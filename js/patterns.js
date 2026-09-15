@@ -1106,6 +1106,659 @@
     return out;
   }
 
+  // =====================================================================
+  // 9. Colours - colorHex(), colors()
+  // =====================================================================
+
+  // ~130 yarn colour words. Values are deliberately a little muted: they are
+  // drawn as yarn, not as screen primaries.
+  var COLOR_TABLE = {
+    // neutrals / naturals
+    black: '#1c1c1c', white: '#fdfdfb', cream: '#f5ebd8', ivory: '#fffff0',
+    ecru: '#d6cbb3', natural: '#e8dcc4', linen: '#faf0e6', bone: '#e3dac9',
+    almond: '#efdecd', sand: '#e3cda4', beige: '#f0e2c8', oatmeal: '#e5dbc7',
+    biscuit: '#e0c9a6', wheat: '#f5deb3', vanilla: '#f3e5ab', champagne: '#f7e7ce',
+    pearl: '#eae0c8', blonde: '#e6be8a', nude: '#e3bc9a', tan: '#d2a86a',
+    camel: '#c19a6b', khaki: '#c3b091', taupe: '#b3a394', latte: '#c8a882',
+    caramel: '#c68e3f', honey: '#eab64b', toffee: '#a9743c', mocha: '#8b6f4e',
+    coffee: '#6f4e37', chocolate: '#5c3a21', brown: '#7b4b28', chestnut: '#954535',
+    walnut: '#5c4033', hazelnut: '#9c7248', cocoa: '#6b4423', fawn: '#d5b596',
+    // greys
+    grey: '#9e9e9e', gray: '#9e9e9e', silver: '#c0c0c0', pewter: '#96a8a1',
+    slate: '#708090', ash: '#b2beb5', charcoal: '#36454f', graphite: '#45474b',
+    smoke: '#848884', stone: '#a8a196', dove: '#c9c5c1', heather: '#a8a2b0',
+    // reds / pinks
+    red: '#d32f2f', crimson: '#dc143c', scarlet: '#e22c18', cherry: '#b3121e',
+    brick: '#9c3a26', burgundy: '#6d071a', maroon: '#6e1414', wine: '#722f37',
+    ruby: '#9b111e', pink: '#ffc0cb', blush: '#e39aa7', rose: '#d9607a',
+    salmon: '#fa8072', coral: '#ff7f50', watermelon: '#fc6c85', strawberry: '#e33d4a',
+    raspberry: '#b3446c', cerise: '#de3163', fuchsia: '#e83e8c', magenta: '#d6249f',
+    // oranges / yellows
+    peach: '#ffcba4', apricot: '#fbceb1', orange: '#f28c28', tangerine: '#f28500',
+    pumpkin: '#ff7518', carrot: '#ed9121', ginger: '#b06500', rust: '#b7410e',
+    terracotta: '#c76a4a', copper: '#b87333', bronze: '#cd7f32', amber: '#ffbf00',
+    marigold: '#f4a300', gold: '#d4af37', mustard: '#d4a017', yellow: '#f5d547',
+    lemon: '#f6ea5c', butter: '#f7e6a3', banana: '#ffe135', sunflower: '#ffc512',
+    corn: '#fbec5d', cornsilk: '#fff8dc',
+    // greens
+    green: '#3f9142', emerald: '#2e8b57', jade: '#00a86b', forest: '#1f4d2e',
+    pine: '#2a5c45', hunter: '#355e3b', olive: '#708238', moss: '#8a9a5b',
+    fern: '#4f7942', sage: '#9caf88', mint: '#a8e6cf', seafoam: '#93e9be',
+    pistachio: '#b5d99c', lime: '#9fd356', chartreuse: '#b5d000', avocado: '#78866b',
+    // blues
+    blue: '#2f6fb5', navy: '#1f2a5a', cobalt: '#0047ab', royal: '#2b4fbf',
+    denim: '#4a6fa5', sky: '#87ceeb', azure: '#3d8bd4', cornflower: '#6495ed',
+    periwinkle: '#a3aee0', powder: '#b0e0e6', ice: '#d6f0f5', teal: '#1d8a8a',
+    turquoise: '#40e0d0', aqua: '#7fdbda', cyan: '#00ced1', peacock: '#1f7a8c',
+    ocean: '#1f6f8b', lagoon: '#4aa3a2', blueberry: '#4f86c6', midnight: '#191970',
+    twilight: '#2b3556', storm: '#4f5b66', dusk: '#4a4e69', steel: '#5b7c99',
+    'baby blue': '#bcd4e6', 'baby pink': '#f4c2c2',
+    // purples
+    purple: '#7b3fa0', violet: '#8f5fd6', lavender: '#c3aee0', lilac: '#c8a2c8',
+    mauve: '#b784a7', orchid: '#da70d6', plum: '#8e4585', grape: '#6f2da8',
+    indigo: '#4b0082', amethyst: '#9966cc', iris: '#8a6fd1',
+    // soft neutrals used as "whites"
+    snow: '#fffafa', cloud: '#e8eaed', mist: '#dfe6e9', chalk: '#f2f0e6'
+  };
+
+  var LIGHTEN_RE = /^(light|lite|lt|pale|baby|soft|powder)$/;
+  var DARKEN_RE = /^(dark|dk|deep|dusky|rich)$/;
+
+  function hexBytes(h) {
+    return [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)];
+  }
+  function byte2(n) {
+    var v = Math.max(0, Math.min(255, Math.round(n))).toString(16);
+    return v.length < 2 ? '0' + v : v;
+  }
+  function mixHex(hex, towards, amount) {
+    var a = hexBytes(hex), b = hexBytes(towards);
+    return '#' + byte2(a[0] + (b[0] - a[0]) * amount) +
+      byte2(a[1] + (b[1] - a[1]) * amount) +
+      byte2(a[2] + (b[2] - a[2]) * amount);
+  }
+
+  // Words that follow "in/with/using" but are never a yarn colour.
+  var COLOR_STOP = {};
+  ('each every all both the a an this that these those next same other half front back ' +
+   'mr magic ring circle loop round rounds row rows rnd rnds st sts stitch stitches ' +
+   'turn work working pattern total hook hand yarn wool color colour colors colours ' +
+   'place between order addition general fact case way end ends side sides top bottom ' +
+   'main contrast contrasting it its you your my our their one two three four five six ' +
+   'seven eight nine ten first second third last long short same time times set sets ' +
+   'photo photos left right back loops loop').split(' ').forEach(function (w) { COLOR_STOP[w] = true; });
+
+  function colorHex(name) {
+    if (name === null || name === undefined) return null;
+    var s = String(name).toLowerCase().replace(/[^a-z\s-]+/g, ' ').replace(/\s+/g, ' ').trim();
+    s = s.replace(/\s+(?:yarn|wool|colou?r|thread)$/, '').trim();
+    if (!s) return null;
+    if (/^colou?r\s+[a-z]$/.test(s)) return null;      // "Color A"
+    if (/^(?:mc|cc|pc|a|b|c|d|e|f)$/.test(s)) return null;  // scheme letters
+    if (/^[a-z]$/.test(s)) return null;
+    if (COLOR_TABLE[s]) return COLOR_TABLE[s];
+
+    var m = /^([a-z]+)[\s-]+(.+)$/.exec(s);
+    if (m) {
+      var mod = m[1], rest = m[2];
+      var base = COLOR_TABLE[rest] || COLOR_TABLE[rest.split(' ').pop()] || null;
+      if (base) {
+        if (LIGHTEN_RE.test(mod)) return mixHex(base, '#ffffff', 0.35);
+        if (DARKEN_RE.test(mod)) return mixHex(base, '#000000', 0.30);
+        if (/^(bright|hot|neon|vivid)$/.test(mod)) return base;
+        return base;                                   // "heather grey", "sea green"
+      }
+    }
+    var last = s.split(' ').pop();
+    if (last !== s && COLOR_TABLE[last]) return COLOR_TABLE[last];
+    return null;
+  }
+
+  // --- colour names ------------------------------------------------------
+
+  function cleanName(s) {
+    var t = String(s == null ? '' : s).replace(/\s+/g, ' ').trim();
+    t = t.replace(/[.,;:!]+$/, '').trim();
+    t = t.replace(/\s+(?:yarn|wool|thread)$/i, '').trim();
+    if (/^colou?r\s+[a-z]$/i.test(t)) return titleCase(t);
+    if (/^(?:mc|cc)$/i.test(t)) return t.toUpperCase();
+    return t;
+  }
+
+  // Is this captured word plausibly a yarn colour?
+  function looksLikeColor(raw, legendVals) {
+    var t = cleanName(raw);
+    if (!t) return false;
+    if (/^colou?r\s+[a-z]$/i.test(t)) return true;
+    if (/^(?:mc|cc)$/i.test(t)) return true;
+    if (/^[a-z]$/i.test(t)) return false;
+    if (t.length > 24) return false;
+    var low = t.toLowerCase();
+    if (COLOR_STOP[low]) return false;
+    if (stitchInfo(t)) return false;
+    if (legendVals && legendVals[low]) return true;
+    if (colorHex(t)) return true;
+    // a capitalised word we do not know ("Twilight", "Seaglass")
+    return /^[A-Z][a-z]{2,15}$/.test(t);
+  }
+
+  var LEGEND_RE = /(?:^|[(\[,;])\s*([A-Za-z]{1,3})\s*=\s*([A-Za-z][A-Za-z '\-]{1,23}?)\s*(?=[)\]]|,|;|$)/g;
+  var C_IN = /^\s*(?:in|with|using|w\/)\b\s*(?:the\s+)?(colou?r\s+[a-z]\b|[A-Za-z][A-Za-z'-]*)/i;
+  var C_CHANGE = /\b(?:colou?r\s*change|change|changing|switch|switching)\s+to\s+(?:the\s+)?(colou?r\s+[a-z]\b|[A-Za-z][A-Za-z'-]*)/ig;
+  var C_OFF = /\bfasten\s+off\s+(?:the\s+)?(colou?r\s+[a-z]\b|[A-Za-z][A-Za-z'-]*)/ig;
+  var C_INCOLOR = /\bin\s+(colou?r\s+[a-z])\b/ig;
+  var C_ADDYARN = /\badd\s+([A-Za-z][A-Za-z'-]*)\s+yarn\b/ig;
+
+  // Colour instructions carried by one line / note, in reading order.
+  // kind: 'base' (sets the working colour) | 'off' (ends a colour)
+  function colorPhrases(text, legendVals, baseOnly) {
+    var s = trimLine(text);
+    var hits = [];
+    var m;
+    if (!s) return hits;
+
+    m = C_IN.exec(s);
+    if (m && looksLikeColor(m[1], legendVals)) hits.push({ at: m.index, kind: 'base', name: cleanName(m[1]) });
+
+    C_CHANGE.lastIndex = 0;
+    while ((m = C_CHANGE.exec(s)) !== null) {
+      if (looksLikeColor(m[1], legendVals)) hits.push({ at: m.index, kind: 'base', name: cleanName(m[1]) });
+    }
+    C_OFF.lastIndex = 0;
+    while ((m = C_OFF.exec(s)) !== null) {
+      if (looksLikeColor(m[1], legendVals)) hits.push({ at: m.index, kind: 'off', name: cleanName(m[1]) });
+    }
+    if (!baseOnly) {
+      C_INCOLOR.lastIndex = 0;
+      while ((m = C_INCOLOR.exec(s)) !== null) {
+        hits.push({ at: m.index, kind: 'mention', name: cleanName(m[1]) });
+      }
+      C_ADDYARN.lastIndex = 0;
+      while ((m = C_ADDYARN.exec(s)) !== null) {
+        if (looksLikeColor(m[1], legendVals)) hits.push({ at: m.index, kind: 'mention', name: cleanName(m[1]) });
+      }
+    }
+    hits.sort(function (a, b) { return a.at - b.at; });
+    return hits;
+  }
+
+  function textLines(text) {
+    if (text === null || text === undefined) return [];
+    if (typeof text === 'string') return text.split(/\r\n|\r|\n/);
+    if (Object.prototype.toString.call(text) === '[object Array]') {
+      return text.map(function (x) {
+        return (x && typeof x === 'object' && x.text !== undefined) ? String(x.text) : String(x == null ? '' : x);
+      });
+    }
+    return String(text).split(/\r\n|\r|\n/);
+  }
+
+  function colors(text) {
+    var raws = textLines(text);
+    var legend = {};
+    var legendVals = {};
+    var names = [];
+    var seen = {};
+    var i, m, t;
+
+    function add(name) {
+      var n = cleanName(name);
+      if (!n) return;
+      var k = n.toLowerCase();
+      if (seen[k]) return;
+      seen[k] = true;
+      names.push(n);
+    }
+
+    // pass 1: the legend, so later lines can lean on its colour words
+    for (i = 0; i < raws.length; i++) {
+      t = trimLine(raws[i]);
+      if (!t || t.indexOf('=') < 0) continue;
+      LEGEND_RE.lastIndex = 0;
+      while ((m = LEGEND_RE.exec(t)) !== null) {
+        var key = m[1].toUpperCase();
+        var val = cleanName(m[2]);
+        if (!val || val.length < 2) continue;
+        if (/^\d/.test(val)) continue;
+        if (stitchInfo(val)) continue;
+        if (!legend[key]) legend[key] = val;
+        legendVals[val.toLowerCase()] = true;
+      }
+    }
+    Object.keys(legend).forEach(function (k) { add(legend[k]); });
+
+    // pass 2: colour phrases in reading order
+    for (i = 0; i < raws.length; i++) {
+      colorPhrases(raws[i], legendVals, false).forEach(function (hit) { add(hit.name); });
+    }
+
+    return { legend: legend, names: names };
+  }
+
+  // =====================================================================
+  // 10. expand() - one entry per produced stitch
+  // =====================================================================
+
+  var FILL_MARK = { fillMark: true };
+
+  function stitchTok(word) {
+    var info = stitchInfo(word);
+    if (!info) return null;
+    var w = String(word).toLowerCase().replace(/\s+/g, ' ').trim();
+    var t = 'sc', h = 1;
+    if (/hdc/.test(w)) { t = 'hdc'; h = 1.5; }
+    else if (/dtr|treble|\btr\b/.test(w)) { t = 'tr'; h = 2.5; }
+    else if (/dc/.test(w)) { t = 'dc'; h = 2; }
+    else if (/sl\s*st|slst|slip/.test(w)) { t = 'sl'; h = 1; }
+    else if (/puff/.test(w)) { t = 'puff'; h = 1; }
+    else if (/bbl|bobble|popcorn|cluster|shell/.test(w)) { t = 'bbl'; h = 1; }
+    else if (/^ch/.test(w)) { t = 'ch'; h = 1; }
+    if (info.p === 2 && info.c === 1) t = 'inc';
+    else if (info.p === 1 && info.c === 2) t = 'dec';
+    return { p: info.p, c: info.c, t: t, h: h };
+  }
+
+  function emit(tok, times) {
+    var out = [], n = times * tok.p, i;
+    for (i = 0; i < n; i++) out.push({ t: tok.t, c: null, h: tok.h });
+    return out;
+  }
+
+  function runOf(type, height, n) {
+    var out = [], i;
+    for (i = 0; i < n; i++) out.push({ t: type, c: null, h: height });
+    return out;
+  }
+
+  function cloneList(list) {
+    var out = [], i;
+    for (i = 0; i < list.length; i++) {
+      var e = list[i];
+      if (e === FILL_MARK) continue;
+      out.push({ t: e.t, c: e.c, h: e.h });
+    }
+    return out;
+  }
+
+  function paint(list, colr) {
+    var out = [], i;
+    for (i = 0; i < list.length; i++) {
+      var e = list[i];
+      if (e === FILL_MARK) { out.push(e); continue; }
+      out.push({ t: e.t, c: colr, h: e.h });
+    }
+    return out;
+  }
+
+  function stripMarks(list) {
+    var out = [], i;
+    for (i = 0; i < list.length; i++) if (list[i] !== FILL_MARK) out.push(list[i]);
+    return out;
+  }
+
+  function spliceMark(list, replacement) {
+    var out = [], i, done = false;
+    for (i = 0; i < list.length; i++) {
+      if (list[i] === FILL_MARK) {
+        if (!done) { out = out.concat(replacement); done = true; }
+        continue;
+      }
+      out.push(list[i]);
+    }
+    if (!done) out = out.concat(replacement);
+    return out;
+  }
+
+  // "8 Sc into Magic Ring" / "Mr6" - n stitches of whatever kind is named.
+  function mrList(s, n) {
+    var mm = /(\d+)\s*(hdc|dc|tr|sc)\b/i.exec(s);
+    var tok = mm ? stitchTok(mm[2]) : null;
+    return runOf(tok ? tok.t : 'sc', tok ? tok.h : 1, n > 0 ? n : 0);
+  }
+
+  // The stitch-emitting twin of parseSegment(). Same branches, same order.
+  // -> { list, c } | { fill:{list,c} } | { abs:list } | null
+  function expandSegment(seg) {
+    var s = seg.trim().replace(/\s+/g, ' ');
+    if (!s) return { list: [], c: 0 };
+
+    var i, m, st;
+    for (i = 0; i < ZERO_RES.length; i++) if (ZERO_RES[i].test(s)) return { list: [], c: 0 };
+    if (WORK_EVEN_RE.test(s)) return { fill: { list: runOf('sc', 1, 1), c: 1 } };
+
+    m = MR_RE1.exec(s); if (m) return { abs: mrList(s, num(m[1])) };
+    m = MR_RE2.exec(s); if (m) return { abs: mrList(s, num(m[1])) };
+
+    s = s.replace(PREFIX_RE, '');
+    for (i = 0; i < ZERO_RES.length; i++) if (ZERO_RES[i].test(s)) return { list: [], c: 0 };
+    m = MR_RE1.exec(s); if (m) return { abs: mrList(s, num(m[1])) };
+
+    m = R_NEXT_N.exec(s);
+    if (m) {
+      st = stitchTok(m[2]); if (!st) return null;
+      var lead = m[1] ? num(m[1]) : 1;
+      var n = num(m[3]);
+      return { list: emit(st, n * lead), c: n * st.c };
+    }
+    m = R_FROM_HOOK.exec(s);
+    if (m) { st = stitchTok(m[1]); return st ? { list: emit(st, 1), c: 0 } : null; }
+
+    m = R_EACH.exec(s);
+    if (m) {
+      st = stitchTok(m[2]); if (!st) return null;
+      var lead2 = m[1] ? num(m[1]) : 1;
+      return { fill: { list: emit(st, lead2), c: st.c } };
+    }
+    m = R_AROUND.exec(s);
+    if (m) { st = stitchTok(m[1]); return st ? { fill: { list: emit(st, 1), c: st.c } } : null; }
+
+    m = R_N_IN_NEXT.exec(s);
+    if (m) { st = stitchTok(m[2]); return st ? { list: emit(st, num(m[1])), c: st.c } : null; }
+
+    m = R_N_ST.exec(s);
+    if (m) { st = stitchTok(m[2]); return st ? { list: emit(st, num(m[1])), c: num(m[1]) * st.c } : null; }
+
+    m = R_ST_X.exec(s);
+    if (m) { st = stitchTok(m[1]); return st ? { list: emit(st, num(m[2])), c: num(m[2]) * st.c } : null; }
+
+    m = R_ST_N.exec(s);
+    if (m) { st = stitchTok(m[1]); return st ? { list: emit(st, num(m[2])), c: num(m[2]) * st.c } : null; }
+
+    m = R_ST.exec(s);
+    if (m) { st = stitchTok(m[1]); return st ? { list: emit(st, 1), c: st.c } : null; }
+
+    return null;
+  }
+
+  // The stitch-emitting twin of sumSegments().
+  function expandSegments(list) {
+    var out = [], c = 0, fill = null;
+    for (var i = 0; i < list.length; i++) {
+      var r = expandSegment(list[i]);
+      if (!r) return null;
+      if (r.abs !== undefined) return { abs: r.abs };
+      if (r.fill) { if (fill) return null; fill = r.fill; out.push(FILL_MARK); continue; }
+      out = out.concat(r.list); c += r.c;
+    }
+    return { list: out, c: c, fill: fill };
+  }
+
+  // A colour prefix sitting at the end of the text run before a group:
+  // "Sc 10 , A (Sc 3)", "Hdc 1 , Almond (Hdc 13)", "(in B) sc 3".
+  var PREFIX_TAIL_RE = /(?:^|[,;.:)\]]|\s)\s*(?:in\s+)?(colou?r\s+[a-z]|[a-z][a-z'-]{0,15})\s*:?\s*$/i;
+
+  function resolveColor(word, ctx) {
+    var t = String(word == null ? '' : word).trim().replace(/[:.,]+$/, '').replace(/\s+/g, ' ');
+    if (!t) return null;
+    if (/^[a-z]$/i.test(t)) {
+      var k = t.toUpperCase();
+      return ctx.legend[k] || k;
+    }
+    if (/^colou?r\s+[a-z]$/i.test(t)) return titleCase(t);
+    if (/^(?:mc|cc)$/i.test(t)) return t.toUpperCase();
+    if (stitchInfo(t)) return null;
+    var low = t.toLowerCase();
+    if (COLOR_STOP[low]) return null;
+    if (ctx.names[low]) return ctx.names[low];
+    if (colorHex(t)) return ctx.names[low] || t;
+    return null;
+  }
+
+  function prefixColorFor(items, i, ctx) {
+    if (i <= 0) return null;
+    var before = items[i - 1];
+    if (!before || before.kind !== 'text') return null;
+    var m = PREFIX_TAIL_RE.exec(before.text);
+    if (!m) return null;
+    return resolveColor(m[1], ctx);
+  }
+
+  // The stitch-emitting twin of evaluate(). Returns a list or null.
+  function expandInstruction(instruction, prevCount, ctx) {
+    if (instruction == null) return null;
+    var prev = (typeof prevCount === 'number' && isFinite(prevCount)) ? prevCount : null;
+    var s = normDashes(String(instruction)).replace(/ /g, ' ');
+    s = fixTypos(s);
+
+    var mk = detectMarker(s.trim());
+    if (mk) s = mk.rest;
+    s = s.toLowerCase().trim();
+    if (!s) return null;
+
+    // "Rnd 5 (yellow): ..." - the whole row is worked in that colour
+    var rc = /^\(\s*([a-z][a-z ]{1,20}?)\s*\)\s*:?\s*/.exec(s);
+    if (rc) {
+      var rcName = resolveColor(rc[1], ctx);
+      if (rcName) { ctx.rowColor = rcName; s = s.slice(rc[0].length); }
+    }
+
+    if (prev !== null && OPEN_FILL_RE.test(s)) return runOf('sc', 1, prev);
+
+    var repAround = /\b(?:rep(?:eat)?)\s+(?:around|across|to\s+end)\b/i.exec(s);
+    var tailFill = false;
+    if (repAround) { s = s.slice(0, repAround.index); tailFill = true; }
+
+    var items = scanItems(s);
+    if (!items.length) return null;
+
+    var list = [], consumed = 0, fill = null, filledGroup = null;
+    var k;
+
+    for (var i = 0; i < items.length; i++) {
+      var it = items[i];
+      if (it.kind === 'text') {
+        var r = expandSegments(splitSegments(it.text));
+        if (!r) return null;
+        if (r.abs !== undefined) return r.abs;
+        if (r.fill) { if (fill) return null; fill = r.fill; }
+        list = list.concat(r.list); consumed += r.c;
+      } else {
+        var g = expandSegments(splitSegments(it.text));
+        if (!g || g.abs !== undefined || g.fill) {
+          if (it.mult === 1 && !it.filled && (!g || !g.fill)) continue;
+          return null;
+        }
+        var colr = prefixColorFor(items, i, ctx);
+        var glist = colr ? paint(g.list, colr) : g.list;
+        if (it.filled) {
+          if (filledGroup) return null;
+          filledGroup = { list: glist, c: g.c };
+          list.push(FILL_MARK);
+        } else {
+          for (k = 0; k < it.mult; k++) list = list.concat(cloneList(glist));
+          consumed += g.c * it.mult;
+        }
+      }
+    }
+
+    if (filledGroup) {
+      var rest = (prev == null) ? null : prev - consumed;
+      if (rest == null || filledGroup.c <= 0) return null;
+      var groups = Math.floor(rest / filledGroup.c);
+      var leftover = rest - groups * filledGroup.c;
+      if (groups < 0 || leftover < 0) return null;
+      var rep = [];
+      for (k = 0; k < groups; k++) rep = rep.concat(cloneList(filledGroup.list));
+      rep = rep.concat(runOf('sc', 1, leftover));
+      return spliceMark(list, rep);
+    }
+
+    if (tailFill) {
+      var plain = stripMarks(list);
+      if (!plain.length && consumed === 0) return null;
+      if (prev == null || consumed <= 0) return null;
+      var groups2 = Math.floor(prev / consumed);
+      var left2 = prev - groups2 * consumed;
+      var out2 = [];
+      for (k = 0; k < groups2; k++) out2 = out2.concat(cloneList(plain));
+      return out2.concat(runOf('sc', 1, left2));
+    }
+
+    if (fill) {
+      if (prev == null) return null;
+      var remaining = prev - consumed;
+      if (remaining < 0) return null;
+      if (fill.c <= 0) return null;
+      var whole = Math.floor(remaining / fill.c);
+      var left = remaining - whole * fill.c;
+      var rep2 = [];
+      for (k = 0; k < whole; k++) rep2 = rep2.concat(cloneList(fill.list));
+      rep2 = rep2.concat(runOf('sc', 1, left));
+      return spliceMark(list, rep2);
+    }
+
+    var plain2 = stripMarks(list);
+    if (!plain2.length && consumed === 0) return null;
+    return plain2;
+  }
+
+  // --- row plumbing ------------------------------------------------------
+
+  function asParsed(lines) {
+    if (!lines) return [];
+    if (typeof lines === 'string') return parse(lines);
+    if (Object.prototype.toString.call(lines) !== '[object Array]') return [];
+    if (!lines.length) return lines;
+    if (typeof lines[0] === 'string') return parse(lines.join('\n'));
+    return lines;
+  }
+
+  // The instruction part of a row line: marker off the front, count off the
+  // back - exactly what parse() feeds to evaluate().
+  function instrOf(line) {
+    var t = trimLine(line.text);
+    var prefixLen = 0, m, nr;
+    m = detectMarker(t);
+    if (m) prefixLen = t.length - m.rest.length;
+    else {
+      m = detectNextRow(t);
+      if (m) prefixLen = t.length - m.rest.length;
+      else {
+        m = detectSetup(t);
+        if (m) prefixLen = t.length - m.rest.length;
+        else { nr = nameRowInfo(t); if (nr) prefixLen = nr.prefixLen; }
+      }
+    }
+    var rest = t.slice(prefixLen);
+    var e = findExplicit(rest);
+    if (e && e.start > 0) rest = rest.slice(0, e.start);
+    return rest;
+  }
+
+  function newState() {
+    return { color: null, legend: {}, names: {}, ready: false, init: false };
+  }
+
+  function normState(state, parsed) {
+    var st = (state && typeof state === 'object') ? state : newState();
+    if (!st.legend) st.legend = {};
+    if (!st.names) st.names = {};
+    if (st.color === undefined) st.color = null;
+    if (!st.ready) {
+      var c = colors(parsed);
+      st.legend = c.legend;
+      st.names = {};
+      c.names.forEach(function (n) { st.names[n.toLowerCase()] = n; });
+      st.ready = true;
+    }
+    return st;
+  }
+
+  function applyPhrases(text, st) {
+    colorPhrases(text, null, true).forEach(function (hit) {
+      if (hit.kind === 'base') {
+        var resolved = st.names[hit.name.toLowerCase()] || hit.name;
+        if (/^[a-z]$/i.test(resolved) && st.legend[resolved.toUpperCase()]) {
+          resolved = st.legend[resolved.toUpperCase()];
+        }
+        st.color = resolved;
+      }
+      // 'off' ends a secondary colour; the base colour is left alone.
+    });
+  }
+
+  function dominantHeight(list) {
+    if (!list.length) return 1;
+    var counts = {}, i;
+    for (i = 0; i < list.length; i++) {
+      var h = list[i].h === undefined ? 1 : list[i].h;
+      counts[h] = (counts[h] || 0) + 1;
+    }
+    var best = 1, bestN = -1;
+    Object.keys(counts).forEach(function (k) {
+      var v = counts[k], hv = parseFloat(k);
+      if (v > bestN || (v === bestN && hv > best)) { bestN = v; best = hv; }
+    });
+    return best;
+  }
+
+  function fitTo(list, target) {
+    if (target === null || target === undefined || !isFinite(target)) return list;
+    if (target <= 0) return [];
+    if (list.length > target) return list.slice(0, target);
+    while (list.length < target) list.push({ t: 'sc', c: null, h: 1 });
+    return list;
+  }
+
+  function expand(lines, rowNumber, prevCount, state) {
+    var parsed, st;
+    try {
+      parsed = asParsed(lines);
+      st = normState(state, parsed);
+    } catch (e) {
+      st = normState(state, []);
+      return { stitches: [], color: st.color || null, height: 1, state: st };
+    }
+
+    var res = { stitches: [], color: st.color || null, height: 1, state: st };
+
+    try {
+      var line = lineFor(parsed, rowNumber);
+      if (!line) return res;
+
+      // header-adjacent colour lines, once, before the first row we see
+      if (!st.init) {
+        st.init = true;
+        for (var i = 0; i < parsed.length; i++) {
+          var l = parsed[i];
+          if (l.index >= line.index) break;
+          if (l.kind !== 'note' && l.kind !== 'header') continue;
+          applyPhrases(l.text, st);
+        }
+      }
+      if (line.notes && line.notes.length) {
+        for (var n = 0; n < line.notes.length; n++) applyPhrases(line.notes[n], st);
+      }
+
+      var instr = instrOf(line);
+      var prev = (typeof prevCount === 'number' && isFinite(prevCount)) ? prevCount : null;
+      var ctx = { legend: st.legend, names: st.names, rowColor: null };
+
+      var ev = null;
+      try { ev = evaluate(instr, prev); } catch (e2) { ev = null; }
+
+      var target = (line.count === null || line.count === undefined) ? ev : line.count;
+
+      var list = null;
+      if (ev !== null) {
+        try { list = expandInstruction(instr, prev, ctx); } catch (e3) { list = null; }
+      }
+      if (ctx.rowColor) st.color = ctx.rowColor;
+
+      if (list === null) {
+        list = (target === null || target === undefined) ? [] : runOf('x', 1, target);
+      }
+      list = fitTo(list, target);
+
+      res.color = st.color || null;
+      res.height = dominantHeight(list);
+      res.stitches = list.map(function (e) { return { t: e.t, c: e.c === undefined ? null : e.c }; });
+    } catch (e4) {
+      res.stitches = res.stitches || [];
+    }
+    return res;
+  }
+
   window.Patterns = {
     parse: parse,
     targetFor: targetFor,
@@ -1113,7 +1766,10 @@
     summary: summary,
     splitSections: splitSections,
     detectSizes: detectSizes,
-    evaluate: evaluate
+    evaluate: evaluate,
+    colors: colors,
+    colorHex: colorHex,
+    expand: expand
   };
 
 })();

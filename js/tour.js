@@ -799,6 +799,13 @@
             tryIt: 'tap it three times, then come back here.'
           },
           {
+            // Only there when the live diagram is on — the step trims itself out
+            // when the canvas is missing.
+            target: '#stitch-canvas',
+            title: 'Your piece, in 3D',
+            body: 'This is your piece growing as you count. Tap ⤢ to spin it around.'
+          },
+          {
             target: '#stitch-readout',
             title: 'Groups and targets',
             body:
