@@ -2,7 +2,7 @@
 
 /* Stitchkeeper service worker.
    Bump CACHE_VERSION whenever any precached file changes. */
-const CACHE_VERSION = 'v12';
+const CACHE_VERSION = 'v13';
 const CACHE_NAME = 'stitchkeeper-' + CACHE_VERSION;
 
 const PRECACHE_URLS = [

@@ -211,9 +211,20 @@ ctx.pdfDropZone({
 }) → HTMLElement            // append it wherever the sheet wants it
 ```
 
-`PdfText` gains `PdfText.open(file) → Promise<{ doc, numPages, textOf(pageNo), renderPage(pageNo, { scale|maxWidth }) → Promise<HTMLCanvasElement> }>`
+`PdfText` gains `PdfText.open(file) → Promise<{ doc, numPages, textOf(pageNo), renderPage(pageNo, { scale|maxWidth }) → Promise<HTMLCanvasElement>, destroy() }>`
 so a craft can both read text and rasterise chart pages from a single load. The
 existing `PdfText.extract` is unchanged and used by crochet.
+
+Caveat (as shipped): when `onPages` is given together with `onText`, the text
+is assembled per page from `textOf(n)`, which still untangles columns and
+drops per-page furniture but skips the cross-page repeated-running-head pass,
+and `columnsDetected` is reported as 0. `onText` alone runs the exact
+`extract()` pipeline. Crafts that need the running-head pass should call
+`PdfText.extract` themselves and `PdfText.open` separately for page images.
+
+`Tour.register(def)`: `def.steps` must be a **function** returning the step
+array (the built-in tours are declared that way so targets are resolved late),
+not a plain array.
 
 ## Shared UI pieces crafts should reuse (from `css/app.css`)
 

@@ -1682,7 +1682,7 @@ textarea.mono {
 .craft-body > * { flex: 0 0 auto; }
 
 /* A craft that wants a bottom bar renders .bottombar inside .craft-body. */
-.craft-body > .bottombar {
+.craft-body .bottombar {
   margin-top: auto;
   position: sticky;
   bottom: calc(-1 * (20px + env(safe-area-inset-bottom)));
