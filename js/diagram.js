@@ -19,11 +19,15 @@
 
    No modules, no build step. Attaches window.Diagram.
 
-   Two deliberate departures from SPEC.md:
-   - rows mode swings about the vertical axis (+/-32 deg, 12 deg/s at the
-     middle of the swing) instead of turning through a full circle: a flat
-     sheet spun 360 deg vanishes edge-on twice a turn. Rounds mode turns
-     continuously as specified.
+   Deliberate departures from SPEC.md:
+   - rows mode turns a full circle like rounds mode, but with non-uniform
+     angular speed: 6 deg/s while the sheet faces the camera (or its back),
+     60 deg/s through the edge-on zone, eased between. The fabric is extruded
+     so it has a real edge and never vanishes at 90 deg.
+   - the solid part's minimum share of the frame ramps with progress (0 below
+     15% of the planned height, 45% from 40% up) instead of being a flat 45%,
+     and ghost rounds pushed past the canvas edge fade out. Nothing is ever
+     drawn clipped.
    - crevice AO darkens slice edges by 17%, not 12%; 12% did not read at
      button size.
    ========================================================================== */
@@ -49,6 +53,11 @@
   var TIDX = TPS * 3;              // 48 indices per slice
   var LPS = SEGS * 2 + 2;          // 10 wire lines per slice
   var LIDX = LPS * 2;              // 20 indices per slice
+  // extruded (rows) slice: front grid + back grid + 2 side walls + 2 end walls
+  var TPS_THICK = TPS * 2 + ROWS * 2 * 2 + SEGS * 2 * 2;   // 56 triangles
+  var TIDX_THICK = TPS_THICK * 3;                          // 168 indices
+  var THICK = 0.55;                // fabric thickness, fraction of SW
+  var BACK_BUMP = 0.45;            // how much of the face texture the back keeps
   var FLOATS = 13;         // anchor3 + offset3 + normal3 + colour3 + slice1
 
   var AO_EDGE = 0.17;      // darkening at slice edges
@@ -58,14 +67,21 @@
   var FOV = 30 * Math.PI / 180;
   var PITCH = 20 * Math.PI / 180;
   var CAM_DIST = 34;
-  var ROT_SPEED = 12 * Math.PI / 180;   // rad/s
-  var SWING_AMP = 0.55;                 // rows mode: swing amplitude (rad)
+  var ROT_SPEED = 12 * Math.PI / 180;   // rad/s, rounds mode
+  // rows mode turns a full circle too, but dwells on the face and flicks
+  // through the edge-on zone so the sheet is readable almost all the time
+  var ROWS_SLOW = 6 * Math.PI / 180;    // rad/s while facing the camera
+  var ROWS_FAST = 60 * Math.PI / 180;   // rad/s through edge-on
+  var ROWS_FACE = 50 * Math.PI / 180;   // "facing" half-window
+  var ROWS_EDGE = 85 * Math.PI / 180;   // fully edge-on by here
   var ROT_PAUSE = 1500;                 // ms after setModel
   var FIT_EASE = 200;                   // ms
   var STITCH_ANIM = 140;                // ms
   var ROUND_ANIM = 620;                 // ms
   var FIT_MARGIN = 0.92;                // 8% margin
-  var GHOST_FLOOR = 0.45;               // ghosts may not shrink the solid below this
+  var GHOST_FLOOR = 0.45;               // most the solid part is ever guaranteed
+  var FLOOR_FROM = 0.15;                // no floor at all below this much progress
+  var FLOOR_TO = 0.40;                  // full floor from this much progress up
 
   var GHOST_ALPHA = 0.30;
   var PENDING_ALPHA = 0.62;
@@ -85,6 +101,10 @@
   function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
   function lerp(a, b, t) { return a + (b - a) * t; }
   function easeOutCubic(t) { var u = 1 - t; return 1 - u * u * u; }
+  function smoothstep(a, b, x) {
+    var t = clamp((x - a) / (b - a || 1e-6), 0, 1);
+    return t * t * (3 - 2 * t);
+  }
 
   var now = (global.performance && global.performance.now)
     ? function () { return global.performance.now(); }
@@ -424,11 +444,17 @@
 
   /* Builds one band (one round / one row) into typed arrays.
      opts: n, a0[], aw[], amp[], col[], rBase[3], drdt, yBase[3], dydt, zOff,
-           dipScale, anchorCol */
+           dipScale, anchorCol, thick
+     `thick` > 0 extrudes the bump surface inward by that much and closes the
+     four sides, so flat fabric has a real edge and never vanishes when it
+     turns side-on. Rounds mode is a closed solid already and passes 0. */
   function buildBand(o) {
     var n = o.n;
-    var verts = new Float32Array(n * VPS * FLOATS);
-    var tri = new Uint16Array(n * TIDX);
+    var thick = o.thick || 0;
+    var vps = thick ? VPS * 2 : VPS;
+    var tidx = thick ? TIDX_THICK : TIDX;
+    var verts = new Float32Array(n * vps * FLOATS);
+    var tri = new Uint16Array(n * tidx);
     var lin = new Uint16Array(n * LIDX);
     var a0 = o.a0, aw = o.aw, amp = o.amp, col = o.col;
     var rB = o.rBase, yB = o.yBase, drdt = o.drdt, dydt = o.dydt;
@@ -437,6 +463,8 @@
     var cosA = new Float64Array(COLS), sinA = new Float64Array(COLS);
     var px = new Float64Array(VPS), py = new Float64Array(VPS), pz = new Float64Array(VPS);
     var nx = new Float64Array(VPS), ny = new Float64Array(VPS), nz = new Float64Array(VPS);
+    var bx = thick ? new Float64Array(VPS) : null;
+    var bz = thick ? new Float64Array(VPS) : null;
     var j, k, t, vi, p, idx;
 
     for (j = 0; j < n; j++) {
@@ -477,6 +505,11 @@
           Nx /= len; Ny /= len; Nz /= len;
           if (Nx * ca + Nz * sa < 0) { Nx = -Nx; Ny = -Ny; Nz = -Nz; }
           nx[vi] = Nx; ny[vi] = Ny; nz[vi] = Nz;
+          if (thick) {
+            var rb = rowR - thick + A * CU[k] * ft * BACK_BUMP;
+            bx[vi] = rb * ca;
+            bz[vi] = rb * sa + zOff;
+          }
         }
       }
 
@@ -486,27 +519,39 @@
       var ax = px[ai], ay = py[ai], az = pz[ai];
       var cr = col[j * 3], cg = col[j * 3 + 1], cb = col[j * 3 + 2];
       var lum = 0.2126 * cr + 0.7152 * cg + 0.0722 * cb;
-      var base = j * VPS;
+      var base = j * vps;
 
       for (t = 0; t < VROWS; t++) {
         var edgeT = (t === 0 || t === VROWS - 1) ? 1 : 0;
         for (k = 0; k < COLS; k++) {
           vi = t * COLS + k;
+          var ao = EDGE[k] * AO_EDGE + edgeT * AO_BAND;
+          var mixv = ao * (AO_DESAT / (AO_EDGE + AO_BAND));
+          var dark = 1 - ao;
+          var fr = lerp(cr, lum * 0.62, mixv) * dark;
+          var fg = lerp(cg, lum * 0.62, mixv) * dark;
+          var fb = lerp(cb, lum * 0.62, mixv) * dark;
           p = (base + vi) * FLOATS;
           verts[p] = ax; verts[p + 1] = ay; verts[p + 2] = az;
           verts[p + 3] = px[vi] - ax; verts[p + 4] = py[vi] - ay; verts[p + 5] = pz[vi] - az;
           verts[p + 6] = nx[vi]; verts[p + 7] = ny[vi]; verts[p + 8] = nz[vi];
-          var ao = EDGE[k] * AO_EDGE + edgeT * AO_BAND;
-          var mixv = ao * (AO_DESAT / (AO_EDGE + AO_BAND));
-          var dark = 1 - ao;
-          verts[p + 9] = lerp(cr, lum * 0.62, mixv) * dark;
-          verts[p + 10] = lerp(cg, lum * 0.62, mixv) * dark;
-          verts[p + 11] = lerp(cb, lum * 0.62, mixv) * dark;
+          verts[p + 9] = fr; verts[p + 10] = fg; verts[p + 11] = fb;
           verts[p + 12] = j;
+          if (thick) {
+            // the wrong side of the fabric: darker and flatter
+            p = (base + VPS + vi) * FLOATS;
+            verts[p] = ax; verts[p + 1] = ay; verts[p + 2] = az;
+            verts[p + 3] = bx[vi] - ax; verts[p + 4] = py[vi] - ay; verts[p + 5] = bz[vi] - az;
+            verts[p + 6] = -nx[vi]; verts[p + 7] = -ny[vi]; verts[p + 8] = -nz[vi];
+            verts[p + 9] = lerp(fr, lum * 0.45, 0.38) * 0.52;
+            verts[p + 10] = lerp(fg, lum * 0.45, 0.38) * 0.52;
+            verts[p + 11] = lerp(fb, lum * 0.45, 0.38) * 0.52;
+            verts[p + 12] = j;
+          }
         }
       }
 
-      idx = j * TIDX;
+      idx = j * tidx;
       for (t = 0; t < ROWS; t++) {
         for (k = 0; k < SEGS; k++) {
           var v00 = base + t * COLS + k;
@@ -515,6 +560,37 @@
           var v11 = v01 + 1;
           tri[idx++] = v00; tri[idx++] = v01; tri[idx++] = v10;
           tri[idx++] = v10; tri[idx++] = v01; tri[idx++] = v11;
+        }
+      }
+      if (thick) {
+        var B = base + VPS;
+        for (t = 0; t < ROWS; t++) {           // back face
+          for (k = 0; k < SEGS; k++) {
+            var w00 = B + t * COLS + k;
+            var w10 = w00 + 1;
+            var w01 = w00 + COLS;
+            var w11 = w01 + 1;
+            tri[idx++] = w00; tri[idx++] = w10; tri[idx++] = w01;
+            tri[idx++] = w10; tri[idx++] = w11; tri[idx++] = w01;
+          }
+        }
+        for (var e = 0; e < 2; e++) {          // the two side walls (u edges)
+          var ke = e === 0 ? 0 : SEGS;
+          for (t = 0; t < ROWS; t++) {
+            var f0 = base + t * COLS + ke, f1 = f0 + COLS;
+            var b0 = B + t * COLS + ke, b1 = b0 + COLS;
+            tri[idx++] = f0; tri[idx++] = b0; tri[idx++] = f1;
+            tri[idx++] = f1; tri[idx++] = b0; tri[idx++] = b1;
+          }
+        }
+        for (e = 0; e < 2; e++) {              // the two end walls (t edges)
+          var te = e === 0 ? 0 : ROWS;
+          for (k = 0; k < SEGS; k++) {
+            var g0 = base + te * COLS + k, g1 = g0 + 1;
+            var h0 = B + te * COLS + k, h1 = h0 + 1;
+            tri[idx++] = g0; tri[idx++] = g1; tri[idx++] = h0;
+            tri[idx++] = g1; tri[idx++] = h1; tri[idx++] = h0;
+          }
         }
       }
       idx = j * LIDX;
@@ -526,7 +602,7 @@
         lin[idx++] = base + t * COLS; lin[idx++] = base + (t + 1) * COLS;
       }
     }
-    return { verts: verts, tri: tri, lin: lin, n: n };
+    return { verts: verts, tri: tri, lin: lin, n: n, tps: tidx, lps: LIDX };
   }
 
   /* Small domed cap for the magic ring at the top of a round-worked piece. */
@@ -555,7 +631,10 @@
       tri[i * 3] = 0; tri[i * 3 + 1] = 1 + i; tri[i * 3 + 2] = 1 + ((i + 1) % n);
       lin[i * 2] = 1 + i; lin[i * 2 + 1] = 1 + ((i + 1) % n);
     }
-    return { verts: verts, tri: tri, lin: lin, n: 1, isCap: true, triCount: n * 3, linCount: n * 2 };
+    return {
+      verts: verts, tri: tri, lin: lin, n: 1, isCap: true,
+      triCount: n * 3, linCount: n * 2, tps: n * 3, lps: n * 2
+    };
   }
 
   /* Turns one prepared round + its layout band into geometry. */
@@ -610,7 +689,8 @@
       dydt: band.yBot - band.yTop,
       zOff: -Rc,
       dipScale: band.reach,
-      anchorCol: 0
+      anchorCol: 0,
+      thick: THICK * SW
     });
   }
 
@@ -698,7 +778,7 @@
       dpr: 1,
       w: 0, h: 0,
       // camera
-      yaw: -0.35, pitch: PITCH, swingPhase: 0,
+      yaw: -0.35, pitch: PITCH,
       spinVel: 0,
       zoom: 1,
       userPitch: 0,
@@ -794,8 +874,10 @@
       gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, geo.lin, gl.STATIC_DRAW);
       c.n = geo.n;
       c.isCap = !!geo.isCap;
-      c.triCount = geo.triCount != null ? geo.triCount : geo.n * TIDX;
-      c.linCount = geo.linCount != null ? geo.linCount : geo.n * LIDX;
+      c.tps = geo.tps != null ? geo.tps : TIDX;     // triangle indices per slice
+      c.lps = geo.lps != null ? geo.lps : LIDX;     // line indices per slice
+      c.triCount = geo.triCount != null ? geo.triCount : geo.n * c.tps;
+      c.linCount = geo.linCount != null ? geo.linCount : geo.n * c.lps;
       c.verts = geo.verts.length / FLOATS;
       return c;
     }
@@ -860,28 +942,58 @@
 
     /* -------------------------------------------------------------- fit */
 
+    /* Worst-case extent of one band under rotation: a radius about the
+       vertical axis plus a y range. Shared by the fit and the ghost fade. */
+    function bandExtent(i, out) {
+      var r = state.model.rounds[i], b = state.bands[i];
+      if (!b || !r || r.count <= 0) return null;
+      out.rad = state.model.mode === 'rows'
+        ? r.n * SW / 2 + THICK * SW
+        : Math.max(b.rTop, b.rBot) + BUMP * SW;
+      out.ymin = Math.min(b.yTop, b.yBot);
+      out.ymax = Math.max(b.yTop, b.yBot);
+      return out;
+    }
+
+    var _ext = { rad: 0, ymin: 0, ymax: 0 };
+    var _half = { w: 1, h: 1, cp: 1, sp: 0, scale: 1, cy: 0 };
+
+    /* Refreshed once per frame; frameFade then costs a handful of multiplies. */
+    function updateFrameMetrics() {
+      _half.h = CAM_DIST * Math.tan(FOV / 2);
+      _half.w = _half.h * (state.h > 0 ? state.w / state.h : 1);
+      var pitch = state.pitch + state.userPitch;
+      _half.cp = Math.cos(pitch);
+      _half.sp = Math.abs(Math.sin(pitch));
+      _half.scale = state.fit.scale * state.zoom;
+      _half.cy = state.fit.cy;
+    }
+
+    /* 1 - how far past the canvas edge this band reaches; ghosts fade out over
+       the last 8% so nothing is ever drawn clipped. */
+    function frameFade(i) {
+      if (!bandExtent(i, _ext)) return 0;
+      var s = _half.scale;
+      var hx = _ext.rad * s;
+      var hy = Math.max(Math.abs(_ext.ymax - _half.cy), Math.abs(_ext.ymin - _half.cy)) * s * _half.cp +
+        _ext.rad * s * _half.sp;
+      var f = Math.max(hx / _half.w, hy / _half.h);
+      return 1 - smoothstep(FIT_MARGIN, 1.0, f);
+    }
+
     function computeFit() {
-      var rounds = state.model.rounds, bands = state.bands;
+      var rounds = state.model.rounds;
       var sR = 0, sYmin = Infinity, sYmax = -Infinity, sAny = false;
       var aR = 0, aYmin = Infinity, aYmax = -Infinity, aAny = false;
-      var mode = state.model.mode;
       for (var i = 0; i < rounds.length; i++) {
-        var r = rounds[i], b = bands[i];
-        if (!b || r.count <= 0) continue;
-        var rad, ymin, ymax;
-        if (mode === 'rows') {
-          rad = Math.max(r.n * SW / 2, b.Rc * 0.18);
-          ymin = Math.min(b.yTop, b.yBot); ymax = Math.max(b.yTop, b.yBot);
-        } else {
-          rad = Math.max(b.rTop, b.rBot) + BUMP * SW;
-          ymin = Math.min(b.yTop, b.yBot); ymax = Math.max(b.yTop, b.yBot);
-        }
+        if (!bandExtent(i, _ext)) continue;
         aAny = true;
-        aR = Math.max(aR, rad); aYmin = Math.min(aYmin, ymin); aYmax = Math.max(aYmax, ymax);
-        var solid = !r.ghost && r.doneSlices > 0;
-        if (solid) {
+        aR = Math.max(aR, _ext.rad);
+        aYmin = Math.min(aYmin, _ext.ymin); aYmax = Math.max(aYmax, _ext.ymax);
+        if (!rounds[i].ghost && rounds[i].doneSlices > 0) {
           sAny = true;
-          sR = Math.max(sR, rad); sYmin = Math.min(sYmin, ymin); sYmax = Math.max(sYmax, ymax);
+          sR = Math.max(sR, _ext.rad);
+          sYmin = Math.min(sYmin, _ext.ymin); sYmax = Math.max(sYmax, _ext.ymax);
         }
       }
       if (!aAny) return { scale: 1, cx: 0, cy: 0, cz: 0 };
@@ -898,13 +1010,22 @@
         var sH = halfH / Math.max(hy * cp + rad * sp, 1e-4);
         return Math.min(sW, sH);
       }
+      /* Baseline: the WHOLE model (solids + ghosts) fits with the 8% margin.
+         The minimum size guaranteed to the solid part then ramps with
+         progress, so a piece two stitches in is framed as the plan it will
+         become rather than as a speck inside an oversized cage. Once the
+         floor does start to bite, ghost rounds pushed past the canvas edge
+         fade out (see frameFade) instead of being drawn clipped. */
+      var allH = aYmax - aYmin;
+      var progress = allH > 1e-6 ? clamp((sYmax - sYmin) / allH, 0, 1) : 1;
+      var floor = GHOST_FLOOR * smoothstep(FLOOR_FROM, FLOOR_TO, progress);
+
       var sAll = fitScale(aR, aYmin, aYmax);
       var sSolid = fitScale(sR, sYmin, sYmax);
-      var scale = Math.max(sAll, sSolid * GHOST_FLOOR);
+      var scale = Math.max(sAll, sSolid * floor);
       var k = sAll > 0 ? clamp((scale / sAll - 1) * 2, 0, 1) : 0;
       var cy = lerp((aYmin + aYmax) / 2, (sYmin + sYmax) / 2, k);
-      var cz = 0;
-      return { scale: scale, cx: 0, cy: cy, cz: cz };
+      return { scale: scale, cx: 0, cy: cy, cz: 0 };
     }
 
     function applyFit(target, immediate) {
@@ -940,7 +1061,6 @@
     function buildView() {
       var s = state.fit.scale * state.zoom;
       var yaw = state.yaw;
-      if (state.model.mode === 'rows') yaw += SWING_AMP * Math.sin(state.swingPhase);
       var cy = Math.cos(yaw), sy = Math.sin(yaw);
       var pitch = state.pitch + state.userPitch;
       var cp = Math.cos(pitch), sp = Math.sin(pitch);
@@ -995,6 +1115,7 @@
 
       perspective(proj, FOV, state.h > 0 ? state.w / state.h : 1, 0.5, CAM_DIST * 6);
       buildView();
+      updateFrameMetrics();
       gl.uniformMatrix4fv(u.proj, false, proj);
       gl.uniformMatrix4fv(u.view, false, view);
       gl.uniformMatrix3fv(u.nrm, false, nrm);
@@ -1052,8 +1173,8 @@
         gl.uniform1f(u.animSlice, animBand === i ? animSlice : -1);
         gl.uniform1f(u.animScale, animBand === i ? animScale : 1);
         gl.uniform1f(u.glow, glowBand === i ? glowAmt : 0);
-        gl.drawElements(gl.TRIANGLES, solid * TIDX, gl.UNSIGNED_SHORT, 0);
-        draws++; tris += solid * TPS;
+        gl.drawElements(gl.TRIANGLES, solid * c.tps, gl.UNSIGNED_SHORT, 0);
+        draws++; tris += solid * c.tps / 3;
       }
 
       /* pass 2: translucent wireframe (ghost rounds + the pending part of the
@@ -1070,10 +1191,17 @@
         var rw = rounds[i];
         var start = rw.ghost ? 0 : Math.min(rw.doneSlices, cw.n);
         if (start >= cw.n) continue;
-        gl.uniform1f(u.alpha, (rw.ghost ? GHOST_ALPHA : PENDING_ALPHA) * ghostA);
+        var a = (rw.ghost ? GHOST_ALPHA : PENDING_ALPHA) * ghostA;
+        // a ghost round that no longer fits the frame fades out instead of
+        // being drawn clipped at the canvas edge
+        if (rw.ghost) {
+          a *= frameFade(i);
+          if (a < 0.004) continue;
+        }
+        gl.uniform1f(u.alpha, a);
         bindChunk(gl, cw);
         gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, cw.lbo);
-        gl.drawElements(gl.LINES, (cw.n - start) * LIDX, gl.UNSIGNED_SHORT, start * LIDX * 2);
+        gl.drawElements(gl.LINES, (cw.n - start) * cw.lps, gl.UNSIGNED_SHORT, start * cw.lps * 2);
         draws++;
       }
       gl.depthMask(true);
@@ -1172,6 +1300,15 @@
 
     /* ------------------------------------------------------------- loop */
 
+    /* Rounds mode turns at a constant 12 deg/s. Rows mode turns a full circle
+       as well, but a flat sheet is only worth looking at near face-on, so it
+       dwells there at 6 deg/s and flicks through the edge-on zone at 60. */
+    function spinSpeed(yaw) {
+      if (state.model.mode !== 'rows') return ROT_SPEED;
+      var d = Math.asin(Math.min(1, Math.abs(Math.sin(yaw))));  // 0 = face/back on
+      return lerp(ROWS_SLOW, ROWS_FAST, smoothstep(ROWS_FACE, ROWS_EDGE, d));
+    }
+
     function needsFrame(t) {
       if (state.dirty) return true;
       if (state.fitT0) return true;
@@ -1196,15 +1333,7 @@
         state.spinVel *= Math.pow(0.06, dt);   // inertia decay
         if (Math.abs(state.spinVel) < 0.0005) state.spinVel = 0;
       } else if (!state.reducedMotion && t >= state.pauseUntil) {
-        if (state.model.mode === 'rows') {
-          // a flat sheet spun through 360 degrees disappears edge-on twice a
-          // turn, so rows mode swings about the vertical axis instead, at the
-          // same 12 deg/s at the middle of the swing
-          state.swingPhase += ROT_SPEED / SWING_AMP * dt;
-          if (state.swingPhase > TAU) state.swingPhase -= TAU;
-        } else {
-          state.yaw += ROT_SPEED * dt;
-        }
+        state.yaw += spinSpeed(state.yaw) * dt;
       }
       if (state.yaw > TAU) state.yaw -= TAU;
       if (state.yaw < -TAU) state.yaw += TAU;
@@ -1382,7 +1511,6 @@
       state.zoom = 1;
       state.userPitch = 0;
       state.yaw = state.model && state.model.mode === 'rows' ? 0 : -0.35;
-      state.swingPhase = 0;
       state.spinVel = 0;
       state.pauseUntil = 0;
       applyFit(computeFit(), false);
