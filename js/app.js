@@ -740,6 +740,20 @@
     /** The name docs/CRAFTS.md uses in its ctx table for the same builder. */
     readPdfInto: pdfDropZone,
 
+    // Screen wake lock, so craft bottom bars can offer the same Awake toggle
+    // as the crochet screen (the lock itself follows any open project).
+    wake: {
+      supported: wakeSupported,
+      isOn: function () { return !!Store.settings().keepAwake; },
+      toggle: function () {
+        var next = !Store.settings().keepAwake;
+        Store.setSetting('keepAwake', next);
+        syncWakeLock();
+        toast(next ? 'Screen will stay awake' : 'Screen can sleep again');
+        return next;
+      }
+    },
+
     // Help
     addFaq: addFaq
   };
@@ -1230,6 +1244,8 @@
         updateCounters(p, prt);
         pushDiagram('none');
     }
+    // The fast paths above skip updateBottomBar; a tap is undoable at once.
+    if (els.btnUndo) els.btnUndo.disabled = !Store.canUndo();
   }
 
   /* ================================================================== *

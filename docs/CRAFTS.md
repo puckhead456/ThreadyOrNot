@@ -149,6 +149,7 @@ ctx = {
   // the shell's helpers, so craft UIs look identical to the rest of the app
   el, button, on, clear, field, textInput, numInput, textArea, stepper, segmented, switchRow,
   openSheet, confirmSheet, toast, announce, fb,            // fb('tap'|'group'|'row'|'alert'|'done'|'undo')
+  wake: { supported, isOn(), toggle() → bool },            // screen wake lock (the lock follows any open project)
   render,                                                    // full re-render (use sparingly)
   currentProject, openProjectEditor, openChecklistSheet, openNotesSheet, openHistorySheet, openStatusSheet,
   celebrate,                                                 // celebrate('project'|'part'|'piece')
