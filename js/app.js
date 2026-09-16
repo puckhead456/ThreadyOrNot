@@ -3722,7 +3722,21 @@
     items.push({ icon: '🕘', label: 'History', run: function () { openHistorySheet(p.id); } });
     items.push({ icon: '🏷️', label: 'Status', run: function () { openStatusSheet(p.id); } });
     items.push({ icon: '📤', label: 'Export backup', run: function () { exportBackup(); } });
-    items.push({ icon: '❓', label: 'Show me around', run: function () { startTour('counter'); } });
+    items.push({
+      icon: '❓',
+      label: 'Show me around',
+      run: function () {
+        // A craft that registered its own tour (same id as the craft) gets it;
+        // otherwise fall back to the crochet counter tour.
+        var id = 'counter';
+        if (def && tourAvailable()) {
+          try {
+            window.Tour.list().forEach(function (t) { if (t.id === def.id) id = def.id; });
+          } catch (e) { /* keep the fallback */ }
+        }
+        startTour(id);
+      }
+    });
     return items;
   }
 
