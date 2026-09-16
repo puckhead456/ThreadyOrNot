@@ -136,6 +136,22 @@
     </div>
 
     <div class="panel">
+      <h2>Gesture — handle.dragStart / dragMove / dragEnd</h2>
+      <div class="row">
+        <button class="b" id="dragL">← drag left</button>
+        <button class="b" id="dragR">drag right →</button>
+        <button class="b" id="dragU">↑ drag up</button>
+        <button class="b" id="dragD">↓ drag down</button>
+        <button class="b" id="finish">Finish piece</button>
+      </div>
+      <div class="stats" id="cam" style="margin-top:8px">—</div>
+      <div class="stats" style="margin-top:6px; color:var(--dim)">
+        Load <b>Quadrants</b> and drag right: the colour panel nearest you must
+        travel <b>right</b>. Drag down: you must see more of the <b>top</b>.
+      </div>
+    </div>
+
+    <div class="panel">
       <h2>Button background (theme --primary)</h2>
       <div class="row" id="swatches"></div>
       <div class="row" style="margin-top:8px">
@@ -266,6 +282,21 @@
     return decorate(p, 'rows');
   }
 
+  /* Four colour panels, one per quadrant: the only honest way to see which
+     way a drag turns the piece. */
+  function planQuad() {
+    var Q = [NAVY, TERRA, PLUM, CREAM], p = [], i;
+    function q(n) {
+      var a = [];
+      for (var j = 0; j < n; j++) a.push({ t: 'sc', c: Q[Math.floor(j / n * 4) % 4] });
+      return a;
+    }
+    for (i = 1; i <= 4; i++) p.push({ count: i * 6, color: CREAM, stitches: q(i * 6) });
+    for (i = 0; i < 7; i++) p.push({ count: 24, color: CREAM, stitches: q(24) });
+    for (i = 3; i >= 2; i--) p.push({ count: i * 6, color: CREAM, stitches: q(i * 6) });
+    return decorate(p);
+  }
+
   function planPerf() {
     var p = [], i;
     for (i = 0; i < 60; i++) {
@@ -300,6 +331,7 @@
     horn:     { label: 'Horn 6→24',      plan: planHorn(),     start: [8, 10],  def: TERRA },
     stripes:  { label: 'Striped tube',   plan: planStripes(),  start: [11, 9],  def: PLUM },
     blanket:  { label: 'Blanket (rows)', plan: planBlanket(),  start: [19, 22], def: SAGE },
+    quad:     { label: 'Quadrants',      plan: planQuad(),     start: [12, 12], def: CREAM },
     started:  { label: 'Just started',   plan: planJustStarted(), start: [0, 2], def: CREAM },
     empty:    { label: 'Empty',          plan: decorate([]),   start: [0, 0],   def: CREAM },
     perf:     { label: '60 × 60',        plan: planPerf(),     start: [59, 60], def: CREAM }
@@ -438,6 +470,29 @@
   document.getElementById('reset').onclick = function () { handle.resetView(); };
   document.getElementById('perf').onclick = function () { loadDemo('perf'); };
 
+  /* Drives the host-facing drag API the way the stitch button does: many small
+     moves, then a zero move so the release carries no flick and the camera can
+     be read from a still frame. */
+  function drive(dx, dy) {
+    handle.dragStart();
+    for (var i = 0; i < 10; i++) handle.dragMove(dx / 10, dy / 10);
+    handle.dragMove(0, 0);
+    handle.dragEnd();
+    var s = handle.getStats();
+    log('drag ' + dx + ',' + dy + ' → yaw ' + s.yaw.toFixed(3) + '  pitch ' + s.pitch.toFixed(3));
+  }
+  document.getElementById('dragL').onclick = function () { drive(-90, 0); };
+  document.getElementById('dragR').onclick = function () { drive(90, 0); };
+  document.getElementById('dragU').onclick = function () { drive(0, -70); };
+  document.getElementById('dragD').onclick = function () { drive(0, 70); };
+  document.getElementById('finish').onclick = function () {
+    var p = plan();
+    if (!p.length) return;
+    cur.round = p.length - 1;
+    cur.stitch = p[cur.round].count;
+    apply('none');
+  };
+
   document.getElementById('interactive').onclick = function () {
     interactive = !interactive;
     handle.setInteractive(interactive);
@@ -522,6 +577,7 @@
 
   /* ---------------------------------------------------------- stats */
   var statsEl = document.getElementById('stats');
+  var camEl = document.getElementById('cam');
   var worstFrame = 0;
   setInterval(function () {
     if (!handle) return;
@@ -535,6 +591,11 @@
       'build ms   <b>' + s.buildMs.toFixed(2) + '</b>  (' + (s.rebuilt || 0) + ' bands rebuilt)\n' +
       'triangles  <b>' + s.triangles.toLocaleString() + '</b>   draws ' + s.drawCalls + '\n' +
       'vertices   <b>' + s.verts.toLocaleString() + '</b>   bands ' + s.chunks;
+    camEl.innerHTML =
+      'yaw <b>' + s.yaw.toFixed(3) + '</b>   pitch <b>' + s.pitch.toFixed(3) +
+      '</b> (user ' + s.userPitch.toFixed(3) + ')\n' +
+      'zoom <b>' + s.zoom.toFixed(2) + '</b>   fit <b>' + s.fitScale.toFixed(2) +
+      '</b>   ' + (s.dragging ? 'dragging' : 'idle');
   }, 250);
   document.getElementById('bench').onclick = function () {
     worstFrame = 0;
@@ -552,7 +613,7 @@
   /* test hook (handy for scripted checks from the console) */
   window.DiagramDemo = {
     load: loadDemo, tap: tap, completeRound: completeRound, rewind: rewind,
-    setBg: setBg, model: buildModel, cur: cur,
+    setBg: setBg, model: buildModel, cur: cur, drag: drive,
     stats: function () { return handle.getStats(); },
     handle: function () { return handle; }
   };

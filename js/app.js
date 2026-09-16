@@ -982,6 +982,20 @@
    * 15. Stitch button gesture
    * ================================================================== */
 
+  /**
+   * One finger, two gestures.
+   *
+   * Press and release inside the tolerance = one stitch, counted on
+   * `pointerup` so nothing has to be taken back. Move further than the
+   * tolerance and the press turns into a drag that spins the live 3D piece
+   * instead; lifting after a drag counts nothing. Undo is never part of the
+   * gesture — the old "count on down, Store.undo() if the finger moved" dance
+   * made a scroll look like a glitch.
+   *
+   * The tap path is still synchronous: Store, DOM and the diagram are all
+   * updated inside the pointerup handler (~0.2 ms), so the number changes in
+   * the same frame the finger lifts.
+   */
   var tapState = null;
   var MOVE_TOLERANCE_SQ = 12 * 12;
 
@@ -994,57 +1008,68 @@
     return true;
   }
 
-  function cancelTap() {
-    if (!tapState || tapState.reverted) return;
-    tapState.reverted = true;
-    // The tap already counted on pointerdown; a drag means it was a scroll.
-    if (Store.undo()) render();
-  }
-
   function bindStitchButton() {
     var btn = els.stitchBtn;
     if (!btn) return;
 
+    function releaseCapture() {
+      if (!tapState) return;
+      try {
+        btn.releasePointerCapture(tapState.id);
+      } catch (err) {
+        /* ignore */
+      }
+    }
+
+    function end() {
+      btn.classList.remove('pressed');
+      if (tapState && tapState.dragging) diagramDragEnd();
+      releaseCapture();
+      tapState = null;
+    }
+
     on(btn, 'pointerdown', function (e) {
       if (e.pointerType === 'mouse' && e.button !== 0) return;
       if (!currentProject()) return;
-      tapState = { id: e.pointerId, x: e.clientX, y: e.clientY, reverted: false };
+      // A second finger on the button is ignored; there is nothing to pinch.
+      if (tapState) return;
+      tapState = { id: e.pointerId, x: e.clientX, y: e.clientY, lx: e.clientX, ly: e.clientY, dragging: false };
       try {
         btn.setPointerCapture(e.pointerId);
       } catch (err) {
         /* ignore */
       }
       btn.classList.add('pressed');
-      doStitchTap();
       e.preventDefault();
     });
 
     on(btn, 'pointermove', function (e) {
-      if (!tapState || e.pointerId !== tapState.id || tapState.reverted) return;
-      var dx = e.clientX - tapState.x;
-      var dy = e.clientY - tapState.y;
-      if (dx * dx + dy * dy > MOVE_TOLERANCE_SQ) {
+      if (!tapState || e.pointerId !== tapState.id) return;
+      if (!tapState.dragging) {
+        var dx = e.clientX - tapState.x;
+        var dy = e.clientY - tapState.y;
+        if (dx * dx + dy * dy <= MOVE_TOLERANCE_SQ) return;
+        // Past the tolerance: this is a swipe, not a stitch.
+        tapState.dragging = true;
         btn.classList.remove('pressed');
-        cancelTap();
+        diagramDragStart();
       }
+      diagramDragMove(e.clientX - tapState.lx, e.clientY - tapState.ly);
+      tapState.lx = e.clientX;
+      tapState.ly = e.clientY;
+      e.preventDefault();
     });
 
-    function end(e) {
-      if (!tapState) return;
-      if (e && e.pointerId !== undefined && e.pointerId !== tapState.id) return;
-      btn.classList.remove('pressed');
-      try {
-        btn.releasePointerCapture(tapState.id);
-      } catch (err) {
-        /* ignore */
-      }
-      tapState = null;
-    }
+    on(btn, 'pointerup', function (e) {
+      if (!tapState || e.pointerId !== tapState.id) return;
+      var counted = !tapState.dragging;
+      end();
+      if (counted) doStitchTap();
+    });
 
-    on(btn, 'pointerup', end);
     on(btn, 'pointercancel', function (e) {
-      cancelTap();
-      end(e);
+      if (tapState && e.pointerId !== tapState.id) return;
+      end();
     });
     on(btn, 'contextmenu', function (e) {
       e.preventDefault();
@@ -1177,6 +1202,42 @@
     });
   }
 
+  /* ---- Swipe-to-rotate for the button ----
+   * The canvas under the stitch button is `pointer-events: none` (the button
+   * has to keep every tap), so the button's own pointer handlers drive the
+   * renderer through its drag API. Same code path as the viewer sheet's
+   * pointer handling, so both turn the piece the same way.
+   */
+  function diagramDragStart() {
+    if (live.handle && typeof live.handle.dragStart === 'function') {
+      try {
+        live.handle.dragStart();
+      } catch (e) {
+        /* ignore */
+      }
+    }
+  }
+
+  function diagramDragMove(dx, dy) {
+    if (live.handle && typeof live.handle.dragMove === 'function') {
+      try {
+        live.handle.dragMove(dx, dy);
+      } catch (e) {
+        /* ignore */
+      }
+    }
+  }
+
+  function diagramDragEnd() {
+    if (live.handle && typeof live.handle.dragEnd === 'function') {
+      try {
+        live.handle.dragEnd();
+      } catch (e) {
+        /* ignore */
+      }
+    }
+  }
+
   function resizeDiagrams() {
     [live.handle, viewer.handle].forEach(function (h) {
       if (!h || typeof h.resize !== 'function') return;
@@ -1233,6 +1294,9 @@
         destroyLiveDiagram();
         return;
       }
+      // Handy for measuring from the console (handle.getStats()); nothing in
+      // the app reads it back.
+      live.canvas.diagram = live.handle;
     }
     if (!live.btn && els.stitchSection) {
       var b = button('stitch-3d', '⤢', 'Open 3D view');
@@ -1328,6 +1392,7 @@
           return;
         }
         viewer.canvas = canvas;
+        canvas.diagram = viewer.handle;
         if (typeof viewer.handle.setInteractive === 'function') {
           try {
             viewer.handle.setInteractive(true);

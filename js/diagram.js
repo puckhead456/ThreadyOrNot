@@ -2,10 +2,11 @@
    Thready or Not — Live 3D diagram renderer
    --------------------------------------------------------------------------
    Renders a crochet piece in real time as a slowly rotating 3D solid.
-   Raw WebGL 1 (no dependency): one vertex + one fragment shader, Lambert with
-   a wrapped key light, a cool bounce fill, a rim highlight and per-vertex
-   colours with baked crevice AO. Canvas 2D silhouette fallback when WebGL is
-   unavailable.
+   Raw WebGL 1 (no dependency): one vertex + one fragment shader, a wrapped
+   warm key light, a cool bounce fill, a two-lobe yarn sheen, a Fresnel rim,
+   a darkened wrong side and per-vertex colours with baked crevice AO plus
+   per-stitch colour/amplitude noise. Canvas 2D silhouette fallback when WebGL
+   is unavailable.
 
    Public API (see SPEC.md "Live 3D diagram" § 2 Renderer):
      Diagram.mount(canvas, { palette, reducedMotion, interactive }) -> handle
@@ -14,8 +15,20 @@
      handle.setInteractive(bool)
      handle.setReducedMotion(bool)
      handle.resize()
-     handle.getStats()   -> { fps, frameMs, buildMs, triangles, drawCalls, ... }
+     handle.resetView()
+     handle.dragStart() / handle.dragMove(dx, dy) / handle.dragEnd()
+         Host-driven rotation, in CSS pixels, for a canvas that cannot take
+         its own pointer events (the one under the stitch button is
+         `pointer-events: none`). Same code path as the viewer's own pointer
+         handlers, so both agree on direction and inertia.
+     handle.getStats()   -> { fps, frameMs, buildMs, triangles, drawCalls,
+                              yaw, pitch, zoom, ... }
      handle.destroy()
+
+   Rotation direction: the model follows the finger like a physical ball.
+   Drag right -> the surface nearest the camera travels right (yaw += dx);
+   drag down -> the near surface travels down, so more of the top comes into
+   view (pitch += dy). Verified on screen, not on paper.
 
    No modules, no build step. Attaches window.Diagram.
 
@@ -30,6 +43,13 @@
      drawn clipped.
    - crevice AO darkens slice edges by 17%, not 12%; 12% did not read at
      button size.
+   - ghost rounds are drawn as bare rings (one line per stitch along the
+     bottom of the band), not as a full grid: the grid read as a cage at
+     button size. The current round's unworked slices keep the full grid and
+     a much higher alpha, so "what I am working now" is the brightest wire.
+   - a soft elliptical contact shadow sits under the piece so it is not
+     floating in the middle of the button. It fades out as the camera comes
+     level with the piece, and never reaches past the fitted radius.
    ========================================================================== */
 
 (function (global) {
@@ -39,8 +59,8 @@
 
   var SW = 1.0;            // stitch width, world units
   var SH = 1.5;            // stitch height for height === 1
-  var BUMP = 0.22;         // outward bump at stitch centre, fraction of SW
-  var BULGE = 0.13;        // mid-band outward bulge / inter-round groove
+  var BUMP = 0.20;         // outward bump at stitch centre, fraction of SW
+  var BULGE = 0.09;        // mid-band outward bulge / inter-round groove
   var DIP = 0.17;          // vertical scallop ("v" shape) as a fraction of row height
   var R_MIN = 0.42;        // smallest ring radius
   var MAX_SLICES = 160;    // per-ring slice cap (subsample beyond)
@@ -53,6 +73,8 @@
   var TIDX = TPS * 3;              // 48 indices per slice
   var LPS = SEGS * 2 + 2;          // 10 wire lines per slice
   var LIDX = LPS * 2;              // 20 indices per slice
+  var GPS = SEGS;                  // ghost ring: just the band's bottom edge
+  var GIDX = GPS * 2;              // 8 indices per slice
   // extruded (rows) slice: front grid + back grid + 2 side walls + 2 end walls
   var TPS_THICK = TPS * 2 + ROWS * 2 * 2 + SEGS * 2 * 2;   // 56 triangles
   var TIDX_THICK = TPS_THICK * 3;                          // 168 indices
@@ -64,6 +86,13 @@
   var AO_BAND = 0.07;      // darkening at band edges
   var AO_DESAT = 0.22;     // desaturation mixed in at the crevices
 
+  /* Hand-made irregularity. Dyed yarn is never one flat colour and no two
+     stitches are pulled to the same tension; a few percent of seeded noise per
+     stitch is the difference between "extruded plastic" and "crocheted". */
+  var JIT_LIGHT = 0.075;   // +/- lightness per stitch
+  var JIT_HUE = 0.045;     // +/- warm/cool per stitch
+  var JIT_AMP = 0.10;      // +/- bump amplitude per stitch
+
   var FOV = 30 * Math.PI / 180;
   var PITCH = 20 * Math.PI / 180;
   var CAM_DIST = 34;
@@ -74,7 +103,10 @@
   var ROWS_FAST = 60 * Math.PI / 180;   // rad/s through edge-on
   var ROWS_FACE = 50 * Math.PI / 180;   // "facing" half-window
   var ROWS_EDGE = 85 * Math.PI / 180;   // fully edge-on by here
-  var ROT_PAUSE = 1500;                 // ms after setModel
+  var ROT_PAUSE = 1500;                 // ms after setModel or after a drag
+  var PITCH_RETURN = 1.7;               // s for a user pitch to ease back home
+  var PITCH_LIMIT = 1.1;                // rad of user pitch either way
+  var FLICK_MAX = 3.5;                  // rad/s cap on throw inertia
   var FIT_EASE = 200;                   // ms
   var STITCH_ANIM = 140;                // ms
   var ROUND_ANIM = 620;                 // ms
@@ -83,8 +115,15 @@
   var FLOOR_FROM = 0.15;                // no floor at all below this much progress
   var FLOOR_TO = 0.40;                  // full floor from this much progress up
 
-  var GHOST_ALPHA = 0.30;
-  var PENDING_ALPHA = 0.62;
+  var GHOST_ALPHA = 0.20;    // future rounds: a calm ring each
+  var PENDING_ALPHA = 0.72;  // the current round's unworked slices: full grid
+
+  var SHADOW_SEGS = 30;
+  var SHADOW_ALPHA = 0.38;   // centre of the contact shadow
+  var SHADOW_GAP = 0.50;     // drop below the piece, fraction of SW
+  var SHADOW_SPREAD = 1.35;  // disc radius vs the bottom ring radius
+  var SHADOW_PITCH_IN = 0.07;  // rad of camera pitch where the shadow starts
+  var SHADOW_PITCH_FULL = 0.34;
 
   var DEFAULT_PALETTE = {
     ghost: '#ffffff',
@@ -221,29 +260,48 @@
     'uniform float uWire;',
     'uniform float uAlpha;',
     'uniform float uGlow;',
+    'uniform float uShadow;',
     'uniform vec3 uFlat;',
     'uniform vec3 uGlowColor;',
     'uniform vec3 uRimColor;',
     'void main() {',
+    // contact shadow: vColor.r carries the falloff weight, ink is plain black
+    '  if (uShadow > 0.5) {',
+    '    gl_FragColor = vec4(0.0, 0.0, 0.0, vColor.r * uAlpha);',
+    '    return;',
+    '  }',
     '  vec3 c;',
     '  if (uWire > 0.5) {',
     '    c = uFlat;',
     '  } else {',
     '    vec3 N = normalize(vNormal);',
     '    vec3 V = normalize(-vView);',
-    '    if (dot(N, V) < 0.0) N = -N;',
+    '    float facing = dot(N, V);',
+    // 1.0 where we are looking at the wrong side of the fabric: the inside of
+    // an open tube. Real crochet is dark in there and it reads as depth.
+    // A hard step here speckles the silhouette, where interpolated normals
+    // cross zero; ramp it instead so only a properly turned-away surface goes
+    // dark.
+    '    float inside = 1.0 - smoothstep(-0.28, -0.02, facing);',
+    '    N = facing < 0.0 ? -N : N;',
     '    vec3 K = normalize(vec3(-0.52, 0.74, 0.62));',  // key: upper-left, front
     '    vec3 F = normalize(vec3(0.30, -0.86, 0.22));',  // fill: from below
     '    float nk = dot(N, K);',
     '    float wrap = max((nk + 0.38) / 1.38, 0.0);',    // soft wrapped lambert
     '    float fill = max(dot(N, F), 0.0);',
-    '    float rim = pow(1.0 - max(dot(N, V), 0.0), 2.6);',
+    '    float nv = max(dot(N, V), 0.0);',
+    '    float rim = pow(1.0 - nv, 3.0);',
     '    vec3 H = normalize(K + V);',
-    '    float spec = pow(max(dot(N, H), 0.0), 24.0) * 0.10;',
-    '    c = vColor * (0.20 + 0.92 * wrap);',
-    '    c += vColor * vec3(0.46, 0.53, 0.70) * 0.26 * fill;',
-    '    c += vec3(spec);',
-    '    c += uRimColor * rim * 0.44;',
+    '    float nh = max(dot(N, H), 0.0);',
+    // Wool scatters, so the sheen is broad and carries the yarn colour; the
+    // tight lobe is only a hint, otherwise the piece turns to plastic.
+    '    float sheen = pow(nh, 7.0) * 0.15 + pow(nh, 44.0) * 0.045;',
+    '    vec3 specTint = mix(vec3(1.0), vColor * 1.6, 0.5);',
+    '    c = vColor * vec3(1.06, 0.99, 0.88) * (0.17 + 0.94 * wrap);',   // warm key
+    '    c += vColor * vec3(0.44, 0.54, 0.76) * 0.30 * fill;',           // cool bounce
+    '    c += specTint * sheen * wrap;',
+    '    c += uRimColor * rim * 0.30 * (1.0 - 0.75 * inside);',
+    '    c *= mix(1.0, 0.42, inside);',
     '    c = mix(c, uGlowColor, uGlow);',
     '  }',
     '  c = max(c, vec3(0.0));',
@@ -267,6 +325,20 @@
     return (h * 16777619) >>> 0;
   }
 
+  var imul = Math.imul || function (a, b) {
+    return ((a >>> 16) * b << 16) + (a & 0xffff) * b | 0;
+  };
+
+  /* Deterministic per-stitch noise in [-1, 1]. Same seed + index always gives
+     the same value, so the piece does not shimmer when a band is rebuilt. */
+  function noise11(seed, i) {
+    var h = (seed ^ imul(i + 1, 2654435761)) >>> 0;
+    h = imul(h ^ (h >>> 15), 2246822507) >>> 0;
+    h = imul(h ^ (h >>> 13), 3266489909) >>> 0;
+    h = (h ^ (h >>> 16)) >>> 0;
+    return h / 2147483648 - 1;
+  }
+
   var STITCH_AMP = {
     sl: 0.22, ch: 0.20, x: 1.0, sc: 1.0, inc: 1.02, dec: 0.92,
     hdc: 1.06, dc: 1.12, tr: 1.16, bbl: 1.85, puff: 1.7
@@ -278,7 +350,7 @@
 
   /* Build the render-side description of one round: slices (after the 160 cap),
      per-slice amplitude / width weight / colour, and the done slice count. */
-  function prepRound(round, defColor, prev) {
+  function prepRound(round, defColor, prev, index) {
     var count = Math.max(0, round.count | 0);
     var done = clamp(round.done | 0, 0, count);
     var stitches = round.stitches || null;
@@ -302,6 +374,8 @@
     var amp = new Float32Array(n);
     var wt = new Float32Array(n);
     var col = new Float32Array(n * 3);
+    // one noise seed per round, so neighbouring rounds do not line up
+    var seed = hashNum(hashStr(hashSeed, base), (index | 0) * 7 + 3);
     var h = hashSeed;
     h = hashNum(h, count);
     h = hashStr(h, base); h = hashNum(h, height);
@@ -316,10 +390,16 @@
       }
       var t = (st && st.t) || 'sc';
       var c = (st && st.c) || base;
-      amp[i] = STITCH_AMP[t] != null ? STITCH_AMP[t] : 1.0;
+      amp[i] = (STITCH_AMP[t] != null ? STITCH_AMP[t] : 1.0) *
+        (1 + noise11(seed, i * 3) * JIT_AMP);
       wt[i] = STITCH_W[t] != null ? STITCH_W[t] : 1.0;
       var lin = linearOf(c, DEFAULT_YARN);
-      col[i * 3] = lin[0]; col[i * 3 + 1] = lin[1]; col[i * 3 + 2] = lin[2];
+      // hand-dyed wobble: a little lightness, a little warm/cool
+      var kl = 1 + noise11(seed, i * 3 + 1) * JIT_LIGHT;
+      var kh = noise11(seed, i * 3 + 2) * JIT_HUE;
+      col[i * 3] = Math.max(0, lin[0] * kl * (1 + kh));
+      col[i * 3 + 1] = Math.max(0, lin[1] * kl);
+      col[i * 3 + 2] = Math.max(0, lin[2] * kl * (1 - kh));
       h = hashStr(h, t); h = hashStr(h, c);
     }
     return {
@@ -328,7 +408,7 @@
       amp: amp, wt: wt, col: col,
       height: height, ghost: ghost,
       ref: stitches, base: base,
-      hash: h >>> 0
+      hash: (h ^ seed) >>> 0
     };
   }
 
@@ -341,7 +421,7 @@
     var rounds = [];
     for (var i = 0; i < src.length; i++) {
       if (!src[i]) continue;
-      rounds.push(prepRound(src[i], def, prevRounds ? prevRounds[rounds.length] : null));
+      rounds.push(prepRound(src[i], def, prevRounds ? prevRounds[rounds.length] : null, rounds.length));
     }
     var current = clamp(m.current == null ? rounds.length - 1 : m.current | 0, 0,
       Math.max(0, rounds.length - 1));
@@ -433,8 +513,16 @@
     }
     for (t = 0; t < VROWS; t++) {
       var tt = t / ROWS;
-      FT[t] = 0.34 + 0.66 * Math.sin(Math.PI * tt);
-      DFT[t] = 0.66 * Math.PI * Math.cos(Math.PI * tt);
+      /* The stitch bump must vanish at the top and bottom edge of its band.
+         Consecutive rounds have different stitch counts (so different slice
+         phases) and now different per-stitch amplitudes, and any bump left at
+         the shared ring makes the two bands disagree about its radius — which
+         shows up as hairline cracks of background between every round. With
+         the taper the shared ring is exactly rBase + BLG for both, so the
+         piece is watertight whatever the stitches do, and each round reads as
+         its own row of V's with a groove between, like real fabric. */
+      FT[t] = Math.sin(Math.PI * tt);
+      DFT[t] = Math.PI * Math.cos(Math.PI * tt);
       BLG[t] = BULGE * SW * (1.35 * Math.sin(Math.PI * tt) - 0.42);
       DBLG[t] = BULGE * SW * 1.35 * Math.PI * Math.cos(Math.PI * tt);
       DIPT[t] = Math.sin(Math.PI * tt);
@@ -456,6 +544,7 @@
     var verts = new Float32Array(n * vps * FLOATS);
     var tri = new Uint16Array(n * tidx);
     var lin = new Uint16Array(n * LIDX);
+    var ring = new Uint16Array(n * GIDX);
     var a0 = o.a0, aw = o.aw, amp = o.amp, col = o.col;
     var rB = o.rBase, yB = o.yBase, drdt = o.drdt, dydt = o.dydt;
     var zOff = o.zOff, dipScale = o.dipScale;
@@ -601,8 +690,14 @@
       for (t = 0; t < ROWS; t++) {
         lin[idx++] = base + t * COLS; lin[idx++] = base + (t + 1) * COLS;
       }
+      // ghost pass: only the bottom edge of the band, so a stack of future
+      // rounds reads as a stack of rings instead of a wire cage
+      idx = j * GIDX;
+      for (k = 0; k < SEGS; k++) {
+        ring[idx++] = base + ROWS * COLS + k; ring[idx++] = base + ROWS * COLS + k + 1;
+      }
     }
-    return { verts: verts, tri: tri, lin: lin, n: n, tps: tidx, lps: LIDX };
+    return { verts: verts, tri: tri, lin: lin, ring: ring, n: n, tps: tidx, lps: LIDX, gps: GIDX };
   }
 
   /* Small domed cap for the magic ring at the top of a round-worked piece. */
@@ -632,8 +727,37 @@
       lin[i * 2] = 1 + i; lin[i * 2 + 1] = 1 + ((i + 1) % n);
     }
     return {
-      verts: verts, tri: tri, lin: lin, n: 1, isCap: true,
-      triCount: n * 3, linCount: n * 2, tps: n * 3, lps: n * 2
+      verts: verts, tri: tri, lin: lin, ring: lin, n: 1, isCap: true,
+      triCount: n * 3, linCount: n * 2, ringCount: n * 2,
+      tps: n * 3, lps: n * 2, gps: n * 2
+    };
+  }
+
+  /* Soft elliptical contact shadow: a fan whose centre carries full weight and
+     whose rim carries none. The shader reads that weight out of the colour
+     attribute, so it needs no extra vertex format. */
+  function buildShadow(radius, y) {
+    var n = SHADOW_SEGS;
+    var verts = new Float32Array((n + 1) * FLOATS);
+    var tri = new Uint16Array(n * 3);
+    function put(i, x, z, w) {
+      var p = i * FLOATS;
+      verts[p] = x; verts[p + 1] = y; verts[p + 2] = z;
+      verts[p + 3] = 0; verts[p + 4] = 0; verts[p + 5] = 0;
+      verts[p + 6] = 0; verts[p + 7] = 1; verts[p + 8] = 0;
+      verts[p + 9] = w; verts[p + 10] = w; verts[p + 11] = w;
+      verts[p + 12] = -9;
+    }
+    put(0, 0, 0, 1);
+    for (var i = 0; i < n; i++) {
+      var a = i / n * TAU;
+      put(i + 1, radius * Math.cos(a), radius * Math.sin(a), 0);
+      tri[i * 3] = 0; tri[i * 3 + 1] = 1 + i; tri[i * 3 + 2] = 1 + ((i + 1) % n);
+    }
+    return {
+      verts: verts, tri: tri, lin: tri, ring: tri, n: 1, isShadow: true,
+      triCount: n * 3, linCount: 0, ringCount: 0,
+      tps: n * 3, lps: 0, gps: 0
     };
   }
 
@@ -748,6 +872,7 @@
         wire: gl.getUniformLocation(p, 'uWire'),
         alpha: gl.getUniformLocation(p, 'uAlpha'),
         glow: gl.getUniformLocation(p, 'uGlow'),
+        shadow: gl.getUniformLocation(p, 'uShadow'),
         flat: gl.getUniformLocation(p, 'uFlat'),
         glowColor: gl.getUniformLocation(p, 'uGlowColor'),
         rimColor: gl.getUniformLocation(p, 'uRimColor')
@@ -769,6 +894,9 @@
       model: normalizeModel(null),
       chunks: [],          // per band GPU chunk
       capChunk: null,
+      shadowChunk: null,
+      shadowHash: 0,
+      shadowFade: 0,
       hashes: [],
       bands: [],
       destroyed: false,
@@ -848,9 +976,12 @@
       if (gl) {
         for (var i = 0; i < state.chunks.length; i++) freeChunk(state.chunks[i]);
         freeChunk(state.capChunk);
+        freeChunk(state.shadowChunk);
       }
       state.chunks = [];
       state.capChunk = null;
+      state.shadowChunk = null;
+      state.shadowHash = 0;
       state.hashes = [];
     }
 
@@ -860,24 +991,32 @@
       if (c.vbo) gl.deleteBuffer(c.vbo);
       if (c.tbo) gl.deleteBuffer(c.tbo);
       if (c.lbo) gl.deleteBuffer(c.lbo);
+      if (c.rbo) gl.deleteBuffer(c.rbo);
     }
 
     function uploadChunk(geo, prev) {
       var gl = state.gl;
       var c = prev || {};
-      if (!c.vbo) { c.vbo = gl.createBuffer(); c.tbo = gl.createBuffer(); c.lbo = gl.createBuffer(); }
+      if (!c.vbo) {
+        c.vbo = gl.createBuffer(); c.tbo = gl.createBuffer();
+        c.lbo = gl.createBuffer(); c.rbo = gl.createBuffer();
+      }
       gl.bindBuffer(gl.ARRAY_BUFFER, c.vbo);
       gl.bufferData(gl.ARRAY_BUFFER, geo.verts, gl.STATIC_DRAW);
       gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, c.tbo);
       gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, geo.tri, gl.STATIC_DRAW);
       gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, c.lbo);
       gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, geo.lin, gl.STATIC_DRAW);
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, c.rbo);
+      gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, geo.ring || geo.lin, gl.STATIC_DRAW);
       c.n = geo.n;
       c.isCap = !!geo.isCap;
       c.tps = geo.tps != null ? geo.tps : TIDX;     // triangle indices per slice
       c.lps = geo.lps != null ? geo.lps : LIDX;     // line indices per slice
+      c.gps = geo.gps != null ? geo.gps : GIDX;     // ghost-ring indices per slice
       c.triCount = geo.triCount != null ? geo.triCount : geo.n * c.tps;
       c.linCount = geo.linCount != null ? geo.linCount : geo.n * c.lps;
+      c.ringCount = geo.ringCount != null ? geo.ringCount : geo.n * c.gps;
       c.verts = geo.verts.length / FLOATS;
       return c;
     }
@@ -929,6 +1068,41 @@
         }
       } else if (state.capChunk) {
         freeChunk(state.capChunk); state.capChunk = null; state.capHash = 0;
+      }
+
+      /* contact shadow: a disc just under the lowest band, no wider than the
+         fitted radius so it can never be clipped by the canvas edge */
+      /* Contact shadow. The plane it lies on is the bottom of the piece as
+         planned — the ghost cage reaches down to it — and its radius is the
+         widest fabric that actually exists. A piece two rounds in is nowhere
+         near that plane, so the shadow fades in as the work grows down to it
+         rather than hanging under a speck. */
+      var aY0 = Infinity, aY1 = -Infinity, aR = 0;
+      var sY0 = Infinity, sR = 0, sAny = false;
+      for (i = 0; i < rounds.length; i++) {
+        if (!bandExtent(i, _ext)) continue;
+        if (_ext.rad > aR) aR = _ext.rad;
+        if (_ext.ymin < aY0) aY0 = _ext.ymin;
+        if (_ext.ymax > aY1) aY1 = _ext.ymax;
+        if (!rounds[i].ghost && rounds[i].doneSlices > 0) {
+          sAny = true;
+          if (_ext.rad > sR) sR = _ext.rad;
+          if (_ext.ymin < sY0) sY0 = _ext.ymin;
+        }
+      }
+      if (sAny && aR > 0 && aY1 > aY0) {
+        var grown = (aY1 - sY0) / (aY1 - aY0);
+        state.shadowFade = smoothstep(0.45, 0.92, grown);
+        var shR = clamp(sR * SHADOW_SPREAD, aR * 0.35, aR);
+        var shY = aY0 - SHADOW_GAP * SW;
+        var sh = hashNum(hashNum(2166136261, shR * 97), shY * 97);
+        if (state.shadowHash !== sh || !state.shadowChunk) {
+          state.shadowChunk = uploadChunk(buildShadow(shR, shY), state.shadowChunk);
+          state.shadowHash = sh;
+          built++;
+        }
+      } else {
+        state.shadowFade = 0;
       }
 
       var stat = state.stats;
@@ -1148,6 +1322,7 @@
       /* pass 1: opaque solids */
       gl.depthMask(true);
       gl.uniform1f(u.wire, 0);
+      gl.uniform1f(u.shadow, 0);
       gl.uniform1f(u.alpha, 1);
 
       if (state.capChunk && rounds.length && !rounds[0].ghost && rounds[0].doneSlices > 0) {
@@ -1177,9 +1352,30 @@
         draws++; tris += solid * c.tps / 3;
       }
 
+      /* pass 1b: contact shadow. It lies on a horizontal plane, so it only
+         makes sense while the camera is above the piece; it fades out as the
+         view comes level and never appears when looking from below. */
+      gl.depthMask(false);
+      if (state.shadowChunk && state.shadowFade > 0) {
+        var shA = SHADOW_ALPHA * state.shadowFade *
+          smoothstep(SHADOW_PITCH_IN, SHADOW_PITCH_FULL, state.pitch + state.userPitch);
+        if (shA > 0.004) {
+          var sc = state.shadowChunk;
+          bindChunk(gl, sc);
+          gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, sc.tbo);
+          gl.uniform1f(u.shadow, 1);
+          gl.uniform1f(u.alpha, shA);
+          gl.uniform1f(u.animSlice, -1);
+          gl.uniform1f(u.animScale, 1);
+          gl.uniform1f(u.glow, 0);
+          gl.drawElements(gl.TRIANGLES, sc.triCount, gl.UNSIGNED_SHORT, 0);
+          draws++; tris += sc.triCount / 3;
+        }
+        gl.uniform1f(u.shadow, 0);
+      }
+
       /* pass 2: translucent wireframe (ghost rounds + the pending part of the
          ring in progress) */
-      gl.depthMask(false);
       gl.uniform1f(u.wire, 1);
       gl.uniform1f(u.glow, 0);
       gl.uniform1f(u.animSlice, -1);
@@ -1200,8 +1396,11 @@
         }
         gl.uniform1f(u.alpha, a);
         bindChunk(gl, cw);
-        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, cw.lbo);
-        gl.drawElements(gl.LINES, (cw.n - start) * cw.lps, gl.UNSIGNED_SHORT, start * cw.lps * 2);
+        // future rounds: bare rings. The round in progress: the full grid, so
+        // the stitches still to work read as cells waiting to be filled.
+        var per = rw.ghost ? cw.gps : cw.lps;
+        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, rw.ghost ? cw.rbo : cw.lbo);
+        gl.drawElements(gl.LINES, (cw.n - start) * per, gl.UNSIGNED_SHORT, start * per * 2);
         draws++;
       }
       gl.depthMask(true);
@@ -1315,6 +1514,8 @@
       if (state.anim || state.glowAnim) return true;
       if (state.dragging) return true;
       if (Math.abs(state.spinVel) > 0.0005) return true;
+      // once the pause is over, auto-rotation and the pitch return both want
+      // frames, and both are off under reduced motion
       if (!state.reducedMotion && t >= state.pauseUntil) return true;
       return false;
     }
@@ -1337,6 +1538,15 @@
       }
       if (state.yaw > TAU) state.yaw -= TAU;
       if (state.yaw < -TAU) state.yaw += TAU;
+
+      /* The yaw the user left behind is theirs to keep — auto-rotation simply
+         carries on from it. A pitch is different: held at an odd angle the
+         piece reads as broken, so it eases home once the pause is over. */
+      if (!state.dragging && !state.reducedMotion && state.userPitch !== 0 &&
+          t >= state.pauseUntil && dt > 0) {
+        state.userPitch *= Math.pow(0.02, dt / PITCH_RETURN);
+        if (Math.abs(state.userPitch) < 0.002) state.userPitch = 0;
+      }
 
       tickFit(t);
       state.dirty = false;
@@ -1411,6 +1621,8 @@
       state.prog = null;
       state.chunks = [];
       state.capChunk = null;
+      state.shadowChunk = null;
+      state.shadowHash = 0;
       state.hashes = [];
       if (state.rafId) { global.cancelAnimationFrame(state.rafId); state.rafId = 0; }
       state.running = false;
@@ -1433,14 +1645,54 @@
     var pointers = {};
     var pinchDist = 0, lastTap = 0, dragMoved = 0;
 
+    /* ---- shared rotation, used by the canvas's own pointer handlers AND by
+       the host through handle.dragStart/dragMove/dragEnd. One implementation
+       means the stitch button and the viewer sheet can never disagree about
+       which way the model turns. ---- */
+
+    /* Radians per CSS pixel: dragging the full width of the canvas turns the
+       piece half a revolution, whatever size the canvas is, so it feels like
+       the same physical ball in the button and in the sheet. */
+    function dragScale() {
+      var cssW = state.dpr > 0 ? state.w / state.dpr : state.w;
+      return Math.PI / clamp(cssW || 320, 160, 900);
+    }
+
+    function dragBegin() {
+      state.dragging = true;
+      state.spinVel = 0;
+      state.dragT = now();
+      kick();
+    }
+
+    /* dx / dy are CSS pixels since the last move. Drag right -> the near face
+       goes right; drag down -> the near face goes down and the top opens up. */
+    function dragBy(dx, dy) {
+      if (!state.dragging) dragBegin();
+      var k = dragScale();
+      state.yaw += dx * k;
+      state.userPitch = clamp(state.userPitch + dy * k, -PITCH_LIMIT, PITCH_LIMIT);
+      var t = now();
+      var ms = t - state.dragT;
+      state.dragT = t;
+      if (ms > 0) state.spinVel = clamp(dx * k * 1000 / ms, -FLICK_MAX, FLICK_MAX);
+      kick();
+    }
+
+    function dragFinish() {
+      if (!state.dragging) return;
+      state.dragging = false;
+      state.pauseUntil = now() + ROT_PAUSE;
+      kick();
+    }
+
     function onPointerDown(e) {
       if (!state.interactive) return;
       pointers[e.pointerId] = { x: e.clientX, y: e.clientY };
       if (canvas.setPointerCapture) { try { canvas.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ } }
       var n = countPointers();
       if (n === 1) {
-        state.dragging = true;
-        state.spinVel = 0;
+        dragBegin();
         dragMoved = 0;
       } else if (n === 2) {
         pinchDist = twoPointerDist();
@@ -1474,10 +1726,7 @@
         }
       } else if (state.dragging) {
         dragMoved += Math.abs(dx) + Math.abs(dy);
-        var k = 0.008;
-        state.yaw += dx * k;
-        state.userPitch = clamp(state.userPitch - dy * k, -1.1, 1.1);
-        state.spinVel = dx * k * 26;
+        dragBy(dx, dy);
       }
       e.preventDefault();
       kick();
@@ -1487,14 +1736,16 @@
       delete pointers[e.pointerId];
       if (countPointers() < 2) pinchDist = 0;
       if (countPointers() === 0) {
-        state.dragging = false;
+        dragFinish();
         if (dragMoved < 6) {
           var t = now();
+          // double-tap resets the view — viewer sheet only; the stitch button
+          // drives rotation through the drag API and never calls this, so a
+          // double tap there is two stitches, not a view reset.
           if (t - lastTap < 320) { resetView(); lastTap = 0; }
           else lastTap = t;
           state.spinVel = 0;
         }
-        state.pauseUntil = now() + ROT_PAUSE;
       }
       kick();
     }
@@ -1614,6 +1865,11 @@
         kick();
       },
       resetView: resetView,
+      /* Host-driven rotation for a canvas that cannot see pointers itself.
+         Works whether or not `interactive` is on. */
+      dragStart: function () { if (!state.destroyed) dragBegin(); },
+      dragMove: function (dx, dy) { if (!state.destroyed) dragBy(dx || 0, dy || 0); },
+      dragEnd: function () { if (!state.destroyed) dragFinish(); },
       getStats: function () {
         var s = state.stats;
         return {
@@ -1626,7 +1882,14 @@
           drawCalls: s.drawCalls,
           chunks: s.chunks,
           verts: s.verts,
-          running: state.running
+          running: state.running,
+          // camera, so a test can assert direction without reading pixels
+          yaw: Math.round(state.yaw * 1000) / 1000,
+          pitch: Math.round((state.pitch + state.userPitch) * 1000) / 1000,
+          userPitch: Math.round(state.userPitch * 1000) / 1000,
+          zoom: Math.round(state.zoom * 1000) / 1000,
+          fitScale: Math.round(state.fit.scale * 1000) / 1000,
+          dragging: !!state.dragging
         };
       }
     };
@@ -1635,9 +1898,14 @@
 
   global.Diagram = {
     mount: mount,
-    version: '1.0.0',
+    version: '1.1.0',
     // exposed for tests / tuning
-    _consts: { SW: SW, SH: SH, MAX_SLICES: MAX_SLICES }
+    _consts: {
+      SW: SW, SH: SH, MAX_SLICES: MAX_SLICES, BUMP: BUMP,
+      GHOST_ALPHA: GHOST_ALPHA, PENDING_ALPHA: PENDING_ALPHA,
+      SHADOW_ALPHA: SHADOW_ALPHA, JIT_LIGHT: JIT_LIGHT, JIT_AMP: JIT_AMP,
+      PITCH_RETURN: PITCH_RETURN, ROT_PAUSE: ROT_PAUSE
+    }
   };
 
 }(typeof window !== 'undefined' ? window : this));
