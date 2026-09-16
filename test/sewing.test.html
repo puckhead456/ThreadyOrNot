@@ -1383,6 +1383,72 @@ assertTrue(metaStop.meta.designer !== 'and', 'a stop word is never the designer'
 assertTrue(metaStop.meta.designer === '' || /^[A-Z]/.test(metaStop.meta.designer), 'the designer is blank or a proper name');
 
 // =======================================================================
+group('Page images - normalize repairs craftData.pages');
+// =======================================================================
+
+assertEqual(S.normalize(null, null).pages, [], 'an empty project has no pages');
+assertEqual(S.normalize({}, null).pages, [], 'craftData with no pages key normalises to an empty list');
+assertEqual(S.normalize({ pages: 'nope' }, null).pages, [], 'a non-array pages value is dropped');
+assertEqual(S.PAGE_CAP, 40, 'the page cap is 40 (research A.3.4)');
+
+var pagesOk = S.normalize({
+  pages: [{ n: 1, blobKey: 'p:abc:page:1', w: 1400, h: 1980 }]
+}, null).pages;
+assertEqual(pagesOk, [{ n: 1, blobKey: 'p:abc:page:1', w: 1400, h: 1980 }], 'a good page row survives intact');
+
+var pagesSorted = S.normalize({
+  pages: [
+    { n: 3, blobKey: 'p:abc:page:3', w: 10, h: 20 },
+    { n: 1, blobKey: 'p:abc:page:1', w: 10, h: 20 },
+    { n: 2, blobKey: 'p:abc:page:2', w: 10, h: 20 }
+  ]
+}, null).pages;
+assertEqual(pagesSorted.map(function (p) { return p.n; }), [1, 2, 3], 'pages come back in page order');
+
+var pagesJunk = S.normalize({
+  pages: [
+    null,
+    'page 2',
+    { n: 4 },                                   // no blob key
+    { blobKey: 'p:abc:page:0' },                // no page number
+    { n: 0, blobKey: 'p:abc:page:0' },          // page 0 does not exist
+    { n: 5, blobKey: 'p:abc:page:5', w: -3, h: 'tall' },
+    { n: 5, blobKey: 'p:abc:page:5b', w: 1, h: 1 }   // duplicate page number
+  ]
+}, null).pages;
+assertEqual(pagesJunk.length, 1, 'junk page rows are dropped and duplicates collapse');
+assertEqual(pagesJunk[0], { n: 5, blobKey: 'p:abc:page:5', w: 0, h: 0 }, 'bad sizes repair to 0 and the first row wins');
+
+(function () {
+  var many = [];
+  for (var i = 1; i <= 60; i++) many.push({ n: i, blobKey: 'p:abc:page:' + i, w: 100, h: 100 });
+  var capped = S.normalize({ pages: many }, null).pages;
+  assertEqual(capped.length, 40, 'no more than 40 pages are ever kept');
+  assertEqual(capped[39].n, 40, 'the kept pages are the first 40');
+})();
+
+(function () {
+  // A re-import with the pages box unticked must leave the images alone.
+  var existing = S.normalize({
+    pages: [{ n: 6, blobKey: 'p:abc:page:6', w: 1400, h: 1980 }],
+    steps: [{ n: 1, text: 'Sew the darts.', done: true, page: 6 }]
+  }, null);
+  var parsedAgain = S.parse('CONSTRUCTION\n1. Sew the darts.\n2. Press them towards the centre.\n');
+  var merged = S.toCraftData(parsedAgain, existing, { groups: { steps: true } });
+  assertEqual(merged.pages, existing.pages, 'a re-import keeps the page images that were already there');
+  assertEqual(merged.steps.length, 2, 'the re-import still replaced the steps');
+  assertTrue(merged.steps[0].done, 'and kept the step that was already done');
+})();
+
+(function () {
+  var withPages = S.normalize({
+    pages: [{ n: 2, blobKey: 'p:abc:page:2', w: 8, h: 9 }]
+  }, null);
+  var round = S.normalize(JSON.parse(JSON.stringify(withPages)), null);
+  assertEqual(round.pages, withPages.pages, 'pages survive a JSON round trip (export/import)');
+})();
+
+// =======================================================================
 group('Performance');
 // =======================================================================
 

@@ -12,6 +12,8 @@
  *   2. the project screen (#screen-craft)
  *   3. the "Step done ✓" gesture and the quilt unit counter
  *   4. sheets: steps, cutting, notions, size, fabric, machine
+ *   4b. page images: the page viewer and the pages sheet
+ *   4c. the 2D cutting-table illustration (research §B.4.6)
  *   5. the import sheet
  *   6. new-project fields, menu, FAQ, tour, registration
  */
@@ -55,6 +57,34 @@
 
   function plural(n, word) {
     return n + ' ' + word + (n === 1 ? '' : 's');
+  }
+
+  /* ---- page images (research §A.3.4) ---------------------------------- *
+   * Opt-in, lazy, capped, and stored in IndexedDB under the shell's
+   * `p:<projectId>:` prefix so deleting the project takes them with it.   */
+
+  var MAX_PAGES = (S && S.PAGE_CAP) || 40;
+  var KB_PER_PAGE = 250;            // the A.3.4 measurement, used for the estimate
+
+  function pagePrefix(projectId) { return 'p:' + projectId + ':page:'; }
+
+  function blobsAvailable() {
+    return !!(window.BlobStore && window.BlobStore.available && window.BlobStore.available());
+  }
+
+  /** The stored image row for a 1-based PDF page number, or null. */
+  function pageRow(d, n) {
+    if (typeof n !== 'number') return null;
+    for (var i = 0; i < d.pages.length; i++) if (d.pages[i].n === n) return d.pages[i];
+    return null;
+  }
+
+  /** '~2 MB' / '~700 kB' for a page count. */
+  function sizeEstimate(pages) {
+    var kb = pages * KB_PER_PAGE;
+    if (kb < 1000) return '~' + Math.round(kb / 50) * 50 + ' kB';
+    var mb = kb / 1024;
+    return '~' + (mb < 10 ? Math.round(mb * 10) / 10 : Math.round(mb)) + ' MB';
   }
 
   function clip(s, n) {
@@ -121,6 +151,13 @@
     on(v.progress, 'click', function () { openStepsSheet(viewProjectId); });
     main.appendChild(v.progress);
 
+    // --- the 2D cutting table (§B.4.6) --------------------------------------
+    v.cutTable = button('sw-cuttable', null, 'Open the cutting list');
+    v.cutTable.setAttribute('data-tour', 'sw-cuttable');
+    v.cutTable.hidden = true;
+    on(v.cutTable, 'click', function () { openCuttingSheet(viewProjectId); });
+    main.appendChild(v.cutTable);
+
     // --- quilt unit counters (B.4.5) ---------------------------------------
     v.units = el('div', 'sw-units');
     main.appendChild(v.units);
@@ -130,8 +167,10 @@
     v.card.setAttribute('data-tour', 'sw-step-card');
     var head = el('div', 'sw-step-head');
     v.stepN = el('span', 'sw-step-n');
+    v.ring = stepRing();
     v.stepSection = el('span', 'sw-step-section');
     head.appendChild(v.stepN);
+    head.appendChild(v.ring.node);
     head.appendChild(v.stepSection);
     v.stepText = el('div', 'sw-step-text');
     v.card.appendChild(head);
@@ -140,7 +179,10 @@
 
     // --- step meta ----------------------------------------------------------
     v.meta = el('div', 'sw-step-meta');
-    v.page = el('span', 'chip sw-page');
+    v.page = button('chip sw-page', null, 'Page');
+    on(v.page, 'click', function () {
+      if (typeof view.pageNo === 'number') openPageViewer(viewProjectId, view.pageNo);
+    });
     v.sa = button('sw-sa', null, 'Seam allowance');
     on(v.sa, 'click', function () { openSeamSheet(viewProjectId); });
     v.meta.appendChild(v.page);
@@ -190,6 +232,20 @@
       C.render();
     }));
     bb.appendChild(barButton('☰', 'Steps', function () { openStepsSheet(viewProjectId); }));
+    // The shell owns the wake lock; a craft bottom bar just flips the setting.
+    // Guarded because older shells (and browsers without the Wake Lock API)
+    // do not offer it at all.
+    if (C.wake && C.wake.supported) {
+      v.awake = barButton('☀', 'Awake', function () {
+        var on2 = C.wake.toggle();
+        v.awake.classList.toggle('on', !!on2);
+        v.awake.setAttribute('aria-pressed', on2 ? 'true' : 'false');
+        C.fb('tap');
+      });
+      v.awake.setAttribute('aria-pressed', C.wake.isOn() ? 'true' : 'false');
+      v.awake.classList.toggle('on', !!C.wake.isOn());
+      bb.appendChild(v.awake);
+    }
     bb.appendChild(barButton('✂️', 'Cut', function () { openCuttingSheet(viewProjectId); }));
     bb.appendChild(barButton('🧷', 'Notions', function () { openNotionsSheet(viewProjectId); }));
     main.appendChild(bb);
@@ -237,16 +293,26 @@
       total ? 'Step ' + (at + 1) + ' of ' + total + ', open the step list' : 'Add steps');
 
     var step = total ? d.steps[at] : null;
-    view.stepN.textContent = total ? 'STEP ' + (at + 1) : 'NO STEPS';
+    view.stepN.textContent = total ? 'STEP' : 'NO STEPS';
+    view.ring.set(at + 1, total);
     view.stepSection.textContent = step && step.section ? step.section : '';
     view.stepText.textContent = step
       ? step.text
       : 'Import the instruction PDF from the ⋯ menu, or add steps in the step list.';
     view.card.classList.toggle('sw-empty', !total);
 
-    if (step && typeof step.page === 'number') {
-      view.page.textContent = '📄 page ' + step.page;
+    // The page chip opens the page image when there is one, and is plain text
+    // when there is not (the number still tells you where to look in the PDF).
+    view.pageNo = step && typeof step.page === 'number' ? step.page : null;
+    if (view.pageNo) {
+      var hasImg = !!pageRow(d, view.pageNo);
+      view.page.textContent = '📄 page ' + view.pageNo;
       view.page.hidden = false;
+      view.page.disabled = !hasImg;
+      view.page.classList.toggle('sw-page-plain', !hasImg);
+      view.page.setAttribute('aria-label', hasImg
+        ? 'Show page ' + view.pageNo + ' of the booklet'
+        : 'This step is on page ' + view.pageNo + ' of the booklet');
     } else {
       view.page.hidden = true;
     }
@@ -275,6 +341,13 @@
       ? notionsDone(d) + ' of ' + d.notions.length + ' notions ready'
       : 'No notions list yet';
 
+    if (view.awake && C.wake) {
+      var awakeOn = !!C.wake.isOn();
+      view.awake.classList.toggle('on', awakeOn);
+      view.awake.setAttribute('aria-pressed', awakeOn ? 'true' : 'false');
+    }
+
+    paintCutTable(d);
     paintUnits(p, d);
   }
 
@@ -1233,6 +1306,434 @@
   }
 
   /* ================================================================== *
+   * 4b. Page images: the page viewer and the pages sheet
+   *
+   * The booklet's diagram IS the instruction for half the steps (research
+   * §A.3.4), so an opt-in import renders every page to a JPEG in BlobStore
+   * and the step card grows a chip that opens it. The images are a cache:
+   * the text lives in localStorage, the blobs may be evicted, and nothing
+   * here ever assumes a page is still there.
+   * ================================================================== */
+
+  var SVG_NS = 'http://www.w3.org/2000/svg';
+
+  function svgNode(name, attrs) {
+    var n = document.createElementNS(SVG_NS, name);
+    if (attrs) {
+      for (var k in attrs) {
+        if (Object.prototype.hasOwnProperty.call(attrs, k)) n.setAttribute(k, String(attrs[k]));
+      }
+    }
+    return n;
+  }
+
+  var STORED_HERE = 'Pages are stored on this device only — keep the PDF.';
+
+  /**
+   * Rasterise the PDF's pages into BlobStore, one at a time so a 40-page
+   * booklet never blocks the main thread for long. Resolves with the rows for
+   * `craftData.pages` plus the total byte count (used for the toast).
+   */
+  function renderPageImages(projectId, handle, onProgress, isCancelled) {
+    var total = Math.min((handle && handle.numPages) || 0, MAX_PAGES);
+    if (!total || !blobsAvailable() || typeof handle.renderPage !== 'function') {
+      return Promise.resolve({ pages: [], bytes: 0, total: 0 });
+    }
+    var pages = [];
+    var bytes = 0;
+    // A re-render replaces what was there, so clear the old blobs first.
+    var chain = window.BlobStore.deletePrefix(pagePrefix(projectId)).then(null, function () { /* ignore */ });
+
+    function step(n) {
+      return function () {
+        if (isCancelled && isCancelled()) return null;
+        if (onProgress) onProgress(n, total);
+        return handle.renderPage(n, { maxWidth: 1400 }).then(function (canvas) {
+          return new Promise(function (resolve) {
+            var blobKey = pagePrefix(projectId) + n;
+            var done = function (blob) {
+              if (!blob) { resolve(); return; }
+              window.BlobStore.put(blobKey, blob).then(function (ok) {
+                if (ok !== false) {
+                  bytes += blob.size || 0;
+                  pages.push({ n: n, blobKey: blobKey, w: canvas.width, h: canvas.height });
+                }
+                resolve();
+              }, resolve);
+            };
+            if (canvas.toBlob) canvas.toBlob(done, 'image/jpeg', 0.82);
+            else done(null);
+          });
+        }, function () { /* one bad page must not stop the rest */ });
+      };
+    }
+    for (var n = 1; n <= total; n++) chain = chain.then(step(n));
+
+    return chain.then(function () {
+      pages.sort(function (a, b) { return a.n - b.n; });
+      return { pages: pages, bytes: bytes, total: total };
+    });
+  }
+
+  /** Pinch / drag / double-tap zoom over one <img> inside a fixed frame. */
+  function wireZoom(frame, img) {
+    var s = 1, tx = 0, ty = 0;
+    var pts = {}, ids = [];
+    var startDist = 0, startScale = 1, lastX = 0, lastY = 0;
+
+    function apply() {
+      img.style.transform = 'translate(' + tx.toFixed(1) + 'px,' + ty.toFixed(1) + 'px) scale(' + s.toFixed(3) + ')';
+      frame.classList.toggle('zoomed', s > 1.01);
+    }
+    function clampPan() {
+      var r = frame.getBoundingClientRect();
+      var mx = Math.max(0, (r.width * (s - 1)) / 2);
+      var my = Math.max(0, (r.height * (s - 1)) / 2);
+      tx = Math.max(-mx, Math.min(mx, tx));
+      ty = Math.max(-my, Math.min(my, ty));
+    }
+    function setScale(next, cx, cy) {
+      next = Math.max(1, Math.min(6, next));
+      if (cx !== undefined) {
+        var r = frame.getBoundingClientRect();
+        var ox = cx - r.left - r.width / 2;
+        var oy = cy - r.top - r.height / 2;
+        var k = next / s;
+        tx = ox - (ox - tx) * k;
+        ty = oy - (oy - ty) * k;
+      }
+      s = next;
+      clampPan();
+      apply();
+    }
+    function mid() {
+      var a = pts[ids[0]], b = pts[ids[1]];
+      var dx = b.x - a.x, dy = b.y - a.y;
+      return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, d: Math.sqrt(dx * dx + dy * dy) };
+    }
+
+    C.on(frame, 'pointerdown', function (e) {
+      if (ids.length >= 2) return;
+      pts[e.pointerId] = { x: e.clientX, y: e.clientY };
+      ids.push(e.pointerId);
+      try { frame.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+      if (ids.length === 1) { lastX = e.clientX; lastY = e.clientY; }
+      else { var m = mid(); startDist = m.d || 1; startScale = s; }
+    });
+    C.on(frame, 'pointermove', function (e) {
+      if (!pts[e.pointerId]) return;
+      pts[e.pointerId] = { x: e.clientX, y: e.clientY };
+      if (ids.length >= 2) {
+        var m = mid();
+        setScale(startScale * (m.d / startDist), m.x, m.y);
+        e.preventDefault();
+        return;
+      }
+      if (s <= 1.01) return;              // nothing to pan at 1x
+      tx += e.clientX - lastX;
+      ty += e.clientY - lastY;
+      lastX = e.clientX; lastY = e.clientY;
+      clampPan();
+      apply();
+      e.preventDefault();
+    });
+    function drop(e) {
+      if (!pts[e.pointerId]) return;
+      delete pts[e.pointerId];
+      var at = ids.indexOf(e.pointerId);
+      if (at >= 0) ids.splice(at, 1);
+      if (ids.length === 1 && pts[ids[0]]) { lastX = pts[ids[0]].x; lastY = pts[ids[0]].y; }
+    }
+    C.on(frame, 'pointerup', drop);
+    C.on(frame, 'pointercancel', drop);
+    C.on(frame, 'dblclick', function (e) { setScale(s > 1.01 ? 1 : 2.5, e.clientX, e.clientY); });
+    C.on(frame, 'wheel', function (e) {
+      e.preventDefault();
+      setScale(s * (e.deltaY < 0 ? 1.15 : 1 / 1.15), e.clientX, e.clientY);
+    });
+
+    return {
+      reset: function () { s = 1; tx = 0; ty = 0; pts = {}; ids = []; apply(); },
+      zoomIn: function () { setScale(s * 1.5); },
+      zoomOut: function () { setScale(s / 1.5); },
+      scale: function () { return s; }
+    };
+  }
+
+  /** The page viewer sheet. Opens on `pageNo` (the step's page) by default. */
+  function openPageViewer(projectId, pageNo) {
+    var proj = Store.project(projectId);
+    if (!proj) return;
+    var d = dataOf(proj);
+    if (!d.pages.length) { C.toast('No page images yet'); return; }
+
+    var stepPage = typeof pageNo === 'number' ? pageNo : d.pages[0].n;
+    var idx = 0;
+    for (var i = 0; i < d.pages.length; i++) if (d.pages[i].n === stepPage) idx = i;
+
+    var url = null;
+    var api = null;
+    var frame, img, empty, label, prev, next, backBtn, zoom;
+
+    function revoke() {
+      if (!url) return;
+      try { URL.revokeObjectURL(url); } catch (e) { /* ignore */ }
+      url = null;
+    }
+
+    function show(i) {
+      idx = Math.max(0, Math.min(i, d.pages.length - 1));
+      var row = d.pages[idx];
+      label.textContent = 'Page ' + row.n + ' · ' + (idx + 1) + ' of ' + d.pages.length;
+      prev.disabled = idx <= 0;
+      next.disabled = idx >= d.pages.length - 1;
+      backBtn.hidden = !(row.n !== stepPage && pageRow(d, stepPage));
+      if (api) api.title.textContent = 'Page ' + row.n;
+      zoom.reset();
+      img.hidden = true;
+      empty.hidden = true;
+      revoke();
+      if (!blobsAvailable()) { empty.hidden = false; return; }
+      var want = row.blobKey;
+      window.BlobStore.get(want).then(function (blob) {
+        if (!blob) { empty.hidden = false; return; }
+        if (d.pages[idx].blobKey !== want) return;     // moved on already
+        url = URL.createObjectURL(blob);
+        img.src = url;
+        img.alt = 'Page ' + row.n + ' of the instruction booklet';
+        img.hidden = false;
+      }, function () { empty.hidden = false; });
+    }
+
+    api = C.openSheet({
+      title: 'Page ' + d.pages[idx].n,
+      cls: 'sheet-sewing sheet-sw-page',
+      build: function (body, sheet) {
+        api = sheet;
+        frame = C.el('div', 'sw-page-frame');
+        img = document.createElement('img');
+        img.className = 'sw-page-img';
+        img.draggable = false;
+        img.alt = '';
+        frame.appendChild(img);
+        empty = C.el('p', 'muted sw-page-empty',
+          'That page image is not on this device any more — import the PDF again to bring it back.');
+        empty.hidden = true;
+        frame.appendChild(empty);
+        body.appendChild(frame);
+
+        var bar = C.el('div', 'sw-pagebar');
+        prev = C.button('sw-page-nav', '‹', 'Previous page');
+        next = C.button('sw-page-nav', '›', 'Next page');
+        label = C.el('span', 'sw-page-label');
+        C.on(prev, 'click', function () { show(idx - 1); });
+        C.on(next, 'click', function () { show(idx + 1); });
+        var out = C.button('sw-page-nav', '−', 'Zoom out');
+        var into = C.button('sw-page-nav', '＋', 'Zoom in');
+        C.on(out, 'click', function () { zoom.zoomOut(); });
+        C.on(into, 'click', function () { zoom.zoomIn(); });
+        bar.appendChild(prev);
+        bar.appendChild(label);
+        bar.appendChild(out);
+        bar.appendChild(into);
+        bar.appendChild(next);
+        body.appendChild(bar);
+
+        backBtn = C.button('linkish block sw-page-back', '↩ jump to this step’s page');
+        C.on(backBtn, 'click', function () {
+          for (var k = 0; k < d.pages.length; k++) if (d.pages[k].n === stepPage) show(k);
+        });
+        body.appendChild(backBtn);
+
+        body.appendChild(C.el('p', 'field-hint',
+          'Pinch or double-tap to zoom, drag to move it. ' + STORED_HERE));
+
+        zoom = wireZoom(frame, img);
+        show(idx);
+      },
+      footer: [{ text: 'Close', cls: 'btn primary', onClick: function (a) { a.close(); } }],
+      onClose: revoke
+    });
+  }
+
+  /** ⋯ menu → Pages: every stored page as a thumbnail. */
+  function openPagesSheet(projectId) {
+    var proj = Store.project(projectId);
+    if (!proj) return;
+    var urls = [];
+
+    C.openSheet({
+      title: 'Pages',
+      cls: 'sheet-sewing sheet-sw-pages',
+      build: function (body, api) {
+        var d = dataOf(Store.project(projectId) || proj);
+        if (!d.pages.length) {
+          body.appendChild(C.el('p', 'muted',
+            'No page images yet. Import the instruction PDF from the ⋯ menu and tick ' +
+            '“Keep the pages so you can see the diagrams”.'));
+          return;
+        }
+        body.appendChild(C.el('p', 'muted',
+          STORED_HERE + ' They are not in your backup file.' +
+          (d.pages.length >= MAX_PAGES
+            ? ' Only the first ' + MAX_PAGES + ' pages of a booklet are kept.' : '')));
+
+        var grid = C.el('div', 'sw-page-grid');
+        d.pages.forEach(function (row) {
+          var cell = C.button('sw-page-thumb', null, 'Open page ' + row.n);
+          var imgWrap = C.el('span', 'sw-thumb-img');
+          cell.appendChild(imgWrap);
+          cell.appendChild(C.el('span', 'sw-thumb-label', 'Page ' + row.n));
+          C.on(cell, 'click', function () { openPageViewer(projectId, row.n); });
+          grid.appendChild(cell);
+          if (!blobsAvailable()) { imgWrap.textContent = '—'; return; }
+          window.BlobStore.get(row.blobKey).then(function (blob) {
+            if (!blob) { imgWrap.textContent = '—'; return; }
+            var u = URL.createObjectURL(blob);
+            urls.push(u);
+            var im = document.createElement('img');
+            im.src = u;
+            im.alt = 'Page ' + row.n;
+            imgWrap.appendChild(im);
+          }, function () { imgWrap.textContent = '—'; });
+        });
+        body.appendChild(grid);
+
+        var del = C.button('linkish block', 'Delete the page images');
+        C.on(del, 'click', function () {
+          C.confirmSheet({
+            title: 'Delete the page images?',
+            message: 'The steps and everything else stay. You can render the pages again by ' +
+              'importing the PDF with the pages box ticked.',
+            confirmText: 'Delete'
+          }).then(function (ok) {
+            if (!ok) return;
+            var done = function () {
+              edit(projectId, function (dd) { dd.pages = []; });
+              api.close();
+              C.toast('Page images deleted');
+              paint(Store.project(projectId));
+            };
+            if (blobsAvailable()) window.BlobStore.deletePrefix(pagePrefix(projectId)).then(done, done);
+            else done();
+          });
+        });
+        body.appendChild(del);
+      },
+      footer: [{ text: 'Close', cls: 'btn primary', onClick: function (a) { a.close(); } }],
+      onClose: function () {
+        urls.forEach(function (u) { try { URL.revokeObjectURL(u); } catch (e) { /* ignore */ } });
+      }
+    });
+  }
+
+  /* ================================================================== *
+   * 4c. The 2D cutting table (research §B.4.6)
+   *
+   * Flat, 2D and about pieces, not stitches: one rounded rectangle per
+   * cutting entry, width ∝ qty, filling with the accent colour as pieces
+   * are cut — plus a thin ring round the step number. No WebGL, no new
+   * dependency, theme variables only.
+   * ================================================================== */
+
+  var CT_W = 340;      // user units; the SVG scales to the card width
+  var CT_H = 20;       // piece height
+  var CT_ROW = 26;     // row pitch
+  var CT_GAP = 6;
+
+  /** The progress ring drawn round the step number. */
+  function stepRing() {
+    var R = 15;
+    var CIRC = 2 * Math.PI * R;
+    var node = svgNode('svg', { 'class': 'sw-step-ring', viewBox: '0 0 36 36', role: 'img' });
+    node.appendChild(svgNode('circle', { 'class': 'sw-ring-track', cx: 18, cy: 18, r: R }));
+    var arc = svgNode('circle', {
+      'class': 'sw-ring-arc', cx: 18, cy: 18, r: R, transform: 'rotate(-90 18 18)',
+      'stroke-dasharray': CIRC.toFixed(2), 'stroke-dashoffset': CIRC.toFixed(2)
+    });
+    node.appendChild(arc);
+    var text = svgNode('text', {
+      'class': 'sw-ring-num', x: 18, y: 18, 'text-anchor': 'middle', 'dominant-baseline': 'central'
+    });
+    node.appendChild(text);
+    return {
+      node: node,
+      set: function (at, total) {
+        node.style.display = total ? '' : 'none';
+        if (!total) return;
+        text.textContent = String(at);
+        var frac = Math.max(0, Math.min(1, at / total));
+        arc.setAttribute('stroke-dashoffset', (CIRC * (1 - frac)).toFixed(2));
+        node.setAttribute('aria-label', 'Step ' + at + ' of ' + total);
+      }
+    };
+  }
+
+  function cutTableSig(d) {
+    var bits = [];
+    for (var i = 0; i < d.cutting.length; i++) bits.push(d.cutting[i].id + ':' + d.cutting[i].qty);
+    return bits.join('|');
+  }
+
+  function buildCutTable(host, d) {
+    C.clear(host);
+    var fills = [];
+    var x = 0, y = 0;
+    var g = svgNode('g');
+    for (var i = 0; i < d.cutting.length; i++) {
+      var row = d.cutting[i];
+      var w = Math.max(28, Math.min(96, 22 * row.qty));
+      if (x + w > CT_W && x > 0) { x = 0; y += CT_ROW; }
+      var piece = svgNode('g', { 'class': 'sw-ct-piece' });
+      piece.appendChild(svgNode('rect', { 'class': 'sw-ct-bg', x: x, y: y, width: w, height: CT_H, rx: 5 }));
+      var fill = svgNode('rect', { 'class': 'sw-ct-fill', x: x, y: y, width: 0, height: CT_H, rx: 5 });
+      piece.appendChild(fill);
+      if (w >= 40) {
+        var t = svgNode('text', {
+          'class': 'sw-ct-name', x: x + w / 2, y: y + CT_H / 2,
+          'text-anchor': 'middle', 'dominant-baseline': 'central'
+        });
+        t.textContent = clip(row.piece, Math.max(3, Math.floor((w - 6) / 4.6)));
+        piece.appendChild(t);
+      }
+      g.appendChild(piece);
+      fills.push({ node: piece, fill: fill, w: w });
+      x += w + CT_GAP;
+    }
+    var total = y + CT_H;
+    var node = svgNode('svg', {
+      'class': 'sw-ct', viewBox: '0 0 ' + CT_W + ' ' + total,
+      width: CT_W, height: total, preserveAspectRatio: 'xMinYMin meet', 'aria-hidden': 'true'
+    });
+    node.appendChild(g);
+    host.appendChild(node);
+    host.__fills = fills;
+  }
+
+  /** Repaint the fills. The shapes are rebuilt only when the list itself changes. */
+  function paintCutTable(d) {
+    var host = view.cutTable;
+    if (!host) return;
+    if (!d.cutting.length) { host.hidden = true; host.__sig = null; return; }
+    host.hidden = false;
+    var sig = cutTableSig(d);
+    if (host.__sig !== sig) { buildCutTable(host, d); host.__sig = sig; }
+    var fills = host.__fills || [];
+    for (var i = 0; i < fills.length && i < d.cutting.length; i++) {
+      var row = d.cutting[i];
+      var frac = row.qty > 0 ? Math.max(0, Math.min(1, row.cutCount / row.qty)) : 0;
+      var w = fills[i].w * frac;
+      // Both, so a browser without the SVG2 geometry property still draws it.
+      fills[i].fill.setAttribute('width', w.toFixed(1));
+      fills[i].fill.style.width = w.toFixed(1) + 'px';
+      fills[i].node.classList.toggle('done', frac >= 1);
+      fills[i].node.classList.toggle('part', frac > 0 && frac < 1);
+    }
+    host.setAttribute('aria-label',
+      cutDone(d) + ' of ' + d.cutting.length + ' pieces cut — open the cutting list');
+  }
+
+  /* ================================================================== *
    * 5. The import sheet
    * ================================================================== */
 
@@ -1281,6 +1782,15 @@
     var reviewWrap = null;
     var pasteArea = null;
     var importBtn = null;
+    // Page images: the File is stashed from the drop zone's `confirm` hook so
+    // the text still goes through the full extract() pipeline (running heads
+    // and all — see the caveat in docs/CRAFTS.md) and the pages are rendered
+    // from a second, separate PdfText.open only when the box is ticked.
+    var pdfFile = null;
+    var pdfPages = 0;
+    var wantPages = false;
+    var pageHandle = null;
+    var cancelled = false;
 
     var api = C.openSheet({
       title: 'Import pattern',
@@ -1292,8 +1802,13 @@
           label: 'Drop the instruction PDF here, or choose a file',
           tour: 'sw-drop',
           ariaLabel: 'Choose an instruction PDF',
+          confirm: function (file) {
+            pdfFile = file;
+            return true;
+          },
           onText: function (res) {
             dropZone.showResult(res);
+            pdfPages = res.pages || 0;
             takeText(res.text, res.columnsDetected);
           },
           onError: function () {
@@ -1315,6 +1830,8 @@
         C.on(readBtn, 'click', function () {
           var text = pasteArea.value;
           if (!text.replace(/\s/g, '')) { C.toast('Paste the instructions first'); return; }
+          pdfFile = null;
+          pdfPages = 0;
           takeText(text, 0);
         });
         details.appendChild(readBtn);
@@ -1324,11 +1841,16 @@
         body.appendChild(reviewWrap);
       },
       footer: [
-        { text: 'Just keep the text', cls: 'btn ghost', onClick: function (a) { applyImport(true); a.close(); } },
-        { text: 'Import', cls: 'btn primary', onClick: function (a) { if (applyImport(false)) a.close(); } }
+        { text: 'Just keep the text', cls: 'btn ghost', onClick: function (a) { applyImport(true, a); a.close(); } },
+        { text: 'Import', cls: 'btn primary', onClick: function (a) { if (applyImport(false, a)) a.close(); } }
       ],
       onClose: function () {
+        cancelled = true;
         if (dropZone && dropZone.destroy) dropZone.destroy();
+        if (pageHandle && pageHandle.destroy) {
+          try { pageHandle.destroy(); } catch (e) { /* ignore */ }
+        }
+        pageHandle = null;
       }
     });
 
@@ -1392,6 +1914,30 @@
         row.appendChild(expand);
         list.appendChild(row);
       });
+      // Opt-in page images. Only for a PDF, only when IndexedDB is there, and
+      // off by default — this is the one line in the app that can eat 10 MB.
+      if (pdfFile && pdfPages && blobsAvailable()) {
+        var capped = Math.min(pdfPages, MAX_PAGES);
+        var pageRowNode = C.el('div', 'list-item sw-review-row sw-pages-row');
+        var pageCheck = C.button('check', '✓', 'Keep the pages so you can see the diagrams');
+        pageCheck.setAttribute('role', 'checkbox');
+        pageCheck.setAttribute('aria-checked', wantPages ? 'true' : 'false');
+        pageCheck.classList.toggle('on', wantPages);
+        C.on(pageCheck, 'click', function () {
+          wantPages = !wantPages;
+          pageCheck.setAttribute('aria-checked', wantPages ? 'true' : 'false');
+          pageCheck.classList.toggle('on', wantPages);
+        });
+        var pageText = C.el('span', 'item-text');
+        pageText.appendChild(C.el('span', 'sw-review-label', 'Keep the pages so you can see the diagrams'));
+        pageText.appendChild(C.el('span', 'sw-review-count',
+          'adds ' + sizeEstimate(capped) + ' · ' + STORED_HERE +
+          (pdfPages > MAX_PAGES ? ' Only the first ' + MAX_PAGES + ' pages are kept.' : '')));
+        pageRowNode.appendChild(pageCheck);
+        pageRowNode.appendChild(pageText);
+        list.appendChild(pageRowNode);
+      }
+
       reviewWrap.appendChild(list);
 
       if (parsed.warnings.length) {
@@ -1432,8 +1978,8 @@
       });
     }
 
-    /** @param {boolean} textOnly */
-    function applyImport(textOnly) {
+    /** @param {boolean} textOnly @param {object} sheetApi */
+    function applyImport(textOnly, sheetApi) {
       if (!parsed) {
         if (textOnly) C.toast('Nothing to keep yet');
         return false;
@@ -1466,9 +2012,70 @@
       if (groups.steps && parsed.steps.length) bits.push(plural(parsed.steps.length, 'step'));
       if (groups.cutting && parsed.cuttingList.length) bits.push(plural(parsed.cuttingList.length, 'piece'));
       if (groups.notions && parsed.notions.length) bits.push(plural(parsed.notions.length, 'notion'));
-      C.toast(bits.length ? 'Imported ' + listJoin(bits) + '.' : 'Imported.');
+      var summaryText = bits.length ? 'Imported ' + listJoin(bits) + '.' : 'Imported.';
+
+      // The text is already saved; the pages render on top of it, so a cancel
+      // (or a dead IndexedDB) still leaves a working project behind.
+      if (wantPages && pdfFile && blobsAvailable() && window.PdfText && window.PdfText.isAvailable()) {
+        startPageRender(sheetApi, summaryText);
+        return false;
+      }
+      C.toast(summaryText);
       return true;
     }
+
+    /** Render the pages with a progress line and a way out. Keeps the sheet open. */
+    function startPageRender(sheetApi, summaryText) {
+      cancelled = false;
+      C.clear(reviewWrap);
+      if (dropZone) dropZone.style.display = 'none';
+      if (importBtn) importBtn.disabled = true;
+
+      var box = C.el('div', 'sw-page-progress');
+      var line = C.el('p', 'muted', 'Opening the PDF…');
+      var bar = C.el('div', 'bar');
+      var fill = C.el('div', 'bar-fill');
+      bar.appendChild(fill);
+      var stop = C.button('btn ghost block', 'Stop — keep the pages so far');
+      C.on(stop, 'click', function () {
+        cancelled = true;
+        stop.disabled = true;
+        line.textContent = 'Stopping…';
+      });
+      box.appendChild(line);
+      box.appendChild(bar);
+      box.appendChild(stop);
+      box.appendChild(C.el('p', 'field-hint', STORED_HERE));
+      reviewWrap.appendChild(box);
+
+      window.PdfText.open(pdfFile).then(function (handle) {
+        pageHandle = handle;
+        return renderPageImages(projectId, handle, function (n, total) {
+          line.textContent = 'Rendering page ' + n + ' of ' + total + '…';
+          fill.style.width = Math.round(((n - 1) / total) * 100) + '%';
+        }, function () { return cancelled; });
+      }).then(function (res) {
+        var pages = (res && res.pages) || [];
+        if (pages.length) edit(projectId, function (dd) { dd.pages = pages; });
+        C.render();
+        sheetApi.close();
+        var tail = pages.length
+          ? ' Kept ' + plural(pages.length, 'page') + ' (' + fmtBytes(res.bytes) + ').'
+          : ' No pages were kept.';
+        C.toast(summaryText + tail, { ms: 4600 });
+        C.fb('done');
+      }, function () {
+        C.render();
+        sheetApi.close();
+        C.toast(summaryText + ' The pages could not be rendered.', { ms: 4600 });
+      });
+    }
+  }
+
+  function fmtBytes(bytes) {
+    bytes = bytes || 0;
+    if (bytes < 1024 * 1024) return Math.round(bytes / 1024) + ' kB';
+    return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
   }
 
   function listJoin(bits) {
@@ -1503,11 +2110,15 @@
   }
 
   function menuItems(p) {
-    return [
+    var items = [];
+    if (dataOf(p).pages.length) {
+      items.push({ icon: '📄', label: 'Pages', run: function () { openPagesSheet(p.id); } });
+    }
+    return items.concat([
       { icon: '📏', label: 'Size & alterations', run: function () { openSizeSheet(p.id); } },
       { icon: '🧺', label: 'Fabric', run: function () { openFabricSheet(p.id); } },
       { icon: '⚙️', label: 'Machine settings', run: function () { openMachineSheet(p.id); } }
-    ];
+    ]);
   }
 
   var FAQ = [
@@ -1536,6 +2147,13 @@
       q: 'Can I take the notions list to the shop?',
       a: 'Yes — open Notions and tap “Copy shopping list”. Everything you have not ticked off goes on your ' +
         'clipboard, ready to paste into a note or a message.'
+    },
+    {
+      q: 'Can I see the diagrams from the booklet?',
+      a: 'Yes — when you import the PDF, tick “Keep the pages so you can see the diagrams”. ' +
+        'Each page is saved as a picture on your phone, the step card grows a 📄 page chip that opens ' +
+        'the right page, and ⋯ → Pages shows them all. They are stored on this device only and are ' +
+        'not in your backup, so keep the PDF. Leave the box unticked and nothing is stored.'
     },
     {
       q: 'My pattern is a quilt. Where are the block counters?',
@@ -1568,6 +2186,13 @@
           title: 'Page and seam allowance',
           body: 'The page chip tells you which page of the booklet this step came from, and the seam allowance ' +
             'the pattern stated is always right there. Tap it to see any exceptions.'
+        },
+        {
+          target: '.sw-cuttable',
+          title: 'The cutting table',
+          body: 'One block per piece the pattern asks you to cut, as wide as the number you need. ' +
+            'They fill in as you cut, so you can see at a glance what is still on the table. Tap it ' +
+            'for the whole cutting list.'
         },
         {
           target: '.sw-mini-cut',

@@ -368,6 +368,171 @@
 }
 
 /* --------------------------------------------------------------------------
+   9. Page images: the chip, the viewer and the thumbnails
+   -------------------------------------------------------------------------- */
+
+/* The chip is a button when the page image is there, plain text when it is not. */
+.sw-page {
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+.sw-page:not(.sw-page-plain) {
+  border-color: var(--accent-2);
+  color: var(--accent-2);
+  font-weight: 700;
+}
+.sw-page.sw-page-plain {
+  opacity: 1;
+  cursor: default;
+  color: var(--text-muted);
+}
+
+.sw-page-frame {
+  position: relative;
+  width: 100%;
+  height: 56vh;
+  max-height: 560px;
+  overflow: hidden;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  touch-action: none;                 /* the pinch/drag gesture is ours */
+  cursor: grab;
+}
+.sw-page-frame.zoomed { cursor: grabbing; }
+.sw-page-img {
+  max-width: 100%;
+  max-height: 100%;
+  display: block;
+  transform-origin: center center;
+  user-select: none;
+  -webkit-user-drag: none;
+  background: #fff;                   /* a PDF page is paper, in every theme */
+}
+.sw-page-empty { padding: 16px; text-align: center; }
+
+.sw-pagebar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+}
+.sw-page-nav {
+  flex: 0 0 auto;
+  min-width: 44px;
+  min-height: 40px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 20px;
+  line-height: 1;
+}
+.sw-page-nav[disabled] { opacity: 0.35; }
+.sw-page-label {
+  flex: 1 1 auto;
+  text-align: center;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.sw-page-back { margin-top: 8px; }
+
+.sw-page-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+  gap: 10px;
+  margin: 10px 0;
+}
+.sw-page-thumb {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 6px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+}
+.sw-thumb-img {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  min-height: 90px;
+  color: var(--text-muted);
+  background: #fff;
+  border-radius: 4px;
+  overflow: hidden;
+}
+.sw-thumb-img img { max-width: 100%; max-height: 110px; display: block; }
+.sw-thumb-label { font-size: 12px; font-weight: 700; }
+
+/* Import sheet: the opt-in row and the render progress */
+.sw-pages-row .sw-review-count { white-space: normal; }
+.sw-page-progress { margin-top: 12px; display: flex; flex-direction: column; gap: 8px; }
+.sw-page-progress .bar { margin: 0; }
+
+/* --------------------------------------------------------------------------
+   10. The 2D cutting table and the step ring (research §B.4.6)
+   -------------------------------------------------------------------------- */
+
+.sw-cuttable {
+  display: block;
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  text-align: left;
+}
+.sw-cuttable[hidden] { display: none; }
+.sw-ct { width: 100%; height: auto; display: block; }
+.sw-ct-bg {
+  fill: var(--surface-2);
+  stroke: var(--border);
+  stroke-width: 1;
+}
+.sw-ct-fill {
+  fill: var(--accent-2);
+  transition: width 260ms ease;
+}
+.sw-ct-name {
+  font-size: 8px;
+  font-weight: 700;
+  fill: var(--text-muted);
+}
+.sw-ct-piece.done .sw-ct-name { fill: var(--primary-text); }
+
+/* The step number keeps its ring company on the left; the section stays right. */
+.sw-step-head { justify-content: flex-start; align-items: center; }
+.sw-step-section { margin-left: auto; }
+.sw-step-ring { width: 30px; height: 30px; flex: 0 0 auto; margin-left: 6px; }
+.sw-ring-track {
+  fill: none;
+  stroke: var(--border);
+  stroke-width: 2.5;
+}
+.sw-ring-arc {
+  fill: none;
+  stroke: var(--accent-2);
+  stroke-width: 2.5;
+  stroke-linecap: round;
+  transition: stroke-dashoffset 260ms ease;
+}
+.sw-ring-num {
+  font-family: var(--font-display);
+  font-size: 14px;
+  font-weight: 800;
+  fill: var(--text);
+}
+
+/* --------------------------------------------------------------------------
    8. Wider screens and reduced motion
    -------------------------------------------------------------------------- */
 
@@ -377,8 +542,14 @@
   .sw-step-mark { font-size: 72px; }
 }
 
+@media (min-width: 700px) {
+  .sw-page-frame { height: 62vh; max-height: 700px; }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .sw-unit:active { transform: none; }
   .sw-step-btn { transition: none; }
   .sw-step-btn.pressed { transform: none; }
+  /* The cutting table jumps straight to the new fill. */
+  .sw-ct-fill, .sw-ring-arc { transition: none; }
 }

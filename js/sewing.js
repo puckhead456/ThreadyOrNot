@@ -1669,6 +1669,12 @@
 
   var SOURCE_CAP = 60000;
 
+  // Page images (research A.3.4): rendered from the PDF into BlobStore, opt-in,
+  // capped so a 90-page booklet cannot fill the device. They are a CACHE, never
+  // the source of truth: the steps' text lives in localStorage and the images
+  // may be evicted at any time.
+  var PAGE_CAP = 40;
+
   function emptyData() {
     return {
       meta: { designer: '', patternName: '', version: '', view: '', url: '' },
@@ -1679,6 +1685,7 @@
       cutting: [],
       steps: [],
       currentStep: 0,
+      pages: [],
       units: [],
       seamAllowance: null,
       machine: { needle: '', thread: '', stitchLength: '', tension: '', presserFoot: '', notes: '' },
@@ -1847,6 +1854,32 @@
         }
       }
       d.currentStep = clampInt(raw.currentStep, 0, Math.max(0, d.steps.length - 1), 0);
+
+      // Page images: [{ n, blobKey, w, h }], n is the 1-based PDF page number
+      // (the same number steps[].page carries). Rows without a key are dropped,
+      // duplicates collapse, and the list is sorted so ‹ › walks it in order.
+      if (isArr(raw.pages)) {
+        var seenPage = {};
+        var pages = [];
+        for (var pi = 0; pi < raw.pages.length && pages.length < PAGE_CAP; pi++) {
+          var pg = raw.pages[pi];
+          if (!isObj(pg)) continue;
+          // clampInt(…, 0, …) so a 0 or a negative page number falls out here
+          // rather than being clamped up into a page that does not exist.
+          var pn = clampInt(pg.n, 0, 9999, 0);
+          var bk = str(pg.blobKey, '').slice(0, 160);
+          if (pn < 1 || !bk || seenPage[pn]) continue;
+          seenPage[pn] = 1;
+          pages.push({
+            n: pn,
+            blobKey: bk,
+            w: clampInt(pg.w, 0, 20000, 0),
+            h: clampInt(pg.h, 0, 20000, 0)
+          });
+        }
+        pages.sort(function (a, b) { return a.n - b.n; });
+        d.pages = pages;
+      }
 
       if (isArr(raw.units)) {
         for (var ui = 0; ui < raw.units.length && d.units.length < 24; ui++) {
@@ -2024,6 +2057,10 @@
     // --- machine settings are the sewist's own; never overwritten -------------
     out.machine = prev.machine;
 
+    // --- page images survive a re-import untouched; the UI re-renders them
+    // only when the "keep the pages" box is ticked again ----------------------
+    out.pages = prev.pages;
+
     var src = str(pr.sourceText, '');
     if (src) out.sourceText = src.slice(0, SOURCE_CAP);
     out.warnings = normStrArray(pr.warnings, 20, 200);
@@ -2165,6 +2202,7 @@
     summary: summary,
     templates: templates,
     TEMPLATES: TEMPLATES,
+    PAGE_CAP: PAGE_CAP,
     // small pieces the UI and the tests both want
     isHeading: isHeading,
     headingKind: headingKind,
