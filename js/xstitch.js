@@ -1684,6 +1684,17 @@
       parts.push(design.w + ' × ' + design.h + ' stitches');
     }
 
+    /* An image-only PDF import has no key yet; its pages are the progress. */
+    var pages = Array.isArray(data.pages) ? data.pages : [];
+    if (pages.length) {
+      var pageDone = 0;
+      var pd = isObj(data.progress) && Array.isArray(data.progress.pageDone) ? data.progress.pageDone : [];
+      for (var q = 0; q < pd.length; q++) if (pd[q] && pd[q].done) pageDone++;
+      parts.push(pageDone
+        ? (pageDone + ' of ' + pages.length + ' page' + (pages.length === 1 ? '' : 's') + ' done')
+        : (pages.length + ' chart page' + (pages.length === 1 ? '' : 's')));
+    }
+
     if (stats.total > 0) parts.push(stats.pct + '%');
     if (!parts.length) return 'Cross-stitch project';
     return parts.join(' · ');

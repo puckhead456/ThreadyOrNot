@@ -1,4 +1,462 @@
 /* Thready or Not — css/xstitch.css
    Cross-stitch screens. Theme variables only (SPEC.md "Themes contract")
    plus this module's own layout numbers. Loaded after css/themes.css.
-   Stub: empty until js/app-xstitch.js renders something. */
+
+   1. project screen: chart strip, current colour, tap button, key list
+   2. sheets: chart, floss, fabric, pages, parking, colour editor
+   3. import and photo
+   -------------------------------------------------------------------------- */
+
+/* The sections below are appended straight into #craft-body, so the shell's
+   .craft-body rules (scrolling column, sticky bottom bar) already apply. */
+
+.xs-h2 { font-size: 15px; margin: 0; }
+.xs-h3 { font-size: 15px; margin: 0 0 4px; }
+
+/* --------------------------------------------------------------------------
+   1. The chart strip
+   -------------------------------------------------------------------------- */
+
+.xs-chart-card {
+  padding: 0;
+  overflow: hidden;
+}
+
+.xs-chart-wrap {
+  position: relative;
+  width: 100%;
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.xs-chart-wrap.xs-strip { height: 34vh; min-height: 170px; max-height: 320px; }
+.xs-chart-wrap.xs-full { height: 58vh; min-height: 260px; }
+
+.xs-chart {
+  display: block;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: crosshair;
+}
+
+.xs-coord {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  padding: 3px 9px;
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+  max-width: calc(100% - 16px);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.xs-expand {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 38px;
+  height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 17px;
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow);
+}
+
+/* Image-only mode: the rendered PDF pages. */
+.xs-page-frame {
+  position: relative;
+  height: 34vh;
+  min-height: 170px;
+  max-height: 320px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--surface-2);
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.xs-page-img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+.xs-page-empty {
+  padding: 18px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+.xs-pagebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  border-top: 1px solid var(--border);
+}
+.xs-page-nav {
+  min-width: 44px;
+  min-height: 36px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  font-size: 18px;
+}
+.xs-page-nav[disabled] { opacity: 0.35; }
+.xs-page-label {
+  flex: 1 1 auto;
+  text-align: center;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+/* --------------------------------------------------------------------------
+   The current colour bar
+   -------------------------------------------------------------------------- */
+
+.xs-cb {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+  padding: 8px;
+}
+.xs-cb-nav {
+  flex: 0 0 auto;
+  width: 40px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  font-size: 20px;
+}
+.xs-cb-main {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  text-align: left;
+  padding: 4px 6px;
+  border-radius: var(--radius-sm);
+  color: var(--text);
+}
+.xs-cb-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.xs-cb-code {
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.xs-cb-sub {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The little floss swatch, used in the colour bar, key and floss list. */
+.xs-swatch {
+  flex: 0 0 auto;
+  width: 34px;
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 17px;
+  line-height: 1;
+}
+.xs-swatch-big {
+  width: 72px;
+  height: 72px;
+  font-size: 26px;
+  margin: 0 auto 10px;
+  display: flex;
+}
+
+/* --------------------------------------------------------------------------
+   The tap button and its live picture
+   -------------------------------------------------------------------------- */
+
+#xs-stitch-btn { min-height: max(34vh, 170px); }
+.xs-live { z-index: 0; }
+
+.xs-readout {
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.xs-tap-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.xs-tap-actions .btn { min-width: 76px; }
+
+/* --------------------------------------------------------------------------
+   The colour key
+   -------------------------------------------------------------------------- */
+
+.xs-key-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.xs-sort button { font-size: 12px; padding: 5px 9px; }
+
+.xs-key-list { margin-bottom: 8px; }
+
+.xs-key-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 2px;
+}
+.xs-key-row.current { background: var(--surface-2); border-radius: var(--radius-sm); }
+.xs-key-row.complete .xs-key-code { opacity: 0.6; }
+
+.xs-key-main {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  text-align: left;
+  color: var(--text);
+  padding: 2px;
+}
+.xs-key-text { display: flex; flex-direction: column; gap: 3px; min-width: 0; flex: 1 1 auto; }
+.xs-key-code {
+  font-size: 14px;
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.xs-key-sub {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.xs-key-prog { margin-top: 2px; width: 100%; display: block; }
+.xs-key-prog .bar { display: block; height: 5px; }
+.xs-key-prog .bar-fill { display: block; height: 100%; }
+.xs-key-tick { color: var(--success); font-weight: 700; flex: 0 0 auto; }
+
+.xs-key-iso,
+.xs-key-edit {
+  flex: 0 0 auto;
+  width: 34px;
+  height: 34px;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  font-size: 15px;
+}
+.xs-key-iso.on { color: var(--accent-2); background: var(--surface-2); }
+.xs-key-have {
+  flex: 0 0 auto;
+}
+.xs-key-have.on { background: var(--accent-2); color: var(--primary-text); border-color: var(--accent-2); }
+.xs-key-empty { margin: 4px 0 10px; font-size: 13px; }
+
+/* --------------------------------------------------------------------------
+   2. Sheets
+   -------------------------------------------------------------------------- */
+
+.xs-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.xs-tool-seg { flex: 1 1 auto; }
+.xs-tool-seg button { font-size: 12px; padding: 6px 8px; }
+.xs-erase { min-height: 38px; padding: 6px 12px; }
+.xs-erase.on { background: var(--danger); color: var(--primary-text); border-color: var(--danger); }
+
+.xs-zoom {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+.xs-zoom .btn { flex: 1 1 0; min-height: 40px; }
+.xs-hint { font-size: 12px; margin-top: 8px; }
+
+.xs-two {
+  display: flex;
+  gap: 10px;
+}
+.xs-two > * { flex: 1 1 0; min-width: 0; }
+
+.xs-size-box { margin-top: 4px; }
+.xs-size-main {
+  font-family: var(--font-display);
+  font-size: 18px;
+  margin: 0 0 4px;
+}
+.xs-size-table { margin-top: 8px; display: flex; flex-direction: column; gap: 2px; }
+.xs-size-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  padding: 3px 0;
+  border-bottom: 1px solid var(--border);
+}
+.xs-size-row:last-child { border-bottom: none; }
+
+.xs-floss-row { display: flex; align-items: center; gap: 10px; padding: 7px 2px; }
+.xs-floss-text { display: flex; flex-direction: column; gap: 3px; min-width: 0; flex: 1 1 auto; }
+.xs-floss-total { margin-bottom: 8px; font-size: 13px; }
+.xs-disclaimer { margin-top: 12px; font-size: 12px; }
+
+.xs-page-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 10px;
+  margin-top: 10px;
+}
+.xs-page-box { display: flex; flex-direction: column; gap: 4px; }
+.xs-page-thumb {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+}
+.xs-thumb-img {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 110px;
+  overflow: hidden;
+  background: var(--surface);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+}
+.xs-thumb-img img { max-width: 100%; max-height: 110px; display: block; }
+.xs-thumb-label { font-size: 12px; text-align: center; }
+.xs-thumb-done {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--success);
+  color: var(--primary-text);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  font-weight: 700;
+}
+.xs-thumb-tick { min-height: 34px; font-size: 12px; padding: 4px 8px; }
+
+.xs-park-row { display: flex; align-items: center; gap: 10px; padding: 7px 2px; }
+.xs-park-corner { font-size: 20px; flex: 0 0 auto; width: 26px; text-align: center; }
+.xs-park-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1 1 auto; }
+
+.xs-copy-area {
+  width: 100%;
+  min-height: 200px;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+/* --------------------------------------------------------------------------
+   3. Import and photo
+   -------------------------------------------------------------------------- */
+
+.xs-preview { margin-top: 12px; }
+.xs-preview-card { padding: 12px; }
+
+.xs-confidence {
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-weight: 700;
+  margin-bottom: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+}
+.xs-conf-good { border-color: var(--success); color: var(--success); }
+.xs-conf-ok { border-color: var(--accent-2); color: var(--text); }
+.xs-conf-none { border-color: var(--danger); color: var(--text); }
+
+.xs-key-preview { max-height: 46vh; overflow-y: auto; margin: 8px 0; }
+.xs-preview-row { display: flex; align-items: center; gap: 10px; padding: 6px 2px; }
+.xs-preview-row.dropped { opacity: 0.4; text-decoration: line-through; }
+
+.xs-warnings { margin: 8px 0; font-size: 12px; }
+.xs-warn-list { margin: 4px 0 0 18px; padding: 0; color: var(--text-muted); }
+.xs-warn-list li { margin: 2px 0; }
+
+.xs-import-more { margin-top: 14px; }
+.xs-import-note { margin-top: 12px; font-size: 12px; }
+.xs-render-progress { margin: 8px 0; font-variant-numeric: tabular-nums; }
+
+.xs-photo-preview {
+  display: block;
+  width: 100%;
+  height: 30vh;
+  min-height: 150px;
+  margin: 10px 0;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+}
+.xs-photo-readout {
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  margin: 0 0 10px;
+}
+.xs-advanced { margin: 10px 0; }
+.xs-advanced summary {
+  cursor: pointer;
+  padding: 8px 0;
+  font-weight: 700;
+  font-size: 14px;
+}
+
+/* --------------------------------------------------------------------------
+   Wider screens: the chart gets more room, the key sits beside it.
+   -------------------------------------------------------------------------- */
+
+@media (min-width: 720px) {
+  .xs-chart-wrap.xs-strip { height: 40vh; max-height: 420px; }
+  .xs-chart-wrap.xs-full { height: 64vh; }
+  .xs-page-frame { height: 40vh; max-height: 420px; }
+  #xs-stitch-btn { min-height: 240px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .xs-chart, .xs-live { transition: none !important; }
+}

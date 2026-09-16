@@ -556,6 +556,18 @@ group('normalize, summary and templates');
     'summary with no palette falls back to the stitch count');
   assertEqual(X.summary({}), 'Cross-stitch project', 'summary of an empty project is a friendly default');
   assertEqual(X.summary(null), 'Cross-stitch project', 'summary(null) never throws');
+
+  var imageOnly = X.normalize({
+    pages: [
+      { n: 0, label: 'Cover', blobKey: 'k0' }, { n: 1, label: 'Page 2', blobKey: 'k1' },
+      { n: 2, label: 'Page 3', blobKey: 'k2' }
+    ]
+  });
+  assertEqual(X.summary({ craftData: imageOnly }), '3 chart pages',
+    'an image-only PDF import summarises as its page count');
+  imageOnly.progress.pageDone = [{ page: 0, done: true }, { page: 1, done: false }];
+  assertEqual(X.summary({ craftData: imageOnly }), '1 of 3 pages done',
+    'ticked pages show as progress in the summary');
 })();
 
 (function () {
