@@ -187,7 +187,7 @@
     on(v.page, 'click', function () {
       if (typeof view.pageNo === 'number') openPageViewer(viewProjectId, view.pageNo);
     });
-    v.sa = button('sw-sa', null, 'Seam allowance');
+    v.sa = button('sw-sa', null, 'Seam allowance — tap for the details');
     on(v.sa, 'click', function () { openSeamSheet(viewProjectId); });
     v.meta.appendChild(v.page);
     v.meta.appendChild(v.sa);
@@ -210,7 +210,7 @@
     on(v.back, 'click', function () {
       if (Store.undo()) {
         C.fb('undo');
-        C.toast('Back a step');
+        C.toast('Undone');
       } else {
         C.toast('Nothing to undo');
       }
@@ -439,6 +439,13 @@
     });
     C.on(card, 'pointercancel', function () { if (timer) window.clearTimeout(timer); held = false; });
     C.on(card, 'click', function (e) { if (e.detail === 0) bump(1); });   // keyboard
+    // The long press is the only way back a block, and a keyboard cannot long
+    // press — crochet and cross-stitch both give their −1 a real control.
+    C.on(card, 'keydown', function (e) {
+      if (e.key !== 'ArrowDown' && e.key !== 'ArrowLeft' && e.key !== '-' && e.key !== 'Backspace') return;
+      e.preventDefault();
+      bump(-1);
+    });
     return card;
   }
 
@@ -567,7 +574,7 @@
 
       var add = C.button('btn ghost block', '＋ Add step');
       C.on(add, 'click', function () {
-        var input = C.textInput('', 'What do you do next?');
+        var input = C.textInput('', 'Sew the side seams');
         C.openSheet({
           title: 'Add a step',
           build: function (b2) { b2.appendChild(C.field('Step', input)); window.setTimeout(function () { input.focus(); }, 60); },
@@ -966,6 +973,9 @@
         r.cutCount = r.cutCount >= r.qty ? 0 : r.cutCount + 1;
       });
       C.fb('tap');
+      var fresh = dataOf(Store.project(proj.id));
+      var r2 = fresh && fresh.cutting ? fresh.cutting[index] : null;
+      if (r2) C.announce(r2.piece + ' ' + r2.cutCount + ' of ' + r2.qty + ' cut');
       rerender(body);
       afterCut(proj.id);
     });
@@ -992,7 +1002,7 @@
     paint(p);
     if (d.cutting.length && cutDone(d) >= d.cutting.length) {
       C.celebrate('piece');
-      C.toast('Everything\'s cut ✂️');
+      C.toast('Everything’s cut ✂️');
     }
   }
 
@@ -1005,7 +1015,7 @@
 
     var name = C.textInput(row.piece, 'Front bodice');
     var qty = C.stepper(row.qty, 1, 99, 'quantity');
-    var dims = C.textInput(row.dims, '14" x 16"');
+    var dims = C.textInput(row.dims, '14 × 16 in');
     var mat = C.segmented(MATERIAL_ORDER.map(function (m) { return { id: m, label: MATERIAL_NAMES[m] }; }), row.material);
     var fold = { value: row.onFold };
     var foldRow = C.switchRow('Cut on the fold', null, row.onFold, function (v) { fold.value = v; });
@@ -1090,7 +1100,7 @@
       for (var i = 0; i < d.notions.length; i++) list.appendChild(notionRow(proj, d.notions[i], i, body, renderNotions));
       body.appendChild(list);
 
-      var input = C.textInput('', 'Add a notion');
+      var input = C.textInput('', 'Invisible zip, 40 cm');
       var addWrap = C.el('div', 'sw-add-row');
       var add = C.button('btn ghost', '＋ Add');
       function doAdd() {
@@ -1151,7 +1161,7 @@
     var d = dataOf(p);
     var lines = [];
     for (var i = 0; i < d.notions.length; i++) if (!d.notions[i].have) lines.push('• ' + d.notions[i].text);
-    if (!lines.length) { C.toast('You already have everything ✓'); return; }
+    if (!lines.length) { C.toast('You already have everything on this list'); return; }
     var title = (d.meta.patternName || p.name) + ' — still to buy';
     var text = title + '\n' + lines.join('\n');
 
@@ -1201,7 +1211,7 @@
         if (d.seamAllowance.included !== null) {
           b.appendChild(C.el('p', 'muted', d.seamAllowance.included
             ? 'Seam allowances are included in the pieces.'
-            : 'Seam allowances are NOT included — add them as you cut.'));
+            : 'Seam allowances are not included — add them as you cut.'));
         }
         var ex = d.seamAllowance.exceptions || [];
         if (ex.length) {
@@ -1399,7 +1409,7 @@
             });
             b.appendChild(card0);
           } else if (!d.size.chosen && d.size.sizeLabels.length) {
-            b.appendChild(C.el('p', 'field-hint', 'Choose your size in the Size sheet to see just your yardage.'));
+            b.appendChild(C.el('p', 'field-hint', 'Choose your size in Size & alterations to see only the fabric you need.'));
           }
 
           d.fabric.forEach(function (row) {
@@ -1425,7 +1435,7 @@
         }
         // SewingData has no field for this, and normalize() drops unknown keys,
         // so it lives in the project's own notes behind a small tag.
-        var used = C.textArea(fabricUsedFrom(p), 'sw-alt', 'What you actually used, and where it came from');
+        var used = C.textArea(fabricUsedFrom(p), 'sw-alt', '2 m navy linen, 150 cm wide');
         used.setAttribute('aria-label', 'What I actually used');
         C.on(used, 'change', function () {
           var proj = Store.project(projectId);
@@ -2457,6 +2467,31 @@
     }
   ];
 
+  /**
+   * Started from Settings the user is on the home screen, where none of this
+   * tour's targets exist — every step would be dropped and the tour would mark
+   * itself seen without ever showing a card. Open a sewing project first.
+   * @returns {boolean} true when a sewing project is on screen
+   */
+  function openASewingProject() {
+    try {
+      if (C && typeof C.closeAllSheets === 'function') C.closeAllSheets();
+      var all = Store.projects() || [];
+      var open = null;
+      for (var i = 0; i < all.length; i++) {
+        if (all[i].craft !== 'sewing') continue;
+        if (all[i].status === 'active') { open = all[i]; break; }
+        if (!open) open = all[i];
+      }
+      if (!open) return false;
+      Store.setActiveProject(open.id);
+      if (C && typeof C.render === 'function') C.render();
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
   var TOUR = {
     id: 'sewing',
     title: 'Sewing a pattern',
@@ -2465,10 +2500,15 @@
       return [
         {
           target: '#sw-step-btn',
+          before: function () { openASewingProject(); },
+          fallback: 'center',
           title: 'One step at a time',
           body: 'The card above shows the step you are on. When you have done it, tap this big button and the ' +
             'card moves on. Your place is saved, so you can walk away for a month and come back to it.',
-          tryIt: 'Try it: tap Step done'
+          tryIt: 'tap Step done.',
+          fallbackTitle: 'Start a sewing project first',
+          fallbackBody: 'This one walks around the sewing screen, so it needs a pattern to point at. ' +
+            'Tap ＋ New, choose Sewing, then come back to this tour.'
         },
         {
           target: '.sw-progress',

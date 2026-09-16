@@ -1491,10 +1491,10 @@ assertEqual(S.fabricAmounts('1.9 m / 2 1/4 yd 1.9 m / 2 1/4 yd'),
   ['1.9 m / 2 1/4 yd', '1.9 m / 2 1/4 yd'],
   'a metric/imperial pair is ONE amount, not two');
 assertEqual(S.fabricAmounts('All sizes 1m / 40" 1.7m / 1yd 3/4'),
-  ['1m / 40"', '1.7m / 1yd 3/4'],
+  ['1 m / 40"', '1.7 m / 1 yd 3/4'],
   'a trailing bare fraction belongs to the amount in front of it');
 assertEqual(S.fabricAmounts('2.3 m / 2.5yd 2.4 m / 3 yd'),
-  ['2.3 m / 2.5yd', '2.4 m / 3 yd'], 'glued units still pair up');
+  ['2.3 m / 2.5 yd', '2.4 m / 3 yd'], 'glued units still pair up (and get a space)');
 assertEqual(S.fabricAmounts('1.4 m 1.5 m 1.6 m 1.7 m'),
   ['1.4 m', '1.5 m', '1.6 m', '1.7 m'], 'plain metric amounts are not merged');
 assertEqual(S.fabricAmounts('2 yds 2 1/4 yds 2 1/2 yds'),
@@ -1527,9 +1527,9 @@ var fabAllSizes = S.parseFabric(
 );
 assertEqual(fabAllSizes.length, 2, 'two widths on one line still give two rows');
 assertEqual(fabAllSizes[0].amounts.length, 5, '"All sizes" maps its amount onto every size');
-assertEqual(fabAllSizes[0].amounts[0], '1m / 40"', 'the wide fabric takes the first amount');
-assertEqual(fabAllSizes[0].amounts[4], '1m / 40"', 'and every size gets it');
-assertEqual(fabAllSizes[1].amounts[2], '1.7m / 1yd 3/4', 'the narrow fabric takes the second amount');
+assertEqual(fabAllSizes[0].amounts[0], '1 m / 40"', 'the wide fabric takes the first amount');
+assertEqual(fabAllSizes[0].amounts[4], '1 m / 40"', 'and every size gets it');
+assertEqual(fabAllSizes[1].amounts[2], '1.7 m / 1 yd 3/4', 'the narrow fabric takes the second amount');
 assertEqual(fabAllSizes[0].grouped, true, 'an "All sizes" row is flagged grouped');
 assertEqual(fabAllSizes[0].name, 'MAIN Wide Fabric', 'the "- m / yd" units legend is stripped out of the name');
 assertEqual(fabAllSizes[1].name, 'Narrow Fabric', 'the second row is named from the text in front of its width');
@@ -1543,7 +1543,7 @@ assertEqual(fabNoLabels[0].grouped, false, 'and nothing is grouped');
 
 assertEqual(S.fabricForSize(fabGrouped, EU, '40'),
   [{ name: 'Fabric', width: '150cm / 60"', amount: '1.9 m / 2 1/4 yd' },
-   { name: 'Fabric', width: '115cm / 45"', amount: '2.3 m / 2.5yd' }],
+   { name: 'Fabric', width: '115cm / 45"', amount: '2.3 m / 2.5 yd' }],
   'fabricForSize picks the chosen size out of every row');
 assertEqual(S.fabricForSize(fabGrouped, EU, '99'), [], 'a size that is not in the run gives nothing');
 assertEqual(S.fabricForSize(fabGrouped, EU, ''), [], 'no chosen size gives nothing');

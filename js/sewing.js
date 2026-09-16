@@ -1432,7 +1432,12 @@
       var frac = /^\s+\d{1,2}\s*\/\s*\d{1,2}(?![\d\/])/.exec(s.slice(end));
       if (frac && !(i + 1 < raw.length && raw[i + 1].at < end + frac[0].length)) end += frac[0].length;
       out.push({
-        text: s.slice(start, end).replace(/\s+/g, ' ').replace(/^\s+|\s+$/g, ''),
+        // "2.5yd" and "1.9 m" come out of PDFs side by side; give every amount
+        // one space between the number and its unit so a table reads evenly.
+        text: s.slice(start, end)
+          .replace(/(\d)\s*(m|cm|yds?|yards?|metres?|meters?)\b/gi, '$1 $2')
+          .replace(/\s+/g, ' ')
+          .replace(/^\s+|\s+$/g, ''),
         at: start, end: end
       });
     }

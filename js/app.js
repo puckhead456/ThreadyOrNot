@@ -254,6 +254,7 @@
    * ================================================================== */
 
   var openSheets = [];
+  var sheetSeq = 0;
 
   /**
    * @param {{title:string, cls?:string, build?:Function, footer?:Array, onClose?:Function}} opts
@@ -267,6 +268,10 @@
     var head = el('div', 'sheet-head');
     head.appendChild(el('div', 'sheet-grab'));
     var h = el('h2', 'sheet-title', opts.title || '');
+    // Without this every sheet announces as an unnamed dialog.
+    sheetSeq += 1;
+    h.id = 'sheet-title-' + sheetSeq;
+    dlg.setAttribute('aria-labelledby', h.id);
     var closeBtn = button('sheet-close', '✕', 'Close');
     head.appendChild(h);
     head.appendChild(closeBtn);
@@ -331,7 +336,18 @@
       if (e.target === dlg) api.close();
     });
     on(dlg, 'close', teardown);
-    // Escape: <dialog> fires cancel then close — nothing extra needed.
+    // Escape normally arrives as the dialog's own `cancel`, but only when
+    // showModal() was available (see below) and only in engines that wire it
+    // up. Closing here too makes Escape work everywhere; teardown is
+    // idempotent, so a double close is harmless. Inputs that want Escape for
+    // themselves (the inline checklist rename) stop it propagating.
+    on(dlg, 'keydown', function (e) {
+      if (e.defaultPrevented) return;
+      if (e.key === 'Escape' || e.key === 'Esc') {
+        e.preventDefault();
+        api.close();
+      }
+    });
 
     if (opts.build) opts.build(body, api);
 
@@ -457,8 +473,15 @@
 
   function segmented(options, current, onPick) {
     var wrap = el('div', 'seg');
+    wrap.setAttribute('role', 'group');
     var value = current;
     var buttons = {};
+    /** Selection was only ever a class, which a screen reader cannot see. */
+    function syncPressed() {
+      Array.prototype.forEach.call(wrap.children, function (c) {
+        c.setAttribute('aria-pressed', c.classList.contains('on') ? 'true' : 'false');
+      });
+    }
     options.forEach(function (o) {
       var b = button(value === o.id ? 'on' : null, o.label);
       buttons[o.id] = b;
@@ -466,10 +489,12 @@
         value = o.id;
         Array.prototype.forEach.call(wrap.children, function (c) { c.classList.remove('on'); });
         b.classList.add('on');
+        syncPressed();
         if (onPick) onPick(value);
       });
       wrap.appendChild(b);
     });
+    syncPressed();
     return {
       node: wrap,
       get: function () { return value; },
@@ -478,6 +503,7 @@
         value = id;
         Array.prototype.forEach.call(wrap.children, function (c) { c.classList.remove('on'); });
         buttons[id].classList.add('on');
+        syncPressed();
       }
     };
   }
@@ -861,10 +887,14 @@
 
     var meta = el('span', 'pc-meta');
     meta.appendChild(document.createTextNode(ago(p.updatedAt)));
-    meta.appendChild(document.createTextNode(' · '));
-    var t = el('span', 'pc-time', fmtDuration(Store.elapsedMs(p)));
-    t.setAttribute('data-timer-project', p.id);
-    meta.appendChild(t);
+    // A timer that has never run has nothing to say — "0:00:00" on every card
+    // just crowds the line.
+    if (Store.elapsedMs(p) || (p.timer && p.timer.runningSince)) {
+      meta.appendChild(document.createTextNode(' · '));
+      var t = el('span', 'pc-time', fmtDuration(Store.elapsedMs(p)));
+      t.setAttribute('data-timer-project', p.id);
+      meta.appendChild(t);
+    }
     card.appendChild(meta);
 
     on(card, 'click', function () {
@@ -896,6 +926,12 @@
     live.forEach(function (p) {
       els.homeList.appendChild(projectCard(p));
     });
+    // Everything is finished or frogged: the shelf holds it all and this list
+    // would otherwise be a silent blank space.
+    if (all.length > 0 && live.length === 0) {
+      var allDone = el('p', 'muted home-all-done', 'Nothing on the hook right now — everything you have made is on the shelf below.');
+      els.homeList.appendChild(allDone);
+    }
 
     els.finishedWrap.hidden = done.length === 0;
     els.finishedLabel.textContent = 'Finished shelf (' + done.length + ')';
@@ -947,9 +983,20 @@
     els.tabs.appendChild(add);
   }
 
+  /**
+   * A never-started timer showed "0:00:00", which ate 45px of a 375px header
+   * and pushed the project name into an ellipsis. Show a clock until it has
+   * something to report.
+   */
+  function timerChipText(p) {
+    var ms = Store.elapsedMs(p);
+    var running = !!(p.timer && p.timer.runningSince);
+    return (!running && !ms) ? '⏱' : fmtDuration(ms);
+  }
+
   function updateTimerChip(p) {
     if (!els.pTimer) return;
-    els.pTimer.textContent = fmtDuration(Store.elapsedMs(p));
+    els.pTimer.textContent = timerChipText(p);
     var running = !!(p.timer && p.timer.runningSince);
     els.pTimer.classList.toggle('running', running);
     els.pTimer.setAttribute('aria-label', (running ? 'Stop' : 'Start') + ' timer, ' + fmtDuration(Store.elapsedMs(p)));
@@ -1077,11 +1124,10 @@
 
   function updateCraftTimerChip(p) {
     if (!els.cTimer) return;
-    var text = fmtDuration(Store.elapsedMs(p));
-    els.cTimer.textContent = text;
+    els.cTimer.textContent = timerChipText(p);
     var running = !!(p.timer && p.timer.runningSince);
     els.cTimer.classList.toggle('running', running);
-    els.cTimer.setAttribute('aria-label', (running ? 'Stop' : 'Start') + ' timer, ' + text);
+    els.cTimer.setAttribute('aria-label', (running ? 'Stop' : 'Start') + ' timer, ' + fmtDuration(Store.elapsedMs(p)));
   }
 
   /** The friendly card a project gets when its craft module is not loaded. */
@@ -1915,7 +1961,7 @@
 
         groupStep = stepper(p ? p.groupSize : 10, 0, 50, 'group size');
         groupField =
-          field('Stitch group size', groupStep.node, 'A buzz every N stitches while you count. 0 = no grouping.');
+          field('Stitch group size', groupStep.node, 'A buzz every few stitches while you count. Set it to 0 to turn grouping off.');
         body.appendChild(groupField);
 
         // Craft-specific new-project fields go here.
@@ -2000,7 +2046,7 @@
     var undone = false;
     Store.deleteProject(projectId);
     render();
-    toast('Deleted “' + name + '”.', {
+    toast('Deleted “' + name + '”', {
       ms: DELETE_UNDO_MS,
       actionText: 'Undo',
       onAction: function () {
@@ -2239,8 +2285,11 @@
         repWrap.appendChild(repEnable);
         var repRow = el('div', 'row-flex');
         repStart = numInput(prt.repeat.startRow, 1, 999999);
+        repStart.placeholder = '5';
         repEnd = numInput(prt.repeat.endRow, 1, 999999);
+        repEnd.placeholder = '8';
         repTimes = numInput(prt.repeat.times, 1, 9999);
+        repTimes.placeholder = '6';
         repRow.appendChild(field('From', repStart));
         repRow.appendChild(field('To', repEnd));
         repRow.appendChild(field('Times', repTimes));
@@ -2318,6 +2367,7 @@
       title: 'Parts',
       build: function (body, api) {
         var list = el('div', 'list');
+        if (!p.parts.length) list.appendChild(el('p', 'muted', 'No parts yet. Add the first piece below.'));
         p.parts.forEach(function (prt) {
           var item = button('menu-item');
           var main = el('div');
@@ -2603,7 +2653,7 @@
 
         groupStep = stepper(typeof source.groupSize === 'number' ? source.groupSize : 10, 0, 50, 'group size');
         var groupField =
-          field('Stitch group size', groupStep.node, 'New projects start with this group size. 0 = no grouping.');
+          field('Stitch group size', groupStep.node, 'New projects start with this group size. Set it to 0 to turn grouping off.');
         body.appendChild(groupField);
 
         // Rows/Rounds and group size are crochet-only.
@@ -2829,7 +2879,7 @@
           /* fall through to the toast */
         }
       }
-      toast((err && err.message) || 'Couldn’t read that PDF (it may be scanned images).', { ms: 4200 });
+      toast((err && err.message) || 'Couldn’t read that PDF (it may be scanned images)', { ms: 4200 });
     }
 
     /** onPages + onText: build the text out of the already-open document. */
@@ -3134,7 +3184,7 @@
         onText: function (res) {
           area.value = res.text;
           refresh();
-          announce('Read ' + plural(res.pages, 'page') + ' from the PDF.');
+          announce('Read ' + plural(res.pages, 'page') + ' from the PDF');
         }
       });
       body.appendChild(dropZone);
@@ -3498,7 +3548,7 @@
                 title: 'Clear the whole checklist?',
                 message: 'All ' + p.checklist.length + ' item' + (p.checklist.length === 1 ? '' : 's') +
                   ' will be removed.',
-                confirmText: 'Clear all',
+                confirmText: 'Clear the list',
                 danger: true
               }).then(function (ok) {
                 if (!ok) return;
@@ -3514,7 +3564,7 @@
         function refresh() {
           var done = 0;
           p.checklist.forEach(function (i) { if (i.done) done++; });
-          count.textContent = done + ' of ' + p.checklist.length + ' done';
+          count.textContent = p.checklist.length ? done + ' of ' + p.checklist.length + ' done' : '';
           clear(list);
           if (!p.checklist.length) {
             list.appendChild(el('p', 'muted', 'Nothing on the list yet.'));
@@ -3563,7 +3613,7 @@
     openSheet({
       title: 'Project notes',
       build: function (body) {
-        var area = textArea(p.notes, '', 'Hook, yarn, pattern link, mods…');
+        var area = textArea(p.notes, '', 'Hook 4mm · Paintbox DK · pattern link…');
         area.style.minHeight = '220px';
         var save = debounce(function () {
           Store.setNotes(p.id, area.value);
@@ -3590,7 +3640,7 @@
           Store.updatePart(p.id, prt.id, { placementNotes: area.value });
         }, 400);
         on(area, 'input', save);
-        body.appendChild(field('Where things go', area, 'Saves as you type.'));
+        body.appendChild(field('Where things go', area, prt.placementNotes ? 'Saves as you type.' : 'Nothing noted yet. Saves as you type.'));
       },
       onClose: function () {
         Store.flush();
@@ -3609,7 +3659,7 @@
       build: function (body) {
         input = textInput(prt.alerts.join(', '), '40, 80');
         body.appendChild(
-          field('Buzz at stitch', input, 'Comma-separated stitch numbers within a row. Great for marking increases.')
+          field('Buzz at stitch', input, prt.alerts.length ? 'Comma-separated stitch numbers within a row. Great for marking increases.' : 'Nothing set yet. Type stitch numbers, separated by commas — great for marking increases.')
         );
       },
       footer: [
@@ -3681,7 +3731,7 @@
             if (s.id === 'finished') celebrate('project');
             api.close();
             render();
-            toast('Status: ' + s.label);
+            toast('Now ' + s.label.toLowerCase());
           });
           list.appendChild(b);
         });
@@ -3721,7 +3771,7 @@
     items.push({ icon: '📝', label: 'Notes', run: function () { openNotesSheet(p.id); } });
     items.push({ icon: '🕘', label: 'History', run: function () { openHistorySheet(p.id); } });
     items.push({ icon: '🏷️', label: 'Status', run: function () { openStatusSheet(p.id); } });
-    items.push({ icon: '📤', label: 'Export backup', run: function () { exportBackup(); } });
+    items.push({ icon: '📤', label: 'Download backup', run: function () { exportBackup(); } });
     items.push({
       icon: '❓',
       label: 'Show me around',
@@ -3760,7 +3810,7 @@
           openTemplateEditor({ draft: draft });
         }
       },
-      { icon: '📤', label: 'Export backup', run: function () { exportBackup(); } },
+      { icon: '📤', label: 'Download backup', run: function () { exportBackup(); } },
       { icon: '❓', label: 'Show me around', run: function () { startTour('counter'); } }
     ];
     openSheet({
@@ -3855,7 +3905,7 @@
           render();
           toast('Imported ' + n + ' project' + (n === 1 ? '' : 's'));
         } catch (err) {
-          toast(err && err.message ? err.message : 'Import failed');
+          toast(err && err.message ? err.message : 'That backup could not be imported');
         }
       };
       reader.onerror = function () {
@@ -4037,6 +4087,7 @@
       );
     }
 
+    wrap.appendChild(el('div', 'field-label faq-label', 'Common questions'));
     var faqWrap = el('div', 'faq-list');
     FAQ.forEach(function (item) {
       var d = document.createElement('details');
@@ -4115,7 +4166,7 @@
           })
         );
         toggles.appendChild(
-          switchRow('Sounds', 'Little synthesized clicks and chimes.', s.sounds, function (v) {
+          switchRow('Sounds', 'Little synthesised clicks and chimes.', s.sounds, function (v) {
             Store.setSetting('sounds', v);
             if (v) fb('tap');
           })
@@ -4179,7 +4230,7 @@
         var imp = button('btn block', '📂 Import backup');
         on(imp, 'click', importBackup);
         backup.appendChild(imp);
-        backup.appendChild(el('div', 'field-hint', 'Backups merge by project id — imported projects win.'));
+        backup.appendChild(el('div', 'field-hint', 'Importing a backup adds anything new and replaces a project you already have with the copy in the file.'));
         body.appendChild(backup);
 
         /* ---- Help & tours ---- */
@@ -4232,7 +4283,7 @@
     on($('#welcome-dismiss'), 'click', function () {
       Store.setSetting('welcomed', true);
       renderHome();
-      toast('No problem — the tours live in Settings.');
+      toast('No problem — the tours live in Settings');
     });
 
     on(els.finishedToggle, 'click', function () {

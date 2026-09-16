@@ -3293,7 +3293,7 @@
   }
 
   var STITCH_TYPES = [
-    { name: 'cross stitch', re: /cross\s*stitch/i },
+    { name: 'cross-stitch', re: /cross\s*stitch/i },
     { name: 'half stitch', re: /half\s*stitch/i },
     { name: 'quarter stitch', re: /quarter\s*stitch|three[\s-]*quarter/i },
     { name: 'backstitch', re: /back\s*stitch|backstitch/i },

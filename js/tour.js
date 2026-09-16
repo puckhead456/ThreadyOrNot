@@ -602,9 +602,13 @@
 
   /** Make sure a project is open. Creates the sample one when there is none. */
   function ensureProject(ctx) {
+    // The counter tour points at the crochet screen, so only a crochet
+    // project will do: a cross-stitch or sewing project renders #screen-craft
+    // and every step's target would be missing.
+    function isCrochet(proj) { return !!proj && (proj.craft || 'crochet') === 'crochet'; }
     var p = openProject();
-    if (p) return p;
-    var all = window.Store.projects();
+    if (isCrochet(p)) return p;
+    var all = window.Store.projects().filter(isCrochet);
     if (all.length) {
       window.Store.setActiveProject(all[0].id);
       rerender();
@@ -754,7 +758,7 @@
             fallback: 'center',
             title: 'The finished shelf',
             body:
-              'Mark a project Finished or Frogged and it tucks itself away down here. ' +
+              'Mark a project finished or frogged and it tucks itself away down here. ' +
               'Paused ones stay up top, still counting.',
             fallbackTitle: 'The finished shelf',
             fallbackBody:
@@ -787,7 +791,7 @@
             target: '[data-tour="row-counter"]',
             title: 'Rows and rounds',
             body:
-              'The big number is how many rows (or rounds) you have finished. ＋ completes one, ' +
+              'The big number is how many rows (or rounds) you have finished. + completes one, ' +
               '– takes one back. Give the part a target and a progress bar shows up here too.'
           },
           {
@@ -845,7 +849,7 @@
             target: '#btn-place',
             title: 'Placing notes',
             body:
-              'Somewhere to park “eyes between rnd 8 and 9, six stitches apart”, so you are not ' +
+              'Somewhere to park “eyes between rnd 8–9, 6 sts apart”, so you are not ' +
               'scrolling a PDF with a hook in your hand.'
           },
           {
@@ -859,8 +863,9 @@
             target: '#p-menu',
             title: 'Everything else',
             body:
-              'Behind the ⋯ you will find Import pattern, the assembly checklist, notes, history, ' +
-              'the project status and Save as template. The ? in there replays this tour.'
+              'Behind the ⋯ you will find Import pattern, Parts, Checklist, Notes, Yarn colours, ' +
+              'History, Status, Save as template and Download backup. “Show me around” in there ' +
+              'starts this tour again.'
           }
         ];
         if (!opts || opts.sampleOffer !== false) steps.push(sampleOfferStep());
@@ -946,7 +951,7 @@
             title: 'Templates',
             body:
               'A template is the set of parts and the assembly checklist a new project starts with. ' +
-              'Tap one to edit it — the built-in ones can be changed and reset to default whenever.'
+              'Tap one to edit it — the built-in ones can be changed, and reset to default at any time.'
           },
           {
             target: '[data-tour="settings-new-template"]',

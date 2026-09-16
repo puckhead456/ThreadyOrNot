@@ -998,8 +998,8 @@ assertEqual(X.parseKey('nothing here', { defaultStrands: 3 }).strandsDefault, 3,
   'opts.defaultStrands is the fallback');
 
 assertEqual(X.parseKey('Stitches used: cross stitch, backstitch, French knots').stitchesUsed,
-  ['cross stitch', 'backstitch', 'french knot'], 'a "Stitches used" line is parsed');
-assertEqual(X.parseKey('This design uses cross stitch only.').stitchesUsed, ['cross stitch'],
+  ['cross-stitch', 'backstitch', 'french knot'], 'a "Stitches used" line is parsed');
+assertEqual(X.parseKey('This design uses cross stitch only.').stitchesUsed, ['cross-stitch'],
   'stitchesUsed falls back to scanning the whole text');
 
 (function () {
@@ -1030,7 +1030,7 @@ assertEqual(X.parseKey('This design uses cross stitch only.').stitchesUsed, ['cr
   assertEqual(r.fabric.count, 14, 'the worked example reads the fabric count');
   assertEqual(r.sizes.length, 1, 'the worked example reads one finished-size row');
   assertEqual(r.entries[0].skeins, 1, 'the worked example reads the skeins column');
-  assertEqual(r.stitchesUsed, ['cross stitch', 'backstitch'], 'the worked example reads the stitch types');
+  assertEqual(r.stitchesUsed, ['cross-stitch', 'backstitch'], 'the worked example reads the stitch types');
 
   var noMeta = X.parseKey('▲ 310 Black\n■ 666 Red\n● 3799 Pewter');
   assertEqual(noMeta.confidence, 0.6, 'entries with symbols and names but no metadata score 0.6');

@@ -5,7 +5,7 @@
       id: 'stardew-spring',
       name: 'Pelican Town Spring',
       group: 'stardew',
-      tagline: 'Cozy mornings on the farm',
+      tagline: 'Cosy mornings on the farm',
       emoji: '🌱',
       swatches: ['#fff8ed', '#4f9868', '#f4a46b', '#e6a23c']
     },

@@ -52,7 +52,7 @@
   font-family: var(--font-display);
   font-size: 15px;
   letter-spacing: 2px;
-  color: var(--accent-2);
+  color: var(--text);
 }
 .sw-step-section {
   font-size: 12px;
@@ -85,7 +85,7 @@
   background: none;
   border: none;
   padding: 0 4px;
-  min-height: 32px;
+  min-height: 44px;
   font-size: 13px;
   font-weight: 700;
   color: var(--text-muted);
@@ -147,7 +147,7 @@
   font-size: 34px;
   line-height: 1.1;
   font-variant-numeric: tabular-nums;
-  color: var(--accent-2);
+  color: var(--text);
 }
 .sw-unit .bar { margin-top: 4px; }
 .sw-unit-pct {
@@ -200,7 +200,7 @@
   text-transform: uppercase;
   color: var(--text-muted);
 }
-.sw-cut-all { min-height: 36px; font-size: 13px; }
+.sw-cut-all { min-height: 44px; font-size: 13px; }
 
 .sw-section-head {
   margin: 12px 0 2px;
@@ -208,7 +208,7 @@
   font-weight: 800;
   letter-spacing: 1px;
   text-transform: uppercase;
-  color: var(--accent-2);
+  color: var(--text);
 }
 
 /* Steps sheet */
@@ -233,7 +233,7 @@
 }
 .sw-step-row-text { flex: 1 1 auto; min-width: 0; word-break: break-word; }
 .sw-step-row.current { background: var(--surface-2); border-radius: var(--radius-sm); }
-.sw-step-row.current .sw-step-row-n { color: var(--accent-2); }
+.sw-step-row.current .sw-step-row-n { color: var(--text); }
 
 /* Cutting sheet */
 .sw-count-chip {
@@ -273,15 +273,15 @@
   font-family: var(--font-display);
   font-size: 30px;
   margin: 0 0 6px;
-  color: var(--accent-2);
+  color: var(--text);
 }
 
 /* Size sheet */
 .sw-size-chips { display: flex; flex-wrap: wrap; gap: 6px; }
-.sw-size-chip { cursor: pointer; }
+.sw-size-chip { cursor: pointer; min-height: 44px; padding: 4px 14px; font-size: 14px; }
 .sw-size-chip.on {
-  background: var(--accent-2);
-  border-color: var(--accent-2);
+  background: var(--primary);
+  border-color: var(--primary);
   color: var(--primary-text);
 }
 .sw-table-wrap {
@@ -308,7 +308,7 @@
 .sw-table tr:last-child th, .sw-table tr:last-child td { border-bottom: none; }
 .sw-table th.on, .sw-table td.on {
   background: var(--surface-2);
-  color: var(--accent-2);
+  color: var(--text);
   font-weight: 800;
 }
 .sw-alt { min-height: 90px; width: 100%; }
@@ -318,8 +318,8 @@
 .sw-fabric-name { font-weight: 800; margin-bottom: 6px; }
 .sw-fabric-amounts { display: flex; flex-wrap: wrap; gap: 6px; }
 .sw-fabric-amounts .chip.on {
-  background: var(--accent-2);
-  border-color: var(--accent-2);
+  background: var(--primary);
+  border-color: var(--primary);
   color: var(--primary-text);
 }
 .sw-fabric-raw { font-size: 13px; }
@@ -348,7 +348,7 @@
 .sw-fabric-mine-size {
   flex: 0 0 auto;
   font-weight: 800;
-  color: var(--accent-2);
+  color: var(--text);
 }
 .sw-fabric-mine-amount {
   flex: 0 0 auto;
@@ -463,8 +463,8 @@
 }
 .sw-para-tool:disabled { opacity: 0.35; }
 .sw-para-tool.on {
-  background: var(--accent-2);
-  border-color: var(--accent-2);
+  background: var(--primary);
+  border-color: var(--primary);
   color: var(--primary-text);
 }
 .sw-para-split {
@@ -496,7 +496,7 @@
   padding: 2px 0;
   word-break: break-word;
 }
-.sw-para-split-mark { flex: 0 0 auto; color: var(--accent-2); font-weight: 800; }
+.sw-para-split-mark { flex: 0 0 auto; color: var(--text); font-weight: 800; }
 .sw-para-split-text { flex: 1 1 auto; min-width: 0; }
 
 .sw-warnings { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; }
@@ -521,7 +521,7 @@
 }
 .sw-page:not(.sw-page-plain) {
   border-color: var(--accent-2);
-  color: var(--accent-2);
+  color: var(--text);
   font-weight: 700;
 }
 .sw-page.sw-page-plain {
@@ -687,6 +687,29 @@
 
 @media (min-width: 700px) {
   .sw-page-frame { height: 62vh; max-height: 700px; }
+}
+
+/* --------------------------------------------------------------------------
+   Touch targets and scroll affordances
+   -------------------------------------------------------------------------- */
+
+/* Everything you tap is at least 44px tall. */
+.sw-count-chip,
+.sw-page,
+.sw-cut-text,
+.sw-step-jump,
+.sw-cuttable { min-height: 44px; }
+
+/* A long step scrolls inside its card. Without a cue the text just stops at
+   the card edge and reads as if the pattern were truncated. These shadows
+   only show while there is more to scroll to (the `local` layers cover them
+   at each end). */
+.sw-step-text {
+  background:
+    linear-gradient(var(--surface) 40%, rgba(0, 0, 0, 0)) top / 100% 16px no-repeat local,
+    linear-gradient(rgba(0, 0, 0, 0), var(--surface) 60%) bottom / 100% 16px no-repeat local,
+    radial-gradient(farthest-side at 50% 0, var(--border), rgba(0, 0, 0, 0)) top / 100% 8px no-repeat scroll,
+    radial-gradient(farthest-side at 50% 100%, var(--border), rgba(0, 0, 0, 0)) bottom / 100% 8px no-repeat scroll;
 }
 
 @media (prefers-reduced-motion: reduce) {

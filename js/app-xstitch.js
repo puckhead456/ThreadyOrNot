@@ -88,7 +88,7 @@
   function swatchHex(e) { return '#' + ((e && e.hex) || '808080'); }
 
   var KIND_LABEL = {
-    cross: '', back: 'backstitch', knot: 'french knot',
+    cross: '', back: 'backstitch', knot: 'French knot',
     bead: 'bead', half: 'half stitch', blend: 'blend'
   };
 
@@ -931,6 +931,7 @@
     n.stitchBtn.id = 'xs-stitch-btn';
     n.liveCanvas = document.createElement('canvas');
     n.liveCanvas.className = 'stitch-canvas xs-live';
+    n.liveCanvas.setAttribute('aria-hidden', 'true');
     n.stitchBtn.appendChild(n.liveCanvas);
     n.stitchCap = el('span', 'stitch-caption', 'STITCHES');
     n.stitchNum = el('span', 'stitch-number', '0');
@@ -1108,10 +1109,12 @@
       on(mainBtn, 'click', function () { setCurrentColour(project.id, i); });
 
       var iso = button('xs-key-iso', '◉', 'Isolate ' + paletteLabel(e) + ' on the chart');
+      iso.setAttribute('aria-pressed', 'false');
       on(iso, 'click', function () { toggleIsolate(project.id, i); });
 
       var have = button('check xs-key-have', '', 'I own ' + paletteLabel(e));
       have.setAttribute('role', 'checkbox');
+      have.setAttribute('aria-checked', e.have ? 'true' : 'false');
       on(have, 'click', function () { toggleHave(project.id, i); });
 
       var edit = button('xs-key-edit', '✎', 'Edit ' + paletteLabel(e));
@@ -1219,7 +1222,7 @@
       if (st.total) subBits.push(comma(left) + ' left of ' + comma(st.total));
       else if (st.done) subBits.push(comma(st.done) + ' done');
       extraBits(st).forEach(function (b) { subBits.push(b); });
-      if (!subBits.length) subBits.push(comma(st.done) + ' done');
+      if (!subBits.length) subBits.push('no count yet');
       if (KIND_LABEL[pe.kind]) subBits.push(KIND_LABEL[pe.kind]);
       if (pe.strands) subBits.push(pe.strands + ' strand' + (pe.strands === 1 ? '' : 's'));
       row.sub.textContent = subBits.join(' · ');
@@ -1233,7 +1236,9 @@
       row.row.classList.toggle('current', row.i === cur);
       row.row.classList.toggle('complete', complete);
       row.row.classList.toggle('isolated', view.isolate && row.i === cur);
-      row.iso.classList.toggle('on', view.isolate && row.i === cur);
+      var isolated = !!(view.isolate && row.i === cur);
+      row.iso.classList.toggle('on', isolated);
+      row.iso.setAttribute('aria-pressed', isolated ? 'true' : 'false');
       row.have.classList.toggle('on', !!pe.have);
       row.have.setAttribute('aria-checked', pe.have ? 'true' : 'false');
       row.have.textContent = pe.have ? '✓' : '';
@@ -1490,7 +1495,7 @@
       }
       var at = nextCellFor(pi, view.cursor);
       if (at < 0) {
-        toast(paletteLabel(entry) + ' is finished');
+        toast(paletteLabel(entry) + ' done ✓');
         fb('done');
         return;
       }
@@ -1510,7 +1515,7 @@
       bumpStats(pi, 1);
     } else {
       if (entry.stitchCount && before.done >= entry.stitchCount) {
-        toast(paletteLabel(entry) + ' is finished');
+        toast(paletteLabel(entry) + ' done ✓');
         fb('done');
         return;
       }
@@ -1626,7 +1631,7 @@
         }
       }
       var at = lastDoneCellFor(pi);
-      if (at < 0) { toast('Nothing to take back'); return; }
+      if (at < 0) { toast('Nothing to undo'); return; }
       X.setBit(view.bits, at, false);
       paintCell(at, 0);
       view.cursor = at;
@@ -1642,7 +1647,7 @@
       bumpStats(pi, -1);
     } else {
       var st = (view.stats.byColor[pi] || { done: 0 });
-      if (st.done <= 0) { toast('Nothing to take back'); return; }
+      if (st.done <= 0) { toast('Nothing to undo'); return; }
       Store.updateCraftData(projectId, function (cd) {
         bumpPerColor(cd, pi, -1);
         cd.progress.doneCount = Math.max(0, (cd.progress.doneCount || 0) - 1);
@@ -1815,7 +1820,7 @@
     { id: 'tap', label: 'Tap' },
     { id: 'paint', label: 'Drag' },
     { id: 'block', label: '10×10' },
-    { id: 'page', label: 'All of this colour' }
+    { id: 'page', label: 'Whole colour' }
   ];
 
   /* The four things a chart can hold. The switch decides what every mark tool
@@ -4273,6 +4278,31 @@
     registerTour();
   }
 
+  /**
+   * Started from Settings the user is on the home screen, where none of this
+   * tour's targets exist — every step would be dropped and the tour would mark
+   * itself seen without ever showing a card. Open a cross-stitch project first.
+   * @returns {boolean} true when a cross-stitch project is on screen
+   */
+  function openACrossStitchProject() {
+    try {
+      if (C && typeof C.closeAllSheets === 'function') C.closeAllSheets();
+      var all = Store.projects() || [];
+      var open = null;
+      for (var i = 0; i < all.length; i++) {
+        if (all[i].craft !== 'crossstitch') continue;
+        if (all[i].status === 'active') { open = all[i]; break; }
+        if (!open) open = all[i];
+      }
+      if (!open) return false;
+      Store.setActiveProject(open.id);
+      if (C && typeof C.render === 'function') C.render();
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
   function registerTour() {
     if (!window.Tour || typeof window.Tour.register !== 'function') return;
     try {
@@ -4284,9 +4314,14 @@
           return [
             {
               target: '.xs-chart-card',
+              before: function () { openACrossStitchProject(); },
+              fallback: 'center',
               title: 'Your chart lives here',
               body: 'Drag to move around and pinch to zoom. Double-tap to fit the whole design. ' +
-                'The heavy lines are every ten squares, the same as the gridding on your fabric.'
+                'The heavy lines are every ten squares, the same as the gridding on your fabric.',
+              fallbackTitle: 'Start a cross-stitch project first',
+              fallbackBody: 'This one walks around the cross-stitch screen, so it needs a chart to ' +
+                'point at. Tap ＋ New, choose Cross-stitch, then come back to this tour.'
             },
             {
               target: '.xs-cb',
@@ -4299,7 +4334,7 @@
               title: 'Tap for every stitch',
               body: 'Each tap marks the next square of this colour and paints it into the little ' +
                 'picture behind the number, so the design appears as you stitch.',
-              tryIt: 'Give it a tap'
+              tryIt: 'give it a tap.'
             },
             {
               target: '.xs-key-card',
@@ -4311,7 +4346,8 @@
               target: '.craft-body .bottombar',
               title: 'Undo and the rest',
               body: 'Undo takes back the last thing you did. Chart opens the full-screen view with ' +
-                'the marking tools, Pages shows the imported PDF pages and Floss estimates your skeins.'
+                'the marking tools, Pages shows the pages from your PDF, and Floss works out how ' +
+                'many skeins you need.'
             }
           ];
         }

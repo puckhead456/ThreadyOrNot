@@ -37,6 +37,7 @@ Owner-side (fixtures):
 3. A feel-test of the 3D swipe and the chart pinch on a real phone; nothing here has run on touch hardware.
 
 Small code items (each < half a day):
+0. From the UX sweep (`docs/ux-sweep-2026-09-16.md`, 74 findings, 66 fixed): keyboard path for the chart canvas and photo-crop handles, a focus-preserving rerender helper, a proper fallback when `dialog.showModal` is missing, one announcement policy across crafts, home-card summaries in one shared shape, "SA" abbreviation on the sewing step card, the counter still overflowing below ~700 px tall.
 4. Printable chart does not distinguish done stitches (progress is not part of a print).
 5. Sewing fabric rows printed without a bolt width (`LINING 1m / 1 yd`) are dropped.
 6. `ctx.pdfDropZone` with `onPages` + `onText` skips the cross-page running-head pass (documented in CRAFTS.md; both craft importers avoid the combination).
