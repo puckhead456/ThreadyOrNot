@@ -1,16 +1,19 @@
 # Handoff: Thready or Not
 
-Crochet counter PWA. Live: https://puckhead456.github.io/ThreadyOrNot/ (repo puckhead456/ThreadyOrNot, deploys from `main` via `.github/workflows/pages.yml`). Local folder `C:\Users\mitch\CrochetBs` (folder name intentionally unchanged). Plain HTML/CSS/JS, no build step. Everything important is documented in `SPEC.md`; read it first.
+Crochet counter PWA. Live: https://puckhead456.github.io/ThreadyOrNot/ (repo puckhead456/ThreadyOrNot, deploys from `main` via `.github/workflows/pages.yml`). Local folder `C:\Users\mitch\CrochetBs` (folder name intentionally unchanged). Plain HTML/CSS/JS, no build step. Everything important is documented in `SPEC.md`; read it first. Owner: puckhead456 (Windows user "mitch"). Started 2026-09-14.
+
+## Status (updated 2026-09-15)
+- `main` = what is live. Features: counters, parts, templates (editable), checklists, pattern paste + in-app PDF import (pdf.js, on-device), parser v2.1 (computed counts, multi-size, sections, notes, repeats), 6 themes, celebrations, guided tours + help, export/import, Stardrop Night default theme. Proprietary LICENSE + README notice added.
+- `feature/live-diagram` (pushed, NOT merged): real-time rotating 3D WebGL model of the piece inside the stitch button, 3D viewer sheet (drag/pinch), Yarn colours sheet, "Live diagram" setting, parser colour/expand additions, `test/diagram.test.html`. Built by three agents, integrated and verified with the real bear (cream face panel on navy) and Cato patterns. Tap path < 1 ms. Awaiting the owner's go-ahead to merge + deploy. Known rough edges: "STITCHES"/"tap" captions get lost behind light yarn; ghost cage of future rounds spills outside the button in the first 1–2 rounds; rows-mode pieces are a rocking curved sheet, not a spin.
+- Closed-source decision: stay public for now (GitHub Pages free tier needs a public repo). Plan: move hosting to Cloudflare Pages (free, private repo, custom domain) when the business plan's launch checklist starts, then flip the repo private. Before launch also: name/trademark search, rename IP-referencing themes and redraw two mascots, add minification + canary strings, later move parser/diagram-model behind an API for Pro.
+- Business plan artifact: https://claude.ai/artifact/YM4khtjkszxfibJDyLNVyq (private).
 
 ## How to work on it
 - Local server: `.claude/launch.json` config `stitchkeeper` runs `tools/serve.ps1` on http://localhost:8765 (no node or python on this machine).
-- The service worker is cache-first. Before testing ANY change in the browser: unregister service workers and delete caches from the console, then reload with a cache-busting query. Bump `CACHE_VERSION` in `sw.js` on every release and precache any new file.
-- Tests: `test/patterns.test.html` (unit, committed synthetic snippets), `test/patterns.fixtures.html` (runs against the real pattern PDFs in `tmp-pdf/`, which is gitignored and copyrighted: never commit those), `test/celebrate.test.html`, and on this branch `test/diagram.test.html`.
-- Git is signed in; pushes work non-interactively with `GIT_TERMINAL_PROMPT=0` and `GCM_INTERACTIVE=never`. Put commit messages in a short-path file such as `C:\Users\mitch\AppData\Local\Temp\sk-commit.txt` and use `git commit -F`; long scratchpad paths break git on Windows.
-- Delegation pattern that has worked: write the contract into SPEC.md, spawn one Opus agent per independent file group, integrate, verify at 375px in the Browser pane, deploy.
-
-## Current branch: `feature/live-diagram`
-Goal and contracts: SPEC.md section "Live 3D diagram". Three parallel work packages: parser (`Patterns.colors`, `Patterns.expand`, `Patterns.colorHex`), renderer (`js/diagram.js` WebGL plus `test/diagram.test.html`), app integration (Store model builder, canvas inside the stitch button, 3D viewer sheet, Yarn colours sheet, settings toggle). Merge to `main` only after the diagram is verified with the four real PDFs (bear belly-panel colour run, Cato stripes, bee stripes) and the counting tap path still feels instant.
-
-## Business plan
-https://claude.ai/artifact/YM4khtjkszxfibJDyLNVyq (private artifact; the theme and mascot IP rename is the first pre-monetisation task).
+- The service worker is cache-first. Before testing ANY change in the browser: unregister service workers and delete caches from the console, then reload with a cache-busting query. Bump `CACHE_VERSION` in `sw.js` on every release and precache any new file. (Currently v9 on the feature branch, v8 on main.)
+- Tests: `test/patterns.test.html` (unit, committed synthetic snippets; 335 on the branch / 254 on main), `test/patterns.fixtures.html` (runs against the real pattern PDFs in `tmp-pdf/`, which is gitignored and copyrighted: never commit those; 156 / 137), `test/celebrate.test.html`, `test/diagram.test.html` (branch).
+- Git is signed in; pushes work non-interactively with `GIT_TERMINAL_PROMPT=0` and `GCM_INTERACTIVE=never`. Put commit messages in a short-path file such as `C:\Users\mitch\AppData\Local\Temp\sk-commit.txt` and use `git commit -F`; long scratchpad paths break git on Windows. Git Bash heredocs work; PowerShell here-strings with quotes do not survive as git arguments.
+- Deploy = push to `main`; the Pages workflow runs in ~1 minute. Verify live files WITHOUT cache-busting query strings (GitHub's CDN returns 404 for `?x=` on fresh deploys).
+- The Browser pane's localStorage is a scratch profile: agents may wipe it. The owner's phone data is separate.
+- Delegation pattern that has worked: write the contract into SPEC.md, spawn one Opus agent per independent file group (tell them not to touch each other's files and to clear the service worker before testing), integrate, verify at 375px in the Browser pane, deploy.
+- New pattern PDFs: copy to `tmp-pdf/`, extract text via `tmp-pdf/extract.html` (or `PdfText` in-app), add a `.txt` fixture and assertions to `test/patterns.fixtures.html`, extend the parser via the parser agent, keep everything green.
