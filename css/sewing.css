@@ -323,6 +323,45 @@
   color: var(--primary-text);
 }
 .sw-fabric-raw { font-size: 13px; }
+.sw-fabric-grouped { margin: 6px 0 0; }
+
+/* "What you need": the chosen size pulled out of the grouped table. */
+.sw-fabric-mine {
+  padding: 10px 12px;
+  border-color: var(--accent-2);
+}
+.sw-fabric-mine-head {
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+.sw-fabric-mine-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  padding: 3px 0;
+}
+.sw-fabric-mine-size {
+  flex: 0 0 auto;
+  font-weight: 800;
+  color: var(--accent-2);
+}
+.sw-fabric-mine-amount {
+  flex: 0 0 auto;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+.sw-fabric-mine-at {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--text-muted);
+  word-break: break-word;
+}
 
 /* Machine sheet */
 .sw-preset {
@@ -355,6 +394,110 @@
 .sw-review-label { font-weight: 800; }
 .sw-review-count { font-size: 12px; color: var(--text-muted); }
 .sw-review-row.sw-empty-row { opacity: 0.5; }
+.sw-para-action { padding-top: 2px; padding-bottom: 2px; }
+.sw-para-action .linkish { text-align: left; }
+
+/* --------------------------------------------------------------------------
+   7b. Paragraph picker ("Make steps from paragraphs")
+   -------------------------------------------------------------------------- */
+
+.sw-para-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 16px;
+  margin: 10px 0 2px;
+}
+.sw-para-count {
+  flex: 1 1 100%;
+  font-weight: 800;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+.sw-para-bar .linkish {
+  flex: 0 0 auto;
+  min-height: 40px;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.sw-para-list .sw-para-row { align-items: flex-start; gap: 10px; }
+.sw-para-row.on { background: var(--surface-2); border-radius: var(--radius-sm); }
+.sw-para-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 2px 0 4px;
+}
+.sw-para-meta {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.sw-para-text {
+  background: none;
+  border: none;
+  text-align: left;
+  color: inherit;
+  font: inherit;
+  line-height: 1.4;
+  padding: 2px 0;
+  word-break: break-word;
+}
+.sw-para-row:not(.on) .sw-para-text { color: var(--text-muted); }
+.sw-para-tools { display: flex; gap: 8px; margin-top: 4px; }
+.sw-para-tool {
+  flex: 0 0 auto;
+  min-width: 44px;
+  min-height: 36px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 15px;
+  line-height: 1;
+}
+.sw-para-tool:disabled { opacity: 0.35; }
+.sw-para-tool.on {
+  background: var(--accent-2);
+  border-color: var(--accent-2);
+  color: var(--primary-text);
+}
+.sw-para-split {
+  margin-top: 6px;
+  border-left: 2px solid var(--accent-2);
+  padding-left: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.sw-para-split-head {
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-muted);
+}
+.sw-para-split-opt {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  background: none;
+  border: none;
+  text-align: left;
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+  min-height: 40px;
+  padding: 2px 0;
+  word-break: break-word;
+}
+.sw-para-split-mark { flex: 0 0 auto; color: var(--accent-2); font-weight: 800; }
+.sw-para-split-text { flex: 1 1 auto; min-width: 0; }
 
 .sw-warnings { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; }
 .sw-warning {

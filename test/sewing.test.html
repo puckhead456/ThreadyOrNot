@@ -620,8 +620,15 @@ assertEqual(fab[1].width, '150 cm', 'the second width');
 
 var fabMismatch = S.parseFabric('115 cm wide 1.4 m 1.5 m', ['XS', 'S', 'M', 'L']);
 assertEqual(fabMismatch.length, 1, 'a mismatched row is still returned');
-assertEqual(fabMismatch[0].amounts, [], 'a mismatched row has no amounts');
+assertEqual(fabMismatch[0].amounts, ['1.4 m', '1.4 m', '1.5 m', '1.5 m'],
+  'two amounts over four sizes split evenly into size groups');
+assertEqual(fabMismatch[0].grouped, true, 'an evenly split row is flagged grouped');
 assertTrue(fabMismatch[0].line.indexOf('115 cm') >= 0, 'the raw line is kept so the UI can show it');
+
+var fabOdd = S.parseFabric('115 cm wide 1.4 m 1.5 m 1.6 m', ['XS', 'S', 'M', 'L']);
+assertEqual(fabOdd[0].amounts, [], 'three amounts over four sizes cannot be split and are dropped');
+assertEqual(fabOdd[0].grouped, false, 'a dropped row is not flagged grouped');
+assertTrue(fabOdd[0].rawAmounts.length === 3, 'but the raw amounts are still kept for the UI');
 
 var fabImperial = S.parseFabric('Main fabric 45" wide 2 yds 2 1/4 yds 2 1/2 yds', ['S', 'M', 'L']);
 assertEqual(fabImperial.length, 1, 'an imperial fabric row parses');
@@ -1450,6 +1457,237 @@ assertEqual(pagesJunk[0], { n: 5, blobKey: 'p:abc:page:5', w: 0, h: 0 }, 'bad si
 
 // =======================================================================
 group('Performance');
+// =======================================================================
+
+// =======================================================================
+group('Grouped fabric columns - sizeGroups');
+// =======================================================================
+
+var EU = ['36', '38', '40', '42', '44'];
+assertEqual(S.sizeGroups('MAIN - m / yd 36-38-40 42-44', EU), [[0, 1, 2], [3, 4]],
+  "'36-38-40 42-44' expands to a 3-size and a 2-size group");
+assertEqual(S.sizeGroups('Sizes 36-40 42-44', EU), [[0, 1, 2], [3, 4]],
+  "a two-part token is a RANGE: '36-40' covers 36, 38 and 40");
+assertEqual(S.sizeGroups('Sizes XS-M L-XL', ['XS', 'S', 'M', 'L', 'XL']), [[0, 1, 2], [3, 4]],
+  "'Sizes XS-M L-XL' works on letter sizes");
+assertEqual(S.sizeGroups('8/10/12 14/16', ['8', '10', '12', '14', '16']), [[0, 1, 2], [3, 4]],
+  "slash-separated groups '8/10/12 14/16'");
+assertEqual(S.sizeGroups('MAIN - m / yd XS-M L-XL', ['XS', 'S', 'M', 'L', 'XL']), [[0, 1, 2], [3, 4]],
+  "the stray 'm' in 'm / yd' does not become an XS-M group");
+assertEqual(S.sizeGroups('Sizes 36-40 42 44', EU), [[0, 1, 2], [3], [4]],
+  'a mixed header of a range plus two singles still tiles the sizes');
+assertEqual(S.sizeGroups('Fabric requirements', EU), null, 'ordinary prose is not a group header');
+assertEqual(S.sizeGroups('36-38 40-44 42-44', EU), null, 'groups that overlap are rejected');
+assertEqual(S.sizeGroups('36-38-40', EU), null, 'groups that do not cover every size are rejected');
+assertEqual(S.sizeGroups('36-38-40 42-44', null), null, 'no labels means no groups');
+assertEqual(S.sizeGroups('XS-XL', ['XS', 'S', 'M', 'L', 'XL']), [[0, 1, 2, 3, 4]],
+  'one range over the whole run is a single group');
+
+// =======================================================================
+group('Grouped fabric columns - dual-unit amounts');
+// =======================================================================
+
+assertEqual(S.fabricAmounts('1.9 m / 2 1/4 yd 1.9 m / 2 1/4 yd'),
+  ['1.9 m / 2 1/4 yd', '1.9 m / 2 1/4 yd'],
+  'a metric/imperial pair is ONE amount, not two');
+assertEqual(S.fabricAmounts('All sizes 1m / 40" 1.7m / 1yd 3/4'),
+  ['1m / 40"', '1.7m / 1yd 3/4'],
+  'a trailing bare fraction belongs to the amount in front of it');
+assertEqual(S.fabricAmounts('2.3 m / 2.5yd 2.4 m / 3 yd'),
+  ['2.3 m / 2.5yd', '2.4 m / 3 yd'], 'glued units still pair up');
+assertEqual(S.fabricAmounts('1.4 m 1.5 m 1.6 m 1.7 m'),
+  ['1.4 m', '1.5 m', '1.6 m', '1.7 m'], 'plain metric amounts are not merged');
+assertEqual(S.fabricAmounts('2 yds 2 1/4 yds 2 1/2 yds'),
+  ['2 yds', '2 1/4 yds', '2 1/2 yds'], 'imperial amounts with fractions stay separate');
+
+// =======================================================================
+group('Grouped fabric columns - parseFabric');
+// =======================================================================
+
+var fabGrouped = S.parseFabric(
+  'Fabric Requirements:\n' +
+  'MAIN - m / yd 36-38-40 42-44\n' +
+  'Fabric 150cm / 60" 1.9 m / 2 1/4 yd 2.1 m / 2 1/2 yd\n' +
+  'Fabric 115cm / 45" 2.3 m / 2.5yd 2.4 m / 3 yd\n',
+  EU
+);
+assertEqual(fabGrouped.length, 2, 'two grouped fabric rows');
+assertEqual(fabGrouped[0].amounts.length, 5, 'the 150 cm row has one amount per size');
+assertEqual(fabGrouped[0].grouped, true, 'and is flagged as grouped');
+assertEqual(fabGrouped[0].amounts[0], '1.9 m / 2 1/4 yd', 'size 36 takes the first group');
+assertEqual(fabGrouped[0].amounts[2], '1.9 m / 2 1/4 yd', 'size 40 is still in the first group');
+assertEqual(fabGrouped[0].amounts[3], '2.1 m / 2 1/2 yd', 'size 42 takes the second group');
+assertEqual(fabGrouped[1].amounts[4], '2.4 m / 3 yd', 'the 115 cm row groups the same way');
+assertEqual(fabGrouped[0].rawAmounts.length, 2, 'the two printed amounts are kept raw');
+
+var fabAllSizes = S.parseFabric(
+  'MAIN - m / yd Wide Fabric: 150cm / 60" Narrow Fabric: 115cm / 45"\n' +
+  'All sizes 1m / 40" 1.7m / 1yd 3/4\n',
+  ['8', '10', '12', '14', '16']
+);
+assertEqual(fabAllSizes.length, 2, 'two widths on one line still give two rows');
+assertEqual(fabAllSizes[0].amounts.length, 5, '"All sizes" maps its amount onto every size');
+assertEqual(fabAllSizes[0].amounts[0], '1m / 40"', 'the wide fabric takes the first amount');
+assertEqual(fabAllSizes[0].amounts[4], '1m / 40"', 'and every size gets it');
+assertEqual(fabAllSizes[1].amounts[2], '1.7m / 1yd 3/4', 'the narrow fabric takes the second amount');
+assertEqual(fabAllSizes[0].grouped, true, 'an "All sizes" row is flagged grouped');
+assertEqual(fabAllSizes[0].name, 'MAIN Wide Fabric', 'the "- m / yd" units legend is stripped out of the name');
+assertEqual(fabAllSizes[1].name, 'Narrow Fabric', 'the second row is named from the text in front of its width');
+
+var fabExact = S.parseFabric('115 cm wide 1.4 m 1.5 m 1.6 m 1.7 m', ['XS', 'S', 'M', 'L']);
+assertEqual(fabExact[0].grouped, false, 'one amount per size is not grouped');
+
+var fabNoLabels = S.parseFabric('115 cm wide 1.4 m 1.5 m', null);
+assertEqual(fabNoLabels[0].amounts, ['1.4 m', '1.5 m'], 'with no size labels the amounts are kept as printed');
+assertEqual(fabNoLabels[0].grouped, false, 'and nothing is grouped');
+
+assertEqual(S.fabricForSize(fabGrouped, EU, '40'),
+  [{ name: 'Fabric', width: '150cm / 60"', amount: '1.9 m / 2 1/4 yd' },
+   { name: 'Fabric', width: '115cm / 45"', amount: '2.3 m / 2.5yd' }],
+  'fabricForSize picks the chosen size out of every row');
+assertEqual(S.fabricForSize(fabGrouped, EU, '99'), [], 'a size that is not in the run gives nothing');
+assertEqual(S.fabricForSize(fabGrouped, EU, ''), [], 'no chosen size gives nothing');
+assertEqual(S.fabricForSize(fabOdd, ['XS', 'S', 'M', 'L'], 'M'), [],
+  'a row whose amounts did not line up is skipped');
+
+var groupedDoc = S.parse(
+  'SIZE CHART\n36 38 40 42 44\nBust 84 88 92 96 100\n' +
+  'FABRIC REQUIREMENTS\n' +
+  'MAIN - m / yd 36-38-40 42-44\n' +
+  'Fabric 150cm / 60" 1.9 m / 2 1/4 yd 2.1 m / 2 1/2 yd\n' +
+  'CONSTRUCTION\n1. Sew the shoulder seams.\n'
+);
+assertEqual(groupedDoc.fabric.length, 1, 'the grouped row survives a full parse');
+assertEqual(groupedDoc.fabric[0].amounts.length, 5, 'with one amount per size');
+var groupedData = S.toCraftData(groupedDoc);
+assertEqual(groupedData.fabric[0].amounts.length, 5, 'and through toCraftData');
+assertEqual(groupedData.fabric[0].grouped, true, 'the grouped flag survives normalize');
+assertEqual(groupedData.fabric[0].amounts[0], '1.9 m / 2 1/4 yd',
+  'a 16-character dual-unit amount is not truncated by normalize');
+
+// =======================================================================
+group('Paragraph candidates - the no-numbered-steps recovery path');
+// =======================================================================
+
+var PROSE_BOOKLET =
+  'THE HARLOW SHIRT\n' +
+  'A relaxed camp-collar shirt with a back yoke and a curved hem.\n' +
+  '\n' +
+  'SIZE CHART\n' +
+  'XS S M L XL\n' +
+  'Bust 82 87 92 97 102\n' +
+  'Waist 64 69 74 79 84\n' +
+  '\n' +
+  'NOTIONS\n' +
+  '7 x 11 mm buttons\n' +
+  'Lightweight fusible interfacing\n' +
+  '\n' +
+  'GLOSSARY\n' +
+  'Understitch: stitch the seam allowance to the facing close to the seam line so the facing rolls to the inside.\n' +
+  'Edgestitch: a line of stitching worked 1 to 2 mm from a finished edge or a seam line.\n' +
+  'Grade: trim the layers of a seam allowance to different widths so the seam lies flat.\n' +
+  '\n' +
+  'CUTTING\n' +
+  'Front — cut 2 main\n' +
+  'Back — cut 1 on the fold, main\n' +
+  '\n' +
+  'CONSTRUCTION\n' +
+  'Staystitch the neckline of the front and back pieces a scant 6 mm from the raw edge, working from the shoulder down to the centre in both directions.\n' +
+  '\n' +
+  'With right sides together, pin the outer yoke to the back and stitch across. Press the seam allowance up towards the yoke.\n' +
+  '\n' +
+  'Sew the fronts to the yoke at the shoulders, matching the notches, and press the seam allowances towards the yoke.\n' +
+  '\n' +
+  'Fold the front band along the pressed lines, enclosing the raw edge, and edgestitch it down from the hem to the neckline.\n' +
+  '\n' +
+  'Pin the undercollar to the collar, right sides together, and stitch around the three outer edges. Trim the corners and turn it out.\n' +
+  '\n' +
+  'Attach the collar to the neckline, sandwiching the raw edge between the collar stand pieces, and understitch the inner stand.\n' +
+  '\n' +
+  'Stitch the side seams from the underarm to the curved hem, then finish the raw edges together and press them towards the back.\n' +
+  '\n' +
+  'Press a double 6 mm hem all the way around the curved bottom edge and topstitch it in place, easing the curve as you go.\n';
+
+var cands = S.paragraphCandidates(PROSE_BOOKLET);
+assertTrue(cands.length >= 10, 'the booklet yields a candidate for every paragraph, got ' + cands.length);
+
+var onCands = cands.filter(function (c) { return c.defaultOn; });
+var construction = cands.filter(function (c) { return c.section === 'Construction'; });
+assertEqual(construction.length, 8, 'all eight construction paragraphs are candidates');
+var constructionOn = construction.filter(function (c) { return c.defaultOn; });
+assertTrue(constructionOn.length / construction.length >= 0.8,
+  'at least 80% of the real steps default on (' + constructionOn.length + ' of ' + construction.length + ')');
+
+var glossary = cands.filter(function (c) { return c.section === 'Glossary'; });
+assertTrue(glossary.length >= 1, 'the glossary paragraphs are candidates too, got ' + glossary.length);
+assertEqual(glossary.filter(function (c) { return c.defaultOn; }).length, 0,
+  'but not one glossary entry defaults on');
+assertEqual(cands.filter(function (c) { return c.section === 'Size Chart' && c.defaultOn; }).length, 0,
+  'no size-chart line defaults on');
+assertEqual(cands.filter(function (c) { return c.section === 'Cutting' && c.defaultOn; }).length, 0,
+  'no cutting line defaults on');
+assertEqual(cands.filter(function (c) { return c.section === 'Notions' && c.defaultOn; }).length, 0,
+  'no notion defaults on');
+assertTrue(onCands.length >= 7 && onCands.length <= 9,
+  'about eight paragraphs are ticked to start with, got ' + onCands.length);
+assertEqual(cands.filter(function (c) { return c.section === 'The Harlow Shirt' && c.defaultOn; }).length, 0,
+  'the cover blurb does not default on when the booklet names its construction section');
+
+assertTrue(construction[0].score >= 1, 'a construction paragraph scores at least 1');
+var rescuedGlossary = S.paragraphCandidates('CONSTRUCTION\n' + glossary[0].text)[0];
+assertTrue(glossary[0].score < rescuedGlossary.score,
+  'sitting in the glossary costs a paragraph three points');
+assertEqual(rescuedGlossary.defaultOn, true, 'the very same words under CONSTRUCTION do default on');
+assertTrue(S.paragraphCandidates('Sew the front to the back.')[0].score >=
+  S.paragraphCandidates('The pattern was printed on A4 paper.')[0].score,
+  'an imperative opener outscores flat prose');
+
+var proseParsed = S.parse(PROSE_BOOKLET, { fallbackSteps: true });
+assertEqual(proseParsed.steps.length, 8, 'fallbackSteps imports exactly the eight construction paragraphs');
+assertEqual(proseParsed.steps[0].marker, 'none', 'they are marker "none" steps');
+assertEqual(proseParsed.steps[0].section, 'Construction', 'with the section from the nearest heading');
+assertTrue(hasWarning(proseParsed.warnings, 'No numbered steps found'), 'and a warning still explains the fallback');
+assertEqual(S.parse(PROSE_BOOKLET).steps.length, 0, 'without the opt-in there are still no steps');
+
+var shortPara = S.paragraphCandidates('CONSTRUCTION\nSew it.\n');
+assertEqual(shortPara[0].defaultOn, false, 'a paragraph under 40 characters does not default on');
+
+// Paragraphs run across a page break unless the sentence really ended.
+var crossPageCands = S.paragraphCandidates(
+  'CONSTRUCTION\n' +
+  'With right sides together, pin the front to the back at the shoulder seams and\n' +
+  '\n' +
+  '=== PAGE 7 ===\n' +
+  'stitch them at 1.5 cm, then press the seam allowances towards the back.\n'
+);
+assertEqual(crossPageCands.length, 1, 'a sentence split by a page break stays one paragraph');
+assertTrue(crossPageCands[0].text.indexOf('stitch them at 1.5 cm') > 0, 'and the rest of it joined on');
+
+var pageBreakCands = S.paragraphCandidates(
+  'CONSTRUCTION\n' +
+  'Press the shoulder seams towards the back of the garment.\n' +
+  '\n' +
+  '=== PAGE 8 ===\n' +
+  'Stitch the side seams from the underarm down to the hem.\n'
+);
+assertEqual(pageBreakCands.length, 2, 'a finished sentence before a page break does end the paragraph');
+assertEqual(pageBreakCands[1].page, 8, 'and the second paragraph carries the new page number');
+
+assertEqual(S.paragraphCandidates('').length, 0, 'empty text gives no candidates');
+assertEqual(S.paragraphCandidates(null).length, 0, 'null gives no candidates');
+
+// =======================================================================
+group('Sentences (the picker\'s split control)');
+// =======================================================================
+
+assertEqual(S.sentences('Sew the seam. Press it open. Trim the corners.'),
+  ['Sew the seam.', 'Press it open.', 'Trim the corners.'], 'three sentences');
+assertEqual(S.sentences('Stitch at 1.5 cm from the edge. Press.'),
+  ['Stitch at 1.5 cm from the edge.', 'Press.'], 'a decimal measurement is not a sentence end');
+assertEqual(S.sentences('No full stop here'), ['No full stop here'], 'a fragment is one sentence');
+assertEqual(S.sentences(''), [], 'empty text gives no sentences');
+assertEqual(S.sentences('Really? Yes! Good.'), ['Really?', 'Yes!', 'Good.'], 'question and exclamation marks split too');
+
 // =======================================================================
 
 (function () {

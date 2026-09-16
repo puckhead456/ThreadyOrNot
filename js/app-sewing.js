@@ -59,6 +59,10 @@
     return n + ' ' + word + (n === 1 ? '' : 's');
   }
 
+  function newId(prefix) {
+    return (prefix || 'sw') + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  }
+
   /* ---- page images (research §A.3.4) ---------------------------------- *
    * Opt-in, lazy, capped, and stored in IndexedDB under the shell's
    * `p:<projectId>:` prefix so deleting the project takes them with it.   */
@@ -590,6 +594,23 @@
       });
       body.appendChild(add);
 
+      // A project imported with "Just keep the text" has the whole booklet but
+      // no steps: this turns it into steps whenever the sewist is ready.
+      if (d.sourceText) {
+        var fromText = C.button('btn ghost block', '＋ Steps from the pattern text');
+        C.on(fromText, 'click', function () {
+          addStepsFromText(projectId, d.sourceText, function () {
+            renderSteps(body);
+            paint(Store.project(projectId));
+          });
+        });
+        body.appendChild(fromText);
+        body.appendChild(C.el('p', 'field-hint',
+          d.steps.length
+            ? 'Adds more steps from the pattern text you imported.'
+            : 'The pattern text was kept — pick the paragraphs that are steps.'));
+      }
+
       if (stepsDone(d)) {
         var clearDone = C.button('linkish block', 'Clear all done');
         C.on(clearDone, 'click', function () {
@@ -665,6 +686,221 @@
       return;
     }
     go();
+  }
+
+  // --- Steps from paragraphs (the "no numbered steps" recovery path) ------
+
+  /**
+   * The picker behind "Make steps from paragraphs". Every paragraph in the
+   * booklet is offered; the construction prose starts ticked and the glossary,
+   * size chart and cutting list start unticked (Sewing.paragraphCandidates
+   * scores them). ↑ joins a paragraph to the one above, ✂ splits one at a
+   * sentence boundary — the two things a run of prose always needs.
+   *
+   * opts = { text, title?, onUse(stepRows) }
+   */
+  function openParagraphPicker(opts) {
+    var text = String((opts && opts.text) || '');
+    var items = [];
+    try {
+      items = (S.paragraphCandidates(text) || []).map(function (c) {
+        return {
+          text: String(c.text || ''), page: c.page, section: String(c.section || ''),
+          on: !!c.defaultOn, open: false, splitAt: -1
+        };
+      });
+    } catch (e) { items = []; }
+    items = items.filter(function (it) { return it.text; });
+    if (!items.length) {
+      C.toast('There are no paragraphs here to turn into steps', { ms: 3600 });
+      return;
+    }
+
+    var listNode = null, headNode = null, useBtn = null;
+
+    var api = C.openSheet({
+      title: opts.title || 'Make steps from paragraphs',
+      cls: 'sheet-sewing sheet-para',
+      build: function (body) {
+        body.appendChild(C.el('p', 'muted',
+          'Tick the paragraphs that are really steps. ↑ joins one to the paragraph above, ✂ splits a long one.'));
+
+        var bar = C.el('div', 'sw-para-bar');
+        headNode = C.el('span', 'sw-para-count', '');
+        var all = C.button('linkish', 'Tick all');
+        var none = C.button('linkish', 'Untick all');
+        C.on(all, 'click', function () { setAll(true); });
+        C.on(none, 'click', function () { setAll(false); });
+        bar.appendChild(headNode);
+        bar.appendChild(all);
+        bar.appendChild(none);
+        body.appendChild(bar);
+
+        listNode = C.el('div', 'list sw-para-list');
+        body.appendChild(listNode);
+        renderList();
+      },
+      footer: [
+        { text: 'Cancel', cls: 'btn ghost', onClick: function (a) { a.close(); } },
+        {
+          text: 'Use these', cls: 'btn primary',
+          onClick: function (a) {
+            var picked = [];
+            items.forEach(function (it) { if (it.on) picked.push(it); });
+            if (!picked.length) { C.toast('Tick at least one paragraph first'); return; }
+            a.close();
+            if (opts.onUse) {
+              opts.onUse(picked.map(function (it, i) {
+                return { n: i + 1, section: it.section, text: it.text, page: it.page, marker: 'none' };
+              }));
+            }
+          }
+        }
+      ]
+    });
+
+    // The footer's last button is "Use these".
+    window.setTimeout(function () {
+      var foot = api.dialog.querySelector('.sheet-foot');
+      if (foot) useBtn = foot.lastChild;
+      syncHead();
+    }, 0);
+
+    function chosen() {
+      var n = 0;
+      items.forEach(function (it) { if (it.on) n++; });
+      return n;
+    }
+    function syncHead() {
+      var n = chosen();
+      if (headNode) headNode.textContent = n + ' of ' + items.length + ' chosen';
+      if (useBtn) useBtn.disabled = !n;
+    }
+    function setAll(on) {
+      items.forEach(function (it) { it.on = on; });
+      C.fb('tap');
+      renderList();
+    }
+    function renderList() {
+      if (!listNode) return;
+      C.clear(listNode);
+      for (var i = 0; i < items.length; i++) listNode.appendChild(paraRow(i));
+      syncHead();
+    }
+
+    function paraRow(index) {
+      var it = items[index];
+      var row = C.el('div', 'list-item sw-para-row' + (it.on ? ' on' : ''));
+
+      var check = C.button('check' + (it.on ? ' on' : ''), '✓',
+        (it.on ? 'Do not use paragraph ' : 'Use paragraph ') + (index + 1));
+      check.setAttribute('role', 'checkbox');
+      check.setAttribute('aria-checked', it.on ? 'true' : 'false');
+      C.on(check, 'click', function () {
+        it.on = !it.on;
+        C.fb('tap');
+        renderList();
+      });
+      row.appendChild(check);
+
+      var main = C.el('div', 'sw-para-main');
+      var meta = [];
+      if (it.section) meta.push(it.section);
+      if (typeof it.page === 'number') meta.push('p' + it.page);
+      if (meta.length) main.appendChild(C.el('div', 'sw-para-meta', meta.join(' · ')));
+
+      var body = C.button('sw-para-text' + (it.open ? ' open' : ''), null,
+        it.open ? 'Show less of paragraph ' + (index + 1) : 'Show all of paragraph ' + (index + 1));
+      body.appendChild(C.el('span', null, it.open ? it.text : clip(it.text, 130)));
+      C.on(body, 'click', function () { it.open = !it.open; renderList(); });
+      main.appendChild(body);
+
+      var tools = C.el('div', 'sw-para-tools');
+      var up = C.button('sw-para-tool', '↑', 'Join this paragraph to the one above');
+      up.disabled = index === 0;
+      C.on(up, 'click', function () { mergeUp(index); });
+      tools.appendChild(up);
+
+      var sentences = S.sentences(it.text) || [];
+      var cut = C.button('sw-para-tool' + (it.splitAt >= 0 ? ' on' : ''), '✂', 'Split this paragraph');
+      cut.disabled = sentences.length < 2;
+      C.on(cut, 'click', function () {
+        it.splitAt = it.splitAt >= 0 ? -1 : 0;
+        renderList();
+      });
+      tools.appendChild(cut);
+      main.appendChild(tools);
+
+      if (it.splitAt >= 0 && sentences.length > 1) {
+        var picker = C.el('div', 'sw-para-split');
+        picker.appendChild(C.el('div', 'sw-para-split-head', 'Start a new step at…'));
+        for (var s = 1; s < sentences.length; s++) {
+          picker.appendChild(splitChoice(index, sentences, s));
+        }
+        main.appendChild(picker);
+      }
+
+      row.appendChild(main);
+      return row;
+    }
+
+    function splitChoice(index, sentences, at) {
+      var b = C.button('sw-para-split-opt', null, 'Split before: ' + clip(sentences[at], 60));
+      b.appendChild(C.el('span', 'sw-para-split-mark', '⤵'));
+      b.appendChild(C.el('span', 'sw-para-split-text', clip(sentences[at], 70)));
+      C.on(b, 'click', function () { splitAt(index, sentences, at); });
+      return b;
+    }
+
+    function mergeUp(index) {
+      if (index < 1) return;
+      var prev = items[index - 1], it = items[index];
+      prev.text = (prev.text + ' ' + it.text).replace(/\s+/g, ' ').replace(/^\s+|\s+$/g, '');
+      prev.on = prev.on || it.on;
+      prev.splitAt = -1;
+      items.splice(index, 1);
+      C.fb('tap');
+      renderList();
+      C.announce('Joined — ' + items.length + ' paragraphs left');
+    }
+
+    function splitAt(index, sentences, at) {
+      var it = items[index];
+      var head = sentences.slice(0, at).join(' ').replace(/^\s+|\s+$/g, '');
+      var tail = sentences.slice(at).join(' ').replace(/^\s+|\s+$/g, '');
+      if (!head || !tail) return;
+      it.text = head;
+      it.splitAt = -1;
+      items.splice(index + 1, 0, {
+        text: tail, page: it.page, section: it.section, on: it.on, open: false, splitAt: -1
+      });
+      C.fb('tap');
+      renderList();
+      C.announce('Split — ' + items.length + ' paragraphs');
+    }
+  }
+
+  /** Append picked paragraphs to a project's step list. */
+  function addStepsFromText(projectId, text, after) {
+    openParagraphPicker({
+      text: text,
+      onUse: function (rows) {
+        var added = 0;
+        edit(projectId, function (dd) {
+          for (var i = 0; i < rows.length; i++) {
+            if (dd.steps.length >= 400) break;
+            dd.steps.push({
+              id: newId('s'), n: dd.steps.length + 1, section: rows[i].section,
+              text: rows[i].text, done: false, page: rows[i].page, imageRef: null
+            });
+            added++;
+          }
+        });
+        C.toast('Added ' + plural(added, 'step') + ' from the pattern text');
+        C.fb('done');
+        if (after) after();
+      }
+    });
   }
 
   // --- Cutting -----------------------------------------------------------
@@ -1145,6 +1381,27 @@
         if (!d.fabric.length) {
           b.appendChild(C.el('p', 'muted', 'No fabric requirements were found in the pattern.'));
         } else {
+          // The one thing a sewist standing in the fabric shop wants: how much
+          // of each bolt width, for THEIR size. Booklets print this per size
+          // GROUP ('36-38-40  42-44'), so the parser expands it per size first.
+          var mine = [];
+          try { mine = S.fabricForSize(d.fabric, d.size.sizeLabels, d.size.chosen) || []; } catch (e) { mine = []; }
+          if (mine.length) {
+            var card0 = C.el('div', 'card sw-fabric-mine');
+            card0.appendChild(C.el('div', 'sw-fabric-mine-head', 'What you need'));
+            mine.forEach(function (r) {
+              var line0 = C.el('div', 'sw-fabric-mine-row');
+              line0.appendChild(C.el('span', 'sw-fabric-mine-size', 'Size ' + d.size.chosen));
+              line0.appendChild(C.el('span', 'sw-fabric-mine-amount', r.amount));
+              line0.appendChild(C.el('span', 'sw-fabric-mine-at',
+                'at ' + (r.width || 'this width') + (r.name && !/^fabric$/i.test(r.name) ? ' · ' + r.name : '')));
+              card0.appendChild(line0);
+            });
+            b.appendChild(card0);
+          } else if (!d.size.chosen && d.size.sizeLabels.length) {
+            b.appendChild(C.el('p', 'field-hint', 'Choose your size in the Size sheet to see just your yardage.'));
+          }
+
           d.fabric.forEach(function (row) {
             var card = C.el('div', 'card sw-fabric-row');
             card.appendChild(C.el('div', 'sw-fabric-name', row.name + (row.width ? ' · ' + row.width : '')));
@@ -1156,6 +1413,10 @@
                 line.appendChild(chip);
               }
               card.appendChild(line);
+              if (row.grouped) {
+                card.appendChild(C.el('div', 'field-hint sw-fabric-grouped',
+                  'The pattern prints this per size group — sizes that share a figure show the same amount.'));
+              }
             } else if (row.line) {
               card.appendChild(C.el('div', 'muted sw-fabric-raw', row.line));
             }
@@ -1788,6 +2049,7 @@
     // from a second, separate PdfText.open only when the box is ticked.
     var pdfFile = null;
     var pdfPages = 0;
+    var lastColumns = 0;
     var wantPages = false;
     var pageHandle = null;
     var cancelled = false;
@@ -1874,8 +2136,9 @@
         C.toast('That looks like scanned images — there is no text to read', { ms: 4200 });
         return;
       }
+      lastColumns = columns || 0;
       try {
-        parsed = S.parse(text, { columns: columns || 0 });
+        parsed = S.parse(text, { columns: lastColumns });
       } catch (e) {
         parsed = null;
         C.toast('That pattern could not be read');
@@ -1913,6 +2176,16 @@
         row.appendChild(text);
         row.appendChild(expand);
         list.appendChild(row);
+
+        // Research risk #1: a minority of booklets number nothing. Offer the
+        // recovery path right where the disappointing count is.
+        if (g.id === 'steps' && parsed.sourceText) {
+          var act = C.el('div', 'list-item sw-para-action');
+          var make = C.button('linkish', n ? 'Not right? Make steps from paragraphs' : '＋ Make steps from paragraphs');
+          C.on(make, 'click', makeStepsFromParagraphs);
+          act.appendChild(make);
+          list.appendChild(act);
+        }
       });
       // Opt-in page images. Only for a PDF, only when IndexedDB is there, and
       // off by default — this is the one line in the app that can eat 10 MB.
@@ -1945,6 +2218,28 @@
         parsed.warnings.forEach(function (w) { warn.appendChild(C.el('div', 'sw-warning', '⚠ ' + w)); });
         reviewWrap.appendChild(warn);
       }
+    }
+
+    /** Re-run the parse with the paragraph fallback on, then let the user prune it. */
+    function makeStepsFromParagraphs() {
+      if (!parsed || !parsed.sourceText) return;
+      var src = parsed.sourceText;
+      var refreshed = null;
+      try { refreshed = S.parse(src, { fallbackSteps: true, columns: lastColumns }); } catch (e) { refreshed = null; }
+      openParagraphPicker({
+        text: src,
+        onUse: function (steps) {
+          if (refreshed) parsed = refreshed;
+          parsed.steps = steps;
+          parsed.warnings = (parsed.warnings || []).filter(function (w) {
+            return String(w).indexOf('No numbered steps found') < 0;
+          });
+          checks.steps = true;
+          renderReview();
+          syncFooter();
+          C.toast(plural(steps.length, 'step') + ' ready — press Import to keep them', { ms: 3800 });
+        }
+      });
     }
 
     function openGroupPreview(g) {

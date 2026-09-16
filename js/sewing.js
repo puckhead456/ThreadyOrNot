@@ -508,7 +508,7 @@
     }
     if (!steps.length) {
       if (opts.fallback) {
-        steps = paragraphSteps(lines, kinds, heads);
+        steps = paragraphSteps(lines, info);
         if (steps.length) warns.push('No numbered steps found — each paragraph was made into a step.');
       }
       if (!steps.length) {
@@ -521,27 +521,149 @@
     return steps;
   }
 
-  /** Opt-in fallback for booklets with no numbered steps: one step per paragraph run. */
-  function paragraphSteps(lines, kinds, heads) {
+  // --- Paragraph candidates (the "no numbered steps" recovery path) --------
+  //
+  // Research risk #1: a minority of respected publishers number nothing. The
+  // fallback is therefore a first-class path, not an error: every paragraph in
+  // the booklet becomes a *candidate*, scored so the construction prose starts
+  // ticked and the reference matter starts unticked, and the user fixes the rest
+  // in the picker.
+
+  var IMPERATIVE_OPENER_RE = /^(?:sew|pin|press|stitch|fold|cut|trim|attach|turn|topstitch|baste|gather|hem|insert|finish|clip|understitch|edgestitch)\b/i;
+  var IMPERATIVE_ANY_RE = /\b(?:sew|sewn|sewing|pin|pinned|press|pressed|pressing|stitch|stitched|stitching|fold|folded|cut|trim|attach|turn|topstitch|baste|basting|gather|gathered|hem|hemming|insert|finish|clip|understitch|edgestitch|overlock|serge|staystitch|slipstitch|tack|notch)\b/i;
+  var SEW_VOCAB_RE = /\b(?:right sides? together|wrong sides? together|rst|seam allowances?|raw edges?|seams?|hemline|notch(?:es)?|interfacing|facings?|selvages?|selvedges?|darts?|zips?|zippers?|neckline|armholes?|waistband|lining|bodice|cuffs?|collar|pocket)\b/i;
+  var PROSE_ABOUT_RE = /\b(?:we recommend|please note|you may wish|this pattern|our patterns|all rights reserved|copyright|print at home|test square|thank you|share your|before you start|tag us|hashtag)\b/i;
+  var EXCLUDED_KIND = { cut: 1, notions: 1, fabric: 1, size: 1, skip: 1 };
+
+  /**
+   * How much a paragraph looks like a construction step. Imperative openers
+   * ('Sew', 'Press', 'Understitch'…) are the strongest signal there is.
+   */
+  function paragraphScore(text, excluded) {
+    var t = str(text, '');
+    var s = 0;
+    if (IMPERATIVE_OPENER_RE.test(t)) s += 3;
+    if (IMPERATIVE_ANY_RE.test(t)) s += 1;
+    if (SEW_VOCAB_RE.test(t)) s += 1;
+    if (t.length >= 100) s += 1;
+    if (PROSE_ABOUT_RE.test(t)) s -= 2;
+    if (t.split(/\s+/).length < 6) s -= 2;
+    var digits = t.replace(/[^\d]/g, '').length;
+    if (digits > t.length * 0.25) s -= 2;
+    if (excluded) s -= 3;
+    return s;
+  }
+
+  var PARA_CAP = 300;
+
+  /**
+   * Sewing.paragraphCandidates(text, blocks) -> [{ text, page, section, score, defaultOn }]
+   *
+   * A paragraph ends at a blank line, at a heading, and at a `=== PAGE n ===`
+   * marker ONLY when the text before it finished a sentence and the text after
+   * it starts a new one — otherwise a step that runs over a page break would be
+   * torn in half. PdfText prints a blank line immediately before every page
+   * marker, so that blank defers to the page rule instead of flushing.
+   */
+  function paragraphCandidates(input, blocks) {
+    var lines = toLines(input);
+    var info = blocks || classify(lines);
+    var kinds = info.kinds, heads = info.heads;
     var out = [];
-    var buf = '', section = '', page = null;
+    var buf = '', section = '', page = null, excluded = false, inSteps = false;
+    // When the booklet names its construction section, nothing outside it starts
+    // ticked: the cover blurb and the "before you start" page are not steps.
+    var hasSteps = info.hasSteps || hasStepsBlock(kinds);
+
+    function nextContent(from) {
+      for (var j = from; j < lines.length; j++) {
+        if (lines[j].pageMark) return lines[j];
+        if (lines[j].text) return lines[j];
+      }
+      return null;
+    }
     function flush() {
       var t = buf.replace(/^\s+|\s+$/g, '');
       buf = '';
-      if (t.length < 40) return;
-      if (out.length >= 200) return;
-      out.push({ n: out.length + 1, section: section, text: t.slice(0, STEP_TEXT_CAP), page: page, marker: 'none' });
+      if (!t || out.length >= PARA_CAP) return;
+      var sc = paragraphScore(t, excluded);
+      out.push({
+        text: t.slice(0, STEP_TEXT_CAP),
+        page: page,
+        section: section,
+        score: sc,
+        defaultOn: !excluded && t.length >= 40 && sc >= 1 && (!hasSteps || inSteps)
+      });
     }
+
     for (var i = 0; i < lines.length; i++) {
       var ln = lines[i], t = ln.text, k = kinds[i];
-      if (ln.pageMark || !t) { flush(); continue; }
-      if (k === 'head') { flush(); section = prettyHeading(heads[i]); continue; }
-      if (k === 'cut' || k === 'notions' || k === 'fabric' || k === 'size' || k === 'skip') { flush(); continue; }
-      if (!buf) page = typeof ln.page === 'number' ? ln.page : null;
+      if (ln.pageMark) {
+        var nxt = nextContent(i + 1);
+        var prevEnds = /[.!?:]["')]?$/.test(buf.replace(/\s+$/, ''));
+        var nextStarts = !!(nxt && nxt.text && /^[A-Z0-9"'(]/.test(nxt.text));
+        if (!buf || (prevEnds && nextStarts)) flush();
+        continue;
+      }
+      if (!t) {
+        var after = nextContent(i + 1);
+        if (after && after.pageMark) continue;   // the blank PdfText prints before a page marker
+        flush();
+        continue;
+      }
+      if (k === 'head') {
+        // Every heading names a section here, including 'Glossary' and 'Notions':
+        // the picker shows those paragraphs (unticked) so the user can rescue one.
+        flush();
+        section = prettyHeading(heads[i]);
+        continue;
+      }
+      if (!buf) {
+        page = typeof ln.page === 'number' ? ln.page : null;
+        excluded = !!EXCLUDED_KIND[k];
+        inSteps = (k === 'steps');
+      }
       buf = buf ? (buf + ' ' + t) : t;
+      if (buf.length > STEP_TEXT_CAP * 2) flush();
     }
     flush();
     return out;
+  }
+
+  /** Opt-in fallback for booklets with no numbered steps: the default-on paragraphs. */
+  function paragraphSteps(lines, blocks) {
+    var cands = paragraphCandidates(lines, blocks);
+    var out = [];
+    for (var i = 0; i < cands.length && out.length < 200; i++) {
+      if (!cands[i].defaultOn) continue;
+      out.push({
+        n: out.length + 1, section: cands[i].section, text: cands[i].text,
+        page: cands[i].page, marker: 'none'
+      });
+    }
+    return out;
+  }
+
+  var SENT_DOT = '';
+
+  /**
+   * Sewing.sentences(text) -> string[]  (lossless: join(' ') gives the text back)
+   * Used by the picker's "split here" control. '1.5 cm' is one sentence.
+   */
+  function sentencesOf(text) {
+    var t = str(text, '').replace(/^\s+|\s+$/g, '');
+    if (!t) return [];
+    var flat = t.replace(/(\d)\.(\d)/g, '$1' + SENT_DOT + '$2');
+    var re = /[^.!?]*[.!?]+["')\]]*(?:\s+|$)|[^.!?]+$/g;
+    var out = [];
+    var m;
+    while ((m = re.exec(flat))) {
+      if (!m[0]) { re.lastIndex++; continue; }
+      var one = m[0].split(SENT_DOT).join('.').replace(/^\s+|\s+$/g, '');
+      if (one) out.push(one);
+      if (out.length >= 200) break;
+    }
+    return out.length ? out : [t];
   }
 
   // =====================================================================
@@ -1285,12 +1407,133 @@
     return out;
   }
 
+  /**
+   * Every yardage on a line, with dual-unit pairs kept together.
+   * '1.9 m / 2 1/4 yd' is ONE amount printed twice, not two amounts; and a
+   * trailing bare fraction belongs to the amount in front of it ('1yd 3/4').
+   */
+  function amountsIn(text) {
+    var s = str(text, '');
+    var raw = [];
+    var m;
+    AMOUNT_RE.lastIndex = 0;
+    while ((m = AMOUNT_RE.exec(s))) {
+      raw.push({ at: m.index, end: m.index + m[0].length });
+      if (raw.length >= 80) break;
+    }
+    AMOUNT_RE.lastIndex = 0;
+    var out = [];
+    for (var i = 0; i < raw.length && out.length < 40; i++) {
+      var start = raw[i].at, end = raw[i].end;
+      while (i + 1 < raw.length && /^\s*\/\s*$/.test(s.slice(end, raw[i + 1].at))) {
+        i++;
+        end = raw[i].end;
+      }
+      var frac = /^\s+\d{1,2}\s*\/\s*\d{1,2}(?![\d\/])/.exec(s.slice(end));
+      if (frac && !(i + 1 < raw.length && raw[i + 1].at < end + frac[0].length)) end += frac[0].length;
+      out.push({
+        text: s.slice(start, end).replace(/\s+/g, ' ').replace(/^\s+|\s+$/g, ''),
+        at: start, end: end
+      });
+    }
+    return out;
+  }
+
+  function amountTexts(text) {
+    return amountsIn(text).map(function (a) { return a.text; });
+  }
+
+  var GROUP_TOKEN_RE = /^[A-Za-z0-9]{1,5}(?:[-\/][A-Za-z0-9]{1,5})*$/;
+  var ALL_SIZES_RE = /\ball\s+sizes\b/i;
+  var UNIT_WORD = '(?:m|cm|yds?|yards?|metres?|meters?)';
+  var UNIT_LEGEND_RE = new RegExp('\\s*[-—]\\s*' + UNIT_WORD + '\\s*\\/\\s*' + UNIT_WORD + '\\b\\s*', 'i');
+
+  /**
+   * Sewing.sizeGroups(text, labels) -> number[][] | null
+   *
+   * Real booklets print yardage per size GROUP and head the columns with the
+   * groups: 'Sizes 36-40  42-44', '36-38-40 42-44', '8/10/12 14/16',
+   * 'XS-M  L-XL'. A two-part token is a RANGE across the size run; three or more
+   * parts is an explicit list. The groups have to tile the size labels exactly
+   * once each, in order — that is what tells a real header from a stray number.
+   */
+  function sizeGroups(text, labels) {
+    if (!isArr(labels) || labels.length < 2) return null;
+    var index = {};
+    for (var i = 0; i < labels.length; i++) index[str(labels[i], '').toLowerCase()] = i;
+    var toks = str(text, '').split(/\s+/);
+    var multi = [], all = [];
+    for (var k = 0; k < toks.length; k++) {
+      var tok = toks[k].replace(/[(),:;.]/g, '');
+      if (!tok || !GROUP_TOKEN_RE.test(tok)) continue;
+      var parts = tok.split(/[-\/]/);
+      var idx = [], ok = true;
+      for (var pi = 0; pi < parts.length; pi++) {
+        var at = index[parts[pi].toLowerCase()];
+        if (at === undefined) { ok = false; break; }
+        idx.push(at);
+      }
+      if (!ok) continue;
+      var members;
+      if (parts.length === 2) {
+        var lo = Math.min(idx[0], idx[1]), hi = Math.max(idx[0], idx[1]);
+        members = [];
+        for (var q = lo; q <= hi; q++) members.push(q);
+      } else {
+        members = idx.slice();
+      }
+      all.push(members);
+      if (parts.length > 1) multi.push(members);
+    }
+    return tiles(multi, labels.length) || tiles(all, labels.length);
+  }
+
+  /** The groups cover 0..n-1 exactly once each, in order. */
+  function tiles(groups, n) {
+    if (!groups.length) return null;
+    var flat = [];
+    for (var g = 0; g < groups.length; g++) flat = flat.concat(groups[g]);
+    if (flat.length !== n) return null;
+    for (var i = 0; i < n; i++) if (flat[i] !== i) return null;
+    return groups;
+  }
+
+  /** Map a row's amounts onto one per size. */
+  function expandAmounts(mine, labels, groups, allSizes) {
+    var n = isArr(labels) ? labels.length : 0;
+    if (!n) return { amounts: mine.slice(), grouped: false };
+    if (!mine.length) return { amounts: [], grouped: false };
+    if (mine.length === n) return { amounts: mine.slice(), grouped: false };
+    var out, i;
+    if (groups && groups.length === mine.length) {
+      out = new Array(n);
+      for (var g = 0; g < groups.length; g++) {
+        for (var j = 0; j < groups[g].length; j++) out[groups[g][j]] = mine[g];
+      }
+      for (i = 0; i < n; i++) if (out[i] === undefined) return { amounts: [], grouped: false };
+      return { amounts: out, grouped: true };
+    }
+    if (allSizes && mine.length === 1) {
+      out = [];
+      for (i = 0; i < n; i++) out.push(mine[0]);
+      return { amounts: out, grouped: true };
+    }
+    // No header, but the columns divide the sizes evenly: split evenly.
+    if (mine.length < n && n % mine.length === 0) {
+      var per = n / mine.length;
+      out = [];
+      for (i = 0; i < n; i++) out.push(mine[Math.floor(i / per)]);
+      return { amounts: out, grouped: true };
+    }
+    return { amounts: [], grouped: false };
+  }
+
   /** parseFabric(lines, labels) -> FabricRow[] */
   function parseFabric(input, labels) {
     var lines = toLines(input);
-    var wanted = isArr(labels) ? labels.length : 0;
     var out = [];
     var lastName = '';
+    var groups = null;
     for (var i = 0; i < lines.length; i++) {
       var ln = lines[i];
       var t = ln.text;
@@ -1301,33 +1544,45 @@
       var found = widthsIn(t);
 
       if (!found.length) {
+        var hdr = sizeGroups(t, labels);
+        if (hdr) groups = hdr;
         if (t.length <= 40 && /[a-z]/i.test(t) && !AMOUNT_RE.test(t)) lastName = t.replace(/[:\-—]\s*$/, '');
         AMOUNT_RE.lastIndex = 0;
         continue;
       }
 
       var tail = t.slice(found[found.length - 1].end);
-      var amounts = matchAll(tail, AMOUNT_RE);
+      var amounts = amountTexts(tail);
       var consumedNext = false;
       if (!amounts.length && i + 1 < lines.length && lines[i + 1].text) {
         // The amounts often sit on the line under the widths.
-        var nxt = matchAll(lines[i + 1].text, AMOUNT_RE);
+        var nxt = amountTexts(lines[i + 1].text);
         if (nxt.length && !widthsIn(lines[i + 1].text).length) { amounts = nxt; consumedNext = true; }
       }
+      var fullLine = consumedNext ? (t + ' ' + lines[i + 1].text) : t;
+      var allSizes = ALL_SIZES_RE.test(fullLine);
       var raw = amounts.slice();
-      if (found.length > 1 || (wanted && amounts.length !== wanted)) amounts = [];
+      // Several widths on one line share the amounts between them, in order.
+      var per = found.length > 1
+        ? (amounts.length % found.length === 0 ? amounts.length / found.length : 0)
+        : amounts.length;
 
       for (var f = 0; f < found.length; f++) {
         var from = f === 0 ? 0 : found[f - 1].end;
         var name = t.slice(from, found[f].at).replace(/[:\-—,]\s*$/, '').replace(/^[\s\-—:,\/]+/, '').replace(/^\s+|\s+$/g, '');
+        // 'MAIN - m / yd Wide Fabric' prints the units legend inside the name.
+        name = name.replace(UNIT_LEGEND_RE, ' ').replace(/\s{2,}/g, ' ').replace(/^\s+|\s+$/g, '');
         if (!name) name = lastName || 'Fabric';
+        var mine = found.length > 1 ? amounts.slice(f * per, (f + 1) * per) : amounts;
+        var mapped = expandAmounts(mine, labels, groups, allSizes);
         out.push({
           name: name,
           width: found[f].text,
-          amounts: amounts,
+          amounts: mapped.amounts,
+          grouped: mapped.grouped,
           rawAmounts: raw,
           note: '',
-          line: consumedNext ? (t + ' ' + lines[i + 1].text) : t
+          line: fullLine
         });
         if (out.length >= 40) break;
       }
@@ -1337,15 +1592,25 @@
     return out;
   }
 
-  function matchAll(s, re) {
+  /**
+   * Sewing.fabricForSize(rows, labels, chosen) -> [{ name, width, amount }]
+   * The one line a sewist standing in the fabric shop actually wants.
+   */
+  function fabricForSize(rows, labels, chosen) {
     var out = [];
-    re.lastIndex = 0;
-    var m;
-    while ((m = re.exec(str(s, '')))) {
-      out.push(m[0].replace(/\s+/g, ' ').replace(/^\s+|\s+$/g, ''));
-      if (out.length > 40) break;
+    if (!isArr(rows) || !isArr(labels) || !str(chosen, '')) return out;
+    var at = -1;
+    for (var i = 0; i < labels.length; i++) {
+      if (str(labels[i], '') === str(chosen, '')) { at = i; break; }
     }
-    re.lastIndex = 0;
+    if (at < 0) return out;
+    for (var r = 0; r < rows.length; r++) {
+      var row = rows[r];
+      if (!isObj(row) || !isArr(row.amounts) || row.amounts.length !== labels.length) continue;
+      var amount = str(row.amounts[at], '');
+      if (!amount) continue;
+      out.push({ name: str(row.name, 'Fabric') || 'Fabric', width: str(row.width, ''), amount: amount });
+    }
     return out;
   }
 
@@ -1791,8 +2056,9 @@
           d.fabric.push({
             name: fname || 'Fabric',
             width: str(f.width, '').slice(0, 24),
-            amounts: normStrArray(f.amounts, 32, 16),
-            rawAmounts: normStrArray(f.rawAmounts, 32, 16),
+            amounts: normStrArray(f.amounts, 32, 24),
+            grouped: !!f.grouped,
+            rawAmounts: normStrArray(f.rawAmounts, 32, 24),
             note: str(f.note, '').slice(0, 200),
             line: fline
           });
@@ -2195,6 +2461,11 @@
     parseSizes: parseSizes,
     parseFabric: parseFabric,
     parseUnits: parseUnits,
+    paragraphCandidates: paragraphCandidates,
+    sentences: sentencesOf,
+    sizeGroups: sizeGroups,
+    fabricAmounts: amountTexts,
+    fabricForSize: fabricForSize,
     parseMeta: parseMeta,
     detectKind: detectKind,
     toCraftData: toCraftData,

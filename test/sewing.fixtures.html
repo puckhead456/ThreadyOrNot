@@ -127,13 +127,36 @@ var FIXTURES = [
       t(p.warnings.join(' ').indexOf('No cutting list found') >= 0,
         'and the warning says to add the pieces yourself');
 
-      // 6. fabric
+      // 6. fabric — 'All sizes 1m / 40"' has to reach every size
       t(p.fabric.length >= 1, 'at least one fabric row, got ' + p.fabric.length);
       t(has(p.fabric, function (f) { return /150\s*cm/i.test(f.width); }), 'the 150 cm bolt width is kept');
       t(has(p.fabric, function (f) { return (f.rawAmounts || []).length >= 2 || (f.amounts || []).length >= 2; }),
         'the raw amounts are kept');
+      t(every(p.fabric, function (f) { return f.amounts.length === 5; }),
+        'every fabric row has one amount per size');
+      t(every(p.fabric, function (f) { return f.grouped === true; }), 'and both rows are flagged grouped');
+      t(every(p.fabric, function (f) {
+        return f.amounts.join('|') === [f.amounts[0], f.amounts[0], f.amounts[0], f.amounts[0], f.amounts[0]].join('|');
+      }), '"All sizes" gives every size the same amount');
+      var wide = window.Sewing.fabricForSize(p.fabric, p.sizes.labels, '12');
+      t(wide.length === 2, 'the chosen size resolves to both bolt widths, got ' + wide.length);
+      t(wide.length === 2 && /^1\s*m\s*\/\s*40"$/.test(wide[0].amount),
+        'size 12 at 150 cm is the 1 m / 40" figure');
+      t(wide.length === 2 && /1\.7\s*m/.test(wide[1].amount), 'and 1.7 m at 115 cm');
+      t(every(p.fabric, function (f) { return !/\bm\s*\/\s*yd\b/i.test(f.name); }),
+        'the units legend was stripped out of the fabric name');
 
-      // 7. meta
+      // 7. paragraph candidates — the recovery path never offers the glossary
+      var cands = window.Sewing.paragraphCandidates(p.sourceText);
+      t(cands.length >= 10, 'the booklet yields paragraph candidates, got ' + cands.length);
+      t(every(cands.filter(function (c) { return c.defaultOn; }), function (c) { return c.page === null || c.page >= 5; }),
+        'every ticked candidate sits on a sewing-instructions page');
+      t(every(cands.filter(function (c) { return c.defaultOn; }), function (c) { return c.text.length >= 40; }),
+        'no ticked candidate is a stray fragment');
+      t(every(cands, function (c) { return typeof c.score === 'number' && typeof c.defaultOn === 'boolean'; }),
+        'every candidate is scored');
+
+      // 8. meta
       t(/pencil skirt/i.test(p.meta.patternName), 'the pattern name comes from the title line');
       t(p.meta.designer === '' || /^[A-Z]/.test(p.meta.designer), 'the designer is blank or a proper name');
       t(!/^(and|the|to|of|in|for|by)$/i.test(p.meta.designer), 'the designer is never a stop word');
@@ -186,6 +209,34 @@ var FIXTURES = [
       t(has(p.fabric, function (f) { return /115\s*cm/i.test(f.width); }), 'the 115 cm bolt width is kept');
       t(every(p.fabric, function (f) { return (f.rawAmounts || []).length >= 1 || (f.amounts || []).length >= 1; }),
         'both rows keep their raw amounts');
+
+      // grouped columns: '36-38-40  42-44' printed above two yardage columns
+      t(every(p.fabric, function (f) { return f.amounts.length === 5; }),
+        'every fabric row expands to one amount per size');
+      t(every(p.fabric, function (f) { return f.grouped === true; }), 'and every row is flagged grouped');
+      t(every(p.fabric, function (f) { return (f.rawAmounts || []).length === 2; }),
+        'the two printed columns are kept raw');
+      t(every(p.fabric, function (f) { return every(f.amounts, function (a) { return /\d.*\/.*\d/.test(a); }); }),
+        'each amount keeps both its metric and its imperial figure');
+      var at40 = window.Sewing.fabricForSize(p.fabric, p.sizes.labels, '40');
+      t(at40.length === 2, 'size 40 resolves to both bolt widths, got ' + at40.length);
+      var wide40 = null;
+      at40.forEach(function (r) { if (/150\s*cm/i.test(r.width)) wide40 = r; });
+      t(!!wide40, 'one of them is the 150 cm bolt');
+      t(!!wide40 && /^1\.9\s*m\s*\/\s*2\s*1\/4\s*yd$/.test(wide40.amount),
+        'size 40 at 150 cm is 1.9 m / 2 1/4 yd, got ' + (wide40 ? wide40.amount : 'nothing'));
+      // the first group is 36-38-40, so those three sizes share one figure
+      t(every(p.fabric, function (f) { return f.amounts[0] === f.amounts[1] && f.amounts[1] === f.amounts[2]; }),
+        'sizes 36, 38 and 40 share the first column');
+      t(every(p.fabric, function (f) { return f.amounts[3] === f.amounts[4]; }),
+        'sizes 42 and 44 share the second column');
+
+      var scands = window.Sewing.paragraphCandidates(p.sourceText);
+      t(scands.length >= 10, 'the booklet yields paragraph candidates, got ' + scands.length);
+      t(every(scands.filter(function (c) { return c.defaultOn; }), function (c) { return c.page === null || c.page >= 5; }),
+        'every ticked candidate sits on a sewing-instructions page');
+      t(every(scands.filter(function (c) { return c.defaultOn; }), function (c) { return c.text.length >= 40; }),
+        'no ticked candidate is a stray fragment');
 
       t(/sundress|dress/i.test(p.meta.patternName), 'the pattern name comes from the title line');
       t(p.meta.designer === '' || /^[A-Z]/.test(p.meta.designer), 'the designer is blank or a proper name');
