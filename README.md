@@ -1,5 +1,7 @@
 # Thready or Not
 
+> Proprietary. Copyright (c) 2026 puckhead456. All rights reserved. See LICENSE.
+
 Thready or Not is a row & stitch counter for crochet projects — track rows/rounds,
 stitches, repeats, pattern text, assembly checklists, and progress across
 multiple parts of a project. It's an installable web app (PWA) that works
