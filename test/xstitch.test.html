@@ -1,0 +1,1108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>XStitch.js tests</title>
+<style>
+  body { font: 14px/1.4 Menlo, Consolas, monospace; background:#111; color:#eee; padding:16px; }
+  .pass { color:#7bd389; }
+  .fail { color:#ff6b6b; background:#2a1414; }
+  .note { color:#c9a227; }
+  .group { margin-top:18px; font-weight:bold; color:#9cf; border-bottom:1px solid #333; padding-bottom:4px; }
+  #summary { margin-top:20px; font-size:18px; font-weight:bold; }
+  #summary.ok { color:#7bd389; }
+  #summary.bad { color:#ff6b6b; }
+  pre { white-space:pre-wrap; }
+</style>
+</head>
+<body>
+<h1>XStitch.js test suite</h1>
+<div id="out"></div>
+<div id="summary"></div>
+
+<script src="../js/xstitch.js"></script>
+<script>
+'use strict';
+
+var out = document.getElementById('out');
+var passed = 0;
+var failed = 0;
+
+function log(ok, label, detail) {
+  if (ok) { passed++; } else { failed++; }
+  var line = (ok ? 'PASS' : 'FAIL') + ' - ' + label + (detail ? '  (' + detail + ')' : '');
+  var div = document.createElement('div');
+  div.className = ok ? 'pass' : 'fail';
+  div.textContent = line;
+  out.appendChild(div);
+  if (ok) { console.log(line); } else { console.error(line); }
+}
+
+function note(text) {
+  var div = document.createElement('div');
+  div.className = 'note';
+  div.textContent = '     ' + text;
+  out.appendChild(div);
+  console.log(text);
+}
+
+function group(title) {
+  var div = document.createElement('div');
+  div.className = 'group';
+  div.textContent = title;
+  out.appendChild(div);
+  console.log('== ' + title + ' ==');
+}
+
+function deepEqual(a, b) {
+  if (a === b) return true;
+  if (a === null || b === null) return a === b;
+  if (typeof a !== typeof b) return false;
+  if (typeof a !== 'object') return a === b;
+  var ak = Object.keys(a), bk = Object.keys(b);
+  if (ak.length !== bk.length) return false;
+  for (var i = 0; i < ak.length; i++) {
+    var k = ak[i];
+    if (!deepEqual(a[k], b[k])) return false;
+  }
+  return true;
+}
+
+function assertEqual(actual, expected, label) {
+  var ok = deepEqual(actual, expected);
+  log(ok, label, ok ? '' : ('expected ' + JSON.stringify(expected) + ' got ' + JSON.stringify(actual)));
+}
+
+function assertTrue(cond, label, detail) {
+  log(!!cond, label, cond ? '' : (detail || ''));
+}
+
+function assertClose(actual, expected, tol, label) {
+  var ok = typeof actual === 'number' && isFinite(actual) && Math.abs(actual - expected) <= tol;
+  log(ok, label, ok ? '' : ('expected ' + expected + ' +/-' + tol + ' got ' + actual));
+}
+
+function assertSubset(actual, expected, label) {
+  var sub = {};
+  Object.keys(expected).forEach(function (k) { sub[k] = actual ? actual[k] : undefined; });
+  assertEqual(sub, expected, label);
+}
+
+var X = window.XStitch;
+
+/* =====================================================================
+ * 1. Module shape
+ * ===================================================================== */
+group('Module shape and standalone load');
+
+assertTrue(!!X, 'window.XStitch exists');
+assertTrue(!window.Store, 'loads standalone: no Store on the page, and nothing threw');
+var API = ['normalize', 'summary', 'hexFor', 'nearestFloss', 'rgbToLab', 'deltaE76', 'deltaE2000',
+  'assignSymbols', 'packCells', 'unpackCells', 'packBits', 'unpackBits', 'getBit', 'setBit',
+  'finishedSize', 'sizeTable', 'lengthPerStitchCm', 'skeinsFor', 'skeinRange', 'confetti',
+  'progressStats', 'parseOXS', 'toOXS', 'parseKey', 'extractGrid', 'printableHTML'];
+(function () {
+  var missing = [];
+  for (var i = 0; i < API.length; i++) if (typeof X[API[i]] !== 'function') missing.push(API[i]);
+  assertTrue(missing.length === 0, 'all ' + API.length + ' public functions are present', missing.join(','));
+})();
+assertTrue(Array.isArray(X.TEMPLATES) && X.TEMPLATES.length === 3, 'TEMPLATES is an array of 3');
+assertTrue(Array.isArray(X.SYMBOLS) && X.SYMBOLS.length >= 60, 'SYMBOLS has at least 60 glyphs');
+assertTrue(!!X.FLOSS && Array.isArray(X.FLOSS.dmc), 'FLOSS.dmc is an array');
+assertEqual(X.printableHTML({}), '', 'printableHTML is a stub returning an empty string (TODO B7)');
+
+/* =====================================================================
+ * 2. DMC table and hexFor
+ * ===================================================================== */
+group('DMC floss table (MIT, sharlagelfand/dmc)');
+
+assertEqual(X.FLOSS.dmc.length, 454, 'FLOSS.dmc has 454 colours');
+(function () {
+  var bad = 0, e;
+  for (var i = 0; i < X.FLOSS.dmc.length; i++) {
+    e = X.FLOSS.dmc[i];
+    if (typeof e.code !== 'string' || !e.code) bad++;
+    else if (typeof e.name !== 'string' || !e.name) bad++;
+    else if (!/^[0-9a-f]{6}$/.test(e.hex)) bad++;
+    else if (!(e.r >= 0 && e.r <= 255 && e.g >= 0 && e.g <= 255 && e.b >= 0 && e.b <= 255)) bad++;
+  }
+  assertEqual(bad, 0, 'every entry has code, name, 6-hex lower-case hex and r/g/b in 0..255');
+})();
+(function () {
+  var seen = {}, dupes = 0;
+  for (var i = 0; i < X.FLOSS.dmc.length; i++) {
+    if (seen[X.FLOSS.dmc[i].code]) dupes++;
+    seen[X.FLOSS.dmc[i].code] = 1;
+  }
+  assertEqual(dupes, 0, 'no duplicate DMC codes');
+})();
+(function () {
+  var e = X.flossFor('DMC', '310');
+  assertEqual([e.r, e.g, e.b], [0, 0, 0], 'r/g/b derived from the hex (310 -> 0,0,0)');
+})();
+
+assertEqual(X.hexFor('DMC', '310'), '000000', "hexFor('DMC','310') is black");
+assertEqual(X.hexFor('', '310'), '000000', 'an empty brand is treated as DMC');
+assertEqual(X.hexFor('dmc', '3799'), '424242', 'brand match is case-insensitive');
+assertEqual(X.hexFor('DMC', '0310'), '000000', 'leading zeros are tolerated');
+assertEqual(X.hexFor('DMC', ' 666 '), 'e31d42', 'surrounding whitespace is tolerated');
+assertEqual(X.hexFor('DMC', 'Blanc'), 'fcfbf8', "'Blanc' maps to White");
+assertEqual(X.hexFor('DMC', 'blanc'), 'fcfbf8', "'blanc' is case-insensitive");
+assertEqual(X.hexFor('DMC', 'White'), 'fcfbf8', "'White' is a valid code");
+assertEqual(X.hexFor('DMC', 'B5200'), 'ffffff', "'B5200' is snow white");
+assertEqual(X.hexFor('DMC', 'Snow White'), 'ffffff', "'Snow White' aliases B5200");
+assertEqual(X.hexFor('DMC', 'Ecru'), 'f0eada', "'Ecru' is a valid code");
+assertEqual(X.hexFor('DMC', '99999'), null, 'an unknown DMC code returns null');
+assertEqual(X.hexFor('Anchor', '403'), null, 'Anchor returns null in v1 (no colour data)');
+assertEqual(X.hexFor('Madeira', '2400'), null, 'Madeira returns null in v1');
+
+/* =====================================================================
+ * 3. Colour maths
+ * ===================================================================== */
+group('Colour maths: sRGB -> Lab, deltaE76, CIEDE2000');
+
+(function () {
+  var white = X.rgbToLab(255, 255, 255);
+  assertClose(white[0], 100, 0.01, 'rgbToLab white L* = 100');
+  assertClose(white[1], 0, 0.01, 'rgbToLab white a* = 0');
+  assertClose(white[2], 0, 0.01, 'rgbToLab white b* = 0');
+  var black = X.rgbToLab(0, 0, 0);
+  assertEqual([black[0], black[1], black[2]], [0, 0, 0], 'rgbToLab black is [0,0,0]');
+  var mid = X.rgbToLab(128, 128, 128);
+  assertClose(mid[0], 53.585, 0.01, 'rgbToLab 50% grey L* ~ 53.59');
+  assertEqual(X.rgbToLab([255, 0, 0]).length, 3, 'rgbToLab accepts an [r,g,b] array');
+  var viaObj = X.rgbToLab({ r: 255, g: 0, b: 0 });
+  assertClose(viaObj[0], X.rgbToLab(255, 0, 0)[0], 1e-9, 'rgbToLab accepts an {r,g,b} object');
+})();
+
+assertEqual(X.deltaE76([50, 0, 0], [50, 0, 0]), 0, 'deltaE76 of a colour with itself is 0');
+assertClose(X.deltaE76([50, 0, 0], [50, 3, 4]), 5, 1e-9, 'deltaE76 is plain Euclidean distance');
+
+/* Published CIEDE2000 test data (Sharma, Wu & Dalal). */
+assertClose(X.deltaE2000([50, 2.6772, -79.7751], [50, 0, -82.7485]), 2.0425, 0.0002, 'CIEDE2000 reference pair 1 -> 2.0425');
+assertClose(X.deltaE2000([50, 3.1571, -77.2803], [50, 0, -82.7485]), 2.8615, 0.0002, 'CIEDE2000 reference pair 2 -> 2.8615');
+assertClose(X.deltaE2000([50, -1.3802, -84.2814], [50, 0, -82.7485]), 1.0000, 0.0002, 'CIEDE2000 reference pair 4 -> 1.0000 (hue-rotation term)');
+assertClose(X.deltaE2000([50, 0, 0], [50, -1, 2]), 2.3669, 0.0002, 'CIEDE2000 reference pair 7 -> 2.3669');
+assertClose(X.deltaE2000([50, -1, 2], [50, 0, 0]), 2.3669, 0.0002, 'CIEDE2000 is symmetric (pair 8)');
+assertClose(X.deltaE2000([50, 2.4900, -0.0010], [50, -2.4900, 0.0009]), 7.1792, 0.0002, 'CIEDE2000 reference pair 9 -> 7.1792');
+assertClose(X.deltaE2000([60.2574, -34.0099, 36.2677], [60.4626, -34.1751, 39.4387]), 1.2644, 0.0002, 'CIEDE2000 reference pair 15 -> 1.2644');
+assertEqual(X.deltaE2000([50, 2, -3], [50, 2, -3]), 0, 'CIEDE2000 of a colour with itself is 0');
+
+(function () {
+  var near = X.nearestFloss([0, 0, 0], { brand: 'DMC', limit: 3 });
+  assertEqual(near.length, 3, 'nearestFloss honours limit');
+  assertEqual(near[0].code, '310', 'nearestFloss of pure black is DMC 310');
+  assertClose(near[0].de, 0, 1e-9, 'an exact match has deltaE 0');
+  assertTrue(near[0].de <= near[1].de && near[1].de <= near[2].de, 'nearestFloss results are sorted by deltaE');
+  var byHex = X.nearestFloss('#e31d42', { limit: 1 });
+  assertEqual(byHex[0].code, '666', 'nearestFloss accepts a hex string');
+  var byLab = X.nearestFloss({ lab: X.rgbToLab(66, 66, 66) }, { limit: 1 });
+  assertEqual(byLab[0].code, '3799', 'nearestFloss accepts a Lab input');
+  assertEqual(X.nearestFloss([0, 0, 0], { brand: 'Anchor' }), [], 'nearestFloss returns [] for a brand we have no data for');
+  var de76 = X.nearestFloss([120, 40, 200], { limit: 1, metric: 'de76' });
+  assertTrue(de76.length === 1 && typeof de76[0].de === 'number', 'nearestFloss supports the de76 metric');
+})();
+
+/* =====================================================================
+ * 4. Symbols
+ * ===================================================================== */
+group('Symbols');
+
+(function () {
+  var bad = [];
+  for (var i = 0; i < X.SYMBOLS.length; i++) {
+    if ('0OoIl1'.indexOf(X.SYMBOLS[i]) >= 0) bad.push(X.SYMBOLS[i]);
+  }
+  assertEqual(bad, [], 'SYMBOLS contains none of the confusable glyphs 0 O o I l 1');
+  var seen = {}, dup = 0;
+  for (var k = 0; k < X.SYMBOLS.length; k++) {
+    if (seen[X.SYMBOLS[k]]) dup++;
+    seen[X.SYMBOLS[k]] = 1;
+  }
+  assertEqual(dup, 0, 'SYMBOLS has no duplicates');
+})();
+
+function palFixture() {
+  return [
+    { i: 0, hex: '000000', stitchCount: 1200, symbol: '' },
+    { i: 1, hex: 'ffffff', stitchCount: 40, symbol: '' },
+    { i: 2, hex: 'e31d42', stitchCount: 800, symbol: '' },
+    { i: 3, hex: '424242', stitchCount: 50, symbol: '' },
+    { i: 4, hex: 'b8d2e6', stitchCount: 300, symbol: '' },
+    { i: 5, hex: '94a8c6', stitchCount: 120, symbol: '' }
+  ];
+}
+
+(function () {
+  var a = X.assignSymbols(palFixture());
+  var b = X.assignSymbols(palFixture());
+  var symsA = a.map(function (p) { return p.symbol; });
+  var symsB = b.map(function (p) { return p.symbol; });
+  assertEqual(symsA, symsB, 'assignSymbols is deterministic for a fixed palette');
+  var seen = {}, dup = 0;
+  for (var i = 0; i < symsA.length; i++) { if (seen[symsA[i]]) dup++; seen[symsA[i]] = 1; }
+  assertEqual(dup, 0, 'assignSymbols gives every colour a distinct glyph');
+  assertEqual(a[0].symbol, X.SYMBOLS[0], 'the highest stitchCount colour gets the lowest-ink glyph');
+  var allInSet = true;
+  for (var k = 0; k < symsA.length; k++) if (X.SYMBOLS.indexOf(symsA[k]) < 0) allInSet = false;
+  assertTrue(allInSet, 'all assigned glyphs come from SYMBOLS for a 6-colour palette');
+  assertTrue(X.assignSymbols([]) !== undefined, 'assignSymbols survives an empty palette');
+})();
+
+(function () {
+  /* 80 colours: more than the curated set, so the overflow pool kicks in. */
+  var big = [];
+  for (var i = 0; i < 80; i++) {
+    var v = (i * 3) % 256;
+    var hx = ('0' + v.toString(16)).slice(-2);
+    big.push({ i: i, hex: hx + hx + hx, stitchCount: 1000 - i, symbol: '' });
+  }
+  X.assignSymbols(big);
+  var seen = {}, dup = 0;
+  for (var k = 0; k < big.length; k++) { if (seen[big[k].symbol]) dup++; seen[big[k].symbol] = 1; }
+  assertEqual(dup, 0, 'an 80-colour palette still gets 80 distinct glyphs');
+})();
+
+assertEqual(X.symbolInk('000000'), 'light', 'a dark swatch takes a light glyph (L* < 50)');
+assertEqual(X.symbolInk('ffffff'), 'dark', 'a light swatch takes a dark glyph');
+
+/* =====================================================================
+ * 5. Packing
+ * ===================================================================== */
+group('Packing: RLE cells and base64 bitmaps');
+
+(function () {
+  var cells = new Int16Array([-1, -1, -1, 3, 3, 0]);
+  var packed = X.packCells(cells, 3, 2);
+  assertEqual(packed, { enc: 'rle', data: '-1x3,3x2,0x1' }, "packCells produces '<idx>x<run>' segments");
+  var back = X.unpackCells(packed);
+  assertEqual(Array.prototype.slice.call(back), [-1, -1, -1, 3, 3, 0], 'unpackCells round-trips');
+  assertTrue(back instanceof Int16Array, 'unpackCells returns an Int16Array');
+  assertEqual(Array.prototype.slice.call(X.unpackCells('2,5x2')), [2, 5, 5], 'a bare segment means a run of one');
+  assertEqual(Array.prototype.slice.call(X.unpackCells('')), [], 'an empty packing unpacks to an empty array');
+  assertEqual(Array.prototype.slice.call(X.unpackCells('nonsense')), [], 'garbage unpacks to an empty array, not a throw');
+  assertEqual(X.packCells([], 0, 0), { enc: 'rle', data: '' }, 'packing nothing gives an empty string');
+})();
+
+var bigW = 200, bigH = 250, bigN = bigW * bigH;
+var bigCells = new Int16Array(bigN);
+(function () {
+  /* deterministic pseudo-random grid over 24 colours plus empties */
+  var seed = 1234567;
+  for (var i = 0; i < bigN; i++) {
+    seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+    var v = seed % 26;
+    bigCells[i] = v >= 24 ? -1 : v;
+  }
+})();
+
+var packTime = 0, unpackTime = 0, bigPacked = null;
+(function () {
+  var t0 = performance.now();
+  bigPacked = X.packCells(bigCells, bigW, bigH);
+  packTime = performance.now() - t0;
+  var t1 = performance.now();
+  var round = X.unpackCells(bigPacked);
+  unpackTime = performance.now() - t1;
+  assertEqual(round.length, bigN, '200x250 round-trip keeps all 50,000 cells');
+  var same = true;
+  for (var i = 0; i < bigN; i++) if (round[i] !== bigCells[i]) { same = false; break; }
+  assertTrue(same, '200x250 random grid round-trips byte for byte');
+})();
+
+(function () {
+  var n = 1000;
+  var bits = new Uint8Array(n);
+  for (var i = 0; i < n; i++) bits[i] = (i % 7 === 0 || i % 13 === 0) ? 1 : 0;
+  var b64 = X.packBits(bits, n);
+  assertTrue(typeof b64 === 'string' && b64.length > 0, 'packBits returns a base64 string');
+  assertEqual(b64.length, Math.ceil(Math.ceil(n / 8) / 3) * 4, 'packBits is ceil(n/8) bytes of base64');
+  var back = X.unpackBits(b64, n);
+  var same = true;
+  for (var k = 0; k < n; k++) if (back[k] !== bits[k]) { same = false; break; }
+  assertTrue(same, 'packBits/unpackBits round-trip 1,000 bits');
+  assertEqual(X.countBits(b64, n), (function () { var c = 0; for (var j = 0; j < n; j++) c += bits[j]; return c; })(),
+    'countBits matches a manual popcount');
+  assertEqual(X.getBit(b64, 0), true, 'getBit reads bit 0');
+  assertEqual(X.getBit(b64, 1), false, 'getBit reads a clear bit');
+  assertEqual(X.getBit(b64, 7), true, 'getBit reads across into the next byte group');
+  assertEqual(X.getBit(b64, 999), bits[999] === 1, 'getBit reads the last bit');
+  assertEqual(X.getBit(b64, 5000), false, 'getBit past the end is false, not a throw');
+  assertEqual(X.getBit('', 3), false, 'getBit on an empty bitmap is false');
+})();
+
+(function () {
+  var n = 64;
+  var st = X.bitsState(X.packBits(new Uint8Array(n), n), n);
+  X.setBit(st, 5, true);
+  X.setBit(st, 63, true);
+  X.setBit(st, 5, false);
+  X.setBit(st, 9, true);
+  var b64 = X.bitsB64(st);
+  var bits = X.unpackBits(b64, n);
+  assertEqual([bits[5], bits[9], bits[63], bits[0]], [0, 1, 1, 0], 'setBit sets and clears through a bitsState');
+  assertEqual(X.countBits(b64, n), 2, 'setBit leaves exactly two bits set');
+  assertEqual(X.getBit(st, 9), true, 'getBit reads a live bitsState without re-decoding');
+})();
+
+(function () {
+  /* 50,000 progress bits, the size of a 200x250 chart */
+  var bits = new Uint8Array(bigN);
+  for (var i = 0; i < bigN; i += 3) bits[i] = 1;
+  var b64 = X.packBits(bits, bigN);
+  assertTrue(b64.length < 9000, '50,000 progress bits fit in under 9 kB of base64 (' + b64.length + ' chars)');
+  assertEqual(X.countBits(b64, bigN), Math.ceil(bigN / 3), 'countBits over 50,000 bits is right');
+})();
+
+/* =====================================================================
+ * 6. Geometry and floss maths
+ * ===================================================================== */
+group('Geometry and floss maths');
+
+(function () {
+  var s = X.finishedSize({ w: 89, h: 74, count: 14, over: 1 });
+  assertEqual(s.wIn, 6.36, '89 stitches at 14 ct is 6.36 in');
+  assertEqual(s.hIn, 5.29, '74 stitches at 14 ct is 5.29 in');
+  assertEqual(s.wCm, 16.1, '89 stitches at 14 ct is 16.1 cm');
+  assertEqual(s.fabricIn.w, 12.36, 'fabric to buy adds 6 in on the width');
+  assertEqual(s.fabricIn.h, 11.29, 'fabric to buy adds 6 in on the height');
+  assertClose(s.fabricCm.w, 31.4, 0.1, 'fabric to buy in cm');
+
+  var ev = X.finishedSize({ w: 89, h: 74, count: 28, over: 2 });
+  assertEqual([ev.wIn, ev.hIn], [6.36, 5.29], '28 ct over 2 is the same size as 14 ct aida');
+
+  var none = X.finishedSize({});
+  assertEqual([none.wIn, none.hIn], [0, 0], 'finishedSize of an unknown design is 0 x 0, not NaN');
+})();
+
+(function () {
+  var t = X.sizeTable({ w: 89, h: 74 });
+  assertEqual(t.length, 3, 'sizeTable defaults to 14/16/18 ct');
+  assertEqual(t[0], { count: 14, wIn: 6.36, hIn: 5.29 }, 'sizeTable row for 14 ct');
+  assertEqual(t[1], { count: 16, wIn: 5.56, hIn: 4.63 }, 'sizeTable row for 16 ct');
+  assertEqual(t[2], { count: 18, wIn: 4.94, hIn: 4.11 }, 'sizeTable row for 18 ct');
+  assertEqual(X.sizeTable({ w: 100, h: 100 }, [11])[0], { count: 11, wIn: 9.09, hIn: 9.09 }, 'sizeTable takes custom counts');
+})();
+
+assertEqual(X.lengthPerStitchCm(11, 1), 3.18, 'length per stitch at 11 ct is 3.18 cm');
+assertEqual(X.lengthPerStitchCm(14, 1), 2.50, 'length per stitch at 14 ct is 2.50 cm');
+assertEqual(X.lengthPerStitchCm(16, 1), 2.19, 'length per stitch at 16 ct is 2.19 cm');
+assertEqual(X.lengthPerStitchCm(18, 1), 1.94, 'length per stitch at 18 ct is 1.94 cm');
+assertEqual(X.lengthPerStitchCm(22, 1), 1.59, 'length per stitch at 22 ct is 1.59 cm');
+assertEqual(X.lengthPerStitchCm(28, 2), 2.50, 'length per stitch at 28 ct over 2 is 2.50 cm');
+
+(function () {
+  var base = { count: 14, over: 1, strands: 2 };
+  function sk(n, waste) {
+    return X.skeinsFor({ stitchCount: n, count: base.count, over: base.over, strands: base.strands, waste: waste });
+  }
+  assertEqual(sk(960, 0), 1, '960 stitches at 14 ct / 2 strands with no waste is exactly 1 skein');
+  assertEqual(sk(961, 0), 2, '961 stitches with no waste tips into a second skein');
+  assertEqual(sk(800, 0.2), 1, '800 stitches with 20% waste is exactly 1 skein');
+  assertEqual(sk(801, 0.2), 2, '801 stitches with 20% waste tips into a second skein');
+  assertEqual(sk(0, 0.2), 0, 'no stitches needs no skeins');
+  assertEqual(sk(1, 0.2), 1, 'one stitch still needs a skein');
+  assertEqual(X.skeinsFor({ stitchCount: 800, count: 14, strands: 1, waste: 0.2 }), 1,
+    'one strand goes twice as far (800 stitches is still 1 skein)');
+  assertEqual(X.skeinsFor({ stitchCount: 1601, count: 14, strands: 1, waste: 0.2 }), 2,
+    'one strand: 1,601 stitches needs 2 skeins');
+  var r = X.skeinRange({ stitchCount: 1234, count: 14, over: 1, strands: 2, waste: 0.2 });
+  assertEqual(r, { low: 1, high: 2 }, 'skeinRange for 1,234 stitches is 1-2 skeins');
+  assertTrue(r.low <= r.high, 'skeinRange low never exceeds high');
+  assertEqual(X.skeinRange({ stitchCount: 0 }), { low: 0, high: 0 }, 'skeinRange of nothing is 0-0');
+})();
+
+/* =====================================================================
+ * 7. Confetti and progress stats
+ * ===================================================================== */
+group('Confetti and progress stats');
+
+(function () {
+  /* 5 x 5. Colour 0 makes a solid 2x2 block; colours 1, 2 and 3 are single
+     isolated stitches; colour 0 also has one isolated stitch far away. */
+  var w = 5, h = 5;
+  var g = new Int16Array(w * h);
+  for (var i = 0; i < g.length; i++) g[i] = -1;
+  function set(x, y, v) { g[y * w + x] = v; }
+  set(0, 0, 0); set(1, 0, 0); set(0, 1, 0); set(1, 1, 0);   // solid block, not confetti
+  set(4, 0, 1);                                            // confetti
+  set(4, 4, 2);                                            // confetti
+  set(0, 4, 3);                                            // confetti
+  set(3, 2, 0);                                            // isolated colour 0 -> confetti
+  var chart = { w: w, h: h, cells: X.packCells(g, w, h) };
+  var c = X.confetti(chart);
+  assertEqual(c.total, 4, 'confetti finds 4 isolated stitches');
+  assertEqual(c.byColor[1], 1, 'colour 1 has 1 confetti stitch');
+  assertEqual(c.byColor[2], 1, 'colour 2 has 1 confetti stitch');
+  assertEqual(c.byColor[3], 1, 'colour 3 has 1 confetti stitch');
+  assertEqual(c.byColor[0], 1, 'the 2x2 block is not confetti, but the lone colour-0 stitch is');
+  assertEqual(c.byPage, [], 'byPage is empty until pages are known');
+  assertEqual(X.confetti(null).total, 0, 'confetti of nothing is 0');
+})();
+
+(function () {
+  var w = 4, h = 1;
+  var g = new Int16Array([0, 0, 1, -1]);
+  var bits = new Uint8Array([1, 0, 1, 0]);
+  var data = X.normalize({
+    palette: [
+      { code: '310', name: 'Black', hex: '000000' },
+      { code: '666', name: 'Red', hex: 'e31d42' }
+    ],
+    chart: { w: w, h: h, cells: X.packCells(g, w, h) },
+    progress: { mode: 'cells', done: X.packBits(bits, w * h) }
+  });
+  var st = X.progressStats(data);
+  assertEqual([st.done, st.total, st.pct], [2, 3, 67], 'cells-mode progressStats: 2 of 3, 67%');
+  assertEqual(st.byColor[0], { i: 0, done: 1, total: 2 }, 'cells-mode per-colour totals for colour 0');
+  assertEqual(st.byColor[1], { i: 1, done: 1, total: 1 }, 'cells-mode per-colour totals for colour 1');
+  assertEqual(data.progress.doneCount, 2, 'normalize caches doneCount from the bitmap');
+})();
+
+(function () {
+  var data = X.normalize({
+    palette: [
+      { code: '310', name: 'Black', hex: '000000', stitchCount: 100 },
+      { code: '666', name: 'Red', hex: 'e31d42', stitchCount: 300 }
+    ],
+    progress: { mode: 'counts', perColor: [{ i: 0, done: 100 }, { i: 1, done: 100 }] }
+  });
+  var st = X.progressStats(data);
+  assertEqual([st.done, st.total, st.pct], [200, 400, 50], 'counts-mode progressStats: 200 of 400, 50%');
+  assertEqual(st.byColor[0], { i: 0, done: 100, total: 100 }, 'counts-mode colour 0 is complete');
+  assertEqual(X.progressStats({}).pct, 0, 'progressStats of an empty project is 0%');
+})();
+
+/* =====================================================================
+ * 8. normalize, summary, TEMPLATES
+ * ===================================================================== */
+group('normalize, summary and templates');
+
+(function () {
+  var d = X.normalize(null, null);
+  assertEqual(d.v, 1, 'normalize(null) still gives v:1');
+  assertEqual(d.fabric, { count: 14, countY: 14, over: 1, kind: 'aida', color: 'White', widthIn: null, heightIn: null },
+    'default fabric is 14 ct white aida');
+  assertEqual(d.design, { w: null, h: null, title: '', designer: '', copyright: '' }, 'default design is empty');
+  assertEqual(d.strandsDefault, 2, 'default strandsDefault is 2');
+  assertEqual(d.palette, [], 'default palette is empty');
+  assertEqual(d.chart, null, 'default chart is null');
+  assertEqual(d.progress.mode, 'counts', 'with no chart the progress mode is counts');
+  assertEqual(d.source.kind, 'manual', 'default source is manual');
+  assertTrue(JSON.stringify(d).length > 0, 'normalize output is JSON-safe');
+})();
+
+(function () {
+  var junk = X.normalize({
+    v: 'nope', fabric: { count: 'x', over: 7, kind: 'velvet' },
+    design: { w: -5, h: 1e9, title: 42 },
+    strandsDefault: 99,
+    palette: 'not an array',
+    chart: 'not a chart',
+    progress: { mode: 'weird', perColor: 'no', blocks: { 'bad key': true, '3,4': true } },
+    current: { paletteIndex: 500 },
+    parking: [{ corner: 'zz' }],
+    stash: { '310': 'two' },
+    source: { kind: 'aliens', warnings: ['keep me', 7] }
+  }, null);
+  assertEqual(junk.fabric.count, 14, 'a bad fabric count falls back to 14');
+  assertEqual(junk.fabric.over, 1, 'a bad `over` falls back to 1');
+  assertEqual(junk.fabric.kind, 'aida', 'a bad fabric kind falls back to aida');
+  assertEqual(junk.design.title, '', 'a non-string title becomes an empty string');
+  assertEqual(junk.strandsDefault, 12, 'strandsDefault is clamped to 12');
+  assertEqual(junk.palette, [], 'a non-array palette becomes []');
+  assertEqual(junk.chart, null, 'an unusable chart becomes null');
+  assertEqual(junk.progress.mode, 'counts', 'an unknown progress mode falls back to counts');
+  assertEqual(junk.progress.blocks, { '3,4': true }, 'only well-formed block keys survive');
+  assertEqual(junk.current.paletteIndex, 0, 'current.paletteIndex is clamped to the palette');
+  assertEqual(junk.parking[0].corner, 'tl', 'a bad parking corner falls back to tl');
+  assertEqual(junk.stash, {}, 'a non-numeric stash value is dropped');
+  assertEqual(junk.source.kind, 'manual', 'an unknown source kind falls back to manual');
+  assertEqual(junk.source.warnings, ['keep me'], 'non-string warnings are dropped');
+})();
+
+(function () {
+  var cells = new Int16Array([0, 0, 1, -1]);
+  var d = X.normalize({ chart: { w: 2, h: 2, cells: cells } }, null);
+  assertEqual(d.chart.cells, { enc: 'rle', data: '0x2,1x1,-1x1' }, 'normalize packs a raw Int16Array chart');
+  assertEqual([d.design.w, d.design.h], [2, 2], 'normalize fills design size from the chart');
+  assertEqual(d.progress.mode, 'cells', 'a chart switches progress into cells mode');
+})();
+
+(function () {
+  var d = X.normalize({
+    palette: [{ i: 9, code: '310' }, { i: 9, code: '666' }]
+  }, null);
+  assertEqual([d.palette[0].i, d.palette[1].i], [0, 1], 'palette entries are re-indexed 0..n-1');
+  assertEqual(d.palette[0].name, 'Black', 'a missing name is filled from the DMC table');
+  assertEqual(d.palette[0].hex, '000000', 'a missing hex is filled from the DMC table');
+  assertEqual(d.palette[1].hex, 'e31d42', 'DMC 666 gets its real colour');
+})();
+
+(function () {
+  var p = {
+    craft: 'crossstitch',
+    craftData: X.normalize({
+      design: { title: 'Cottage', w: 10, h: 10 },
+      palette: [
+        { code: '310', stitchCount: 10 },
+        { code: '666', stitchCount: 10 }
+      ],
+      progress: { mode: 'counts', perColor: [{ i: 0, done: 10 }, { i: 1, done: 0 }] }
+    })
+  };
+  assertEqual(X.summary(p), 'Cottage · 1 of 2 colours · 50%', 'summary reads title, colours done and percent');
+  assertEqual(X.summary({ craftData: X.normalize({ design: { w: 89, h: 74 } }) }), '89 × 74 stitches',
+    'summary with no palette falls back to the stitch count');
+  assertEqual(X.summary({}), 'Cross-stitch project', 'summary of an empty project is a friendly default');
+  assertEqual(X.summary(null), 'Cross-stitch project', 'summary(null) never throws');
+})();
+
+(function () {
+  var ids = X.TEMPLATES.map(function (t) { return t.id; });
+  assertEqual(ids, ['xs-blank', 'xs-sampler', 'xs-kit'], 'the three built-in template ids');
+  var allCross = true, allEmoji = true, hasCrochetEmoji = false;
+  for (var i = 0; i < X.TEMPLATES.length; i++) {
+    if (X.TEMPLATES[i].craft !== 'crossstitch') allCross = false;
+    if (!X.TEMPLATES[i].emoji) allEmoji = false;
+    if (X.TEMPLATES[i].emoji === '🧶') hasCrochetEmoji = true;
+  }
+  assertTrue(allCross, "every built-in template has craft 'crossstitch'");
+  assertTrue(allEmoji, 'every built-in template has an emoji');
+  assertTrue(!hasCrochetEmoji, 'no template reuses the crochet yarn emoji');
+  assertEqual(X.TEMPLATES[0].emoji, '🧵', 'xs-blank uses the cross-stitch thread emoji');
+  assertEqual(X.TEMPLATES[1].checklist.length, 7, 'the sampler template ships a 7-step checklist');
+  assertEqual(X.TEMPLATES[2].checklist.length, 3, 'the kit template ships a 3-step checklist');
+  var allParts = true;
+  for (var k = 0; k < X.TEMPLATES.length; k++) {
+    if (!X.TEMPLATES[k].parts || X.TEMPLATES[k].parts.length !== 1) allParts = false;
+  }
+  assertTrue(allParts, 'every template still declares the single Main part the shell needs');
+})();
+
+/* =====================================================================
+ * 9. parseOXS
+ * ===================================================================== */
+group('parseOXS: a hand-written 6x6 chart');
+
+var OXS_6x6 =
+  '<?xml version="1.0" encoding="UTF-8"?>\n' +
+  '<chart>\n' +
+  '<format comments01="test fixture" />\n' +
+  '<properties software="Ursa Software" software_version="2020"\n' +
+  '  chartheight="6" chartwidth="6" charttitle="Tiny Sampler"\n' +
+  '  author="A Stitcher" copyright="(c) 2026 A Stitcher"\n' +
+  '  instructions="A six by six test chart."\n' +
+  '  stitchesperinch="16" stitchesperinch_y="16" palettecount="4" />\n' +
+  '<palette>\n' +
+  '  <palette_item index="0" number="cloth" name="cloth" color="F0EADA" printcolor="F0EADA" blendcolor="nil" comments="" strands="2" symbol="100" dashpattern="" misc1=""/>\n' +
+  '  <palette_item index="1" number="DMC 310" name="Black" color="000000" printcolor="000000" blendcolor="nil" comments="" strands="2" bsstrands="1" symbol="21" dashpattern="" misc1=""/>\n' +
+  '  <palette_item index="2" number="666" name="Red Bright" color="E31D42" printcolor="E31D42" blendcolor="nil" comments="" strands="2" bsstrands="1" symbol="22" dashpattern="" misc1=""/>\n' +
+  '  <palette_item index="3" number="Anchor 403" name="Anchor Black" color="1A1A1A" printcolor="1A1A1A" blendcolor="nil" comments="" strands="3" bsstrands="1" symbol="23" dashpattern="" misc1=""/>\n' +
+  '</palette>\n' +
+  '<fullstitches>\n' +
+  '  <stitch x="1" y="1" palindex="1"/>\n' +
+  '  <stitch x="2" y="1" palindex="1" marked="true"/>\n' +
+  '  <stitch x="6" y="1" palindex="2"/>\n' +
+  '  <stitch x="1" y="6" palindex="3"/>\n' +
+  '  <stitch x="6" y="6" palindex="2" marked="true"/>\n' +
+  '</fullstitches>\n' +
+  '<partstitches>\n' +
+  '  <partstitch x="3" y="3" palindex1="1" palindex2="2" direction="1"/>\n' +
+  '</partstitches>\n' +
+  '<backstitches>\n' +
+  '  <backstitch x1="2" x2="4.5" y1="2" y2="2" palindex="1" objecttype="backstitch" sequence="0"/>\n' +
+  '  <backstitch x1="1" x2="2" y1="5" y2="5" palindex="2" objecttype="daisy" sequence="1"/>\n' +
+  '</backstitches>\n' +
+  '<ornaments_inc_knots_and_beads>\n' +
+  '  <object x1="4" y1="4" palindex="2" objecttype="knot"/>\n' +
+  '  <object x1="5" y1="5" palindex="3" objecttype="bead"/>\n' +
+  '  <object x1="2" y1="4" palindex="1" objecttype="bugle"/>\n' +
+  '</ornaments_inc_knots_and_beads>\n' +
+  '</chart>';
+
+var oxs = X.parseOXS(OXS_6x6);
+
+assertEqual(oxs.ok, true, 'parseOXS accepts the 6x6 fixture');
+assertEqual(oxs.data.design, { w: 6, h: 6, title: 'Tiny Sampler', designer: 'A Stitcher', copyright: '(c) 2026 A Stitcher' },
+  'properties give design size, title, author and copyright');
+assertEqual(oxs.data.notesKey, 'A six by six test chart.', 'instructions become notesKey');
+assertEqual(oxs.data.fabric.count, 16, 'stitchesperinch becomes fabric.count');
+assertEqual(oxs.data.fabric.countY, 16, 'stitchesperinch_y becomes fabric.countY');
+assertEqual(oxs.data.fabric.color, '#F0EADA', 'a non-white cloth entry sets the fabric colour');
+assertEqual(oxs.data.palette.length, 3, 'the cloth palette entry is skipped');
+assertTrue(oxs.warnings.indexOf('cloth palette entry skipped') >= 0, 'skipping cloth is reported as a warning');
+assertSubset(oxs.data.palette[0], { i: 0, brand: 'DMC', code: '310', name: 'Black', hex: '000000', strands: 2, bsStrands: 1, kind: 'cross' },
+  'a "DMC 310" number splits into brand and code');
+assertSubset(oxs.data.palette[1], { i: 1, brand: '', code: '666', name: 'Red Bright', hex: 'e31d42' },
+  'a bare "666" number keeps an empty brand');
+assertSubset(oxs.data.palette[2], { i: 2, brand: 'Anchor', code: '403', name: 'Anchor Black', hex: '1a1a1a', strands: 3 },
+  'an "Anchor 403" number splits too');
+assertEqual(oxs.data.strandsDefault, 2, 'strandsDefault is the commonest strand count in the palette');
+assertTrue(!!oxs.data.palette[0].symbol && oxs.data.palette[0].symbol !== '21',
+  'the OXS symbol number is ignored and our own glyph is assigned');
+
+(function () {
+  var cells = X.unpackCells(oxs.data.chart.cells);
+  assertEqual(cells.length, 36, 'the 6x6 chart unpacks to 36 cells');
+  assertEqual(cells[0], 0, '1-based (1,1) becomes 0-based (0,0) with palette index 0');
+  assertEqual(cells[1], 0, '(2,1) is also colour 0');
+  assertEqual(cells[5], 1, '(6,1) becomes (5,0) with palette index 1');
+  assertEqual(cells[30], 2, '(1,6) becomes (0,5) with palette index 2');
+  assertEqual(cells[35], 1, '(6,6) becomes (5,5)');
+  assertEqual(cells[2], -1, 'untouched cells are -1');
+})();
+
+assertEqual(oxs.data.chart.part, [{ x: 2, y: 2, a: 0, b: 1, d: 1 }], 'part stitches remap both palette indexes and shift to 0-based');
+assertEqual(oxs.data.chart.back.length, 2, 'both backstitch rows are kept');
+assertEqual(oxs.data.chart.back[0], { x1: 1, y1: 1, x2: 3.5, y2: 1, i: 0 }, 'backstitch keeps its fractional 4.5 -> 3.5 vertex');
+assertTrue(oxs.warnings.join('|').indexOf('daisy') >= 0, 'a daisy is drawn as a plain line with a warning');
+assertEqual(oxs.data.chart.knots.length, 2, 'the knot and the bead are kept, the bugle is not');
+assertEqual(oxs.data.chart.knots[0], { x: 3, y: 3, i: 1, t: 'knot' }, 'a french knot ornament');
+assertEqual(oxs.data.chart.knots[1], { x: 4, y: 4, i: 2, t: 'bead' }, 'a bead ornament');
+assertTrue(oxs.warnings.indexOf('unknown objecttype "bugle"') >= 0, 'an unknown objecttype is dropped with a warning');
+assertEqual(oxs.data.progress.doneCount, 2, 'two marked="true" stitches seed the done bitmap');
+(function () {
+  var bits = X.unpackBits(oxs.data.progress.done, 36);
+  assertEqual([bits[0], bits[1], bits[35]], [0, 1, 1], 'the done bitmap marks exactly the marked stitches');
+})();
+assertEqual(
+  [oxs.data.palette[0].stitchCount, oxs.data.palette[1].stitchCount, oxs.data.palette[2].stitchCount],
+  [3, 3, 1],
+  'stitchCount counts cells plus part stitches at a half each');
+
+group('parseOXS: coordinates, malformed input and 0-based files');
+
+(function () {
+  var zeroBased = OXS_6x6
+    .replace('<stitch x="1" y="1"', '<stitch x="0" y="0"')
+    .replace('<stitch x="2" y="1"', '<stitch x="1" y="0"')
+    .replace('<stitch x="6" y="1"', '<stitch x="5" y="0"')
+    .replace('<stitch x="1" y="6"', '<stitch x="0" y="5"')
+    .replace('<stitch x="6" y="6"', '<stitch x="5" y="5"')
+    .replace('<partstitch x="3" y="3"', '<partstitch x="2" y="2"');
+  var z = X.parseOXS(zeroBased);
+  assertEqual(z.ok, true, '0-based files parse');
+  var cells = X.unpackCells(z.data.chart.cells);
+  assertEqual([cells[0], cells[5], cells[30], cells[35]], [0, 1, 2, 1],
+    'a 0-based file is left alone (no origin shift)');
+  assertEqual(z.data.chart.part[0].x, 2, '0-based part stitches are not shifted either');
+})();
+
+assertEqual(X.parseOXS('<chart><palette>').ok, false, 'malformed XML returns ok:false');
+assertTrue(X.parseOXS('<chart><palette>').warnings.length > 0, 'malformed XML explains itself');
+assertEqual(X.parseOXS('').ok, false, 'an empty string returns ok:false');
+assertEqual(X.parseOXS('   \n  ').ok, false, 'whitespace only returns ok:false');
+assertEqual(X.parseOXS(null).ok, false, 'parseOXS(null) returns ok:false, not a throw');
+assertEqual(X.parseOXS('<?xml version="1.0"?><notachart/>').ok, false, 'a non-chart root is rejected');
+assertTrue(X.parseOXS('<?xml version="1.0"?><notachart/>').warnings.indexOf('not an OXS chart') >= 0,
+  'a non-chart root says so');
+
+(function () {
+  var noProps = '<?xml version="1.0"?><chart><palette>' +
+    '<palette_item index="0" number="cloth" name="cloth" color="FFFFFF"/>' +
+    '<palette_item index="1" number="DMC 310" name="Black" color="ZZZZZZ"/>' +
+    '</palette><fullstitches><stitch x="0" y="0" palindex="1"/><stitch x="3" y="2" palindex="1"/>' +
+    '</fullstitches><backstitches></backstitches></chart>';
+  var r = X.parseOXS(noProps);
+  assertEqual(r.ok, true, 'a chart with no <properties> still parses');
+  assertEqual([r.data.design.w, r.data.design.h], [4, 3], 'a missing chart size is inferred from the stitches');
+  assertEqual(r.data.palette[0].hex, '000000', 'a bad colour value falls back to the DMC table');
+  assertTrue(r.warnings.length >= 2, 'both repairs are reported');
+  assertEqual(r.data.fabric.color, 'White', 'a white cloth entry leaves the fabric colour alone');
+})();
+
+/* =====================================================================
+ * 10. toOXS round-trip
+ * ===================================================================== */
+group('toOXS round-trip');
+
+(function () {
+  var xml = X.toOXS(oxs.data);
+  assertTrue(xml.indexOf('<?xml') === 0, 'toOXS starts with an XML declaration');
+  assertTrue(xml.indexOf('number="cloth"') > 0, 'toOXS writes a synthetic cloth entry at index 0');
+  assertTrue(xml.indexOf('number="DMC 310"') > 0, 'toOXS writes brand and code back into `number`');
+  assertTrue(xml.indexOf('marked="true"') > 0, 'toOXS carries the done bitmap back out as marked');
+
+  var back = X.parseOXS(xml);
+  assertEqual(back.ok, true, 'our own OXS parses back');
+  assertEqual(back.data.design, oxs.data.design, 'round-trip keeps design metadata');
+  assertEqual(back.data.fabric.count, oxs.data.fabric.count, 'round-trip keeps the fabric count');
+  assertEqual(back.data.fabric.color, oxs.data.fabric.color, 'round-trip keeps the cloth colour');
+  assertEqual(back.data.notesKey, oxs.data.notesKey, 'round-trip keeps the instructions');
+  assertEqual(
+    back.data.palette.map(function (p) { return p.brand + ':' + p.code + ':' + p.hex + ':' + p.strands; }),
+    oxs.data.palette.map(function (p) { return p.brand + ':' + p.code + ':' + p.hex + ':' + p.strands; }),
+    'round-trip keeps every palette entry');
+  assertEqual(back.data.chart.cells, oxs.data.chart.cells, 'round-trip keeps every cell');
+  assertEqual(back.data.chart.part, oxs.data.chart.part, 'round-trip keeps part stitches');
+  assertEqual(back.data.chart.back[0], oxs.data.chart.back[0], 'round-trip keeps fractional backstitch vertices');
+  assertEqual(back.data.chart.knots, oxs.data.chart.knots, 'round-trip keeps knots and beads');
+  assertEqual(back.data.progress.done, oxs.data.progress.done, 'round-trip keeps the done bitmap');
+  assertEqual(back.data.progress.doneCount, 2, 'round-trip keeps the done count');
+  assertTrue(X.toOXS(null).indexOf('<chart>') > 0, 'toOXS(null) still produces a valid empty chart');
+  assertTrue(X.toOXS({ design: { title: 'A & B <c>' } }).indexOf('A &amp; B &lt;c&gt;') > 0,
+    'toOXS escapes XML in attribute values');
+})();
+
+/* =====================================================================
+ * 11. parseKey: the five layouts
+ * ===================================================================== */
+group('parseKey: the five key layouts (B3.3 step 2)');
+
+function oneRow(text) {
+  var r = X.parseKey(text);
+  return r.entries.length === 1 ? r.entries[0] : null;
+}
+
+(function () {
+  var e = oneRow('▲  DMC 310    Black                 2    1,234');
+  assertSubset(e, { symbol: '▲', brand: 'DMC', code: '310', name: 'Black', strands: 2, stitchCount: 1234, skeins: null, kind: 'cross' },
+    'layout 1: symbol, brand, code, name, strands, stitches');
+  assertEqual(e.hex, '000000', 'layout 1: hex filled from the DMC table');
+  assertEqual(e.line, '▲  DMC 310    Black                 2    1,234', 'the raw line is kept for the "check this" UI');
+})();
+
+assertSubset(oneRow('▲  310  Black                                  2 str   1234 sts   1 skein'),
+  { symbol: '▲', code: '310', name: 'Black', strands: 2, stitchCount: 1234, skeins: 1 },
+  'layout 2: units spelled out after each number');
+
+assertSubset(oneRow('310 BLACK ................ 2 ......... 1234'),
+  { symbol: '', code: '310', name: 'BLACK', strands: 2, stitchCount: 1234 },
+  'layout 3: leader dots, no symbol glyph');
+
+assertSubset(oneRow('▲ | 310 | Black | 2 | 1234 | 1'),
+  { symbol: '▲', code: '310', name: 'Black', strands: 2, stitchCount: 1234, skeins: 1 },
+  'layout 4: pipe-delimited table row');
+
+assertSubset(oneRow('DMC 310  Black  (2 strands)  1234 stitches'),
+  { symbol: '', brand: 'DMC', code: '310', name: 'Black', strands: 2, stitchCount: 1234 },
+  'layout 5: parenthesised strands and a labelled stitch count');
+
+assertSubset(oneRow('● 310 Black 1234 2'),
+  { code: '310', name: 'Black', strands: null, stitchCount: 1234, skeins: 2 },
+  'a big number then a small one reads as stitches then skeins');
+
+assertSubset(oneRow('● 310 Black 2'),
+  { code: '310', name: 'Black', strands: 2, stitchCount: null, skeins: null },
+  'a lone small number after the name is strands');
+
+assertSubset(oneRow('● 310 Black 1234'),
+  { code: '310', name: 'Black', strands: null, stitchCount: 1234 },
+  'a lone large number after the name is a stitch count');
+
+/* =====================================================================
+ * 12. parseKey: the edge-case table
+ * ===================================================================== */
+group('parseKey: edge cases (B3.3 table)');
+
+(function () {
+  var r = X.parseKey(' 310 Black 2 1234\n� 666 Red Bright 2 400');
+  assertEqual(r.entries.length, 2, 'unreadable symbol glyphs do not stop the row parsing');
+  assertEqual([r.entries[0].symbol, r.entries[1].symbol], ['', ''], 'a PUA code point and U+FFFD both give symbol: ""');
+  assertTrue(r.warnings.indexOf('symbols unreadable') >= 0, 'unreadable symbols raise the "symbols unreadable" warning');
+})();
+
+(function () {
+  /* PdfText has already untangled a two-column key into consecutive lines. */
+  var r = X.parseKey('▲ 310 Black 2 1234\n■ 666 Red Bright 2 400\n● 3799 Pewter Gray 2 150');
+  assertEqual(r.entries.length, 3, 'a two-column key arrives already untangled: three rows');
+  assertEqual(r.entries.map(function (e) { return e.code; }), ['310', '666', '3799'], 'codes in key order');
+})();
+
+(function () {
+  var text =
+    'Symbol  DMC  Colour  Strands  Stitches\n' +
+    '▲ 310 Black 2 1200\n' +
+    '=== PAGE 3 ===\n' +
+    'Symbol  DMC  Colour  Strands  Stitches\n' +
+    '▲ 310 Black 2 1234\n' +
+    '■ 666 Red Bright 2 300';
+  var r = X.parseKey(text);
+  assertEqual(r.entries.length, 2, 'a key split over two pages merges duplicate rows');
+  assertEqual(r.entries[0].stitchCount, 1234, 'merged rows keep the larger stitch count');
+  assertEqual(r.entries[1].code, '666', 'the second colour survives the merge');
+})();
+
+assertSubset(oneRow('310 Black ......... 2 .... 1234'),
+  { code: '310', name: 'Black', strands: 2, stitchCount: 1234 },
+  'leader dots collapse to a single separator');
+assertSubset(oneRow('310 Black ····· 2 ___ 1234'),
+  { code: '310', name: 'Black', strands: 2, stitchCount: 1234 },
+  'middle dots and underscores work as leaders too');
+
+assertSubset(oneRow('◆ 809 Delft Blue 3325 2 412'),
+  { code: '809', name: 'Delft Blue 3325', strands: 2, stitchCount: 412 },
+  'a colour name containing a number keeps it; the code is the first number');
+assertSubset(oneRow('● 340 Blue Violet MD 2 618'),
+  { code: '340', name: 'Blue Violet MD', strands: 2, stitchCount: 618 },
+  'a colour name ending in an abbreviation is not truncated');
+
+assertEqual(oneRow('○ Blanc White 2 500').hex, 'fcfbf8', "'Blanc' is a valid code with a known colour");
+assertEqual(oneRow('○ Blanc White 2 500').code, 'Blanc', "'Blanc' keeps its capitalisation");
+assertEqual(oneRow('□ B5200 Snow White 2 120').code, 'B5200', "'B5200' is a valid code");
+assertEqual(oneRow('□ B5200 Snow White 2 120').hex, 'ffffff', "'B5200' resolves to snow white");
+assertEqual(oneRow('+ Ecru Ecru 2 80').hex, 'f0eada', "'Ecru' is a valid code");
+assertEqual(oneRow('★ White White 2 60').hex, 'fcfbf8', "'White' is a valid code");
+
+(function () {
+  var r = X.parseKey('Anchor Floss Key\n▲ 403 Black 2 1234\n■ 47 Carmine 2 300');
+  assertEqual(r.entries.length, 2, 'an Anchor-only chart still parses its rows');
+  assertEqual(r.entries[0].brand, 'Anchor', 'the document-level brand is applied when a row names none');
+  assertEqual(r.entries[0].hex, null, 'Anchor rows have no colour data in v1');
+  assertTrue(r.warnings.join('|').indexOf('Anchor') >= 0, 'a "no colour data" warning names the brand');
+})();
+
+(function () {
+  var r = X.parseKey('◇ 4210 Radiant Ruby 2 240');
+  assertEqual(r.entries[0].code, '4210', 'a variegated code parses normally');
+  assertEqual(r.entries[0].hex, null, 'we have no RGB for variegated floss');
+  assertTrue(r.warnings.join('|').indexOf('variegated') >= 0, 'variegated floss raises its own warning');
+})();
+
+(function () {
+  var e = oneRow('DMC 310 - 1 skein');
+  assertSubset(e, { brand: 'DMC', code: '310', name: '', strands: null, stitchCount: null, skeins: 1 },
+    'a kit-style row with only a skein count parses, with stitchCount null');
+})();
+
+(function () {
+  var r = X.parseKey('');
+  assertEqual(r.entries, [], 'an empty text gives no entries');
+  assertEqual(r.confidence, 0, 'an empty text has confidence 0');
+  assertTrue(r.warnings.length > 0, 'an empty text says why');
+  var scan = X.parseKey('=== PAGE 1 ===\n=== PAGE 2 ===\n=== PAGE 3 ===');
+  assertEqual(scan.entries, [], 'a scanned PDF (page markers only) gives no entries');
+  assertEqual(scan.confidence, 0, 'a scanned PDF has confidence 0, not an error');
+  assertEqual(X.parseKey(null).entries, [], 'parseKey(null) never throws');
+})();
+
+(function () {
+  var prose =
+    'How to stitch this design\n' +
+    'Cross stitch with 2 strands over 1 thread of aida.\n' +
+    'Use 2 strands throughout.\n' +
+    '2 strands throughout\n' +
+    'Bring the needle up at 1 and down at 2.\n' +
+    'Work each stitch in the same direction so the top legs all lie the same way.\n' +
+    '1 2 3 4 5 6 7 8 9 10\n' +
+    'Wash the finished piece in cool water and press face down.';
+  var r = X.parseKey(prose);
+  assertEqual(r.entries, [], 'an instruction page full of the word "stitch" produces no key rows');
+  assertEqual(r.confidence, 0, 'an instruction page has confidence 0');
+})();
+
+(function () {
+  var e1 = oneRow('▲ 310 + 3799 Charcoal Blend 2 88');
+  assertSubset(e1, { code: '310', blendCode: '3799', kind: 'blend', name: 'Charcoal Blend', strands: 2, stitchCount: 88 },
+    "a '310 + 3799' blend splits into code and blendCode");
+  var e2 = oneRow('▲ 310/3799 Charcoal Blend 2 88');
+  assertSubset(e2, { code: '310', blendCode: '3799', kind: 'blend' }, "a '310/3799' blend works too");
+  var e3 = oneRow('DMC 310 & 3799 Charcoal Blend 2 88');
+  assertSubset(e3, { code: '310', blendCode: '3799', kind: 'blend' }, "a 'DMC 310 & 3799' blend works too");
+})();
+
+(function () {
+  var text =
+    'Cross stitch\n' +
+    '▲ 310 Black 2 1234\n' +
+    'Backstitch\n' +
+    '■ 3799 Pewter Gray Very Dark 1 60\n' +
+    'French knots\n' +
+    '● 666 Red Bright 2 12\n' +
+    'Beads\n' +
+    '★ 3325 Baby Blue Light 1 8';
+  var r = X.parseKey(text);
+  assertEqual(r.entries.length, 4, 'section headers are not mistaken for key rows');
+  assertEqual(r.entries.map(function (e) { return e.kind; }), ['cross', 'back', 'knot', 'bead'],
+    'section headers switch the kind of every following row');
+})();
+
+(function () {
+  var text = 'Backstitch\n■ 3799 Pewter Gray 1 60\n\n\n▲ 310 Black 2 100';
+  var r = X.parseKey(text);
+  assertEqual(r.entries.map(function (e) { return e.kind; }), ['back', 'cross'],
+    'a blank run of two or more lines resets the section back to cross stitch');
+})();
+
+(function () {
+  var text = 'Half stitches\n▲ 310 Black 2 40\nPetite stitches\n■ 666 Red 2 20';
+  var r = X.parseKey(text);
+  assertEqual(r.entries.map(function (e) { return e.kind; }), ['half', 'half'],
+    '"half stitches" and "petite" both select the half kind');
+})();
+
+/* =====================================================================
+ * 13. parseKey: fabric, design, sizes, confidence
+ * ===================================================================== */
+group('parseKey: fabric, design size, finished sizes, confidence');
+
+(function () {
+  var r = X.parseKey('Fabric: 14 count White Aida');
+  assertEqual(r.fabric.count, 14, '"14 count" gives the fabric count');
+  assertEqual(r.fabric.countY, 14, 'countY mirrors count when only one is given');
+  assertEqual(r.fabric.kind, 'aida', '"Aida" gives the fabric kind');
+  assertEqual(r.fabric.color, 'White', 'the capitalised word by the count is the fabric colour');
+})();
+
+assertEqual(X.parseKey('Stitched on 16ct Antique White Aida').fabric.color, 'Antique White',
+  'a two-word fabric colour is kept');
+assertEqual(X.parseKey('28 ct Belfast linen, stitched over 2 threads').fabric.count, 28, '"28 ct" is read');
+assertEqual(X.parseKey('28 ct Belfast linen, stitched over 2 threads').fabric.kind, 'linen', '"Belfast" means linen');
+assertEqual(X.parseKey('28 ct Belfast linen, stitched over 2 threads').fabric.over, 2, '"over 2" is detected');
+assertEqual(X.parseKey('Worked on 28-count Lugana').fabric.kind, 'evenweave', '"Lugana" means evenweave');
+assertEqual(X.parseKey('No fabric mentioned here').fabric.count, null, 'no fabric line leaves count null');
+
+assertEqual(X.parseKey('Stitch count: 89W x 74H').design, { w: 89, h: 74, title: null, designer: null },
+  '"Stitch count: 89W x 74H" gives the design size');
+assertSubset(X.parseKey('89 wide x 74 high').design, { w: 89, h: 74 }, '"89 wide x 74 high" gives the design size');
+assertSubset(X.parseKey('Design area: 89 x 74').design, { w: 89, h: 74 }, '"Design area: 89 x 74" gives the design size');
+assertSubset(X.parseKey('Design name: The Cottage').design, { title: 'The Cottage' }, 'a labelled title is read');
+assertSubset(X.parseKey('Designer: Peter Bristow').design, { designer: 'Peter Bristow' }, 'a labelled designer is read');
+
+assertEqual(X.parseKey('Finished size: 6.36 x 5.29 in on 14 ct').sizes, [{ count: 14, wIn: 6.36, hIn: 5.29 }],
+  'an inches-then-count finished size row');
+assertEqual(X.parseKey('14 ct: 6.36 x 5.29 inches').sizes, [{ count: 14, wIn: 6.36, hIn: 5.29 }],
+  'a count-then-inches finished size row');
+assertEqual(X.parseKey('16.2 cm x 13.4 cm on 14 ct').sizes, [{ count: 14, wIn: 6.38, hIn: 5.28 }],
+  'a centimetre finished size row is converted to inches');
+assertEqual(X.parseKey('Nothing about size here').sizes, [], 'no size line gives an empty sizes list');
+
+assertEqual(X.parseKey('Use 2 strands for cross stitch and 1 for backstitch.').strandsDefault, 2,
+  'a strand hint near "cross stitch" sets strandsDefault');
+assertEqual(X.parseKey('nothing here', { defaultStrands: 3 }).strandsDefault, 3,
+  'opts.defaultStrands is the fallback');
+
+assertEqual(X.parseKey('Stitches used: cross stitch, backstitch, French knots').stitchesUsed,
+  ['cross stitch', 'backstitch', 'french knot'], 'a "Stitches used" line is parsed');
+assertEqual(X.parseKey('This design uses cross stitch only.').stitchesUsed, ['cross stitch'],
+  'stitchesUsed falls back to scanning the whole text');
+
+(function () {
+  var r = X.parseKey('© 2026 A Stitcher. All rights reserved.\nCopyright: do not share.');
+  assertEqual(r.copyrightLines.length, 2, 'copyright lines are collected');
+})();
+
+(function () {
+  var full =
+    'The Cottage\n' +
+    'Design name: The Cottage\n' +
+    'Stitch count: 89W x 74H\n' +
+    'Fabric: 14 count White Aida\n' +
+    'Finished size: 6.36 x 5.29 in on 14 ct\n' +
+    'Stitches used: cross stitch, backstitch\n' +
+    '\n' +
+    'Symbol  DMC  Colour  Strands  Stitches  Skeins\n' +
+    '▲ 310 Black 2 1234 1\n' +
+    '■ 666 Red Bright 2 412 1\n' +
+    '● 3799 Pewter Gray Very Dark 2 208 1\n' +
+    '★ 3325 Baby Blue Light 2 96 1\n' +
+    '\n' +
+    '© 2026 A Stitcher';
+  var r = X.parseKey(full);
+  assertEqual(r.entries.length, 4, 'the worked example finds four colours');
+  assertEqual(r.confidence, 1, 'a complete key scores confidence 1.0');
+  assertEqual(r.design.w, 89, 'the worked example reads the design width');
+  assertEqual(r.fabric.count, 14, 'the worked example reads the fabric count');
+  assertEqual(r.sizes.length, 1, 'the worked example reads one finished-size row');
+  assertEqual(r.entries[0].skeins, 1, 'the worked example reads the skeins column');
+  assertEqual(r.stitchesUsed, ['cross stitch', 'backstitch'], 'the worked example reads the stitch types');
+
+  var noMeta = X.parseKey('▲ 310 Black\n■ 666 Red\n● 3799 Pewter');
+  assertEqual(noMeta.confidence, 0.5, 'entries with symbols but no counts or metadata score 0.5');
+  var tiny = X.parseKey('▲ 310 Black 2 100');
+  assertClose(tiny.confidence, 0.2, 0.001, 'a single row scores only the stitchCount and symbol weights');
+})();
+
+/* =====================================================================
+ * 14. extractGrid stub
+ * ===================================================================== */
+group('extractGrid (beta stub)');
+
+X.extractGrid(null, 0, {}).then(function (r) {
+  assertEqual(r.ok, false, 'extractGrid resolves ok:false for now');
+  assertEqual(r.warnings, ['not implemented'], 'extractGrid says it is not implemented');
+  finish();
+});
+
+/* =====================================================================
+ * 15. Performance
+ * ===================================================================== */
+group('Performance');
+
+note('packCells 200x250 (50,000 cells): ' + packTime.toFixed(1) + ' ms');
+note('unpackCells 200x250 (50,000 cells): ' + unpackTime.toFixed(1) + ' ms');
+assertTrue(packTime < 20, 'packCells on a 200x250 random grid is under 20 ms (' + packTime.toFixed(1) + ' ms)');
+assertTrue(unpackTime < 20, 'unpackCells on a 200x250 random grid is under 20 ms (' + unpackTime.toFixed(1) + ' ms)');
+
+function bigChartXml(w, h, comment, reordered) {
+  var parts = [];
+  parts.push('<?xml version="1.0" encoding="UTF-8"?><chart>');
+  parts.push('<properties chartwidth="' + w + '" chartheight="' + h + '" charttitle="Big" stitchesperinch="18" />');
+  parts.push('<palette><palette_item index="0" number="cloth" name="cloth" color="FFFFFF"/>');
+  for (var p = 1; p <= 20; p++) {
+    parts.push('<palette_item index="' + p + '" number="DMC 310" name="C' + p + '" color="123456" strands="2"/>');
+  }
+  parts.push('</palette><fullstitches>');
+  if (comment) parts.push('<!-- a comment inside fullstitches disables the fast scanner -->');
+  for (var y = 1; y <= h; y++) {
+    for (var x = 1; x <= w; x++) {
+      /* 8x8 blocks of colour, so the RLE behaves like a real chart */
+      var pi = 1 + (((x >> 3) + (y >> 3)) % 20);
+      var mk = (x === 1 && y === 1) ? ' marked="true"' : '';
+      parts.push(reordered
+        ? '<stitch palindex="' + pi + '" y="' + y + '" x="' + x + '"' + mk + '/>'
+        : '<stitch x="' + x + '" y="' + y + '" palindex="' + pi + '"' + mk + '/>');
+    }
+  }
+  parts.push('</fullstitches><backstitches></backstitches></chart>');
+  return parts.join('');
+}
+
+(function () {
+  /* Both parseOXS paths must agree: the regex fast path (no comment) and the
+     plain DOM path (a comment inside <fullstitches> disables the fast path). */
+  var a = X.parseOXS(bigChartXml(120, 120, false, false));
+  var b = X.parseOXS(bigChartXml(120, 120, true, false));
+  var c = X.parseOXS(bigChartXml(120, 120, false, true));
+  assertTrue(a.ok && b.ok && c.ok, 'all three parseOXS paths accept a 120x120 chart');
+  assertEqual(a.data.chart.cells.data, b.data.chart.cells.data, 'the fast scanner and the DOM path produce identical cells');
+  assertEqual(c.data.chart.cells.data, b.data.chart.cells.data, 'reordered attributes fall back to the generic scan and still agree');
+  assertEqual(a.data.progress.done, b.data.progress.done, 'both paths produce the same done bitmap');
+  assertEqual(c.data.progress.done, b.data.progress.done, 'the generic scan keeps marked stitches too');
+  assertEqual(a.data.palette.map(function (p) { return p.stitchCount; }),
+    b.data.palette.map(function (p) { return p.stitchCount; }), 'both paths produce the same stitch counts');
+})();
+
+(function () {
+  /* A 500 x 700 chart: 350,000 cells, every one stitched. */
+  var xml = bigChartXml(500, 700, false, false);
+
+  var t0 = performance.now();
+  var big = X.parseOXS(xml);
+  var ms = performance.now() - t0;
+
+  var tD = performance.now();
+  new DOMParser().parseFromString(xml, 'application/xml');
+  var domMs = performance.now() - tD;
+
+  note('DOMParser alone on the same 12.7 MB of XML: ' + domMs.toFixed(0) + ' ms (this is why the fast scanner exists)');
+  note('parseOXS on a 500x700 chart (350,000 stitches, ' + (xml.length / 1048576).toFixed(1) + ' MB of XML): ' + ms.toFixed(0) + ' ms');
+  assertEqual(big.ok, true, 'a 350,000-cell chart parses');
+  assertEqual(big.data.chart.w * big.data.chart.h, 350000, 'the big chart has 350,000 cells');
+  assertEqual(big.data.progress.doneCount, 1, 'the marked stitch survives the fast path');
+  assertTrue(ms < 300, 'parseOXS on a 350,000-cell chart is under 300 ms (' + ms.toFixed(0) + ' ms)');
+})();
+
+/* =====================================================================
+ * Summary
+ * ===================================================================== */
+function finish() {
+  var el = document.getElementById('summary');
+  el.textContent = passed + ' passed, ' + failed + ' failed  (' + (passed + failed) + ' assertions)';
+  el.className = failed ? 'bad' : 'ok';
+  console.log(el.textContent);
+}
+</script>
+</body>
+</html>

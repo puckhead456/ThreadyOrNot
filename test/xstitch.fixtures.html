@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>XStitch.js fixture run (dev only)</title>
+<style>
+  body { font: 13px/1.45 Menlo, Consolas, monospace; background:#111; color:#eee; padding:16px; }
+  h1 { font-size:18px; }
+  h2 { font-size:15px; color:#9cf; margin-top:26px; border-bottom:1px solid #333; padding-bottom:4px; }
+  h3 { font-size:13px; color:#ffd479; margin:14px 0 4px; }
+  table { border-collapse:collapse; margin:4px 0 10px; width:100%; }
+  th, td { border:1px solid #333; padding:2px 6px; text-align:left; vertical-align:top; }
+  th { color:#9cf; font-weight:normal; }
+  td.k { color:#888; }
+  td.c { color:#7bd389; white-space:nowrap; }
+  td.no { color:#666; }
+  .pass { color:#7bd389; }
+  .fail { color:#ff6b6b; background:#2a1414; }
+  .skip { color:#888; }
+  .warn { color:#ffb86b; }
+  .note { color:#888; margin-bottom:10px; }
+  #summary { margin-top:20px; font-size:18px; font-weight:bold; }
+  #summary.ok { color:#7bd389; }
+  #summary.bad { color:#ff6b6b; }
+</style>
+</head>
+<body>
+<h1>XStitch.js fixture run
+  <span class="note">(dev only - loads copyrighted charts from ../tmp-pdf at runtime; nothing here is committed)</span></h1>
+<p class="note">
+  Put extracted chart text in <code>tmp-pdf/xs-&lt;name&gt;.txt</code> and OXS exports in
+  <code>tmp-pdf/xs-&lt;name&gt;.oxs</code>. <code>tmp-pdf/</code> is gitignored; never commit a
+  purchased or downloaded chart. Missing fixtures are reported and skipped, so this page stays
+  green on a clean checkout.
+</p>
+<div id="out">Looking for fixtures...</div>
+<div id="summary"></div>
+
+<script src="../js/xstitch.js"></script>
+<script>
+'use strict';
+
+var X = window.XStitch;
+var out = document.getElementById('out');
+var passed = 0, failed = 0, skipped = 0;
+
+function el(tag, cls, text) {
+  var e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+function h(tag, text, cls) { out.appendChild(el(tag, cls, text)); }
+
+function log(ok, label, detail) {
+  if (ok) passed++; else failed++;
+  var line = (ok ? 'PASS' : 'FAIL') + ' - ' + label + (detail ? '  (' + detail + ')' : '');
+  out.appendChild(el('div', ok ? 'pass' : 'fail', line));
+  if (ok) console.log(line); else console.error(line);
+}
+function skip(label) {
+  skipped++;
+  out.appendChild(el('div', 'skip', 'SKIP - ' + label + ' (fixture not present)'));
+  console.log('SKIP - ' + label);
+}
+function info(text) { out.appendChild(el('div', 'note', '      ' + text)); }
+function warn(text) { out.appendChild(el('div', 'warn', '      ' + text)); }
+
+function table(rows, headers) {
+  var t = el('table');
+  if (headers) {
+    var tr = el('tr');
+    for (var i = 0; i < headers.length; i++) tr.appendChild(el('th', null, headers[i]));
+    t.appendChild(tr);
+  }
+  for (var r = 0; r < rows.length; r++) {
+    var row = el('tr');
+    for (var c = 0; c < rows[r].length; c++) {
+      var v = rows[r][c];
+      row.appendChild(el('td', v === null || v === undefined || v === '' ? 'no' : null,
+        v === null || v === undefined || v === '' ? '-' : String(v)));
+    }
+    t.appendChild(row);
+  }
+  out.appendChild(t);
+}
+
+/* Fetch a fixture; resolves to null when it is not there. */
+function load(path) {
+  return fetch(path, { cache: 'no-store' }).then(function (res) {
+    if (!res.ok) return null;
+    return res.text();
+  }).catch(function () { return null; });
+}
+
+/* -------------------------------------------------------------------- *
+ * The fixture set recommended in docs/research/cross-stitch.md A4.
+ * Add rows here as you collect charts you own.
+ * -------------------------------------------------------------------- */
+var TEXT_FIXTURES = [
+  { name: 'xs-flosscross', label: 'FlossCross (self-generated; paired with an OXS ground truth)', scan: false },
+  { name: 'xs-artecy', label: 'Artecy (commercial happy path, Pattern-Keeper supported)', scan: false },
+  { name: 'xs-dmc', label: 'DMC free pattern (designer-house style)', scan: false },
+  { name: 'xs-pic2pat', label: 'Pic2Pat (second self-owned generator)', scan: false },
+  { name: 'xs-scan', label: 'Antique Pattern Library scan (no text layer)', scan: true }
+];
+var OXS_FIXTURES = [
+  { name: 'xs-flosscross', label: 'FlossCross OXS export' }
+];
+
+var keyResults = {};
+var oxsResults = {};
+
+function runTextFixture(fx) {
+  return load('../tmp-pdf/' + fx.name + '.txt').then(function (text) {
+    h('h3', fx.name + '.txt - ' + fx.label);
+    if (text === null) { skip(fx.name + '.txt'); return; }
+
+    var t0 = performance.now();
+    var r = X.parseKey(text);
+    var ms = performance.now() - t0;
+    keyResults[fx.name] = r;
+
+    info(text.length.toLocaleString() + ' chars parsed in ' + ms.toFixed(0) + ' ms');
+    table([[
+      r.entries.length,
+      r.confidence,
+      r.fabric.count === null ? '' : r.fabric.count + ' ct',
+      r.fabric.kind || '',
+      r.fabric.over === 2 ? 'over 2' : '',
+      r.fabric.color || '',
+      (r.design.w && r.design.h) ? r.design.w + ' x ' + r.design.h : '',
+      r.strandsDefault,
+      r.sizes.length,
+      r.stitchesUsed.join(', ')
+    ]], ['entries', 'confidence', 'count', 'kind', 'over', 'colour', 'design', 'strands', 'sizes', 'stitches used']);
+
+    if (r.entries.length) {
+      var rows = [];
+      for (var i = 0; i < r.entries.length && i < 40; i++) {
+        var e = r.entries[i];
+        rows.push([e.symbol, e.brand, e.code, e.name, e.strands, e.stitchCount, e.skeins, e.kind, e.hex || '']);
+      }
+      table(rows, ['sym', 'brand', 'code', 'name', 'str', 'stitches', 'skeins', 'kind', 'hex']);
+      if (r.entries.length > 40) info('... and ' + (r.entries.length - 40) + ' more');
+    }
+    for (var w = 0; w < r.warnings.length; w++) warn(r.warnings[w]);
+
+    if (fx.scan) {
+      log(r.confidence === 0, fx.name + ': a scan reports confidence 0 and no error');
+      log(r.entries.length === 0, fx.name + ': a scan finds no key rows');
+    } else {
+      log(r.entries.length >= 1, fx.name + ': at least one usable key entry', r.entries.length + ' found');
+      log(r.confidence > 0, fx.name + ': confidence above zero', 'confidence ' + r.confidence);
+    }
+  });
+}
+
+function runOxsFixture(fx) {
+  return load('../tmp-pdf/' + fx.name + '.oxs').then(function (xml) {
+    h('h3', fx.name + '.oxs - ' + fx.label);
+    if (xml === null) { skip(fx.name + '.oxs'); return; }
+
+    var t0 = performance.now();
+    var r = X.parseOXS(xml);
+    var ms = performance.now() - t0;
+    oxsResults[fx.name] = r;
+
+    info(xml.length.toLocaleString() + ' chars parsed in ' + ms.toFixed(0) + ' ms');
+    log(r.ok, fx.name + '.oxs: parses');
+    if (!r.ok) {
+      for (var q = 0; q < r.warnings.length; q++) warn(r.warnings[q]);
+      return;
+    }
+
+    var d = r.data;
+    table([[
+      d.design.title || '', d.design.w + ' x ' + d.design.h, d.palette.length,
+      d.fabric.count + ' ct', d.chart.part.length, d.chart.back.length, d.chart.knots.length,
+      d.progress.doneCount
+    ]], ['title', 'size', 'colours', 'count', 'parts', 'backstitch', 'knots/beads', 'marked']);
+
+    var rows = [];
+    for (var i = 0; i < d.palette.length && i < 40; i++) {
+      var p = d.palette[i];
+      rows.push([p.symbol, p.brand, p.code, p.name, p.strands, p.stitchCount, p.hex]);
+    }
+    table(rows, ['sym', 'brand', 'code', 'name', 'str', 'stitches', 'hex']);
+    for (var w = 0; w < r.warnings.length; w++) warn(r.warnings[w]);
+
+    /* Round-trip through our own writer. */
+    var back = X.parseOXS(X.toOXS(d));
+    log(back.ok && back.data.chart.cells.data === d.chart.cells.data,
+      fx.name + '.oxs: survives a toOXS/parseOXS round-trip unchanged');
+
+    var conf = X.confetti(d.chart);
+    info('confetti: ' + conf.total + ' isolated stitches of ' +
+      (d.design.w * d.design.h) + ' cells');
+  });
+}
+
+/* Diff parseKey against the OXS ground truth for a paired fixture. */
+function diffPair(name) {
+  var key = keyResults[name], oxs = oxsResults[name];
+  h('h3', name + ': parseKey vs parseOXS ground truth');
+  if (!key || !oxs || !oxs.ok) { skip(name + ' pair diff'); return; }
+
+  var truth = {}, truthOrder = [];
+  for (var i = 0; i < oxs.data.palette.length; i++) {
+    var p = oxs.data.palette[i];
+    truth[p.code.toLowerCase()] = p;
+    truthOrder.push(p.code);
+  }
+  var found = {};
+  for (var k = 0; k < key.entries.length; k++) {
+    found[key.entries[k].code.toLowerCase()] = key.entries[k];
+  }
+
+  var rows = [], agree = 0, countAgree = 0, countable = 0;
+  for (var t = 0; t < truthOrder.length; t++) {
+    var code = truthOrder[t];
+    var tp = truth[code.toLowerCase()];
+    var fe = found[code.toLowerCase()];
+    if (fe) agree++;
+    var sc = fe ? fe.stitchCount : null;
+    if (fe && sc !== null) {
+      countable++;
+      if (Math.abs(sc - tp.stitchCount) <= Math.max(2, tp.stitchCount * 0.02)) countAgree++;
+    }
+    rows.push([code, tp.name, tp.stitchCount, fe ? (fe.name || '') : '', sc === null ? '' : sc, fe ? 'yes' : 'MISSING']);
+  }
+  var extra = [];
+  for (var f in found) if (!truth[f]) extra.push(found[f].code);
+  table(rows, ['code', 'OXS name', 'OXS stitches', 'key name', 'key stitches', 'matched']);
+  if (extra.length) warn('codes in the key that the OXS does not have: ' + extra.join(', '));
+
+  var pct = truthOrder.length ? agree / truthOrder.length : 0;
+  info('code agreement ' + (pct * 100).toFixed(0) + '% (' + agree + ' of ' + truthOrder.length + ')');
+  log(pct >= 0.9, name + ': at least 90% of the OXS codes are found by parseKey',
+    (pct * 100).toFixed(0) + '%');
+  if (countable) {
+    info('stitch-count agreement within 2%: ' + countAgree + ' of ' + countable);
+  }
+}
+
+/* -------------------------------------------------------------------- */
+function finish() {
+  var el2 = document.getElementById('summary');
+  var bits = passed + ' passed, ' + failed + ' failed, ' + skipped + ' skipped';
+  if (!passed && !failed) bits += '  -  no fixtures present, nothing to check';
+  el2.textContent = bits;
+  el2.className = failed ? 'bad' : 'ok';
+  console.log(bits);
+}
+
+out.textContent = '';
+h('h2', 'PDF key text fixtures (parseKey)');
+var chain = Promise.resolve();
+TEXT_FIXTURES.forEach(function (fx) {
+  chain = chain.then(function () { return runTextFixture(fx); });
+});
+chain = chain.then(function () { h('h2', 'OXS fixtures (parseOXS / toOXS)'); });
+OXS_FIXTURES.forEach(function (fx) {
+  chain = chain.then(function () { return runOxsFixture(fx); });
+});
+chain
+  .then(function () {
+    h('h2', 'Paired fixture diff');
+    diffPair('xs-flosscross');
+  })
+  .catch(function (e) {
+    log(false, 'fixture run threw', String(e && e.message ? e.message : e));
+  })
+  .then(finish);
+</script>
+</body>
+</html>

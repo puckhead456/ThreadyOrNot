@@ -1,0 +1,1116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Sewing.js tests</title>
+<style>
+  body { font: 14px/1.4 Menlo, Consolas, monospace; background:#111; color:#eee; padding:16px; }
+  .pass { color:#7bd389; }
+  .fail { color:#ff6b6b; background:#2a1414; }
+  .group { margin-top:18px; font-weight:bold; color:#9cf; border-bottom:1px solid #333; padding-bottom:4px; }
+  #summary { margin-top:20px; font-size:18px; font-weight:bold; }
+  #summary.ok { color:#7bd389; }
+  #summary.bad { color:#ff6b6b; }
+  pre { white-space:pre-wrap; }
+</style>
+</head>
+<body>
+<h1>Sewing.js test suite</h1>
+<p class="pass">Synthetic snippets only. Nothing here is copied from a real pattern.</p>
+<div id="out"></div>
+<div id="summary"></div>
+
+<script src="../js/sewing.js"></script>
+<script>
+'use strict';
+
+var out = document.getElementById('out');
+var passed = 0;
+var failed = 0;
+
+function log(ok, label, detail) {
+  if (ok) { passed++; } else { failed++; }
+  var line = (ok ? 'PASS' : 'FAIL') + ' - ' + label + (detail ? '  (' + detail + ')' : '');
+  var div = document.createElement('div');
+  div.className = ok ? 'pass' : 'fail';
+  div.textContent = line;
+  out.appendChild(div);
+  if (ok) { console.log(line); } else { console.error(line); }
+}
+
+function group(title) {
+  var div = document.createElement('div');
+  div.className = 'group';
+  div.textContent = title;
+  out.appendChild(div);
+  console.log('== ' + title + ' ==');
+}
+
+function deepEqual(a, b) {
+  if (a === b) return true;
+  if (a === null || b === null) return a === b;
+  if (typeof a !== typeof b) return false;
+  if (typeof a !== 'object') return a === b;
+  var ak = Object.keys(a), bk = Object.keys(b);
+  if (ak.length !== bk.length) return false;
+  for (var i = 0; i < ak.length; i++) {
+    var k = ak[i];
+    if (!deepEqual(a[k], b[k])) return false;
+  }
+  return true;
+}
+
+function assertEqual(actual, expected, label) {
+  var ok = deepEqual(actual, expected);
+  log(ok, label, ok ? '' : ('expected ' + JSON.stringify(expected) + ' got ' + JSON.stringify(actual)));
+}
+
+function assertTrue(cond, label) { log(!!cond, label, cond ? '' : 'expected truthy'); }
+function assertFalse(cond, label) { log(!cond, label, !cond ? '' : 'expected falsy'); }
+
+/** Compare only the listed keys of an object. */
+function assertSubset(actual, expected, label) {
+  var sub = {};
+  Object.keys(expected).forEach(function (k) { sub[k] = actual ? actual[k] : undefined; });
+  assertEqual(sub, expected, label);
+}
+
+function hasWarning(list, fragment) {
+  if (!list) return false;
+  for (var i = 0; i < list.length; i++) {
+    if (String(list[i]).toLowerCase().indexOf(String(fragment).toLowerCase()) >= 0) return true;
+  }
+  return false;
+}
+
+function pieceNamed(rows, name) {
+  for (var i = 0; i < rows.length; i++) {
+    if (String(rows[i].piece).toLowerCase() === String(name).toLowerCase()) return rows[i];
+  }
+  return null;
+}
+
+function notionMatching(rows, fragment) {
+  for (var i = 0; i < rows.length; i++) {
+    if (String(rows[i].text).toLowerCase().indexOf(String(fragment).toLowerCase()) >= 0) return rows[i];
+  }
+  return null;
+}
+
+var S = window.Sewing;
+
+// =======================================================================
+group('Module shape');
+// =======================================================================
+
+assertTrue(!!S, 'window.Sewing exists');
+['parse', 'normalizeText', 'parseSteps', 'parseCutting', 'parseNotions', 'parseSeamAllowance',
+ 'parseSizes', 'toCraftData', 'normalize', 'summary', 'templates'].forEach(function (fn) {
+  assertTrue(typeof S[fn] === 'function', 'Sewing.' + fn + ' is a function');
+});
+assertTrue(Object.prototype.toString.call(S.TEMPLATES) === '[object Array]', 'Sewing.TEMPLATES is an array');
+
+// =======================================================================
+group('normalizeText - glyphs');
+// =======================================================================
+
+assertEqual(S.normalizeText('“Wren”'), '"Wren"', 'curly double quotes become straight');
+assertEqual(S.normalizeText('don’t'), "don't", 'curly apostrophe becomes straight');
+assertEqual(S.normalizeText('sew at 1/2″'), 'sew at 1/2"', 'double prime becomes an inch mark');
+assertEqual(S.normalizeText("1/2'' seam"), '1/2" seam', 'two apostrophes become one inch mark');
+assertEqual(S.normalizeText('1/2’’ seam'), '1/2" seam', 'two curly apostrophes become one inch mark');
+assertEqual(S.normalizeText('5′ tall'), "5' tall", 'prime becomes a foot mark');
+assertEqual(S.normalizeText('a b'), 'a b', 'non-breaking space becomes a plain space');
+assertEqual(S.normalizeText('a​b'), 'ab', 'zero-width space is dropped');
+assertEqual(S.normalizeText('sew   the   seam'), 'sew the seam', 'runs of spaces collapse');
+assertEqual(S.normalizeText('  padded  \n  line  '), 'padded\nline', 'lines are trimmed');
+assertEqual(S.normalizeText('a\r\nb'), 'a\nb', 'CRLF becomes LF');
+assertEqual(S.normalizeText(''), '', 'empty string stays empty');
+assertEqual(S.normalizeText(null), '', 'null is tolerated');
+assertEqual(S.normalizeText(undefined), '', 'undefined is tolerated');
+assertEqual(S.normalizeText(42), '', 'a number is tolerated');
+
+// =======================================================================
+group('normalizeText - fractions');
+// =======================================================================
+
+assertEqual(S.normalizeText('4½"'), '4 1/2"', 'fraction glued to a digit gains a space');
+assertEqual(S.normalizeText('½"'), '1/2"', 'standalone half');
+assertEqual(S.normalizeText('¼'), '1/4', 'quarter');
+assertEqual(S.normalizeText('¾'), '3/4', 'three quarters');
+assertEqual(S.normalizeText('⅛ ⅜ ⅝ ⅞'), '1/8 3/8 5/8 7/8', 'eighths');
+assertEqual(S.normalizeText('⅓ ⅔'), '1/3 2/3', 'thirds');
+assertEqual(S.normalizeText('2-1/2 yards'), '2 1/2 yards', 'hyphenated mixed number splits');
+assertEqual(S.normalizeText('2–1/2 yards'), '2 1/2 yards', 'en-dashed mixed number splits');
+assertEqual(S.normalizeText('Cut 2 - 14" x 16"'), 'Cut 2 - 14" x 16"', 'a plain hyphen between whole numbers is left alone');
+assertEqual(S.normalizeText('seam allowance is ⅝"'), 'seam allowance is 5/8"', 'five eighths in a sentence');
+assertEqual(S.normalizeText(S.normalizeText('4½" x WOF')), '4 1/2" x WOF', 'normalizeText is idempotent');
+
+// =======================================================================
+group('normalizeText - dot leaders and dashes');
+// =======================================================================
+
+assertEqual(S.normalizeText('Front Bodice . . . . . Cut 2'), 'Front Bodice — Cut 2', 'spaced dot leaders collapse');
+assertEqual(S.normalizeText('Front........Cut 2'), 'Front — Cut 2', 'solid dot leaders collapse');
+assertEqual(S.normalizeText('Front……Cut 2'), 'Front — Cut 2', 'ellipsis leaders collapse');
+assertEqual(S.normalizeText('Front····Cut 2'), 'Front — Cut 2', 'middot leaders collapse');
+assertEqual(S.normalizeText('Front---Cut 2'), 'Front — Cut 2', 'hyphen leaders collapse');
+assertEqual(S.normalizeText('Front — Cut 2'), 'Front - Cut 2', 'a lone em dash becomes a hyphen (leaders keep the em dash)');
+assertEqual(S.normalizeText('Front .... Cut 2').indexOf('—') > 0, true, 'a collapsed leader is an em dash');
+assertEqual(S.normalizeText('sizes 6–20'), 'sizes 6-20', 'a lone en dash becomes a hyphen');
+assertEqual(S.normalizeText('=== PAGE 6 ==='), '=== PAGE 6 ===', 'page markers are untouched');
+assertEqual(S.normalizeText('a\n=== PAGE 12 ===\nb'), 'a\n=== PAGE 12 ===\nb', 'page markers survive inside a document');
+
+// =======================================================================
+group('Headings');
+// =======================================================================
+
+assertTrue(S.isHeading('CONSTRUCTION'), 'ALL CAPS heading');
+assertTrue(S.isHeading('Attaching the Collar'), 'Title Case heading');
+assertTrue(S.isHeading('3. THE SLEEVES'), 'numbered ALL CAPS heading');
+assertTrue(S.isHeading('NOTIONS:'), 'a trailing colon is allowed');
+assertFalse(S.isHeading('Press the seam allowances open.'), 'a sentence is not a heading');
+assertFalse(S.isHeading('With right sides together, pin the front to the back at the shoulders'), 'a long line is not a heading');
+assertFalse(S.isHeading('sew the shoulder seams'), 'lowercase prose is not a heading');
+assertFalse(S.isHeading(''), 'empty string is not a heading');
+assertFalse(S.isHeading('Cut the front,'), 'a trailing comma rules out a heading');
+
+assertEqual(S.headingText('3. THE SLEEVES'), 'THE SLEEVES', 'headingText strips the number');
+assertEqual(S.headingText('NOTIONS:'), 'NOTIONS', 'headingText strips the colon');
+
+assertEqual(S.headingKind('CUTTING'), 'cut', 'CUTTING is a cutting heading');
+assertEqual(S.headingKind('CUTTING INSTRUCTIONS'), 'cut', 'CUTTING INSTRUCTIONS is a cutting heading');
+assertEqual(S.headingKind('Cutting List'), 'cut', 'Cutting List is a cutting heading');
+assertEqual(S.headingKind('PATTERN PIECES'), 'cut', 'PATTERN PIECES is a cutting heading');
+assertEqual(S.headingKind('From Fabric A'), 'cut', 'From Fabric A is a cutting heading');
+assertEqual(S.headingKind('NOTIONS'), 'notions', 'NOTIONS');
+assertEqual(S.headingKind('YOU WILL NEED'), 'notions', 'YOU WILL NEED');
+assertEqual(S.headingKind('HABERDASHERY'), 'notions', 'HABERDASHERY');
+assertEqual(S.headingKind('HARDWARE'), 'notions', 'HARDWARE');
+assertEqual(S.headingKind('MATERIALS'), 'notions', 'MATERIALS');
+assertEqual(S.headingKind('FABRIC REQUIREMENTS'), 'fabric', 'FABRIC REQUIREMENTS');
+assertEqual(S.headingKind('YARDAGE'), 'fabric', 'YARDAGE');
+assertEqual(S.headingKind('SIZE CHART'), 'size', 'SIZE CHART');
+assertEqual(S.headingKind('FINISHED GARMENT MEASUREMENTS'), 'size', 'FINISHED GARMENT MEASUREMENTS');
+assertEqual(S.headingKind('CONSTRUCTION'), 'steps', 'CONSTRUCTION');
+assertEqual(S.headingKind('QUILT TOP ASSEMBLY'), 'steps', 'QUILT TOP ASSEMBLY');
+assertEqual(S.headingKind('VIEW A'), 'steps', 'VIEW A');
+assertEqual(S.headingKind('FINISHING'), 'steps', 'FINISHING');
+assertEqual(S.headingKind('Buttercup'), null, 'an unknown heading has no kind');
+
+// =======================================================================
+group('Step markers');
+// =======================================================================
+
+assertSubset(S.stepMarker('1. Sew the shoulder seams'), { n: 1, marker: '1.' }, "'1.' style");
+assertSubset(S.stepMarker('12) Press the seam open'), { n: 12, marker: '1)' }, "'1)' style");
+assertSubset(S.stepMarker('01: Staystitch the neckline'), { n: 1, marker: '1.' }, "'01:' style");
+assertSubset(S.stepMarker('Step 1 - Cut your fabric'), { n: 1, marker: 'Step' }, "'Step 1 - ' style");
+assertSubset(S.stepMarker('Step 7 Attach the collar'), { n: 7, marker: 'Step' }, "'Step 7 ' style");
+assertSubset(S.stepMarker('STEP 12'), { n: 12, marker: 'Step', rest: '' }, 'a bare Step heading has empty rest');
+assertSubset(S.stepMarker('- 4. Turn the bag right side out'), { n: 4, marker: '1.' }, 'a bullet before the number is stripped');
+assertEqual(S.stepMarker('1. Sew the shoulder seams').rest, 'Sew the shoulder seams', 'rest excludes the marker');
+
+assertEqual(S.stepMarker('1.5 cm from the edge'), null, 'a decimal measurement is not a step');
+assertEqual(S.stepMarker('2. 5 mm from the edge'), null, 'a spaced measurement is not a step');
+assertEqual(S.stepMarker('1. cm'), null, 'a bare unit is not a step');
+assertEqual(S.stepMarker('3. 1/2" seam allowance'), null, 'a fraction remainder is not a step');
+assertEqual(S.stepMarker('Sew the shoulder seams'), null, 'an unnumbered line is not a step');
+assertEqual(S.stepMarker(''), null, 'empty line is not a step');
+assertEqual(S.stepMarker('Fig. 1'), null, 'a figure reference is not a step');
+assertTrue(S.stepMarker('5. (Optional) Topstitch the hem') !== null, 'a step may open with a parenthesis');
+
+// =======================================================================
+group('parseSteps - a plain numbered booklet');
+// =======================================================================
+
+var simpleSteps = S.parseSteps(
+  'CONSTRUCTION\n' +
+  '1. With RST, pin the front to the back at the shoulder seams and stitch.\n' +
+  '2. Press the shoulder seams towards the back.\n' +
+  '3. Staystitch the neckline 1 cm from the raw edge.\n'
+);
+assertEqual(simpleSteps.length, 3, 'three steps parsed');
+assertEqual(simpleSteps[0].n, 1, 'first step is number 1');
+assertEqual(simpleSteps[0].section, 'Construction', 'ALL CAPS section is prettified');
+assertEqual(simpleSteps[0].marker, '1.', 'marker style recorded');
+assertEqual(simpleSteps[2].text, 'Staystitch the neckline 1 cm from the raw edge.', 'third step text');
+assertEqual(simpleSteps[0].page, null, 'no page markers means page is null');
+assertEqual(simpleSteps.warnings.length, 0, 'a clean booklet produces no step warnings');
+
+var wrapped = S.parseSteps(
+  '1. With right sides together, pin the front\n' +
+  'to the back at the shoulder seams and\n' +
+  'stitch at 1.5 cm.\n' +
+  '\n' +
+  '2. Press.\n'
+);
+assertEqual(wrapped.length, 2, 'wrapped lines do not create extra steps');
+assertEqual(wrapped[0].text,
+  'With right sides together, pin the front to the back at the shoulder seams and stitch at 1.5 cm.',
+  'wrapped lines merge into one step');
+assertEqual(wrapped[1].text, 'Press.', 'the step after a blank line is separate');
+
+var pageSteps = S.parseSteps(
+  '=== PAGE 6 ===\n' +
+  '1. Sew the side seams.\n' +
+  '=== PAGE 7 ===\n' +
+  '2. Hem the sleeves.\n'
+);
+assertEqual(pageSteps.length, 2, 'page markers do not become steps');
+assertEqual(pageSteps[0].page, 6, 'step 1 is on page 6');
+assertEqual(pageSteps[1].page, 7, 'step 2 is on page 7');
+
+var stepStyle = S.parseSteps('Step 1 Cut the pieces.\nStep 2 Sew the seams.\nStep 3 Press.');
+assertEqual(stepStyle.length, 3, 'Step N style parses');
+assertEqual(stepStyle[0].marker, 'Step', 'Step N marker style recorded');
+
+var parenStyle = S.parseSteps('1) Cut.\n2) Sew.\n3) Press.');
+assertEqual(parenStyle.length, 3, '1) style parses');
+assertEqual(parenStyle[0].marker, '1)', '1) marker style recorded');
+
+// =======================================================================
+group('parseSteps - sections, restarts and rejections');
+// =======================================================================
+
+var restart = S.parseSteps(
+  'BODICE\n' +
+  '1. Sew the darts.\n' +
+  '2. Join the shoulders.\n' +
+  'SLEEVES\n' +
+  '1. Gather the sleeve head.\n' +
+  '2. Set the sleeve into the armhole.\n'
+);
+assertEqual(restart.length, 4, 'a restart at 1 keeps all four steps');
+assertEqual(restart[0].section, 'Bodice', 'first section name');
+assertEqual(restart[2].section, 'Sleeves', 'second section name');
+assertEqual(restart[2].n, 1, 'numbering restarts inside the new section');
+
+var restartNoHeading = S.parseSteps('1. Sew.\n2. Press.\n1. Cut.\n2. Fuse.');
+assertEqual(restartNoHeading.length, 4, 'a restart with no heading still keeps every step');
+assertTrue(restartNoHeading[2].section !== restartNoHeading[0].section, 'a nameless restart opens a new section');
+
+var views = S.parseSteps(
+  'VIEW A\n1. Sew the patch pocket on.\n2. Hem.\n' +
+  'VIEW B\n1. Sew the welt pocket.\n2. Hem.\n'
+);
+assertEqual(views.length, 4, 'both views parse');
+assertEqual(views[0].section, 'View A', 'view A section');
+assertEqual(views[2].section, 'View B', 'view B section');
+
+var figureJump = S.parseSteps('1. Sew.\n2. Press.\n97. Nonsense from a figure caption.\n3. Hem.');
+assertEqual(figureJump.length, 3, 'a wild number jump is rejected');
+assertEqual(figureJump[2].n, 3, 'the real step 3 still parses');
+
+var measureLines = S.parseSteps('1. Sew.\n1.5 cm is the seam allowance.\n2. Press.');
+assertEqual(measureLines.length, 2, 'a measurement line does not become a step');
+assertTrue(measureLines[0].text.indexOf('1.5 cm is the seam allowance.') >= 0, 'the measurement line merges into step 1');
+
+var noSteps = S.parseSteps('Sew the front to the back.\nPress everything well.\nEnjoy your garment.');
+assertEqual(noSteps.length, 0, 'no numbered steps means no steps');
+assertTrue(hasWarning(noSteps.warnings, 'No numbered steps found'), 'a warning explains there were no steps');
+
+var fallback = S.parseSteps(
+  'With right sides together, sew the front to the back at the shoulders and press.\n' +
+  '\n' +
+  'Turn the garment right side out and topstitch the neckline all the way round.\n',
+  { fallback: true }
+);
+assertEqual(fallback.length, 2, 'the opt-in paragraph fallback makes one step per paragraph');
+assertEqual(fallback[0].marker, 'none', 'fallback steps are marked "none"');
+
+var longStep = ['1. Press the seam allowance carefully.'];
+for (var lw = 0; lw < 60; lw++) longStep.push('Keep pressing the seam allowance carefully all the way along.');
+var longParsed = S.parseSteps(longStep.join('\n'));
+assertEqual(longParsed.length, 1, 'a very long step is still one step');
+assertTrue(longParsed[0].text.length <= 810, 'step text is capped near 800 characters');
+
+var many = [];
+for (var mi = 1; mi <= 260; mi++) many.push(mi + '. Do a thing.');
+var manyParsed = S.parseSteps(many.join('\n'));
+assertEqual(manyParsed.length, 200, 'steps are capped at 200');
+assertTrue(hasWarning(manyParsed.warnings, '200'), 'the 200-step cap is warned about');
+
+var interleaved = [];
+for (var ii = 0; ii < 10; ii++) { interleaved.push((ii + 1) + '. Left column line.'); interleaved.push((ii + 60) + '. Right column line.'); }
+var interParsed = S.parseSteps(interleaved.join('\n'), { columns: 2 });
+assertTrue(hasWarning(interParsed.warnings, 'interleaved'), 'heavy non-monotonic markers warn about interleaved columns');
+assertTrue(hasWarning(interParsed.warnings, '2 columns'), 'the column count is included when known');
+</script>
+<script>
+'use strict';
+
+// =======================================================================
+group('parseCutting - family 1: piece then "cut N"');
+// =======================================================================
+
+var cut1 = S.parseCutting([
+  'Front Bodice — Cut 2 on the fold, main',
+  'Back ............ cut 1 on fold',
+  'Sleeve - cut 2 (1 pair)',
+  'Neck facing: cut 1 interfacing'
+]);
+assertEqual(cut1.length, 4, 'four garment pieces parsed');
+assertSubset(cut1[0], { piece: 'Front Bodice', qty: 2, material: 'main', onFold: true }, 'Front Bodice, cut 2, on fold, main');
+assertSubset(cut1[1], { piece: 'Back', qty: 1, onFold: true }, 'dot leaders resolve to Back, cut 1, on fold');
+assertSubset(cut1[2], { piece: 'Sleeve', qty: 2, note: '1 pair' }, 'Sleeve cut 2 keeps the parenthetical note');
+assertSubset(cut1[3], { piece: 'Neck facing', qty: 1, material: 'interfacing' }, 'facing is interfacing');
+assertFalse(cut1[2].onFold, 'a sleeve is not on the fold');
+assertEqual(cut1[0].cutCount, undefined, 'the parser does not invent progress fields');
+
+// =======================================================================
+group('parseCutting - family 2: "Cut N ..." dimensional (bags)');
+// =======================================================================
+
+var cut2 = S.parseCutting([
+  'Cut 2 - 14" x 16" from exterior',
+  'Cut (4) 2 1/2" x 38" strap pieces from main',
+  'Cut 1 - 16" x 11" lining zipper pocket'
+]);
+assertEqual(cut2.length, 3, 'three dimensional bag pieces parsed');
+assertEqual(cut2[0].qty, 2, 'Cut 2 gives qty 2');
+assertEqual(cut2[0].dims, '14" x 16"', 'dims captured from the line');
+assertEqual(cut2[0].material, 'main', 'exterior maps to main');
+assertEqual(cut2[1].qty, 4, 'a parenthesised count parses');
+assertEqual(cut2[2].material, 'lining', 'lining maps to lining');
+assertTrue(cut2[1].dims.indexOf('x') > 0, 'the strap line keeps its dimensions');
+
+// =======================================================================
+group('parseCutting - family 3: the x forms');
+// =======================================================================
+
+var cut3 = S.parseCutting([
+  '2 x Front (main)',
+  'Pocket bag x4 lining',
+  '1 × Base panel - interfacing',
+  'Strap × 2'
+]);
+assertEqual(cut3.length, 4, 'four x-form pieces parsed');
+assertSubset(cut3[0], { piece: 'Front', qty: 2, material: 'main' }, '2 x Front (main)');
+assertSubset(cut3[1], { piece: 'Pocket bag', qty: 4, material: 'lining' }, 'Pocket bag x4 lining');
+assertSubset(cut3[2], { piece: 'Base panel', qty: 1, material: 'interfacing' }, 'unicode multiplication sign works');
+assertSubset(cut3[3], { piece: 'Strap', qty: 2 }, 'trailing x 2');
+
+// =======================================================================
+group('parseCutting - family 4: quilting WOF strips');
+// =======================================================================
+
+var cut4 = S.parseCutting([
+  'From Fabric A, cut (7) 4 1/2" x WOF strips.',
+  '10 strips 2 1/2" x width of fabric',
+  '(3) strips 5" x WOF'
+]);
+assertEqual(cut4.length, 3, 'three quilting strip rows parsed');
+assertEqual(cut4[0].qty, 7, 'a parenthesised strip count parses');
+assertEqual(cut4[1].qty, 10, 'a bare strip count parses');
+assertEqual(cut4[1].piece, '2 1/2" x WOF strip', 'width-of-fabric spelled out is normalised to a WOF strip name');
+assertEqual(cut4[2].qty, 3, 'a leading parenthesised count parses');
+assertTrue(cut4[0].piece.indexOf('4 1/2"') >= 0, 'the strip width survives in the piece name');
+assertTrue(String(cut4[0].note + cut4[0].material).toLowerCase().indexOf('fabric a') >= 0 ||
+  cut4[0].material === 'other', 'the From Fabric A context is carried onto the row');
+
+// =======================================================================
+group('parseCutting - family 5: quilting subcut');
+// =======================================================================
+
+var cut5 = S.parseCutting([
+  'Subcut into (64) 4 1/2" squares.',
+  'Sub-cut 24 2 1/2" squares',
+  'Subcut into 8 rectangles 2 1/2" x 4 1/2"'
+]);
+assertEqual(cut5.length, 3, 'three subcut rows parsed');
+assertEqual(cut5[0].qty, 64, 'subcut count parses');
+assertEqual(cut5[0].piece, '4 1/2" square', 'subcut piece name is singularised');
+assertEqual(cut5[1].qty, 24, 'the hyphenated Sub-cut spelling parses');
+assertEqual(cut5[2].qty, 8, 'subcut without parentheses parses');
+
+// =======================================================================
+group('parseCutting - flags, dedup and rejections');
+// =======================================================================
+
+var flags = S.parseCutting([
+  'Collar stand — cut 1 on the bias from contrast',
+  'Under collar - cut 1 mirrored, interfacing',
+  'Batting — cut 1',
+  'Backing — cut 1'
+]);
+assertEqual(flags[0].grain, 'on the bias', 'bias grain captured');
+assertEqual(flags[0].material, 'contrast', 'contrast material captured');
+assertEqual(flags[1].grain, 'mirrored', 'mirrored grain captured');
+assertEqual(flags[2].material, 'batting', 'batting material captured');
+assertEqual(flags[3].material, 'other', 'backing falls into other');
+
+var dupes = S.parseCutting(['Front — cut 2 main', 'Front — cut 2 main', 'Front — cut 1 main']);
+assertEqual(dupes.length, 2, 'identical rows are de-duplicated, a different qty is kept');
+
+assertEqual(S.cutRow('Press the seam allowances open.', null), null, 'a plain instruction is not a cutting row');
+assertEqual(S.cutRow('', null), null, 'an empty line is not a cutting row');
+assertEqual(S.cutRow('With right sides together, cut 2 notches into the curve and then press everything very carefully indeed before you continue', null), null, 'a long sentence is rejected');
+assertEqual(S.parseCutting([]).length, 0, 'an empty list gives no rows');
+
+var numbered = S.parseCutting(['1. Front — cut 2', '2. Cut 4 pocket pieces']);
+assertEqual(numbered.length, 2, 'a numbered cutting list still parses');
+assertEqual(numbered[0].piece, 'Front', 'the list number is not part of the piece name');
+assertEqual(numbered[1].qty, 4, 'a numbered "Cut N" row parses');
+
+// =======================================================================
+group('parseNotions');
+// =======================================================================
+
+var notions = S.parseNotions([
+  '1 x 20 cm invisible zip',
+  '(2) 5/8" D-rings',
+  'two 10" zippers',
+  'Matching thread',
+  '4 rivets',
+  'Fusible interfacing x2',
+  '1 - 18 mm magnetic snap'
+]);
+assertEqual(notions.length, 7, 'seven notions parsed');
+assertEqual(notions[0].qty, 1, '"1 x ..." gives qty 1');
+assertEqual(notions[0].text, '1 x 20 cm invisible zip', 'notion text keeps the whole line');
+assertEqual(notions[0].kind, 'notion', 'a zip is a plain notion');
+assertEqual(notions[1].qty, 2, '"(2)" gives qty 2');
+assertEqual(notions[1].kind, 'hardware', 'D-rings are hardware');
+assertEqual(notions[2].qty, 2, '"two" gives qty 2');
+assertEqual(notions[3].qty, null, 'a notion with no number has a null qty');
+assertEqual(notions[4].qty, 4, 'a bare leading number gives qty');
+assertEqual(notions[4].kind, 'hardware', 'rivets are hardware');
+assertEqual(notions[5].qty, 2, 'a trailing x2 gives qty 2');
+assertEqual(notions[5].kind, 'interfacing', 'fusible interfacing is interfacing');
+assertEqual(notions[6].qty, 1, '"1 - ..." gives qty 1');
+assertEqual(notions[6].kind, 'hardware', 'a magnetic snap is hardware');
+
+assertEqual(S.notionQty('20 cm invisible zip'), null, 'a leading measurement is not a quantity');
+assertEqual(S.notionQty('2 m of webbing'), null, 'a leading number followed by a unit is not a quantity');
+assertEqual(S.notionKind('Soft and Stable'), 'interfacing', 'branded stabiliser is interfacing');
+assertEqual(S.notionKind('Pellon SF-101 Shape Flex'), 'interfacing', 'SF-101 is interfacing');
+assertEqual(S.notionKind('Swivel hook'), 'hardware', 'a swivel hook is hardware');
+assertEqual(S.notionKind('Bias binding'), 'notion', 'bias binding is a plain notion');
+
+var loose = S.parseNotions([
+  'This pattern was drafted for a stable woven.',
+  'You will need a 20 cm invisible zip and matching thread.',
+  'Thread to match'
+], { inBlock: false });
+assertTrue(loose.length >= 1, 'outside a block only vocabulary lines are picked up');
+assertTrue(notionMatching(loose, 'Thread to match') !== null, 'a thread line is recognised outside a block');
+assertEqual(notionMatching(loose, 'drafted for a stable woven'), null, 'prose with no notion vocabulary is skipped');
+
+var dupNotions = S.parseNotions(['Matching thread', 'matching thread', 'Matching  thread']);
+assertEqual(dupNotions.length, 1, 'notions are de-duplicated case- and space-insensitively');
+
+// =======================================================================
+group('parseSeamAllowance');
+// =======================================================================
+
+var sa1 = S.parseSeamAllowance('Seam allowance is 1.5 cm (5/8") unless otherwise noted.');
+assertEqual(sa1.mm, 15, 'metric-first seam allowance is 15 mm');
+assertEqual(sa1.inches, '5/8', 'the bracketed imperial value is kept for display');
+assertEqual(sa1.exceptions.length, 0, 'no exceptions in a simple statement');
+assertTrue(sa1.text.indexOf('unless otherwise noted') >= 0, 'the statement text is kept verbatim');
+
+var sa2 = S.parseSeamAllowance('All seam allowances are 1 cm.');
+assertEqual(sa2.mm, 10, '1 cm is 10 mm');
+assertEqual(sa2.inches, null, 'no imperial value means inches stays null');
+
+var sa3 = S.parseSeamAllowance('Use a 1/4" seam allowance throughout.');
+assertEqual(sa3.mm, 6, '1/4 inch rounds to 6 mm');
+assertEqual(sa3.inches, '1/4', 'the inch fraction is kept');
+
+var sa4 = S.parseSeamAllowance('Seam allowance: 5/8 inch.');
+assertEqual(sa4.mm, 16, '5/8 inch rounds to 16 mm');
+
+var sa5 = S.parseSeamAllowance('Seam allowances are included in the pattern pieces.');
+assertEqual(sa5 && sa5.included, true, 'included is detected');
+var sa6 = S.parseSeamAllowance('Seam allowances are not included. Add 1.5 cm to every edge.');
+assertEqual(sa6 && sa6.included, false, 'not-included is detected');
+
+var saWren = S.parseSeamAllowance('All seams are 1/2" besides the collar and the neckline, which are sewn at 3/8".');
+assertTrue(!!saWren, 'the exception-clause sentence is recognised');
+assertEqual(saWren.mm, 13, 'the main value of the exception sentence is 1/2 inch');
+assertEqual(saWren.exceptions.length, 1, 'one exception is recorded');
+assertEqual(saWren.exceptions[0].mm, 10, 'the exception value is 3/8 inch');
+assertTrue(saWren.exceptions[0].text.toLowerCase().indexOf('collar') >= 0, 'the exception text names the collar');
+
+var saLater = S.parseSeamAllowance(
+  'Seam allowance is 1 cm throughout.\nUse a 6 mm seam allowance except at the armholes.'
+);
+assertEqual(saLater.mm, 10, 'the first statement wins for the main value');
+assertEqual(saLater.exceptions.length, 1, 'a later exception sentence is recorded');
+assertEqual(saLater.exceptions[0].mm, 6, 'the later exception value is 6 mm');
+
+var saMid = S.parseSeamAllowance('Sew the pockets with a 1/4" seam allowance. Use a 1/2" seam allowance from this point forward.');
+assertEqual(saMid.mm, 6, 'the first seam allowance is the main one');
+assertTrue(saMid.exceptions.length >= 0, 'a mid-pattern change does not break parsing');
+
+assertEqual(S.parseSeamAllowance('This pattern is lovely.'), null, 'no seam allowance means null');
+assertEqual(S.parseSeamAllowance(''), null, 'empty text means null');
+
+var saQuilt = S.parseSeamAllowance('Piece the blocks in rows.', 'quilt');
+assertTrue(!!saQuilt, 'a quilt with no statement gets the standard');
+assertEqual(saQuilt.mm, 6, 'the quilting default is 6 mm');
+assertEqual(saQuilt.inches, '1/4', 'the quilting default is 1/4"');
+var saQuiltStated = S.parseSeamAllowance('Seam allowance is 1/4" scant throughout.', 'quilt');
+assertEqual(saQuiltStated.mm, 6, 'a stated quilt seam allowance is used rather than the default');
+
+// =======================================================================
+group('parseSizes');
+// =======================================================================
+
+var sizes1 = S.parseSizes(
+  'SIZE CHART\n' +
+  'XS S M L XL\n' +
+  'Bust 82 87 92 97 102\n' +
+  'Waist 64 69 74 79 84\n' +
+  'Hips 90 95 100 105 110\n'
+);
+assertTrue(!!sizes1, 'an alpha size chart is found');
+assertEqual(sizes1.labels, ['XS', 'S', 'M', 'L', 'XL'], 'labels parsed');
+assertEqual(sizes1.chart.length, 3, 'three measurement rows');
+assertEqual(sizes1.chart[0].label, 'Bust', 'Bust row label');
+assertEqual(sizes1.chart[0].values, ['82', '87', '92', '97', '102'], 'Bust values');
+assertEqual(sizes1.chart[2].label, 'Hip', 'Hips normalises to Hip');
+
+var sizes2 = S.parseSizes(
+  'BODY MEASUREMENTS\n' +
+  'Size 6 8 10 12 14\n' +
+  'Chest 33 34 36 38 40\n' +
+  'FINISHED GARMENT MEASUREMENTS\n' +
+  '6 8 10 12 14\n' +
+  'Bust 37 38 40 42 44\n'
+);
+assertTrue(!!sizes2, 'a numeric size chart is found');
+assertEqual(sizes2.labels, ['6', '8', '10', '12', '14'], 'numeric labels parsed');
+assertEqual(sizes2.chart[0].label, 'Bust', 'Chest normalises to Bust');
+assertEqual(sizes2.finished.length, 1, 'the finished table goes into finished');
+assertEqual(sizes2.finished[0].values, ['37', '38', '40', '42', '44'], 'finished bust values');
+
+var sizesFrac = S.parseSizes('XS S M L\nBust 33 1/2" 35 1/2" 37 1/2" 39 1/2"');
+assertTrue(!!sizesFrac, 'a chart with mixed-number values is found');
+assertEqual(sizesFrac.chart[0].values.length, 4, 'mixed numbers count as one value each');
+assertEqual(sizesFrac.chart[0].values[0], '33 1/2"', 'the mixed number survives verbatim');
+
+var sizesBad = S.parseSizes('XS S M L XL\nBust 82 87 92\nWaist 64 69 74 79 84');
+assertTrue(!!sizesBad, 'a chart with one bad row still returns');
+assertEqual(sizesBad.chart.length, 1, 'a row whose arity does not match is dropped, the good row survives');
+assertEqual(sizesBad.chart[0].label, 'Waist', 'the surviving row is the one with matching arity');
+var sizesStop = S.parseSizes('XS S M L XL\nBust 82 87 92 97 102\nNotes about fitting\nWaist 64 69 74 79 84');
+assertEqual(sizesStop.chart.length, 1, 'the table stops at the first non-measurement line after it starts');
+
+assertEqual(S.parseSizes('Sew the front to the back.\nPress well.'), null, 'prose has no size chart');
+assertEqual(S.parseSizes('Fig 1 2 3'), null, 'three small numbers are not a size chart');
+assertEqual(S.parseSizes('86 91 96 101\nBust 1 2 3 4'), null, 'body measurements are not mistaken for size labels');
+
+// =======================================================================
+group('parseFabric');
+// =======================================================================
+
+var fab = S.parseFabric(
+  'FABRIC REQUIREMENTS\n' +
+  '115 cm wide 1.4 m 1.5 m 1.6 m 1.7 m\n' +
+  '150 cm wide 1.1 m 1.2 m 1.3 m 1.4 m\n',
+  ['XS', 'S', 'M', 'L']
+);
+assertEqual(fab.length, 2, 'two fabric widths parsed');
+assertEqual(fab[0].width, '115 cm', 'the first width');
+assertEqual(fab[0].amounts.length, 4, 'four amounts, one per size');
+assertEqual(fab[0].amounts[0], '1.4 m', 'the first amount');
+assertEqual(fab[1].width, '150 cm', 'the second width');
+
+var fabMismatch = S.parseFabric('115 cm wide 1.4 m 1.5 m', ['XS', 'S', 'M', 'L']);
+assertEqual(fabMismatch.length, 1, 'a mismatched row is still returned');
+assertEqual(fabMismatch[0].amounts, [], 'a mismatched row has no amounts');
+assertTrue(fabMismatch[0].line.indexOf('115 cm') >= 0, 'the raw line is kept so the UI can show it');
+
+var fabImperial = S.parseFabric('Main fabric 45" wide 2 yds 2 1/4 yds 2 1/2 yds', ['S', 'M', 'L']);
+assertEqual(fabImperial.length, 1, 'an imperial fabric row parses');
+assertEqual(fabImperial[0].amounts.length, 3, 'three imperial amounts');
+assertTrue(fabImperial[0].name.indexOf('Main fabric') >= 0, 'the fabric name comes from the line');
+
+// =======================================================================
+group('detectKind and quilt unit counters');
+// =======================================================================
+
+assertEqual(S.detectKind('Cut 7 strips 2 1/2" x WOF. Add binding and backing.'), 'quilt', 'WOF + strips + binding means quilt');
+assertEqual(S.detectKind('Attach the D-rings to the strap, then sew the lining to the exterior with a zip.'), 'bag', 'rings + lining + zip means bag');
+assertEqual(S.detectKind('Sew the bodice darts, then set the sleeve into the armhole and hem.'), 'garment', 'bodice + sleeve + hem means garment');
+assertEqual(S.detectKind('Hello there.'), 'unknown', 'nothing recognisable means unknown');
+assertEqual(S.detectKind('Hello there.', true), 'garment', 'a size chart alone makes it a garment');
+assertEqual(S.detectKind(''), 'unknown', 'empty text is unknown');
+
+var units = S.parseUnits('You will make 224 flying geese and 96 half-square triangles for this quilt.');
+assertEqual(units.length, 2, 'two unit counters seeded');
+assertSubset(units[0], { name: 'Flying Geese', target: 224, done: 0 }, 'flying geese counter');
+assertEqual(units[1].target, 96, 'half-square triangle counter');
+assertEqual(S.parseUnits('Sew the seam.').length, 0, 'no counts means no counters');
+assertEqual(S.parseUnits('Make 2 blocks.').length, 0, 'a tiny count is ignored');
+
+// =======================================================================
+group('parse() - a whole synthetic garment booklet');
+// =======================================================================
+
+var garmentText =
+  '=== PAGE 1 ===\n' +
+  'TANSEY TOP\n' +
+  'Sewing Instructions\n' +
+  '© 2026 Synthetic Patterns Co\n' +
+  '\n' +
+  '=== PAGE 2 ===\n' +
+  'SIZE CHART\n' +
+  'XS S M L XL\n' +
+  'Bust 82 87 92 97 102\n' +
+  'Waist 64 69 74 79 84\n' +
+  '\n' +
+  'FABRIC REQUIREMENTS\n' +
+  '115 cm wide 1.4 m 1.5 m 1.6 m 1.7 m\n' +
+  '150 cm wide 1.1 m 1.2 m 1.3 m 1.4 m\n' +
+  '\n' +
+  'NOTIONS\n' +
+  '1 x 20 cm invisible zip\n' +
+  'Matching thread\n' +
+  '30 cm of lightweight fusible interfacing\n' +
+  '\n' +
+  '=== PAGE 3 ===\n' +
+  'CUTTING\n' +
+  'Front bodice — cut 2 main\n' +
+  'Back bodice — cut 1 on the fold, main\n' +
+  'Sleeve — cut 2 main\n' +
+  'Neck facing — cut 1 interfacing\n' +
+  '\n' +
+  'Seam allowance is 1.5 cm (5/8”) unless otherwise noted.\n' +
+  '\n' +
+  '=== PAGE 4 ===\n' +
+  'CONSTRUCTION\n' +
+  '1. With RST, pin the front bodices to the back at the shoulder seams and stitch.\n' +
+  '2. Press the shoulder seams towards the back.\n' +
+  '3. Staystitch the neckline.\n' +
+  '=== PAGE 5 ===\n' +
+  'FINISHING\n' +
+  '4. Hem the sleeves with a double-turned hem.\n' +
+  '5. Give everything a final press.\n';
+
+var g = S.parse(garmentText);
+assertEqual(g.kind, 'garment', 'the booklet is detected as a garment');
+assertEqual(g.pages, 5, 'five pages counted');
+assertEqual(g.steps.length, 5, 'five steps parsed');
+assertEqual(g.steps[0].page, 4, 'step 1 is on page 4');
+assertEqual(g.steps[3].page, 5, 'step 4 is on page 5');
+assertEqual(g.steps[0].section, 'Construction', 'step 1 is in Construction');
+assertEqual(g.steps[3].section, 'Finishing', 'step 4 is in Finishing');
+assertEqual(g.cuttingList.length, 4, 'four cutting pieces parsed');
+assertEqual(pieceNamed(g.cuttingList, 'Back bodice').onFold, true, 'the back is cut on the fold');
+assertEqual(pieceNamed(g.cuttingList, 'Neck facing').material, 'interfacing', 'the facing is interfacing');
+assertTrue(g.notions.length >= 3, 'at least three notions parsed');
+assertTrue(notionMatching(g.notions, 'invisible zip') !== null, 'the zip is in the notions');
+assertEqual(g.seamAllowance.mm, 15, 'seam allowance is 15 mm');
+assertEqual(g.seamAllowance.inches, '5/8', 'seam allowance shows 5/8"');
+assertTrue(!!g.sizes, 'the size chart was found');
+assertEqual(g.sizes.labels, ['XS', 'S', 'M', 'L', 'XL'], 'size labels');
+assertEqual(g.sizes.chart.length, 2, 'two body measurement rows');
+assertEqual(g.fabric.length, 2, 'two fabric widths');
+assertEqual(g.meta.designer, 'Synthetic Patterns Co', 'the designer comes from the copyright line');
+assertEqual(g.meta.patternName, 'TANSEY TOP', 'the pattern name comes from the cover');
+assertEqual(g.units.length, 0, 'a garment gets no quilt unit counters');
+assertTrue(g.sourceText.length > 100, 'the normalised source text is kept');
+
+// step text must not swallow the cutting list
+assertTrue(g.steps[0].text.indexOf('cut 2') < 0, 'a cutting line did not leak into a step');
+
+// =======================================================================
+group('parse() - a whole synthetic quilt pattern');
+// =======================================================================
+
+var quiltText =
+  '=== PAGE 1 ===\n' +
+  'MISTY FIELDS QUILT\n' +
+  '© Synthetic Quilt Co\n' +
+  'Finished quilt: 60" x 72". You will make 224 flying geese.\n' +
+  '\n' +
+  'CUTTING INSTRUCTIONS\n' +
+  'From Fabric A, cut (7) 4½" x WOF strips.\n' +
+  'Subcut into (64) 4½" squares.\n' +
+  '10 strips 2½" x width of fabric\n' +
+  'From Binding, cut 7 2 1/2" x WOF strips.\n' +
+  '\n' +
+  'NOTIONS\n' +
+  'Piecing thread\n' +
+  'Batting 68" x 80"\n' +
+  'Walking foot\n' +
+  '\n' +
+  '=== PAGE 2 ===\n' +
+  'BLOCK ASSEMBLY\n' +
+  '1. Sew a background square to each end of a Fabric A strip.\n' +
+  '2. Press towards the darker fabric.\n' +
+  'QUILT TOP ASSEMBLY\n' +
+  '1. Join the blocks into rows.\n' +
+  '2. Join the rows, then baste, quilt and bind.\n';
+
+var q = S.parse(quiltText);
+assertEqual(q.kind, 'quilt', 'the pattern is detected as a quilt');
+assertEqual(q.steps.length, 4, 'four quilt steps parsed across two sections');
+assertEqual(q.steps[0].section, 'Block Assembly', 'first quilt section');
+assertEqual(q.steps[2].section, 'Quilt Top Assembly', 'second quilt section');
+assertEqual(q.steps[2].n, 1, 'quilt step numbering restarts per section');
+assertTrue(q.cuttingList.length >= 4, 'at least four quilting cut rows');
+assertEqual(q.seamAllowance.mm, 6, 'a quilt with no statement defaults to 1/4"');
+assertEqual(q.seamAllowance.inches, '1/4', 'the quilt default shows 1/4"');
+assertTrue(hasWarning(q.warnings, 'assumed'), 'the assumed quilt seam allowance is warned about');
+assertEqual(q.units.length, 1, 'one quilt unit counter seeded');
+assertEqual(q.units[0].target, 224, 'the flying geese target is 224');
+assertEqual(q.units[0].done, 0, 'the counter starts at zero');
+
+// =======================================================================
+group('parse() - a whole synthetic bag pattern');
+// =======================================================================
+
+var bagText =
+  'THE HARBOUR TOTE\n' +
+  '© Synthetic Bags\n' +
+  '\n' +
+  'HARDWARE\n' +
+  '2 x 5/8" D-rings\n' +
+  '1 x 18 mm magnetic snap\n' +
+  'two 10" zippers\n' +
+  '4 rivets\n' +
+  '\n' +
+  'INTERFACING\n' +
+  '1 yd Pellon SF-101 Shape Flex\n' +
+  '1/2 yd Soft and Stable\n' +
+  '\n' +
+  'CUTTING\n' +
+  'Cut 2 - 14" x 16" from exterior\n' +
+  'Cut 2 - 14" x 16" from lining\n' +
+  'Cut 2 - 4" x 38" strap pieces from exterior\n' +
+  'Cut 1 - 16" x 11" lining zipper pocket\n' +
+  '\n' +
+  'ASSEMBLY\n' +
+  'Step 1 Fuse the interfacing to the exterior panels.\n' +
+  'Step 2 Sew the exterior panels right sides together along the sides and base.\n' +
+  'Step 3 Use a 1/2" seam allowance from this point forward.\n';
+
+var b = S.parse(bagText);
+assertEqual(b.kind, 'bag', 'the pattern is detected as a bag');
+assertEqual(b.steps.length, 3, 'three bag steps parsed');
+assertEqual(b.steps[0].marker, 'Step', 'the Step N marker style is recorded');
+assertEqual(b.cuttingList.length, 4, 'four bag cut rows');
+assertTrue(b.notions.length >= 6, 'hardware and interfacing blocks both contribute notions');
+assertTrue(notionMatching(b.notions, 'D-rings').kind === 'hardware', 'D-rings are hardware');
+assertTrue(notionMatching(b.notions, 'Shape Flex').kind === 'interfacing', 'Shape Flex is interfacing');
+assertEqual(b.sizes, null, 'a bag has no size chart');
+assertTrue(hasWarning(b.warnings, 'size chart'), 'the missing size chart is warned about');
+
+// =======================================================================
+group('parse() - edge cases from the research table');
+// =======================================================================
+
+var empty = S.parse('');
+assertEqual(empty.steps, [], 'empty input gives no steps');
+assertEqual(empty.cuttingList, [], 'empty input gives no cutting list');
+assertEqual(empty.notions, [], 'empty input gives no notions');
+assertEqual(empty.sizes, null, 'empty input gives null sizes');
+assertEqual(empty.seamAllowance, null, 'empty input gives null seam allowance');
+assertEqual(empty.kind, 'unknown', 'empty input has unknown kind');
+assertEqual(empty.pages, 0, 'empty input has zero pages');
+assertEqual(empty.warnings.length, 1, 'empty input gives exactly one warning');
+assertEqual(empty.sourceText, '', 'empty input keeps no source text');
+assertEqual(S.parse('   \n  \n').warnings.length, 1, 'whitespace-only input gives exactly one warning');
+assertEqual(S.parse(null).warnings.length, 1, 'null input is tolerated');
+assertEqual(S.parse(undefined).steps.length, 0, 'undefined input is tolerated');
+assertEqual(S.parse({}).kind, 'unknown', 'a non-string input is tolerated');
+
+var noStepDoc = S.parse('CONSTRUCTION\nSew the front to the back, then press the seam open and topstitch.\nHem the garment.');
+assertEqual(noStepDoc.steps.length, 0, 'a booklet with no numbered steps gets no steps');
+assertTrue(hasWarning(noStepDoc.warnings, 'No numbered steps found'), 'the no-steps warning is present');
+assertTrue(noStepDoc.sourceText.length > 20, 'the text is still kept when there are no steps');
+
+var markerInCut = S.parse(
+  'CUTTING\n' +
+  '1. Front — cut 2 main\n' +
+  '2. Cut 4 pocket pieces from lining\n' +
+  'CONSTRUCTION\n' +
+  '1. Sew the pockets to the front.\n' +
+  '2. Press.\n'
+);
+assertEqual(markerInCut.cuttingList.length, 2, 'the cutting block wins over the step markers inside it');
+assertEqual(markerInCut.steps.length, 2, 'step parsing resumes after the cutting block');
+assertEqual(markerInCut.steps[0].section, 'Construction', 'the resumed steps are in Construction');
+
+var unitStart = S.parse('CONSTRUCTION\n1. Sew.\n1.5 cm seam allowance is used.\n2. Press.');
+assertEqual(unitStart.steps.length, 2, 'a measurement line at line start is not a step');
+
+var dupHeader = S.parse(
+  'CUTTING\n' +
+  'Front — cut 2 main\n' +
+  '=== PAGE 2 ===\n' +
+  'CUTTING\n' +
+  'Front — cut 2 main\n' +
+  'Back — cut 1 main\n'
+);
+assertEqual(dupHeader.cuttingList.length, 2, 'a repeated cutting header does not duplicate rows');
+
+var mixedUnits = S.parse(
+  'SIZE CHART\n0 2 4 6\nBust 33 34 36 38\n' +
+  'FABRIC REQUIREMENTS\n115 cm wide 1.4 m 1.5 m 1.6 m 1.7 m\n' +
+  'CONSTRUCTION\n1. Sew at 5/8".\n'
+);
+assertEqual(mixedUnits.sizes.chart[0].values[0], '33', 'imperial body values are kept verbatim');
+assertEqual(mixedUnits.fabric[0].amounts[0], '1.4 m', 'metric yardage is kept verbatim in the same document');
+
+var manyStepsDoc = [];
+for (var md = 1; md <= 250; md++) manyStepsDoc.push(md + '. Do the thing.');
+var manyDoc = S.parse('CONSTRUCTION\n' + manyStepsDoc.join('\n'));
+assertEqual(manyDoc.steps.length, 200, 'parse() caps steps at 200');
+assertTrue(hasWarning(manyDoc.warnings, '200'), 'parse() warns about the cap');
+
+var craftHint = S.parse('Sew the seam.', { craftHint: 'quilt' });
+assertEqual(craftHint.kind, 'quilt', 'craftHint overrides detection');
+assertEqual(craftHint.seamAllowance.mm, 6, 'the hinted quilt gets the quilting default');
+
+// =======================================================================
+group('normalize() - repairing saved data');
+// =======================================================================
+
+var fresh = S.normalize(null, null);
+assertEqual(fresh.steps, [], 'a fresh normalise has no steps');
+assertEqual(fresh.cutting, [], 'a fresh normalise has no cutting');
+assertEqual(fresh.notions, [], 'a fresh normalise has no notions');
+assertEqual(fresh.units, [], 'a fresh normalise has no unit counters');
+assertEqual(fresh.currentStep, 0, 'currentStep starts at 0');
+assertEqual(fresh.seamAllowance, null, 'seamAllowance starts null');
+assertEqual(fresh.sourceText, '', 'sourceText starts empty');
+assertSubset(fresh.meta, { designer: '', patternName: '', version: '', view: '', url: '' }, 'meta defaults');
+assertSubset(fresh.size, { chosen: '', alterations: '' }, 'size defaults');
+assertSubset(fresh.machine, { needle: '', thread: '', stitchLength: '', tension: '', presserFoot: '', notes: '' }, 'machine defaults');
+assertEqual(S.normalize('nonsense', null).steps, [], 'a string is tolerated');
+assertEqual(S.normalize(42, null).notions, [], 'a number is tolerated');
+assertEqual(S.normalize([], null).cutting, [], 'an array is tolerated');
+
+var repaired = S.normalize({
+  meta: { patternName: 'Tansey Top', url: 'https://example.test/tansey' },
+  size: { chosen: 'M', sizeLabels: ['XS', 'S', 'M'], alterations: 'FBA 2.5 cm' },
+  steps: [
+    { text: 'Sew.', done: true, page: 4 },
+    { text: '', done: false },
+    'not an object',
+    { text: 'Press.', done: 'yes', page: 'x' }
+  ],
+  cutting: [
+    { piece: 'Front', qty: 2, cutCount: 9, material: 'nonsense' },
+    { piece: '', qty: 1 }
+  ],
+  notions: [{ text: 'Thread', qty: '2', have: 1 }, { text: '' }],
+  units: [{ name: 'Flying geese', target: 224, done: 900 }],
+  currentStep: 99,
+  warnings: ['one', '', 'two']
+}, null);
+assertEqual(repaired.steps.length, 2, 'blank and non-object steps are dropped');
+assertEqual(repaired.steps[0].done, true, 'a done flag survives');
+assertEqual(repaired.steps[1].done, true, 'a truthy done value is coerced to true');
+assertEqual(repaired.steps[1].page, null, 'a non-numeric page becomes null');
+assertTrue(!!repaired.steps[0].id, 'steps gain an id');
+assertEqual(repaired.currentStep, 1, 'currentStep is clamped into range');
+assertEqual(repaired.cutting.length, 1, 'a piece with no name is dropped');
+assertEqual(repaired.cutting[0].cutCount, 2, 'cutCount is clamped to qty');
+assertEqual(repaired.cutting[0].material, 'main', 'an unknown material falls back to main');
+assertEqual(repaired.notions.length, 1, 'a blank notion is dropped');
+assertEqual(repaired.notions[0].qty, 2, 'a string qty is coerced');
+assertEqual(repaired.notions[0].have, true, 'a truthy have is coerced');
+assertEqual(repaired.units[0].done, 224, 'unit done is clamped to the target');
+assertEqual(repaired.warnings, ['one', 'two'], 'blank warnings are dropped');
+assertEqual(repaired.meta.url, 'https://example.test/tansey', 'the url survives');
+assertEqual(repaired.size.chosen, 'M', 'the chosen size survives');
+
+var longSource = new Array(70000).join('x');
+assertTrue(S.normalize({ sourceText: longSource }, null).sourceText.length <= 60000, 'sourceText is capped at 60 KB');
+
+// =======================================================================
+group('toCraftData - first import');
+// =======================================================================
+
+var firstData = S.toCraftData(g);
+assertEqual(firstData.steps.length, 5, 'steps come across');
+assertEqual(firstData.steps[0].done, false, 'a fresh import has nothing done');
+assertTrue(!!firstData.steps[0].id, 'steps gain ids');
+assertEqual(firstData.cutting.length, 4, 'cutting comes across');
+assertEqual(firstData.cutting[0].cutCount, 0, 'a fresh import has nothing cut');
+assertTrue(firstData.notions.length >= 3, 'notions come across');
+assertEqual(firstData.notions[0].have, false, 'a fresh import has nothing on hand');
+assertEqual(firstData.meta.patternName, 'TANSEY TOP', 'the pattern name comes across');
+assertEqual(firstData.size.sizeLabels, ['XS', 'S', 'M', 'L', 'XL'], 'size labels come across');
+assertEqual(firstData.measurements.body.length, 2, 'body measurements come across');
+assertEqual(firstData.seamAllowance.mm, 15, 'seam allowance comes across');
+assertEqual(firstData.currentStep, 0, 'currentStep starts at 0');
+assertEqual(firstData.meta.url, '', 'no url on a fresh import');
+assertEqual(firstData.size.chosen, '', 'no size chosen on a fresh import');
+assertTrue(firstData.sourceText.length > 100, 'the source text is kept');
+
+var quiltData = S.toCraftData(q);
+assertEqual(quiltData.units.length, 1, 'quilt unit counters come across');
+assertEqual(quiltData.units[0].target, 224, 'the counter target comes across');
+
+// =======================================================================
+group('toCraftData - re-import merge semantics');
+// =======================================================================
+
+var existing = S.normalize({
+  meta: { patternName: 'Old name', url: 'https://example.test/mine', designer: 'Old designer' },
+  size: { chosen: 'L', sizeLabels: ['S', 'M'], alterations: 'FBA 2.5 cm, lengthened 3 cm' },
+  machine: { needle: '80/12 universal', thread: 'Gutermann 800', stitchLength: '2.5', tension: '4', presserFoot: 'standard', notes: 'go slow' },
+  measurements: { mine: [{ label: 'Bust', value: '96 cm' }] },
+  steps: [
+    { text: 'With RST, pin the front bodices to the back at the shoulder seams and stitch.', done: true },
+    { text: 'Something that is no longer in the pattern.', done: true }
+  ],
+  cutting: [
+    { piece: 'Front bodice', qty: 2, cutCount: 2 },
+    { piece: 'Sleeve', qty: 2, cutCount: 1 }
+  ],
+  notions: [{ text: 'Matching thread', have: true }, { text: 'Gone from the pattern', have: true }],
+  units: [{ name: 'Flying geese', target: 100, done: 42 }],
+  currentStep: 1
+}, null);
+
+var merged = S.toCraftData(g, existing);
+assertEqual(merged.steps.length, 5, 'the new step list replaces the old one');
+assertEqual(merged.steps[0].done, true, 'a step done flag is preserved by matching text');
+assertEqual(merged.steps[1].done, false, 'a step that was never done stays not done');
+assertEqual(merged.cutting.length, 4, 'the new cutting list replaces the old one');
+assertEqual(pieceNamed(merged.cutting, 'Front bodice').cutCount, 2, 'cutCount is preserved by piece name');
+assertEqual(pieceNamed(merged.cutting, 'Sleeve').cutCount, 1, 'a partial cutCount is preserved');
+assertEqual(pieceNamed(merged.cutting, 'Back bodice').cutCount, 0, 'a new piece starts uncut');
+assertEqual(notionMatching(merged.notions, 'Matching thread').have, true, 'a have flag is preserved by text');
+assertEqual(notionMatching(merged.notions, 'invisible zip').have, false, 'a new notion starts not had');
+assertEqual(merged.size.chosen, 'L', 'the chosen size is never overwritten');
+assertEqual(merged.size.alterations, 'FBA 2.5 cm, lengthened 3 cm', 'alterations are never overwritten');
+assertEqual(merged.machine.needle, '80/12 universal', 'machine settings are never overwritten');
+assertEqual(merged.machine.notes, 'go slow', 'machine notes are never overwritten');
+assertEqual(merged.meta.url, 'https://example.test/mine', 'meta.url is never overwritten');
+assertEqual(merged.measurements.mine[0].value, '96 cm', 'my own measurements are never overwritten');
+assertEqual(merged.meta.patternName, 'TANSEY TOP', 'the pattern name is refreshed from the import');
+assertEqual(merged.size.sizeLabels, ['XS', 'S', 'M', 'L', 'XL'], 'size labels are refreshed from the import');
+assertEqual(merged.currentStep, 1, 'currentStep is carried over');
+
+var caseMerge = S.toCraftData(
+  { steps: [{ n: 1, text: 'Press   the SEAM open!', section: '', page: null, marker: '1.' }], warnings: [] },
+  S.normalize({ steps: [{ text: 'press the seam open', done: true }] }, null)
+);
+assertEqual(caseMerge.steps[0].done, true, 'step matching ignores case, spacing and punctuation');
+
+var groupOff = S.toCraftData(g, existing, { groups: { cutting: false, notions: false } });
+assertEqual(groupOff.cutting.length, 2, 'an unchecked cutting group keeps the existing rows');
+assertEqual(groupOff.notions.length, 2, 'an unchecked notions group keeps the existing rows');
+assertEqual(groupOff.steps.length, 5, 'a checked group is still replaced');
+
+var unitMerge = S.toCraftData(q, existing);
+assertEqual(unitMerge.units.length, 1, 'quilt counters are replaced');
+assertEqual(unitMerge.units[0].done, 42, 'a counter progress value is preserved by name');
+assertEqual(unitMerge.units[0].target, 224, 'the counter target is refreshed');
+
+assertTrue(!!S.toCraftData(null, null), 'toCraftData tolerates a null parse');
+assertEqual(S.toCraftData(null, null).steps, [], 'a null parse gives no steps');
+assertTrue(!!S.toCraftData({}, {}), 'toCraftData tolerates junk');
+
+// =======================================================================
+group('summary()');
+// =======================================================================
+
+var summaryProject = {
+  name: 'Tansey',
+  craft: 'sewing',
+  craftData: S.normalize({
+    meta: { patternName: 'Tansey Top' },
+    steps: (function () { var a = []; for (var i = 0; i < 34; i++) a.push({ text: 'Step ' + (i + 1) }); return a; })(),
+    currentStep: 6,
+    cutting: (function () {
+      var a = [];
+      for (var i = 0; i < 12; i++) a.push({ piece: 'Piece ' + (i + 1), qty: 1, cutCount: i < 4 ? 1 : 0 });
+      return a;
+    })()
+  }, null)
+};
+assertEqual(S.summary(summaryProject), 'Tansey Top · step 7 of 34 · 4 of 12 cut', 'the documented summary line');
+assertEqual(S.summary({ craftData: S.normalize({ meta: { patternName: 'Harbour Tote' } }, null) }), 'Harbour Tote', 'name only');
+assertEqual(S.summary({ craftData: null }), 'Sewing project', 'an empty project falls back');
+assertEqual(S.summary(null), 'Sewing project', 'a null project falls back');
+assertEqual(S.summary({}), 'Sewing project', 'an empty object falls back');
+assertEqual(S.summary({ craftData: { steps: [{ text: 'a' }, { text: 'b' }], currentStep: 1 } }),
+  'step 2 of 2', 'steps only, with no pattern name');
+assertEqual(S.summary({ craftData: { notions: [{ text: 'Thread', have: true }, { text: 'Zip' }] } }),
+  '1 of 2 notions ready', 'notions only');
+
+// =======================================================================
+group('templates()');
+// =======================================================================
+
+var tpl = S.templates();
+assertEqual(tpl.length, 3, 'three built-in sewing templates');
+var ids = tpl.map(function (t) { return t.id; });
+assertEqual(ids, ['sew-garment', 'sew-bag', 'sew-quilt'], 'template ids');
+tpl.forEach(function (t) {
+  assertEqual(t.craft, 'sewing', t.id + ' is a sewing template');
+  assertTrue(!!t.emoji, t.id + ' has an emoji');
+  assertTrue(t.emoji !== '🧵', t.id + ' does not use the cross-stitch thread emoji');
+  assertTrue(!!t.craftData, t.id + ' seeds craftData');
+  assertTrue(t.parts.length === 1 && t.parts[0].name === 'Main', t.id + ' has the single Main part the shell expects');
+});
+assertEqual(tpl[0].emoji, '🧥', 'the garment template uses the coat emoji');
+assertEqual(tpl[1].emoji, '👜', 'the bag template uses the handbag emoji');
+assertEqual(tpl[0].craftData.cutting.length, 5, 'the garment template seeds five pieces');
+assertEqual(tpl[1].craftData.notions.length, 7, 'the bag template seeds seven notions');
+assertEqual(tpl[2].craftData.cutting.length, 6, 'the quilt template seeds six pieces');
+assertEqual(tpl[2].craftData.seamAllowance.mm, 6, 'the quilt template seeds a 1/4" seam allowance');
+
+var seeded = S.normalize(tpl[1].craftData, null);
+assertEqual(seeded.cutting.length, 6, 'the bag seed survives normalise');
+assertEqual(seeded.notions.length, 7, 'the bag notions survive normalise');
+assertTrue(!!seeded.cutting[0].id, 'seeded cutting rows gain ids');
+assertEqual(seeded.cutting[0].cutCount, 0, 'seeded pieces start uncut');
+assertEqual(S.normalize(tpl[0].craftData, null).cutting[0].onFold, true, 'the garment front is seeded on the fold');
+
+tpl[0].name = 'MUTATED';
+assertEqual(S.templates()[0].name, 'Garment', 'templates() returns a fresh copy each time');
+assertEqual(S.TEMPLATES[0].name, 'Garment', 'TEMPLATES was not mutated');
+
+// =======================================================================
+group('Performance');
+// =======================================================================
+
+(function () {
+  // 40 pages, >= 60 KB - the shape of a long indie instruction booklet.
+  var pagesText = [];
+  for (var pageNo = 1; pageNo <= 40; pageNo++) {
+    pagesText.push('=== PAGE ' + pageNo + ' ===');
+    pagesText.push('CONSTRUCTION');
+    for (var k = 1; k <= 7; k++) {
+      pagesText.push(k + '. With right sides together, pin the front to the back at the shoulder seams and stitch at 1.5 cm, then press the seam allowances towards the back and finish the raw edges.');
+      pagesText.push('Trim the seam allowance to 6 mm and understitch the facing, then press it towards the body.');
+      pagesText.push('');
+    }
+    pagesText.push('CUTTING');
+    pagesText.push('Front bodice — cut 2 main');
+    pagesText.push('Back bodice — cut 1 on the fold, main');
+  }
+  var big = pagesText.join('\n');
+  assertTrue(big.length >= 60000, 'the perf document is at least 60 KB (' + big.length + ' chars)');
+  var t0 = (window.performance && performance.now) ? performance.now() : Date.now();
+  var res = S.parse(big);
+  var t1 = (window.performance && performance.now) ? performance.now() : Date.now();
+  var ms = t1 - t0;
+  log(true, 'perf: parsed ' + big.length + ' chars over ' + res.pages + ' pages in ' + ms.toFixed(1) + ' ms');
+  assertEqual(res.pages, 40, 'the perf document is 40 pages');
+  assertTrue(ms < 50, 'a 40-page, 60 KB booklet parses in under 50 ms (' + ms.toFixed(1) + ' ms)');
+  assertTrue(res.steps.length > 0, 'the big booklet produced steps');
+  window.__sewingPerfMs = ms;
+  window.__sewingPerfChars = big.length;
+})();
+
+// =======================================================================
+var sum = document.getElementById('summary');
+sum.className = failed ? 'bad' : 'ok';
+sum.textContent = (failed ? 'FAILED ' : 'ALL PASS ') + passed + ' passed, ' + failed + ' failed';
+window.__sewingTestResults = { passed: passed, failed: failed };
+console.log(sum.textContent);
+</script>
+</body>
+</html>

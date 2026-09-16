@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Sewing.js fixtures</title>
+<style>
+  body { font: 14px/1.4 Menlo, Consolas, monospace; background:#111; color:#eee; padding:16px; }
+  .pass { color:#7bd389; }
+  .fail { color:#ff6b6b; background:#2a1414; }
+  .skip { color:#c9a227; }
+  .group { margin-top:18px; font-weight:bold; color:#9cf; border-bottom:1px solid #333; padding-bottom:4px; }
+  #summary { margin-top:20px; font-size:18px; font-weight:bold; }
+  #summary.ok { color:#7bd389; }
+  #summary.bad { color:#ff6b6b; }
+  .note { color:#888; }
+</style>
+</head>
+<body>
+<h1>Sewing.js fixtures</h1>
+<p class="note">
+  Runs <code>Sewing.parse</code> against real pattern text in <code>../tmp-pdf/sew-*.txt</code>.
+  Those files are copyrighted, personal-use-only material: <code>tmp-pdf/</code> is gitignored and
+  nothing from them is ever asserted verbatim here — only shapes and counts. A fresh clone has no
+  fixtures at all and this page stays green.
+</p>
+<p class="note">
+  To add one: put the PDF in <code>tmp-pdf/</code>, extract its text with <code>tmp-pdf/extract.html</code>
+  (or the in-app importer), save it as <code>tmp-pdf/sew-&lt;name&gt;.txt</code>, and add an entry to
+  <code>FIXTURES</code> below.
+</p>
+<div id="out"></div>
+<div id="summary"></div>
+
+<script src="../js/sewing.js"></script>
+<script>
+'use strict';
+
+var out = document.getElementById('out');
+var passed = 0, failed = 0, skipped = 0;
+
+function line(cls, text) {
+  var div = document.createElement('div');
+  div.className = cls;
+  div.textContent = text;
+  out.appendChild(div);
+}
+function log(ok, label, detail) {
+  if (ok) { passed++; } else { failed++; }
+  var t = (ok ? 'PASS' : 'FAIL') + ' - ' + label + (detail ? '  (' + detail + ')' : '');
+  line(ok ? 'pass' : 'fail', t);
+  if (ok) console.log(t); else console.error(t);
+}
+function group(title) { line('group', title); }
+function skip(label) { skipped++; line('skip', 'SKIP - ' + label); }
+function assertTrue(cond, label, detail) { log(!!cond, label, cond ? '' : (detail || 'expected truthy')); }
+
+/**
+ * Each fixture: `file` under ../tmp-pdf/, and `check(parse, t)` making SHAPE assertions
+ * only. Never assert verbatim pattern text here - this file is committed.
+ */
+var FIXTURES = [
+  {
+    file: 'sew-garment.txt',
+    what: 'an indie garment instruction booklet (Peppermint-style)',
+    check: function (p, t) {
+      t(p.kind === 'garment', 'kind is garment');
+      t(p.pages >= 8, 'at least 8 pages, got ' + p.pages);
+      t(p.steps.length >= 20, 'at least 20 steps, got ' + p.steps.length);
+      t(p.steps[0].page !== null, 'the first step knows its page');
+      t(p.cuttingList.length >= 5, 'at least 5 cutting rows, got ' + p.cuttingList.length);
+      t(p.notions.length >= 3, 'at least 3 notions, got ' + p.notions.length);
+      t(!!p.seamAllowance, 'a seam allowance was found');
+      t(p.seamAllowance && p.seamAllowance.mm > 0, 'the seam allowance has a millimetre value');
+      t(!!p.sizes && p.sizes.labels.length >= 3, 'a size chart with at least 3 sizes');
+    }
+  },
+  {
+    file: 'sew-quilt.txt',
+    what: 'a free quilt pattern with a WOF cutting chart',
+    check: function (p, t) {
+      t(p.kind === 'quilt', 'kind is quilt');
+      t(p.cuttingList.length >= 4, 'at least 4 cutting rows, got ' + p.cuttingList.length);
+      t(p.cuttingList.some(function (r) { return /WOF|strip/i.test(r.piece); }), 'at least one WOF strip row');
+      t(!!p.seamAllowance && p.seamAllowance.mm === 6, 'the quilting 1/4" seam allowance');
+      t(p.steps.length >= 4, 'at least 4 steps, got ' + p.steps.length);
+    }
+  },
+  {
+    file: 'sew-bag.txt',
+    what: 'a bag pattern with hardware and interfacing lists',
+    check: function (p, t) {
+      t(p.kind === 'bag', 'kind is bag');
+      t(p.notions.length >= 5, 'at least 5 notions, got ' + p.notions.length);
+      t(p.notions.some(function (n) { return n.kind === 'hardware'; }), 'at least one hardware item');
+      t(p.notions.some(function (n) { return n.kind === 'interfacing'; }), 'at least one interfacing item');
+      t(p.cuttingList.length >= 4, 'at least 4 cutting rows, got ' + p.cuttingList.length);
+      t(p.cuttingList.some(function (r) { return !!r.dims; }), 'at least one dimensional cut row');
+    }
+  },
+  {
+    file: 'sew-bag2.txt',
+    what: 'a photo-heavy bag pattern (reading order stress test)',
+    check: function (p, t) {
+      t(p.steps.length >= 15, 'at least 15 steps, got ' + p.steps.length);
+      t(p.cuttingList.length >= 3, 'at least 3 cutting rows, got ' + p.cuttingList.length);
+      t(p.notions.length >= 3, 'at least 3 notions, got ' + p.notions.length);
+    }
+  },
+  {
+    file: 'sew-shirt.txt',
+    what: 'a booklet using the "Step N" marker style and a seam-allowance exception clause',
+    check: function (p, t) {
+      t(p.steps.length >= 10, 'at least 10 steps, got ' + p.steps.length);
+      t(p.steps.some(function (s) { return s.marker === 'Step'; }), 'the Step N marker style was detected');
+      t(!!p.seamAllowance, 'a seam allowance was found');
+    }
+  },
+  {
+    file: 'sew-tank.txt',
+    what: 'a booklet with a wide size chart (many sizes, mixed units)',
+    check: function (p, t) {
+      t(!!p.sizes, 'a size chart was found');
+      t(p.sizes && p.sizes.labels.length >= 6, 'at least 6 sizes, got ' + (p.sizes ? p.sizes.labels.length : 0));
+      t(p.sizes && p.sizes.chart.length >= 2, 'at least 2 measurement rows');
+      t(p.steps.length >= 8, 'at least 8 steps, got ' + p.steps.length);
+    }
+  }
+];
+
+/** Every fixture also has to satisfy these, whatever the pattern is. */
+function universal(p, name, t) {
+  t(!!p && typeof p === 'object', 'parse() returned an object');
+  t(Object.prototype.toString.call(p.steps) === '[object Array]', 'steps is an array');
+  t(Object.prototype.toString.call(p.cuttingList) === '[object Array]', 'cuttingList is an array');
+  t(Object.prototype.toString.call(p.notions) === '[object Array]', 'notions is an array');
+  t(Object.prototype.toString.call(p.fabric) === '[object Array]', 'fabric is an array');
+  t(Object.prototype.toString.call(p.warnings) === '[object Array]', 'warnings is an array');
+  t(p.sizes === null || (p.sizes && Object.prototype.toString.call(p.sizes.labels) === '[object Array]'), 'sizes is null or a chart');
+  t(p.seamAllowance === null || typeof p.seamAllowance === 'object', 'seamAllowance is null or an object');
+  t(/^(garment|bag|quilt|unknown)$/.test(p.kind), 'kind is one of the four values');
+  t(typeof p.pages === 'number' && p.pages >= 0, 'pages is a number');
+  t(p.steps.length <= 200, 'steps are capped at 200');
+  // every row is well formed
+  t(p.steps.every(function (s) { return typeof s.text === 'string' && s.text.length > 0 && s.text.length <= 810; }),
+    'every step has non-empty text within the 800-char cap');
+  t(p.steps.every(function (s) { return typeof s.n === 'number'; }), 'every step has a numeric n');
+  t(p.steps.every(function (s) { return s.page === null || typeof s.page === 'number'; }), 'every step page is a number or null');
+  t(p.cuttingList.every(function (r) { return r.qty >= 1 && r.qty <= 9999; }), 'every cut row has a sane qty');
+  t(p.cuttingList.every(function (r) { return typeof r.piece === 'string' && r.piece.length >= 2; }), 'every cut row has a piece name');
+  t(p.notions.every(function (r) { return /^(notion|hardware|interfacing)$/.test(r.kind); }), 'every notion has a valid kind');
+  // round-trip through the data model
+  var data = window.Sewing.toCraftData(p);
+  var again = window.Sewing.normalize(data, null);
+  t(again.steps.length === Math.min(p.steps.length, 400), 'steps survive toCraftData + normalize');
+  t(again.cutting.length === Math.min(p.cuttingList.length, 300), 'cutting survives toCraftData + normalize');
+  t(again.sourceText.length <= 60000, 'sourceText is capped');
+  t(typeof window.Sewing.summary({ craftData: again }) === 'string', 'summary() returns a string for ' + name);
+}
+
+function fetchText(url) {
+  return new Promise(function (resolve) {
+    var xhr = new XMLHttpRequest();
+    xhr.open('GET', url, true);
+    xhr.onload = function () {
+      // file:// gives status 0 with a body when the file exists
+      var ok = (xhr.status >= 200 && xhr.status < 300) || (xhr.status === 0 && xhr.responseText);
+      resolve(ok ? xhr.responseText : null);
+    };
+    xhr.onerror = function () { resolve(null); };
+    try { xhr.send(); } catch (e) { resolve(null); }
+  });
+}
+
+function run() {
+  var chain = Promise.resolve();
+  var found = 0;
+  FIXTURES.forEach(function (fx) {
+    chain = chain.then(function () {
+      return fetchText('../tmp-pdf/' + fx.file).then(function (text) {
+        group(fx.file + ' — ' + fx.what);
+        if (!text || text.replace(/\s/g, '').length < 200) {
+          skip('fixture not present (' + fx.file + ')');
+          return;
+        }
+        found++;
+        var t0 = (window.performance && performance.now) ? performance.now() : Date.now();
+        var p = window.Sewing.parse(text);
+        var t1 = (window.performance && performance.now) ? performance.now() : Date.now();
+        line('pass', 'INFO - ' + text.length + ' chars, ' + p.pages + ' pages, parsed in ' + (t1 - t0).toFixed(1) + ' ms');
+        line('pass', 'INFO - ' + p.steps.length + ' steps, ' + p.cuttingList.length + ' cut rows, ' +
+          p.notions.length + ' notions, kind=' + p.kind +
+          (p.seamAllowance ? (', SA=' + p.seamAllowance.mm + ' mm') : ', SA=none'));
+        if (p.warnings.length) line('skip', 'WARN - ' + p.warnings.join(' | '));
+        var t = function (cond, label, detail) { log(cond, fx.file + ': ' + label, detail); };
+        universal(p, fx.file, t);
+        try { fx.check(p, t); }
+        catch (e) { log(false, fx.file + ': check threw', String(e && e.message)); }
+      });
+    });
+  });
+  return chain.then(function () {
+    group('Result');
+    if (!found) {
+      line('skip', 'No fixtures present. Drop sew-*.txt files into tmp-pdf/ to exercise the parser ' +
+        'against real patterns. Nothing to do — this is not a failure.');
+    }
+    var sum = document.getElementById('summary');
+    sum.className = failed ? 'bad' : 'ok';
+    sum.textContent = (failed ? 'FAILED ' : 'ALL PASS ') + passed + ' passed, ' + failed + ' failed, ' +
+      skipped + ' fixture(s) not present';
+    window.__sewingFixtureResults = { passed: passed, failed: failed, skipped: skipped, found: found };
+    console.log(sum.textContent);
+  });
+}
+
+run();
+</script>
+</body>
+</html>
