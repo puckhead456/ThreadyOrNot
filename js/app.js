@@ -10,7 +10,9 @@
 
   var EMOJI = [
     '🧶', '🐑', '🐄', '🐖', '🐔', '🐰', '🐉', '🐲', '🦖', '🐢',
-    '🐙', '🐸', '🦊', '🐻', '🧣', '🧥', '🧸', '🌵', '🌙', '⭐'
+    '🐙', '🐸', '🦊', '🐻', '🧣', '🧥', '🧸', '🌵', '🌙', '⭐',
+    // craft-module templates (cross-stitch, sewing)
+    '🧵', '🪡', '🌸', '🎁', '👜', '🛏️'
   ];
 
   var MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -1849,6 +1851,11 @@
             var chosen = Store.template(chosenTemplate);
             if (!chosen || (chosen.craft || 'crochet') !== chosenCraft) {
               chosenTemplate = list[0].id;
+              // Switching craft auto-picks its first template, so the emoji
+              // follows too (a sewing project should not start out as 🧶).
+              if (emoji) emoji.set(list[0].emoji);
+              if (modeSeg) modeSeg.set(list[0].countMode);
+              if (groupStep) groupStep.set(list[0].groupSize);
             }
             list.forEach(function (tpl) {
               var card = button('tpl-card' + (tpl.id === chosenTemplate ? ' on' : ''));
