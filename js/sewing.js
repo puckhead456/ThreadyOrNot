@@ -154,6 +154,8 @@
     s = s.replace(UNI_DASH, '-');
     // hyphenated mixed numbers: 2-1/2 -> 2 1/2
     s = s.replace(/(\d)\s*-\s*(\d+\s*\/\s*\d+)/g, '$1 $2');
+    // a fraction split by a stray space: '5 /8 "' -> '5/8 "' (Pattern Runway booklets)
+    s = s.replace(/(\b\d)[ \t]+\/[ \t]*(\d{1,2})(?!\d)/g, '$1/$2');
     s = s.replace(new RegExp(LEADER_MARK, 'g'), ' — ');
     // whitespace (newlines preserved)
     s = s.replace(/[ \t\f\v]+/g, ' ');
@@ -236,7 +238,12 @@
     ['notions', /^(?:notions?(?:\s+(?:list|needed|and\s+supplies))?|supplies|you\s*'?\s*(?:ll|will)\s+need|what\s+you\s*'?\s*(?:ll|will)\s+need|haberdashery|hardware(?:\s+list)?|materials?(?:\s+(?:list|needed|and\s+notions))?|tools?(?:\s+and\s+supplies)?|interfacing(?:\s+list)?)$/i],
     ['fabric', /^(?:fabrics?(?:\s+(?:requirements?|suggestions?|recommendations?|needed|and\s+notions))?|yardage(?:\s+requirements?)?|requirements?|fabric\s+quantities)$/i],
     ['size', /^(?:size\s+chart|sizing|sizes?|body\s+measurements?|finished\s+(?:garment\s+)?measurements?|measurements?|finished\s+sizes?|size\s+guide)$/i],
-    ['steps', /^(?:construction(?:\s+.*)?|instructions?|sewing\s+instructions?|let\s*'?s\s+sew|assembly|block\s+assembly|quilt\s+top\s+assembly|piecing|finishing(?:\s+.*)?|hem(?:ming)?|view\s+[a-z](?:\b.*)?|making\s+up|method|steps?|sew(?:ing)?\s+the\s+.*|attaching\s+the\s+.*|the\s+[a-z]+)$/i]
+    ['steps', /^(?:construction(?:\s+.*)?|instructions?|sewing\s+instructions?|let\s*'?s\s+sew|assembly|block\s+assembly|quilt\s+top\s+assembly|piecing|finishing(?:\s+.*)?|hem(?:ming)?|view\s+[a-z](?:\b.*)?|making\s+up|method|steps?|sew(?:ing)?\s+the\s+.*|attaching\s+the\s+.*|the\s+[a-z]+)$/i],
+    // Reference matter. It reads like instructions (numbered lists, titled
+    // paragraphs) but is never a construction step, a notion or a cut piece.
+    // NB: 'Key' and 'Legend' are deliberately NOT here — they are printed
+    // *inside* the sewing instructions and would cut the steps block in half.
+    ['skip', /^(?:glossary|terms|pattern\s+symbols?|pattern\s+markings?|before\s+(?:you\s+)?start(?:ing)?(?:\s+.*)?|getting\s+started|creating\s+a\s+perfect\s+fit|how\s+to\s+(?:measure|choose|use|read|print)(?:\s+.*)?|my\s+measurements|lengthen(?:ing)?\s*\/?\s*shorten(?:ing)?|choosing\s+your\s+size|about\s+(?:this\s+)?pattern|sewing\s+level|suggested\s+fabrics?|printing(?:\s+.*)?|copyright(?:\s+.*)?|abbreviations?|difficulty)$/i]
   ];
 
   function headingKind(core) {
@@ -258,7 +265,8 @@
   function classify(lines) {
     var kinds = new Array(lines.length);
     var heads = new Array(lines.length);
-    var cur = 'none', head = '', count = 0;
+    var owners = new Array(lines.length);   // the block a heading line sits in
+    var cur = 'none', head = '', count = 0, sawSteps = false;
     for (var i = 0; i < lines.length; i++) {
       var ln = lines[i];
       var t = ln.text;
@@ -266,14 +274,19 @@
       if (isHeading(t) && !sizeHeader(t)) {
         var core = headingText(t);
         var k = headingKind(core);
-        if (k) { cur = k; count = 0; }
-        else if (cur !== 'none' && cur !== 'steps') { cur = 'none'; }
+        if (k) { cur = k; count = 0; if (k === 'steps') sawSteps = true; }
+        // An unrecognised heading ('Sleeve Length:', 'To Lengthen a Bodice:')
+        // does not break out of a steps or skip block — it just names a section.
+        else if (cur !== 'none' && cur !== 'steps' && cur !== 'skip') { cur = 'none'; }
         head = core;
         kinds[i] = 'head';
         heads[i] = core;
+        owners[i] = cur;
         continue;
       }
-      if (cur !== 'none' && cur !== 'steps') {
+      // A 'skip' block (glossary, pattern symbols, how-to-measure) ends only at
+      // the next recognised heading: its numbered lists must never leak out.
+      if (cur !== 'none' && cur !== 'steps' && cur !== 'skip') {
         count++;
         if (count > 60) cur = 'none';
         else if (endsBlock(t, cur)) cur = 'none';
@@ -281,7 +294,13 @@
       kinds[i] = cur;
       heads[i] = head;
     }
-    return { kinds: kinds, heads: heads };
+    return { kinds: kinds, heads: heads, owners: owners, hasSteps: sawSteps };
+  }
+
+  /** True when at least one line sits inside a recognised steps block. */
+  function hasStepsBlock(kinds) {
+    for (var i = 0; i < kinds.length; i++) if (kinds[i] === 'steps') return true;
+    return false;
   }
 
   function endsBlock(text, kind) {
@@ -296,7 +315,9 @@
   // =====================================================================
 
   var BULLET_RE = /^[\-*•●▪·]\s+/;
-  var MARK_NUM_RE = /^(step\s*)?(\d{1,3})\s*([.)\]:\-])\s+(\S.*)$/i;
+  // `\s*` after the separator, not `\s+`: Pattern Runway prints '1.Stabilise the
+  // waist:' with no space. REST_OK_RE still throws out '1.5 cm' and '2. 5 mm'.
+  var MARK_NUM_RE = /^(step\s*)?(\d{1,3})\s*([.)\]:\-])\s*(\S.*)$/i;
   var MARK_STEP_RE = /^step\s*[#]?\s*(\d{1,3})\b[.:)\-]?\s*(.*)$/i;
   var UNIT_START_RE = /^(?:cm|mm|m|in|inch(?:es)?|"|yd|yards?|yds)\b/i;
   var REST_OK_RE = /^[A-Za-z("']/;
@@ -326,6 +347,28 @@
     return null;
   }
 
+  /**
+   * A titled paragraph inside the steps block: 'Centre Back Seam: Align right
+   * sides together…'. Plenty of respected publishers number nothing and simply
+   * bold the title of each operation. Only ever applied inside a steps block.
+   */
+  var TITLE_STEP_RE = /^([A-Z][A-Za-z'\/&\- ]{2,48}):\s+(\S.*)$/;
+  var TITLE_STEP_BAD = /^(?:note|please note|tip|hint|warning|key|legend|fig|figure|size|sizes|size chart|fabric|fabrics|notions|trims|supplies|materials|hardware|tools|seam allowances?(?: & hems)?|my measurements|copyright(?: info)?|sewing level|suggested fabrics|glossary|e|w|t|www|email|contact|disclaimer|terms)$/i;
+
+  /** { title, rest } for a titled-paragraph step, else null. */
+  function titleStep(text) {
+    var s = str(text, '').replace(/^\s+|\s+$/g, '').replace(BULLET_RE, '');
+    if (!s || s.length > 900) return null;
+    var m = TITLE_STEP_RE.exec(s);
+    if (!m) return null;
+    var title = m[1].replace(/\s+$/, '');
+    if (TITLE_STEP_BAD.test(title)) return null;
+    if (title.split(/\s+/).length > 7) return null;
+    // The body has to be a real sentence, not another label on the same line.
+    if (!/[a-z]/.test(m[2])) return null;
+    return { title: title, rest: m[2].replace(/^\s+/, '') };
+  }
+
   var STEP_TEXT_CAP = 800;
 
   /**
@@ -336,21 +379,83 @@
     opts = opts || {};
     var lines = toLines(input);
     var info = opts.blocks || classify(lines);
-    var kinds = info.kinds, heads = info.heads;
+    var kinds = info.kinds, heads = info.heads, owners = info.owners;
     var steps = [];
     var warns = [];
     var lastN = 0, section = '', cur = null;
     var candidates = 0, jumped = 0, sectionSeq = 1, capped = false, truncated = 0;
     var firstIndex = -1;
+    var justCrossedPage = false, lastStep = null, pending = null;
+
+    // When the booklet has a real steps block, nothing outside it is a step:
+    // the numbered list under "How to Measure the Body" is not construction.
+    var stepsOnly = opts.stepsOnly === undefined
+      ? (info.hasSteps || hasStepsBlock(kinds))
+      : !!opts.stepsOnly;
 
     for (var i = 0; i < lines.length; i++) {
       var ln = lines[i];
       var t = ln.text;
-      if (ln.pageMark || !t) { cur = null; continue; }
+      // PdfText prints a blank line before each '=== PAGE n ===', so the step
+      // that was running has already been closed by the time the marker
+      // arrives. Hold on to it so the rest of the paragraph can rejoin it.
+      if (ln.pageMark) {
+        var carry = cur || pending;
+        if (carry) { lastStep = carry; justCrossedPage = true; }
+        cur = null; pending = null;
+        continue;
+      }
+      if (!t) { if (cur) pending = cur; cur = null; continue; }
       var k = kinds[i];
-      if (k === 'head') { section = prettyHeading(heads[i]); cur = null; continue; }
-      var inOtherBlock = (k === 'cut' || k === 'notions' || k === 'fabric' || k === 'size');
+      if (k === 'head') {
+        // '3.Side Seams' and '5.Waistband:' read as Title Case headings, but
+        // inside the sewing instructions they are numbered steps.
+        if (owners && owners[i] === 'steps') {
+          var hm = stepMarker(t);
+          if (hm && hm.n <= lastN + 12) {
+            cur = {
+              n: hm.n, section: section, text: hm.rest,
+              page: typeof ln.page === 'number' ? ln.page : null, marker: hm.marker
+            };
+            if (steps.length < 200) {
+              steps.push(cur);
+              if (firstIndex < 0) firstIndex = i;
+              lastN = hm.n;
+            } else { capped = true; cur = null; }
+            justCrossedPage = false; lastStep = null; pending = null;
+            continue;
+          }
+        }
+        // 'Key:' / 'Note:' name a legend, not a section of the garment.
+        if (!TITLE_STEP_BAD.test(headingText(heads[i] || ''))) section = prettyHeading(heads[i]);
+        cur = null; lastStep = null; justCrossedPage = false; pending = null;
+        continue;
+      }
+      var inStepsBlock = (k === 'steps');
+      var inOtherBlock = (k === 'cut' || k === 'notions' || k === 'fabric' || k === 'size' || k === 'skip');
+      if (stepsOnly && !inStepsBlock) { cur = null; lastStep = null; justCrossedPage = false; pending = null; continue; }
       var mk = inOtherBlock ? null : stepMarker(t);
+      if (!mk && inStepsBlock) {
+        var ts = titleStep(t);
+        if (ts) {
+          if (steps.length < 200) {
+            cur = {
+              n: lastN || (steps.length + 1),
+              section: section,
+              text: ts.title + ': ' + ts.rest,
+              page: typeof ln.page === 'number' ? ln.page : null,
+              marker: 'title'
+            };
+            steps.push(cur);
+            if (firstIndex < 0) firstIndex = i;
+          } else {
+            capped = true;
+            cur = null;
+          }
+          justCrossedPage = false; lastStep = null; pending = null;
+          continue;
+        }
+      }
       if (mk) {
         candidates++;
         if (mk.n > lastN + 12) { jumped++; cur = null; continue; }
@@ -369,10 +474,22 @@
         steps.push(cur);
         if (firstIndex < 0) firstIndex = i;
         lastN = mk.n;
+        justCrossedPage = false; lastStep = null; pending = null;
         continue;
       }
+      // A step that ran over a page break carries on: the PDF put a page marker
+      // in the middle of the paragraph, not a new instruction.
+      if (!cur && justCrossedPage && lastStep && !inOtherBlock) {
+        cur = lastStep;
+        lastStep = null;
+      }
+      justCrossedPage = false;
+      pending = null;
       if (cur && !inOtherBlock) {
-        if (cur.text.length < STEP_TEXT_CAP) {
+        // Trimming the part-word off the end can drop the text back under the
+        // cap, so the ellipsis is what marks a step as full — not its length.
+        var full = cur.text.charAt(cur.text.length - 1) === '…';
+        if (!full && cur.text.length < STEP_TEXT_CAP) {
           cur.text = cur.text ? (cur.text + ' ' + t) : t;
           if (cur.text.length > STEP_TEXT_CAP) {
             cur.text = cur.text.slice(0, STEP_TEXT_CAP).replace(/\s+\S*$/, '') + '…';
@@ -419,7 +536,7 @@
       var ln = lines[i], t = ln.text, k = kinds[i];
       if (ln.pageMark || !t) { flush(); continue; }
       if (k === 'head') { flush(); section = prettyHeading(heads[i]); continue; }
-      if (k === 'cut' || k === 'notions' || k === 'fabric' || k === 'size') { flush(); continue; }
+      if (k === 'cut' || k === 'notions' || k === 'fabric' || k === 'size' || k === 'skip') { flush(); continue; }
       if (!buf) page = typeof ln.page === 'number' ? ln.page : null;
       buf = buf ? (buf + ' ' + t) : t;
     }
@@ -438,6 +555,10 @@
   var C_N_X_PIECE = /^\(?\s*(\d{1,3})\s*\)?\s*[x×]\s*(.{2,48}?)(?:\s*[-—(](.*))?$/i;
   var C_PIECE_X_N = /^(.{2,48}?)\s*[x×]\s*\(?\s*(\d{1,3})\s*\)?\b(.*)$/i;
   var C_FROM_LINE = /^from\s+(?:the\s+)?(.{2,40}?)\s*[,:.]?\s*$/i;
+  // What follows the count when the line is prose rather than a cutting row.
+  var CUT_REST_BAD = /^\s*(?:x\b|only\b|of\b|each\b|more\b|time|times\b)/i;
+  // A "piece name" that is really the tail of a sentence.
+  var CUT_PIECE_BAD = /^(?:layout|fold|unfold|re\s*fold|then|and|or|to|please|note|you|we|this|these|those|first|next|now|after|before|position|place|turn|use|using|make|do|see|when|if|with|for|from|it|is|are|be|the|a|an)\b/i;
 
   var MATERIALS = [
     ['main', /\b(?:main|self|shell|outer|exterior|fashion fabric)\b/i],
@@ -513,11 +634,16 @@
       fromHere = m[1] ? m[1].replace(/^\s+|\s+$/g, '') : null;
       qty = parseInt(m[2], 10);
       rest = m[3] || '';
+      // 'cut 1x only', 'cut 1 x each waistband': the number is a multiplier in
+      // running prose, not a piece count.
+      if (CUT_REST_BAD.test(rest)) return null;
       piece = singular(cleanPiece(rest.replace(/\bfrom\s+(?:the\s+)?[a-z0-9 ]{2,24}$/i, '')));
     } else if ((m = C_PIECE_CUT.exec(s))) {
       piece = cleanPiece(m[1]);
       qty = parseInt(m[2], 10);
       rest = m[3] || '';
+      if (CUT_REST_BAD.test(rest)) return null;
+      if (CUT_PIECE_BAD.test(piece)) return null;
     } else if ((m = C_N_X_PIECE.exec(s))) {
       qty = parseInt(m[1], 10);
       piece = cleanPiece(m[2]);
@@ -598,7 +724,7 @@
     'threads?', 'zips?', 'zippers?', 'invisible zip', 'separating zip', 'buttons?',
     'snaps?', 'magnetic snaps?', 'press studs?', 'hook and eye', 'bra hooks?',
     'elastic', 'bias binding', 'bias tape', 'twill tape', 'interfacing', 'interlining',
-    'fusible[a-z ]*', 'webbing', 'd-?rings?', 'o-?rings?', 'rectangle rings?',
+    'fusing', 'fusible[a-z ]*', 'webbing', 'd-?rings?', 'o-?rings?', 'rectangle rings?',
     'swivel hooks?', 'swivel clasps?', 'triglides?', 'sliders?', 'rivets?', 'grommets?',
     'eyelets?', 'drawstrings?', 'cords?', 'cord stops?', 'toggles?', 'velcro',
     'hook-and-loop', 'boning', 'shoulder pads?', 'labels?', 'batting', 'wadding',
@@ -607,7 +733,37 @@
   ].join('|') + ')\\b', 'i');
 
   var HARDWARE_RE = /\b(?:d-?rings?|o-?rings?|rectangle rings?|swivel hooks?|swivel clasps?|triglides?|sliders?|rivets?|grommets?|eyelets?|magnetic snaps?|snaps?|press studs?|hook and eye|bra hooks?|toggles?|cord stops?|buckles?|purse feet|bag feet)\b/i;
-  var INTERFACING_RE = /\b(?:interfacing|interlining|fusible[a-z ]*|sf-?101|shape ?flex|soft and stable|stabili[sz]ers?|foam)\b/i;
+  var INTERFACING_RE = /\b(?:interfacing|interlining|fusing|fusible[a-z ]*|sf-?101|shape ?flex|soft and stable|stabili[sz]ers?|foam)\b/i;
+
+  /**
+   * 'TRIMS: 1x 25cm Invisible zip, fusing, either a button …' — a whole notions
+   * list on one line after its label. Pattern Runway, Mood and most free
+   * patterns do this instead of a bulleted block.
+   */
+  var NOTION_LABEL_RE = /^(trims?|notions?|supplies|haberdashery|hardware|materials?|you\s+will\s+need|what\s+you\s+will\s+need|tools?)\s*:\s*(\S.*)$/i;
+  /** Any 'Label: text' line — used to stop an inline list running on. */
+  var ANY_LABEL_RE = /^[A-Z][A-Za-z0-9 '&\/-]{1,36}:(?:\s|$)/;
+  var INLINE_SPLIT_RE = /\s*[,;]\s*|\s+\+\s+|\.\s+(?=[A-Z0-9])/;
+  var INLINE_LEAD_JUNK = /^(?:either\s+|a\s+|an\s+|some\s+|plus\s+|and\s+|or\s+)+/i;
+
+  /** Split an inline notions list into items. Never splits 'Hook and eye'. */
+  function splitInlineNotions(text) {
+    var s = str(text, '').replace(/\s+/g, ' ').replace(/^\s+|\s+$/g, '').replace(/\.$/, '');
+    if (!s) return [];
+    var parts = s.split(INLINE_SPLIT_RE);
+    // Only fall back to 'and'/'or' when there were no commas to go on, so that
+    // 'Hook and eye' survives a comma-separated list intact.
+    if (parts.length < 2) parts = s.split(/\s+(?:and|or)\s+/i);
+    var out = [];
+    for (var i = 0; i < parts.length; i++) {
+      var p = str(parts[i], '').replace(INLINE_LEAD_JUNK, '').replace(/^\s+|\s+$/g, '').replace(/[.,;]+$/, '');
+      if (p.length < 2 || p.length > 90) continue;
+      if (!/[a-z]/i.test(p)) continue;
+      out.push(p);
+      if (out.length >= 24) break;
+    }
+    return out;
+  }
 
   var QTY_LEAD_X = /^\(?\s*(\d{1,3})\s*\)?\s*[x×]\s+/i;
   var QTY_PARENS = /^\(\s*(\d{1,3})\s*\)\s*/;
@@ -626,6 +782,40 @@
     if ((m = QTY_TRAIL.exec(s))) return clampInt(m[1], 1, 999, null);
     if ((m = QTY_PLAIN.exec(s))) return clampInt(m[1], 1, 999, null);
     return null;
+  }
+
+  // Words allowed to sit in front of the notion noun on a loose line.
+  var LOOSE_LEAD = {
+    x: 1, matching: 1, lightweight: 1, light: 1, heavyweight: 1, heavy: 1, medium: 1,
+    invisible: 1, fusible: 1, coordinating: 1, separating: 1, clear: 1, metal: 1,
+    plastic: 1, wide: 1, narrow: 1, cm: 1, mm: 1, m: 1, in: 1, inch: 1, inches: 1,
+    yd: 1, yds: 1, yard: 1, yards: 1, of: 1, approx: 1
+  };
+
+  /**
+   * Outside a notions block a line is only a notion when it *opens* with a
+   * quantity or the notion noun itself. Without this, every glossary sentence
+   * that mentions 'stitch' or 'thread' lands in the shopping list.
+   */
+  function looseNotion(text) {
+    var s = str(text, '').replace(/^\s+|\s+$/g, '');
+    if (!s || s.length > 60) return false;
+    var m = NOTION_VOCAB.exec(s);
+    NOTION_VOCAB.lastIndex = 0;
+    if (!m) return false;
+    var before = s.slice(0, m.index).toLowerCase().replace(/[^a-z0-9. ]+/g, ' ').replace(/^\s+|\s+$/g, '');
+    if (!before) return true;
+    var words = before.split(/\s+/);
+    if (words.length > 6) return false;
+    for (var i = 0; i < words.length; i++) {
+      var w = words[i];
+      if (!w) continue;
+      if (/^\d+(?:[.,]\d+)?$/.test(w)) continue;
+      if (WORD_NUM[w]) continue;
+      if (LOOSE_LEAD[w]) continue;
+      return false;
+    }
+    return true;
   }
 
   function notionKind(text) {
@@ -650,22 +840,49 @@
       var ln = lines[i];
       var t = ln.text;
       if (!t || ln.pageMark) continue;
-      if (t.length < 3 || t.length > 90) continue;
-      if (isHeading(t) && headingKind(headingText(t))) continue;
-      if (/^[\d\s.\/"x×-]+$/.test(t)) continue;         // a bare measurement row
-      if (!inBlock && !NOTION_VOCAB.test(t)) continue;
-      if (inBlock && stepMarker(t) && /^step/i.test(t.replace(BULLET_RE, ''))) continue;
-      var text = t.replace(BULLET_RE, '').replace(/\s*[.;]\s*$/, '').replace(/^\s+|\s+$/g, '');
-      if (text.length < 3) continue;
-      var k = key(text);
-      if (!k || seen[k]) continue;
-      seen[k] = 1;
-      out.push({
-        text: text,
-        qty: notionQty(text),
-        kind: notionKind(text),
-        line: t
-      });
+      // A labelled inline list is allowed to be long; a plain line is not.
+      var lab = NOTION_LABEL_RE.exec(t);
+      if (lab) {
+        // The list usually wraps onto the next printed line ('…13mm bias' /
+        // 'binding'). Pull those in before splitting.
+        var joined = lab[2];
+        while (i + 1 < lines.length && joined.length < 400) {
+          var nx = lines[i + 1];
+          if (!nx || nx.pageMark || !nx.text) break;
+          if (ANY_LABEL_RE.test(nx.text)) break;
+          if (isHeading(nx.text)) break;
+          joined += ' ' + nx.text;
+          i++;
+        }
+        lab = [t, lab[1], joined];
+      }
+      if (!lab) {
+        if (t.length < 3 || t.length > 90) continue;
+        if (isHeading(t) && headingKind(headingText(t))) continue;
+        if (/^[\d\s.\/"x×-]+$/.test(t)) continue;       // a bare measurement row
+        if (!inBlock && !looseNotion(t)) continue;
+        if (inBlock && stepMarker(t) && /^step/i.test(t.replace(BULLET_RE, ''))) continue;
+      }
+
+      // An inline list ('TRIMS: a, b, c') becomes one row per item.
+      var items = null;
+      if (lab) items = splitInlineNotions(lab[2]);
+      else if (inBlock && t.indexOf(',') > 0 && t.length > 40) items = splitInlineNotions(t);
+      if (!items || !items.length) items = [t.replace(BULLET_RE, '').replace(/\s*[.;]\s*$/, '').replace(/^\s+|\s+$/g, '')];
+
+      for (var j = 0; j < items.length; j++) {
+        var text = items[j];
+        if (!text || text.length < 3) continue;
+        var k = key(text);
+        if (!k || seen[k]) continue;
+        seen[k] = 1;
+        out.push({
+          text: text,
+          qty: notionQty(text),
+          kind: notionKind(text),
+          line: t
+        });
+      }
     }
     Object.defineProperty(out, 'warnings', { value: warns, enumerable: false, configurable: true });
     return out;
@@ -685,25 +902,61 @@
     new RegExp('seam allowances?\\s*[-\\u2014]\\s*' + SA_NUM + '\\s*' + SA_UNIT, 'i')
   ];
   var SA_BRACKET = new RegExp('\\(\\s*' + SA_NUM + '\\s*' + SA_UNIT + '\\s*\\)', 'i');
+  var SA_DUAL = new RegExp(SA_NUM + '\\s*' + SA_UNIT + '\\s*\\/\\s*' + SA_NUM + '\\s*' + SA_UNIT, 'i');
   var SA_INCLUDED = /seam allowances?\s+(?:are|is)\s+(not\s+included|included)/i;
   var SA_EXCEPT_SPLIT = /\b(besides|except(?:\s+for)?|apart from|other than|excluding)\b/i;
-  var SA_EXCEPT_WORDS = /\b(except|besides|apart from|other than|excluding|unless otherwise|at the)\b/i;
+  // Deliberately narrow: a later sentence only counts as an exception when it
+  // says so. 'at the' alone matched half the construction steps.
+  var SA_EXCEPT_WORDS = /\b(except|besides|apart from|other than|excluding)\b/i;
   var SA_ANY = new RegExp(SA_NUM + '\\s*' + SA_UNIT, 'i');
   var SA_MENTION = /seam allowance|seams? are|seams? is|sewn at|stitch at/i;
 
   var DOT_MARK = '';
+  var SA_STOP_LINE = /^(?:size\s*chart|sizes?\b|finished\b|fabric\b|yardage\b|cutting\b|notions?\b|trims?\b|materials?\b|supplies\b|measurements?\b)/i;
+
+  /**
+   * Split into statement-sized chunks. A heading, a 'Label:' line or a
+   * heading-ish word at the start of a line ends the chunk even without a full
+   * stop — otherwise a seam-allowance sentence with no period swallows the
+   * whole size chart and fabric table beneath it.
+   */
+  function saSegments(text) {
+    var lines = str(text, '').split('\n');
+    var out = [];
+    var buf = [];
+    function flush() {
+      if (buf.length) out.push(buf.join(' '));
+      buf = [];
+    }
+    for (var i = 0; i < lines.length; i++) {
+      var t = lines[i].replace(/^\s+|\s+$/g, '');
+      if (!t || PAGE_RE.test(t)) { flush(); continue; }
+      if (ANY_LABEL_RE.test(t) || SA_STOP_LINE.test(t) || isHeading(t)) {
+        flush();
+        buf.push(t);
+        flush();
+        continue;
+      }
+      buf.push(t);
+      if (buf.join(' ').length > 1200) flush();
+    }
+    flush();
+    return out;
+  }
 
   function splitSentences(text) {
-    var flat = str(text, '').replace(/^===\s*PAGE\s+\d+\s*===$/gim, ' ').replace(/\n+/g, ' ');
-    // protect decimal points and abbreviations so '1.5 cm' is not two sentences
-    flat = flat.replace(/(\d)\.(\d)/g, '$1' + DOT_MARK + '$2');
+    var segments = saSegments(text);
     var out = [];
-    var re = /[^.!?•]+[.!?]?/g;
-    var m;
-    while ((m = re.exec(flat))) {
-      var s = m[0].split(DOT_MARK).join('.').replace(/^\s+|\s+$/g, '');
-      if (s) out.push(s);
-      if (out.length > 4000) break;
+    for (var s = 0; s < segments.length; s++) {
+      // protect decimal points so '1.5 cm' is not two sentences
+      var flat = segments[s].replace(/(\d)\.(\d)/g, '$1' + DOT_MARK + '$2');
+      var re = /[^.!?•]+[.!?]?/g;
+      var m;
+      while ((m = re.exec(flat))) {
+        var one = m[0].split(DOT_MARK).join('.').replace(/^\s+|\s+$/g, '');
+        if (one) out.push(one.slice(0, 200));
+        if (out.length > 4000) return out;
+      }
     }
     return out;
   }
@@ -724,6 +977,16 @@
       var bu = br[2].toLowerCase();
       if (isImperial(bu) && !inches) inches = br[1].replace(/\s+/g, ' ');
       if (!isImperial(bu) && mm === null) mm = toMm(br[1], bu);
+    }
+    // '1.5cm / 5/8"' — the dual-unit slash form, which is what most European
+    // and Australian patterns print instead of brackets.
+    var du = SA_DUAL.exec(sentence);
+    if (du) {
+      var u1 = du[2].toLowerCase(), u2 = du[4].toLowerCase();
+      if (isImperial(u1) && !inches) inches = du[1].replace(/\s+/g, ' ');
+      if (isImperial(u2) && !inches) inches = du[3].replace(/\s+/g, ' ');
+      if (mm === null && !isImperial(u1)) mm = toMm(du[1], u1);
+      if (mm === null && !isImperial(u2)) mm = toMm(du[3], u2);
     }
     return { mm: mm, inches: inches };
   }
@@ -757,7 +1020,10 @@
       if (!main && mHead) {
         main = saObject(head, mHead);
         mainSentence = s.replace(/\s+/g, ' ').replace(/^\s+|\s+$/g, '');
-      } else if (main && mHead && SA_EXCEPT_WORDS.test(s)) {
+      } else if (main && mHead && SA_EXCEPT_WORDS.test(s) && toMm(mHead.value, mHead.unit) !== main.mm) {
+        // A later sentence that simply restates the same allowance ("Seam
+        // allowances for all wovens are 1.5cm unless otherwise indicated") is
+        // not an exception.
         addException(exceptions, s, mHead);
       }
       if (tail) {
@@ -802,9 +1068,20 @@
 
   var SIZE_TOKEN_RE = /^(?:x{0,3}s|s|m|l|x{0,3}l|\d{1,2}\s*x[sl]?|[a-j]|\d{1,2})$/i;
 
+  // 'Size Chart:', 'Size Chart:(cm)', 'Sizes -', 'Finished Garment Measurements:'
+  var SIZE_PREFIX_RE = /^(?:size\s*(?:chart|range|guide)?|sizes|finished(?:\s+garment)?(?:\s+measurements?)?|measurements?|body\s+measurements?)\s*[:.\-]?\s*(?:\(\s*(cm|mm|in|inch(?:es)?)\s*\)\s*)?[:.\-]?\s*/i;
+
+  /** The unit a size-chart header declares in brackets, or ''. */
+  function sizeHeaderUnit(text) {
+    var m = SIZE_PREFIX_RE.exec(str(text, '').replace(/^\s+|\s+$/g, ''));
+    if (!m || !m[1]) return '';
+    var u = m[1].toLowerCase();
+    return (u === 'in' || u === 'inch' || u === 'inches') ? 'inch' : u;
+  }
+
   /** A size-chart header line -> labels[], else null. */
   function sizeHeader(text) {
-    var s = str(text, '').replace(/^\s+|\s+$/g, '').replace(/^sizes?\s*[:.\-]?\s*/i, '').replace(/[|,\/]/g, ' ');
+    var s = str(text, '').replace(/^\s+|\s+$/g, '').replace(SIZE_PREFIX_RE, '').replace(/[|,\/]/g, ' ');
     if (!s) return null;
     var toks = s.split(/\s+/).filter(Boolean);
     if (toks.length < 3 || toks.length > 24) return null;
@@ -845,19 +1122,40 @@
     return m || t;
   }
 
-  var VALUE_TOKEN_RE = /^\d{1,3}(?:[.,]\d+)?(?:\s\d+\/\d+)?(?:"|cm|mm|in|inches)?$/i;
+  // No leading \b: '84cm/33"' has no word boundary before 'cm', and that dual
+  // unit cell is exactly what Pattern Runway prints in its size charts.
+  var UNIT_WORD_RE = /(?:cm|mm|inches|inch|in|yards|yard|yds|yd|m)(?![a-z])/gi;
+  var FRACTION_TOKEN_RE = /^\d{1,2}\s*\/\s*\d{1,2}["’']?$/;
+  // A token that *starts* with a unit, so it belongs to the number before it:
+  // '86.5' + 'cm/34"' is one cell, not two.
+  var UNIT_TAIL_RE = /^(?:cm|mm|m|in|inch(?:es)?|yds?|yards?|")(?:[\/\-]|$|")/i;
 
-  /** Split a measurement row's values, merging '33 1/2' into one token. */
+  /** True when the token is only digits, punctuation and unit words. */
+  function isValueToken(t) {
+    if (!/^\d/.test(t)) return false;
+    var rest = String(t).replace(UNIT_WORD_RE, '').replace(/[\d.,\/–\-"'\s]/g, '');
+    UNIT_WORD_RE.lastIndex = 0;
+    return rest === '';
+  }
+
+  /**
+   * Split a measurement row's values into one token per size. Handles
+   * '33 1/2"' (fraction split off by the glyph pass) and the dual-unit cells
+   * Pattern Runway prints: '84cm/33"  86.5 cm/34"  89 cm/35"'.
+   */
   function valueTokens(s) {
     var raw = str(s, '').replace(/[|]/g, ' ').split(/\s+/).filter(Boolean);
     var out = [];
     for (var i = 0; i < raw.length; i++) {
-      if (/^\d{1,3}$/.test(raw[i]) && i + 1 < raw.length && /^\d+\/\d+"?$/.test(raw[i + 1])) {
-        out.push(raw[i] + ' ' + raw[i + 1]);
-        i++;
-      } else {
-        out.push(raw[i]);
+      var tok = raw[i];
+      // glue on any number of trailing fraction / unit-tail pieces
+      while (i + 1 < raw.length) {
+        var next = raw[i + 1];
+        if (/\d$/.test(tok) && FRACTION_TOKEN_RE.test(next)) { tok += ' ' + next; i++; continue; }
+        if (/[\d.]$/.test(tok) && UNIT_TAIL_RE.test(next)) { tok += ' ' + next; i++; continue; }
+        break;
       }
+      out.push(tok);
     }
     return out;
   }
@@ -867,25 +1165,39 @@
   function measureRows(lines, start, labels, limit) {
     var rows = [];
     var blanks = 0;
+    var prevText = '';
     for (var i = start; i < lines.length && rows.length < (limit || 12); i++) {
       var ln = lines[i];
       var t = ln.text;
       if (ln.pageMark) break;
       if (!t) { blanks++; if (blanks >= 2) break; continue; }
       if (isHeading(t) && headingKind(headingText(t))) break;
+
+      var label = '', valuePart = '';
       var m = MEASURE_ROW_RE.exec(t);
-      if (!m) {
+      if (m) {
+        label = m[1];
+        valuePart = m[2];
+      } else if (/^\d/.test(t) && prevText && prevText.length <= 28 && /^[A-Za-z][A-Za-z ()'\/-]*$/.test(prevText)) {
+        // The label printed on its own line above the values, which is what a
+        // wrapped table cell ('Finished' / values / 'Length') comes out as.
+        label = prevText;
+        valuePart = t;
+      } else {
+        prevText = t;
         if (rows.length) break;
         continue;
       }
-      var vals = valueTokens(m[2]);
+
+      var vals = valueTokens(valuePart);
       var ok = vals.length === labels.length;
       if (ok) {
-        for (var v = 0; v < vals.length; v++) if (!VALUE_TOKEN_RE.test(vals[v])) { ok = false; break; }
+        for (var v = 0; v < vals.length; v++) if (!isValueToken(vals[v])) { ok = false; break; }
       }
-      if (!ok) { if (rows.length) break; else continue; }
+      if (!ok) { prevText = t; if (rows.length) break; else continue; }
       blanks = 0;
-      rows.push({ label: normLabel(m[1]), values: vals });
+      prevText = t;
+      rows.push({ label: normLabel(label), values: vals });
     }
     return rows;
   }
@@ -897,6 +1209,7 @@
     var labels = null, chart = [], finished = [];
     var lastHead = '';
     var found = 0;
+    var unit = '', chartUnit = '';
     for (var i = 0; i < lines.length; i++) {
       var ln = lines[i];
       var t = ln.text;
@@ -907,14 +1220,26 @@
         if (isHeading(t)) lastHead = headingText(t);
         continue;
       }
+      var thisUnit = sizeHeaderUnit(t) || sizeHeaderUnit(lastHead);
       var rows = measureRows(lines, i + 1, hdr, 12);
       if (!rows.length) { if (!labels) warns.push('A size row was found but no measurements lined up with it.'); continue; }
-      var isFinished = /finish/i.test(lastHead);
-      if (!labels) labels = hdr;
+      var isFinished = /finish/i.test(lastHead) || /finish/i.test(t);
+      if (!labels) { labels = hdr; unit = thisUnit; }
       if (hdr.length !== labels.length) continue;
-      if (isFinished) { finished = finished.concat(rows); }
-      else if (!chart.length) { chart = rows; }
-      else { finished = finished.concat(rows); }
+      if (isFinished) {
+        finished = finished.concat(rows);
+      } else if (!chart.length) {
+        chart = rows;
+        chartUnit = thisUnit || unit;
+      } else if (thisUnit && chartUnit && thisUnit !== chartUnit) {
+        // The same chart repeated in the other unit ('Size Chart:(inch)').
+        // One table is enough; the values stay verbatim either way.
+        found++;
+        i += rows.length;
+        continue;
+      } else {
+        finished = finished.concat(rows);
+      }
       found++;
       i += rows.length;
       if (found >= 4) break;
@@ -924,13 +1249,41 @@
       var nullOut = null;
       return nullOut;
     }
-    var out = { labels: labels, chart: chart, finished: finished };
+    var out = { labels: labels, chart: chart, finished: finished, unit: chartUnit || unit || '' };
     Object.defineProperty(out, 'warnings', { value: warns, enumerable: false, configurable: true });
     return out;
   }
 
-  var WIDTH_RE = /\b(\d{2,3})\s*(cm|"|in\b|inch(?:es)?)\s*(?:wide|width)?/i;
+  // A width, optionally in both units: '115 cm', '45"', '150cm / 60"'.
+  var WIDTH_RE = /\b(\d{2,3})\s*(cm|"|in\b|inch(?:es)?)\s*(?:\/\s*(\d{2,3})\s*(cm|"|in\b|inch(?:es)?))?\s*(?:wide|width)?/i;
+  var WIDTH_RE_G = new RegExp(WIDTH_RE.source, 'gi');
+  // The bolt widths fabric is actually sold in, in inches.
+  var COMMON_WIDTHS = { 36: 1, 42: 1, 44: 1, 45: 1, 54: 1, 58: 1, 59: 1, 60: 1, 72: 1 };
   var AMOUNT_RE = /\b\d{1,2}(?:\.\d+)?(?:\s+\d+\/\d+)?\s*(?:m\b|cm\b|yds?\b|yards?\b|")|\b\d+\/\d+\s*(?:m\b|yds?\b|yards?\b|")/gi;
+
+  /**
+   * Every plausible bolt width on a line. '1m / 40"' is a yardage, not a
+   * width, so an imperial value has to be one the trade actually sells.
+   */
+  function widthsIn(text) {
+    var out = [];
+    var w;
+    WIDTH_RE_G.lastIndex = 0;
+    while ((w = WIDTH_RE_G.exec(str(text, '')))) {
+      var wv = parseInt(w[1], 10);
+      var ok = isImperial(w[2]) ? !!COMMON_WIDTHS[wv] : (wv >= 60 && wv <= 300);
+      if (ok) {
+        out.push({
+          text: w[0].replace(/\s*(?:wide|width)\s*$/i, '').replace(/^\s+|\s+$/g, ''),
+          at: w.index,
+          end: w.index + w[0].length
+        });
+      }
+      if (out.length >= 6) break;
+    }
+    WIDTH_RE_G.lastIndex = 0;
+    return out;
+  }
 
   /** parseFabric(lines, labels) -> FabricRow[] */
   function parseFabric(input, labels) {
@@ -943,30 +1296,43 @@
       var t = ln.text;
       if (!t || ln.pageMark) continue;
       if (isHeading(t)) { lastName = prettyHeading(headingText(t)); continue; }
-      var w = WIDTH_RE.exec(t);
-      if (!w) {
+      // A line can carry more than one width: 'Wide Fabric: 150cm / 60"
+      // Narrow Fabric: 115cm / 45"'. Each becomes its own row.
+      var found = widthsIn(t);
+
+      if (!found.length) {
         if (t.length <= 40 && /[a-z]/i.test(t) && !AMOUNT_RE.test(t)) lastName = t.replace(/[:\-—]\s*$/, '');
         AMOUNT_RE.lastIndex = 0;
         continue;
       }
-      var wv = parseInt(w[1], 10);
-      if (wv < 20 || wv > 300) continue;
-      var name = t.slice(0, w.index).replace(/[:\-—,]\s*$/, '').replace(/^\s+|\s+$/g, '');
-      if (!name) name = lastName || 'Fabric';
-      var after = t.slice(w.index + w[0].length);
-      var amounts = matchAll(after, AMOUNT_RE);
-      if ((!amounts.length || (wanted && amounts.length !== wanted)) && i + 1 < lines.length) {
+
+      var tail = t.slice(found[found.length - 1].end);
+      var amounts = matchAll(tail, AMOUNT_RE);
+      var consumedNext = false;
+      if (!amounts.length && i + 1 < lines.length && lines[i + 1].text) {
+        // The amounts often sit on the line under the widths.
         var nxt = matchAll(lines[i + 1].text, AMOUNT_RE);
-        if (nxt.length && (!wanted || nxt.length === wanted)) { amounts = nxt; i++; }
+        if (nxt.length && !widthsIn(lines[i + 1].text).length) { amounts = nxt; consumedNext = true; }
       }
-      if (wanted && amounts.length !== wanted) amounts = [];
-      out.push({
-        name: name,
-        width: w[1] + ' ' + (w[2].toLowerCase() === '"' ? '"' : w[2].toLowerCase()),
-        amounts: amounts,
-        note: '',
-        line: t
-      });
+      var raw = amounts.slice();
+      if (found.length > 1 || (wanted && amounts.length !== wanted)) amounts = [];
+
+      for (var f = 0; f < found.length; f++) {
+        var from = f === 0 ? 0 : found[f - 1].end;
+        var name = t.slice(from, found[f].at).replace(/[:\-—,]\s*$/, '').replace(/^[\s\-—:,\/]+/, '').replace(/^\s+|\s+$/g, '');
+        if (!name) name = lastName || 'Fabric';
+        out.push({
+          name: name,
+          width: found[f].text,
+          amounts: amounts,
+          rawAmounts: raw,
+          note: '',
+          line: consumedNext ? (t + ' ' + lines[i + 1].text) : t
+        });
+        if (out.length >= 40) break;
+      }
+      if (consumedNext) i++;
+      if (out.length >= 40) break;
     }
     return out;
   }
@@ -1047,6 +1413,47 @@
   var NAME_SKIP_RE = /^(?:instructions?|sewing pattern|pattern|contents|page \d+|https?:|www\.|©|copyright|all rights reserved)/i;
   var NAME_HINT_RE = /\b(top|shirt|dress|tank|tee|jacket|coat|bag|tote|pouch|quilt|skirt|pants|trousers|shorts|blouse|jumpsuit|robe|hoodie|sweater|cardigan|vest|apron|backpack|sling|wallet|cushion|pillow)\b/i;
 
+  var DESIGNER_STOP = /^(?:and|the|to|of|in|for|by|this|that|it|is|are|be|with|from|or|all|any|no|not|its|their|our|your|info|information|copyright|reserved|rights|use|only|pattern|patterns|free)\b/i;
+  var DOMAIN_RE = /(?:www\.|https?:\/\/)([a-z0-9][a-z0-9-]{2,30})\.(?:com|net|org|co|co\.uk|com\.au|nz|de|fr)\b/i;
+
+  /** Is this capture a plausible business name rather than a sentence tail? */
+  function goodDesigner(name) {
+    if (!name || name.length < 3 || name.length > 40) return false;
+    if (/[:;|]/.test(name)) return false;
+    if (/^\d+$/.test(name)) return false;
+    if (DESIGNER_STOP.test(name)) return false;
+    if (!/^[A-Z]/.test(name)) return false;
+    var words = name.split(/\s+/);
+    if (words.length > 4) return false;
+    for (var i = 0; i < words.length; i++) {
+      if (DESIGNER_STOP.test(words[i]) && i === 0) return false;
+    }
+    return true;
+  }
+
+  /**
+   * The brand behind 'www.patternrunway.com' written out as 'Pattern Runway'.
+   * Far more reliable than the copyright line, which is usually a sentence.
+   */
+  function designerFromDomain(text) {
+    var d = DOMAIN_RE.exec(text);
+    if (!d) return '';
+    var want = d[1].toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (want.length < 4) return '';
+    var re = /\b([A-Z][A-Za-z]{1,18})(?:\s+([A-Z][A-Za-z]{1,18}))?(?:\s+([A-Z][A-Za-z]{1,18}))?\b/g;
+    var m;
+    var guard = 0;
+    while ((m = re.exec(text)) && guard++ < 4000) {
+      for (var n = 3; n >= 1; n--) {
+        var parts = [];
+        for (var p = 1; p <= n; p++) if (m[p]) parts.push(m[p]);
+        if (parts.length !== n) continue;
+        if (parts.join('').toLowerCase() === want) return parts.join(' ');
+      }
+    }
+    return '';
+  }
+
   function parseMeta(lines, fullText) {
     var meta = { designer: '', patternName: '', version: '', views: [] };
     // designer: the most repeated copyright footer
@@ -1054,12 +1461,12 @@
     COPYRIGHT_RE.lastIndex = 0;
     while ((m = COPYRIGHT_RE.exec(fullText))) {
       var name = m[1].replace(/[\s.,|-]+$/, '').replace(/^\s+|\s+$/g, '');
-      if (!name || name.length < 3 || name.length > 40) continue;
-      if (/^\d+$/.test(name)) continue;
+      if (!goodDesigner(name)) continue;
       counts[name] = (counts[name] || 0) + 1;
       if (counts[name] > bestN) { bestN = counts[name]; best = name; }
     }
     COPYRIGHT_RE.lastIndex = 0;
+    if (!best) best = designerFromDomain(fullText);
     meta.designer = best;
 
     // pattern name: the strongest headline-looking line on the first page
@@ -1162,7 +1569,7 @@
     try {
       var sizes = parseSizes(lines);
       if (sizes) {
-        res.sizes = { labels: sizes.labels, chart: sizes.chart, finished: sizes.finished };
+        res.sizes = { labels: sizes.labels, chart: sizes.chart, finished: sizes.finished, unit: sizes.unit || '' };
         if (sizes.warnings) sizes.warnings.forEach(function (w) { pushUnique(res.warnings, w); });
       } else {
         pushUnique(res.warnings, 'No size chart found — add your size by hand.');
@@ -1265,7 +1672,7 @@
   function emptyData() {
     return {
       meta: { designer: '', patternName: '', version: '', view: '', url: '' },
-      size: { chosen: '', sizeLabels: [], alterations: '' },
+      size: { chosen: '', sizeLabels: [], alterations: '', unit: '' },
       measurements: { body: [], finished: [], mine: [] },
       fabric: [],
       notions: [],
@@ -1348,6 +1755,7 @@
         d.size.chosen = str(raw.size.chosen, '').slice(0, 20);
         d.size.sizeLabels = normStrArray(raw.size.sizeLabels, 32, 12);
         d.size.alterations = str(raw.size.alterations, '').slice(0, 2000);
+        d.size.unit = /^(cm|mm|inch|in)$/.test(str(raw.size.unit, '')) ? raw.size.unit : '';
       }
 
       if (isObj(raw.measurements)) {
@@ -1377,6 +1785,7 @@
             name: fname || 'Fabric',
             width: str(f.width, '').slice(0, 24),
             amounts: normStrArray(f.amounts, 32, 16),
+            rawAmounts: normStrArray(f.rawAmounts, 32, 16),
             note: str(f.note, '').slice(0, 200),
             line: fline
           });
@@ -1502,6 +1911,7 @@
     // --- sizes / measurements ----------------------------------------------
     if (want('sizes') && pr.sizes && isArr(pr.sizes.labels) && pr.sizes.labels.length) {
       out.size.sizeLabels = normStrArray(pr.sizes.labels, 32, 12);
+      out.size.unit = /^(cm|mm|inch|in)$/.test(str(pr.sizes.unit, '')) ? pr.sizes.unit : '';
       out.measurements.body = normMeasureRows(pr.sizes.chart);
       out.measurements.finished = normMeasureRows(pr.sizes.finished);
     }

@@ -1073,6 +1073,316 @@ assertEqual(S.templates()[0].name, 'Garment', 'templates() returns a fresh copy 
 assertEqual(S.TEMPLATES[0].name, 'Garment', 'TEMPLATES was not mutated');
 
 // =======================================================================
+group('Reference matter is never instructions (skip blocks)');
+// =======================================================================
+
+assertEqual(S.headingKind('GLOSSARY'), 'skip', 'GLOSSARY is reference matter');
+assertEqual(S.headingKind('PATTERN SYMBOLS'), 'skip', 'PATTERN SYMBOLS is reference matter');
+assertEqual(S.headingKind('MY MEASUREMENTS'), 'skip', 'MY MEASUREMENTS is reference matter');
+assertEqual(S.headingKind('How to Measure the Body'), 'skip', 'How to Measure the Body is reference matter');
+assertEqual(S.headingKind('How to Choose your Size'), 'skip', 'How to Choose your Size is reference matter');
+assertEqual(S.headingKind('BEFORE STARTING YOUR PROJECT'), 'skip', 'BEFORE STARTING is reference matter');
+assertEqual(S.headingKind('SUGGESTED FABRICS'), 'skip', 'SUGGESTED FABRICS is reference matter');
+assertEqual(S.headingKind('SEWING LEVEL'), 'skip', 'SEWING LEVEL is reference matter');
+assertEqual(S.headingKind('LENGTHENING / SHORTENING'), 'skip', 'LENGTHENING / SHORTENING is reference matter');
+assertEqual(S.headingKind('Key'), null, 'Key is NOT reference matter - it is printed inside the instructions');
+assertEqual(S.headingKind('SEWING INSTRUCTIONS'), 'steps', 'SEWING INSTRUCTIONS is still a steps heading');
+
+var refDoc =
+  'HOW TO MEASURE THE BODY\n' +
+  '1. Bust: Measure around the back, under the arms and across the fullest part.\n' +
+  '2. Waist: Measure around the waist, snug but not too tight.\n' +
+  'GLOSSARY\n' +
+  'Backstitch: Sew in reverse for a maximum of 3 stitches at the start of a seam.\n' +
+  'Understitch: Press the facing away from the garment and edgestitch it down.\n' +
+  'SEWING INSTRUCTIONS\n' +
+  'Key:\n' +
+  '1. Stabilise the waist: Stay stitch the waist with a 1 cm seam allowance.\n' +
+  '2. Sewing front and back darts: Fold each dart through the centre and stitch.\n';
+
+var ref = S.parse(refDoc);
+assertEqual(ref.steps.length, 2, 'only the two real construction steps are steps');
+assertTrue(ref.steps[0].text.indexOf('Stabilise the waist') === 0, 'the first step is the first construction step');
+assertTrue(ref.steps.every(function (s) { return s.text.indexOf('Measure around') < 0; }), 'no body-measurement line became a step');
+assertTrue(ref.steps.every(function (s) { return s.text.indexOf('Backstitch') < 0; }), 'no glossary entry became a step');
+assertEqual(ref.notions.length, 0, 'the glossary contributes no notions');
+
+var noStepsBlockDoc =
+  'HOW TO MEASURE THE BODY\n' +
+  '1. Bust: Measure around the back and across the fullest part of the bust.\n' +
+  '2. Waist: Measure around the waist, snug but not too tight.\n';
+assertEqual(S.parse(noStepsBlockDoc).steps.length, 0, 'with no steps block, a reference list is still not steps');
+
+// =======================================================================
+group('Titled-paragraph steps');
+// =======================================================================
+
+var titled = S.parseSteps(
+  'SEWING INSTRUCTIONS\n' +
+  'Key:\n' +
+  '1.Stabilise the waist: Stay stitch the waist in two passes.\n' +
+  'Centre Back Seam: Align right sides together and sew from the zipper notch.\n' +
+  'Invisible Zip: Using an invisible zipper foot, place the zipper face down.\n' +
+  '3.Side Seams\n' +
+  'With right sides together, align the front and back side seams and stitch.\n'
+);
+assertEqual(titled.length, 4, 'numbered and titled steps are all found');
+assertEqual(titled[0].marker, '1.', 'a number with no space after the dot still parses');
+assertEqual(titled[0].n, 1, 'the number is kept');
+assertTrue(titled[0].text.indexOf('Stabilise the waist:') === 0, 'a numbered titled step keeps its title in the text');
+assertEqual(titled[1].marker, 'title', 'an unnumbered titled paragraph has marker "title"');
+assertEqual(titled[1].text, 'Centre Back Seam: Align right sides together and sew from the zipper notch.', 'a titled step is title + body');
+assertEqual(titled[2].marker, 'title', 'the second titled paragraph too');
+assertEqual(titled[3].n, 3, 'a heading-shaped numbered step ("3.Side Seams") keeps its number');
+assertEqual(titled[3].marker, '1.', 'a heading-shaped numbered step is a numbered step');
+assertTrue(titled[3].text.indexOf('Side Seams') === 0, 'its title starts the text');
+assertTrue(titled[3].text.indexOf('align the front and back') > 0, 'its body merged in from the next line');
+assertTrue(titled.every(function (s) { return s.text.indexOf('Key') !== 0; }), '"Key:" on its own is not a step');
+
+assertEqual(S.parseSteps('CONSTRUCTION\nNOTE: Press as you go.').length, 0, 'a NOTE: paragraph is not a step');
+assertEqual(S.parseSteps('CONSTRUCTION\nCOPYRIGHT INFO: This pattern is for private use only.').length, 0, 'a copyright line is not a step');
+assertEqual(S.parseSteps('CONSTRUCTION\nSize Chart: 8 10 12 14 16').length, 0, 'a size chart line is not a step');
+assertEqual(S.parseSteps('1. Sew.\nCentre Back Seam: Align right sides together.').length, 1,
+  'titled paragraphs only count inside a steps block');
+
+var crossPage = S.parseSteps(
+  'CONSTRUCTION\n' +
+  '=== PAGE 6 ===\n' +
+  '4. Skirt back: Apply fusing to the back left kick pleat.\n' +
+  '=== PAGE 7 ===\n' +
+  'Clip the seam to the stitching at the notch above the dot.\n' +
+  '5. Waistband: Apply fusing to the waistband.\n'
+);
+assertEqual(crossPage.length, 2, 'a page break does not invent a step');
+assertTrue(crossPage[0].text.indexOf('Clip the seam') > 0, 'a step that runs over a page break keeps its tail');
+assertEqual(crossPage[0].page, 6, 'the step keeps the page it started on');
+
+var crossBlank = S.parseSteps(
+  'CONSTRUCTION\n' +
+  '=== PAGE 6 ===\n' +
+  '4. Skirt back: Apply fusing to the back left kick pleat.\n' +
+  '\n' +
+  '=== PAGE 7 ===\n' +
+  'Clip the seam to the stitching at the notch above the dot.\n' +
+  '5. Waistband: Apply fusing to the waistband.\n'
+);
+assertEqual(crossBlank.length, 2, 'a blank line before the page marker still gives two steps');
+assertTrue(crossBlank[0].text.indexOf('Clip the seam') > 0,
+  'PdfText puts a blank line before every page marker - the tail still rejoins its step');
+
+var blankOnly = S.parseSteps('CONSTRUCTION\n1. Sew the darts.\n\nA stray caption line.\n2. Press.');
+assertEqual(blankOnly.length, 2, 'a plain blank line still separates');
+assertTrue(blankOnly[0].text.indexOf('stray caption') < 0, 'a plain blank line does not rejoin the next line');
+
+// =======================================================================
+group('normalizeText - split fractions');
+// =======================================================================
+
+assertEqual(S.normalizeText('All seams are 1.5cm / 5 /8 ”'), 'All seams are 1.5cm / 5/8 "', 'a fraction split by a stray space is rejoined');
+assertEqual(S.normalizeText('3 /8 "'), '3/8 "', 'three eighths rejoined');
+assertEqual(S.normalizeText('1.7m / 1yd 3/4'), '1.7m / 1yd 3/4', 'a unit separator slash is left alone');
+assertEqual(S.normalizeText('sizes 10 / 12'), 'sizes 10 / 12', 'a two-digit pair is not a fraction and is left alone');
+assertEqual(S.normalizeText('1 / 2 of the fabric'), '1/2 of the fabric', 'a single-digit pair does join');
+
+// =======================================================================
+group('Inline notions lists');
+// =======================================================================
+
+var trims = S.parseNotions([
+  'TRIMS: 1x 25cm Invisible zip, fusing, either a button, trouser clip or snaps. 13mm bias',
+  'binding',
+  'SEWING LEVEL: Intermediate.'
+], { inBlock: false });
+assertTrue(trims.length >= 4, 'an inline TRIMS list splits into items (' + trims.length + ')');
+assertTrue(notionMatching(trims, 'Invisible zip') !== null, 'the zip is an item');
+assertEqual(notionMatching(trims, 'Invisible zip').qty, 1, 'the zip qty comes from "1x"');
+assertTrue(notionMatching(trims, 'fusing') !== null, 'fusing is its own item');
+assertTrue(notionMatching(trims, 'bias binding') !== null, 'the wrapped tail is joined back on');
+assertEqual(notionMatching(trims, 'Intermediate'), null, 'the list stops at the next label line');
+assertEqual(notionMatching(trims, 'either a button') === null && notionMatching(trims, 'button') !== null, true,
+  '"either a" is trimmed off the front of an item');
+
+var trims2 = S.parseNotions([
+  'TRIMS: 1x 40cm (15 3/4") Invisible zip, 1 x Hook and eye, Matching linings, Lightweight Fusing.'
+], { inBlock: false });
+assertEqual(trims2.length, 4, 'a four-item comma list gives four items');
+assertTrue(notionMatching(trims2, 'Hook and eye') !== null, '"Hook and eye" is not split on "and"');
+assertEqual(notionMatching(trims2, 'Hook and eye').qty, 1, 'the hook and eye qty is 1');
+assertEqual(notionMatching(trims2, 'Hook and eye').kind, 'hardware', 'a hook and eye is hardware');
+assertEqual(notionMatching(trims2, 'Lightweight Fusing').kind, 'interfacing', 'fusing is interfacing');
+
+assertEqual(S.parseNotions(['NOTIONS: thread and a zip'], { inBlock: false }).length, 2,
+  'with no commas the list does fall back to splitting on "and"');
+
+// =======================================================================
+group('Loose notion lines');
+// =======================================================================
+
+var loose2 = S.parseNotions([
+  'Closing with an invisible zip at centre back, + includes a',
+  'first stitching, towards the raw edge. Pull both bobbin threads',
+  'seams have been stitched remove gathering threads (if visible)',
+  'Matching thread',
+  '1 x 20 cm invisible zip',
+  '2 x 5/8" D-rings',
+  'Bias binding'
+], { inBlock: false });
+assertEqual(loose2.length, 4, 'only the four real notion lines are picked up');
+assertEqual(notionMatching(loose2, 'Closing with'), null, 'a sentence that merely mentions a zip is not a notion');
+assertEqual(notionMatching(loose2, 'bobbin threads'), null, 'a glossary fragment mentioning thread is not a notion');
+assertEqual(notionMatching(loose2, 'gathering threads'), null, 'a second glossary fragment is not a notion either');
+assertTrue(notionMatching(loose2, 'Matching thread') !== null, 'an adjective in front of the noun is fine');
+assertTrue(notionMatching(loose2, '20 cm invisible zip') !== null, 'a quantity and a measurement in front are fine');
+assertTrue(notionMatching(loose2, 'D-rings') !== null, 'hardware with a quantity is fine');
+assertEqual(S.parseNotions(['This very long line mentions a zip somewhere in the middle of a lot of prose'], { inBlock: false }).length, 0,
+  'a line over 60 characters is never a loose notion');
+
+// =======================================================================
+group('Seam allowance - truncation and dual units');
+// =======================================================================
+
+var saRunOn = S.parseSeamAllowance(
+  'Seam Allowances & Hems:\n' +
+  'All seams are 1.5cm / 5/8 "\n' +
+  'Size Chart:\n' +
+  '8 10 12 14 16\n' +
+  'Bust 84cm/33" 86.5 cm/34" 89 cm/35" 94 cm/37" 99 cm/39"\n' +
+  'Fabric Requirements:\n'
+);
+assertTrue(!!saRunOn, 'a seam allowance with no full stop is still found');
+assertEqual(saRunOn.text, 'All seams are 1.5cm / 5/8 "', 'the statement stops before the size chart');
+assertEqual(saRunOn.mm, 15, 'the metric value wins for mm');
+assertEqual(saRunOn.inches, '5/8', 'the dual-unit slash gives the inch string');
+assertEqual(saRunOn.exceptions.length, 0, 'no exceptions');
+assertTrue(saRunOn.text.length <= 200, 'the statement is capped at 200 characters');
+
+var saDual = S.parseSeamAllowance('All seams are 1cm / 3/8 " Except Neckline and Armhole which are 6mm / 1/4".');
+assertEqual(saDual.mm, 10, 'metric primary');
+assertEqual(saDual.inches, '3/8', 'imperial alternate');
+assertEqual(saDual.exceptions.length, 1, 'one exception');
+assertEqual(saDual.exceptions[0].mm, 6, 'the exception is 6 mm');
+
+var saRestated = S.parseSeamAllowance(
+  'Seam allowance is 1.5 cm unless otherwise noted.\n' +
+  'Seam allowances for all wovens are 1.5cm unless otherwise indicated.\n'
+);
+assertEqual(saRestated.mm, 15, 'the first statement wins');
+assertEqual(saRestated.exceptions.length, 0, 'the same value restated later is not an exception');
+
+var saStep = S.parseSeamAllowance(
+  'Seam allowance is 1 cm.\n' +
+  'Stitch the armholes with a 6 mm seam allowance, leaving 1 cm at the shoulders.\n'
+);
+assertEqual(saStep.exceptions.length, 0, 'a construction step is not an exception just because it names a measurement');
+
+// =======================================================================
+group('Size charts - labelled headers and dual-unit cells');
+// =======================================================================
+
+var szLabelled = S.parseSizes('Size Chart:\n8 10 12 14 16\nBust 84cm/33" 86.5 cm/34" 89 cm/35" 94 cm/37" 99 cm/39"');
+assertTrue(!!szLabelled, 'a chart under a "Size Chart:" heading is found');
+assertEqual(szLabelled.labels, ['8', '10', '12', '14', '16'], 'numeric labels');
+assertEqual(szLabelled.chart.length, 1, 'one measurement row');
+assertEqual(szLabelled.chart[0].values.length, 5, 'a dual-unit cell counts as one value');
+assertEqual(szLabelled.chart[0].values[1], '86.5 cm/34"', 'the number and its unit stay together');
+
+var szInline = S.parseSizes('Size Chart:(cm) 36 38 40 42 44\nBust 84 88 92 96 100\nWaist 66 70 74 78 82');
+assertTrue(!!szInline, 'a header with the label on the same line is found');
+assertEqual(szInline.labels, ['36', '38', '40', '42', '44'], 'labels come from after the prefix');
+assertEqual(szInline.unit, 'cm', 'the bracketed unit is recorded');
+assertEqual(szInline.chart.length, 2, 'both rows');
+
+var szTwoUnits = S.parseSizes(
+  'Size Chart:(cm) 36 38 40 42 44\nBust 84 88 92 96 100\n' +
+  'Size Chart:(inch) 36 38 40 42 44\nBust 33 34 1/2 36 1/4 37 3/4 39 1/2\n'
+);
+assertEqual(szTwoUnits.chart.length, 1, 'the same chart repeated in the other unit is not duplicated');
+assertEqual(szTwoUnits.chart[0].values[0], '84', 'the first table (cm) is the one kept');
+assertEqual(szTwoUnits.finished.length, 0, 'the inch table does not become the finished table');
+assertEqual(szTwoUnits.unit, 'cm', 'the kept unit is cm');
+
+var szFrac = S.parseSizes('36 38 40 42 44\nBust 33 34 1/2 36 1/4 37 3/4 39 1/2');
+assertEqual(szFrac.chart[0].values.length, 5, 'mixed-number inch values count as one each');
+assertEqual(szFrac.chart[0].values[1], '34 1/2', 'the fraction stays with its whole number');
+
+var szWrapped = S.parseSizes(
+  'Finished Garment Measurements:\n8 10 12 14 16\nFinished\n' +
+  '65cm/25 5/8" 65cm/25 5/8" 65cm/25 5/8" 65cm/25 5/8" 65cm/25 5/8"\nLength\n'
+);
+assertTrue(!!szWrapped, 'a finished table is found');
+assertEqual(szWrapped.finished.length, 1, 'the row whose label printed on the line above is picked up');
+assertEqual(szWrapped.finished[0].label, 'Finished', 'the label came from the previous line');
+assertEqual(szWrapped.finished[0].values.length, 5, 'five values');
+
+// =======================================================================
+group('Cutting - layout prose is not a cutting list');
+// =======================================================================
+
+assertEqual(S.cutRow('cut 1x only.', null), null, '"cut 1x only" is prose, not a piece');
+assertEqual(S.cutRow('layout and cut 1 x front and back waistbands', null), null, '"cut 1 x each" is prose, not a piece');
+assertEqual(S.cutRow('then cut 2 of these', null), null, 'a sentence tail is not a piece name');
+assertEqual(S.cutRow('Fold the fabric and cut 2 more', null), null, 'a fold instruction is not a piece');
+assertTrue(S.cutRow('Front bodice — cut 2 main', null) !== null, 'a real cutting row still parses');
+assertTrue(S.cutRow('Cut 2 - 14" x 16" from exterior', null) !== null, 'a dimensional row still parses');
+
+var layout = S.parse(
+  'CUTTING INSTRUCTIONS\n' +
+  'Cutting layouts show approximate position of pattern pieces.\n' +
+  'NOTE: Cut waistband after skirt pieces, unfolding fabric to\n' +
+  'cut 1x only.\n' +
+  'SELVEDGE SELVEDGE\n' +
+  'SEWING INSTRUCTIONS\n' +
+  '1. Sew the side seams with a 1.5 cm seam allowance.\n'
+);
+assertEqual(layout.cuttingList.length, 0, 'a layout-diagram cutting block yields no pieces');
+assertTrue(hasWarning(layout.warnings, 'No cutting list found'), 'and says so');
+assertEqual(layout.steps.length, 1, 'the real step after it still parses');
+
+// =======================================================================
+group('Fabric - several widths on one line');
+// =======================================================================
+
+var fabTwo = S.parseFabric(
+  'MAIN - m / yd Wide Fabric: 150cm / 60" Narrow Fabric: 115cm / 45"\nAll sizes 1m / 40" 1.7m / 1yd 3/4\n',
+  ['8', '10', '12', '14', '16']
+);
+assertEqual(fabTwo.length, 2, 'two widths on one line give two rows');
+assertTrue(fabTwo[0].width.indexOf('150cm') >= 0, 'the first row keeps the 150 cm width');
+assertTrue(fabTwo[1].width.indexOf('115cm') >= 0, 'the second row keeps the 115 cm width');
+assertTrue(fabTwo[1].name.indexOf('Narrow') >= 0, 'each row is named from the text in front of its width');
+assertTrue(fabTwo[0].rawAmounts.length >= 2, 'the amounts line underneath is kept as raw amounts');
+assertTrue(fabTwo[0].line.indexOf('1.7m') >= 0, 'the amounts line is kept in the raw line');
+
+var fabNoWidth = S.parseFabric('LINING 1m / 1 yd (all sizes)\n', null);
+assertEqual(fabNoWidth.length, 0, 'a yardage with no bolt width is not a width row');
+var fab40 = S.parseFabric('All sizes 1m / 40" 1.7m / 1yd 3/4\n', null);
+assertEqual(fab40.length, 0, '40" is a length, not a bolt width');
+var fab45 = S.parseFabric('Narrow Fabric: 115cm / 45" 2.3 m 2.4 m\n', null);
+assertEqual(fab45.length, 1, 'a real dual-unit bolt width is one row');
+assertEqual(fab45[0].width, '115cm / 45"', 'both units stay in the width string');
+
+// =======================================================================
+group('Designer');
+// =======================================================================
+
+var metaDomain = S.parse(
+  'CLASSIC PENCIL SKIRT # 1403\n' +
+  'Pattern Runway uses industrial sewing methods where appropriate.\n' +
+  'CONSTRUCTION\n1. Sew the darts.\n' +
+  'www.patternrunway.com | e: hello@example.test\n'
+);
+assertEqual(metaDomain.meta.designer, 'Pattern Runway', 'the designer is read back out of the web address');
+assertTrue(/pencil skirt/i.test(metaDomain.meta.patternName), 'the pattern name comes from the title line');
+
+var metaStop = S.parse(
+  'A LOVELY TOP\n' +
+  'The images, layout, design and other aspects are protected by copyright and belong to someone.\n' +
+  'CONSTRUCTION\n1. Sew the darts.\n'
+);
+assertTrue(metaStop.meta.designer !== 'and', 'a stop word is never the designer');
+assertTrue(metaStop.meta.designer === '' || /^[A-Z]/.test(metaStop.meta.designer), 'the designer is blank or a proper name');
+
+// =======================================================================
 group('Performance');
 // =======================================================================
 

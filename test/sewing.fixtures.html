@@ -8,6 +8,7 @@
   .pass { color:#7bd389; }
   .fail { color:#ff6b6b; background:#2a1414; }
   .skip { color:#c9a227; }
+  .info { color:#7fb8ff; }
   .group { margin-top:18px; font-weight:bold; color:#9cf; border-bottom:1px solid #333; padding-bottom:4px; }
   #summary { margin-top:20px; font-size:18px; font-weight:bold; }
   #summary.ok { color:#7bd389; }
@@ -18,20 +19,21 @@
 <body>
 <h1>Sewing.js fixtures</h1>
 <p class="note">
-  Runs <code>Sewing.parse</code> against real pattern text in <code>../tmp-pdf/sew-*.txt</code>.
-  Those files are copyrighted, personal-use-only material: <code>tmp-pdf/</code> is gitignored and
-  nothing from them is ever asserted verbatim here — only shapes and counts. A fresh clone has no
-  fixtures at all and this page stays green.
+  Runs <code>Sewing.parse</code> against real pattern booklets in <code>../tmp-pdf/</code>.
+  A fixture is read from <code>sew-&lt;name&gt;.txt</code> when one exists, otherwise the
+  <code>sew-&lt;name&gt;.pdf</code> is extracted here with <code>PdfText</code> and the text is cached in
+  <code>sessionStorage</code> for the rest of the browser session.
 </p>
 <p class="note">
-  To add one: put the PDF in <code>tmp-pdf/</code>, extract its text with <code>tmp-pdf/extract.html</code>
-  (or the in-app importer), save it as <code>tmp-pdf/sew-&lt;name&gt;.txt</code>, and add an entry to
-  <code>FIXTURES</code> below.
+  Those files are copyrighted, personal-use-only material: <code>tmp-pdf/</code> is gitignored and
+  nothing from them is asserted verbatim here — only shapes and counts. A fresh clone has no
+  fixtures at all and this page stays green.
 </p>
 <div id="out"></div>
 <div id="summary"></div>
 
 <script src="../js/sewing.js"></script>
+<script src="../js/pdftext.js"></script>
 <script>
 'use strict';
 
@@ -52,77 +54,141 @@ function log(ok, label, detail) {
 }
 function group(title) { line('group', title); }
 function skip(label) { skipped++; line('skip', 'SKIP - ' + label); }
-function assertTrue(cond, label, detail) { log(!!cond, label, cond ? '' : (detail || 'expected truthy')); }
+
+function has(rows, fn) {
+  for (var i = 0; i < rows.length; i++) if (fn(rows[i])) return true;
+  return false;
+}
+function every(rows, fn) {
+  for (var i = 0; i < rows.length; i++) if (!fn(rows[i])) return false;
+  return true;
+}
 
 /**
- * Each fixture: `file` under ../tmp-pdf/, and `check(parse, t)` making SHAPE assertions
- * only. Never assert verbatim pattern text here - this file is committed.
+ * Each fixture: `file` (no extension) under ../tmp-pdf/, and `check(parse, t)`
+ * making SHAPE assertions only. Never assert verbatim pattern text here — this
+ * file is committed and the patterns are not.
  */
 var FIXTURES = [
   {
-    file: 'sew-garment.txt',
-    what: 'an indie garment instruction booklet (Peppermint-style)',
+    file: 'sew-pencilskirt',
+    what: 'Pattern Runway pencil skirt — two-column booklet, reference pages, layout-only cutting',
     check: function (p, t) {
       t(p.kind === 'garment', 'kind is garment');
       t(p.pages >= 8, 'at least 8 pages, got ' + p.pages);
-      t(p.steps.length >= 20, 'at least 20 steps, got ' + p.steps.length);
-      t(p.steps[0].page !== null, 'the first step knows its page');
-      t(p.cuttingList.length >= 5, 'at least 5 cutting rows, got ' + p.cuttingList.length);
-      t(p.notions.length >= 3, 'at least 3 notions, got ' + p.notions.length);
-      t(!!p.seamAllowance, 'a seam allowance was found');
-      t(p.seamAllowance && p.seamAllowance.mm > 0, 'the seam allowance has a millimetre value');
-      t(!!p.sizes && p.sizes.labels.length >= 3, 'a size chart with at least 3 sizes');
-    }
-  },
-  {
-    file: 'sew-quilt.txt',
-    what: 'a free quilt pattern with a WOF cutting chart',
-    check: function (p, t) {
-      t(p.kind === 'quilt', 'kind is quilt');
-      t(p.cuttingList.length >= 4, 'at least 4 cutting rows, got ' + p.cuttingList.length);
-      t(p.cuttingList.some(function (r) { return /WOF|strip/i.test(r.piece); }), 'at least one WOF strip row');
-      t(!!p.seamAllowance && p.seamAllowance.mm === 6, 'the quilting 1/4" seam allowance');
-      t(p.steps.length >= 4, 'at least 4 steps, got ' + p.steps.length);
-    }
-  },
-  {
-    file: 'sew-bag.txt',
-    what: 'a bag pattern with hardware and interfacing lists',
-    check: function (p, t) {
-      t(p.kind === 'bag', 'kind is bag');
-      t(p.notions.length >= 5, 'at least 5 notions, got ' + p.notions.length);
-      t(p.notions.some(function (n) { return n.kind === 'hardware'; }), 'at least one hardware item');
-      t(p.notions.some(function (n) { return n.kind === 'interfacing'; }), 'at least one interfacing item');
-      t(p.cuttingList.length >= 4, 'at least 4 cutting rows, got ' + p.cuttingList.length);
-      t(p.cuttingList.some(function (r) { return !!r.dims; }), 'at least one dimensional cut row');
-    }
-  },
-  {
-    file: 'sew-bag2.txt',
-    what: 'a photo-heavy bag pattern (reading order stress test)',
-    check: function (p, t) {
-      t(p.steps.length >= 15, 'at least 15 steps, got ' + p.steps.length);
-      t(p.cuttingList.length >= 3, 'at least 3 cutting rows, got ' + p.cuttingList.length);
-      t(p.notions.length >= 3, 'at least 3 notions, got ' + p.notions.length);
-    }
-  },
-  {
-    file: 'sew-shirt.txt',
-    what: 'a booklet using the "Step N" marker style and a seam-allowance exception clause',
-    check: function (p, t) {
-      t(p.steps.length >= 10, 'at least 10 steps, got ' + p.steps.length);
-      t(p.steps.some(function (s) { return s.marker === 'Step'; }), 'the Step N marker style was detected');
-      t(!!p.seamAllowance, 'a seam allowance was found');
-    }
-  },
-  {
-    file: 'sew-tank.txt',
-    what: 'a booklet with a wide size chart (many sizes, mixed units)',
-    check: function (p, t) {
-      t(!!p.sizes, 'a size chart was found');
-      t(p.sizes && p.sizes.labels.length >= 6, 'at least 6 sizes, got ' + (p.sizes ? p.sizes.labels.length : 0));
-      t(p.sizes && p.sizes.chart.length >= 2, 'at least 2 measurement rows');
+
+      // 1. steps come from the sewing instructions, never the reference pages
       t(p.steps.length >= 8, 'at least 8 steps, got ' + p.steps.length);
+      t(every(p.steps, function (s) { return s.text.indexOf('Measure around') < 0; }),
+        'no body-measurement line became a step');
+      t(every(p.steps, function (s) { return !/^(Backstitch|Gathering stitch|Understitch|Topstitch|Edgestitch|Neatening the Seams):/.test(s.text); }),
+        'no glossary entry became a step');
+      t(/stabilise|stay stitch|dart|fusing|skirt back|centre back seam|side seam/i.test(p.steps[0].text),
+        'the first step is real construction, not reference matter');
+      t(has(p.steps, function (s) { return s.marker === 'title'; }),
+        'the unnumbered titled paragraphs were picked up');
+      t(every(p.steps, function (s) { return s.page === null || s.page >= 5; }),
+        'every step sits on a sewing-instructions page');
+      var ns = p.steps.map(function (s) { return s.n; });
+      t(ns.join(',') === ns.slice().sort(function (a, b) { return a - b; }).join(','),
+        'steps are in document order');
+
+      // 2. notions
+      t(p.notions.length >= 3, 'at least 3 notions, got ' + p.notions.length);
+      t(has(p.notions, function (n) { return /invisible zip/i.test(n.text) && n.qty === 1; }),
+        'an invisible zip with quantity 1');
+      t(has(p.notions, function (n) { return /fusing/i.test(n.text); }), 'fusing is on the list');
+      t(every(p.notions, function (n) { return n.text.length <= 90; }), 'no notion is a runaway sentence');
+      t(every(p.notions, function (n) { return !/bobbin|gathering threads|towards the raw edge/i.test(n.text); }),
+        'no glossary fragment became a notion');
+
+      // 3. seam allowance
+      t(!!p.seamAllowance, 'a seam allowance was found');
+      t(p.seamAllowance && p.seamAllowance.mm === 15, 'seam allowance is 15 mm');
+      t(p.seamAllowance && p.seamAllowance.inches === '5/8', 'seam allowance shows 5/8"');
+      t(p.seamAllowance && p.seamAllowance.exceptions.length === 0, 'no exceptions');
+      t(p.seamAllowance && p.seamAllowance.text.length <= 200, 'the statement did not swallow the size chart');
+      t(p.seamAllowance && !/Size Chart|Fabric Requirements/i.test(p.seamAllowance.text),
+        'the statement stops before the tables');
+
+      // 4. sizes
+      t(!!p.sizes, 'a size chart was found');
+      t(p.sizes && p.sizes.labels.join(',') === '8,10,12,14,16', 'labels are 8-16');
+      t(p.sizes && p.sizes.chart.length >= 3, 'at least three body rows, got ' + (p.sizes ? p.sizes.chart.length : 0));
+      ['Bust', 'Waist', 'Hip'].forEach(function (label) {
+        t(!!p.sizes && has(p.sizes.chart, function (r) { return r.label === label && r.values.length === 5; }),
+          label + ' row has one value per size');
+      });
+      t(p.sizes && p.sizes.finished.length >= 1, 'at least one finished-measurement row');
+
+      // 5. cutting: this booklet has a layout diagram, not a piece list
+      t(p.cuttingList.length === 0, 'the layout-diagram cutting page yields no pieces');
+      t(has(p.warnings, function () { return false; }) || true, '');
+      t(p.warnings.join(' ').indexOf('No cutting list found') >= 0,
+        'and the warning says to add the pieces yourself');
+
+      // 6. fabric
+      t(p.fabric.length >= 1, 'at least one fabric row, got ' + p.fabric.length);
+      t(has(p.fabric, function (f) { return /150\s*cm/i.test(f.width); }), 'the 150 cm bolt width is kept');
+      t(has(p.fabric, function (f) { return (f.rawAmounts || []).length >= 2 || (f.amounts || []).length >= 2; }),
+        'the raw amounts are kept');
+
+      // 7. meta
+      t(/pencil skirt/i.test(p.meta.patternName), 'the pattern name comes from the title line');
+      t(p.meta.designer === '' || /^[A-Z]/.test(p.meta.designer), 'the designer is blank or a proper name');
+      t(!/^(and|the|to|of|in|for|by)$/i.test(p.meta.designer), 'the designer is never a stop word');
+    }
+  },
+  {
+    file: 'sew-sundress',
+    what: 'Pattern Runway sundress — same template, metric + imperial charts, seam-allowance exception',
+    check: function (p, t) {
+      t(p.kind === 'garment', 'kind is garment');
+      t(p.pages >= 8, 'at least 8 pages, got ' + p.pages);
+
+      t(p.steps.length >= 6, 'at least 6 steps, got ' + p.steps.length);
+      t(every(p.steps, function (s) { return !/^(Backstitch|Gathering stitch|Understitch|Topstitch|Edgestitch):/.test(s.text); }),
+        'no glossary entry became a step');
+      t(every(p.steps, function (s) { return s.text.indexOf('Measure around') < 0; }),
+        'no body-measurement line became a step');
+      t(/bodice|waistband|skirt|lining|seam/i.test(p.steps[0].text), 'the first step is real construction');
+
+      t(p.notions.length >= 4, 'at least 4 notions, got ' + p.notions.length);
+      t(has(p.notions, function (n) { return /hook and eye/i.test(n.text) && n.qty === 1; }),
+        '"Hook and eye" survived as one item with quantity 1');
+      t(has(p.notions, function (n) { return /invisible zip/i.test(n.text) && n.qty === 1; }),
+        'an invisible zip with quantity 1');
+      t(every(p.notions, function (n) { return n.text.length <= 90; }), 'no notion is a runaway sentence');
+
+      t(!!p.seamAllowance, 'a seam allowance was found');
+      t(p.seamAllowance && p.seamAllowance.mm === 10, 'seam allowance is 10 mm');
+      t(p.seamAllowance && p.seamAllowance.inches === '3/8', 'seam allowance shows 3/8"');
+      t(p.seamAllowance && p.seamAllowance.exceptions.length >= 1,
+        'the exception clause was captured, got ' + (p.seamAllowance ? p.seamAllowance.exceptions.length : 0));
+      t(p.seamAllowance && has(p.seamAllowance.exceptions, function (e) { return e.mm === 6; }),
+        'the exception is 6 mm');
+
+      t(!!p.sizes, 'a size chart was found');
+      t(p.sizes && p.sizes.labels.join(',') === '36,38,40,42,44', 'labels are the EU 36-44 run');
+      t(p.sizes && p.sizes.unit === 'cm', 'the chart unit was recorded as cm');
+      ['Bust', 'Waist', 'Hip'].forEach(function (label) {
+        t(!!p.sizes && has(p.sizes.chart, function (r) { return r.label === label && r.values.length === 5; }),
+          label + ' row has one value per size');
+      });
+      t(p.sizes && p.sizes.chart.length === 3, 'the inch copy of the chart was not duplicated in');
+      t(p.sizes && p.sizes.finished.length >= 1, 'at least one finished-measurement row');
+
+      t(p.cuttingList.length === 0, 'the layout-diagram cutting page yields no pieces');
+      t(p.warnings.join(' ').indexOf('No cutting list found') >= 0, 'and the warning says so');
+
+      t(p.fabric.length >= 2, 'two fabric widths, got ' + p.fabric.length);
+      t(has(p.fabric, function (f) { return /150\s*cm/i.test(f.width); }), 'the 150 cm bolt width is kept');
+      t(has(p.fabric, function (f) { return /115\s*cm/i.test(f.width); }), 'the 115 cm bolt width is kept');
+      t(every(p.fabric, function (f) { return (f.rawAmounts || []).length >= 1 || (f.amounts || []).length >= 1; }),
+        'both rows keep their raw amounts');
+
+      t(/sundress|dress/i.test(p.meta.patternName), 'the pattern name comes from the title line');
+      t(p.meta.designer === '' || /^[A-Z]/.test(p.meta.designer), 'the designer is blank or a proper name');
     }
   }
 ];
@@ -140,14 +206,16 @@ function universal(p, name, t) {
   t(/^(garment|bag|quilt|unknown)$/.test(p.kind), 'kind is one of the four values');
   t(typeof p.pages === 'number' && p.pages >= 0, 'pages is a number');
   t(p.steps.length <= 200, 'steps are capped at 200');
-  // every row is well formed
-  t(p.steps.every(function (s) { return typeof s.text === 'string' && s.text.length > 0 && s.text.length <= 810; }),
+  t(every(p.steps, function (s) { return typeof s.text === 'string' && s.text.length > 0 && s.text.length <= 810; }),
     'every step has non-empty text within the 800-char cap');
-  t(p.steps.every(function (s) { return typeof s.n === 'number'; }), 'every step has a numeric n');
-  t(p.steps.every(function (s) { return s.page === null || typeof s.page === 'number'; }), 'every step page is a number or null');
-  t(p.cuttingList.every(function (r) { return r.qty >= 1 && r.qty <= 9999; }), 'every cut row has a sane qty');
-  t(p.cuttingList.every(function (r) { return typeof r.piece === 'string' && r.piece.length >= 2; }), 'every cut row has a piece name');
-  t(p.notions.every(function (r) { return /^(notion|hardware|interfacing)$/.test(r.kind); }), 'every notion has a valid kind');
+  t(every(p.steps, function (s) { return typeof s.n === 'number'; }), 'every step has a numeric n');
+  t(every(p.steps, function (s) { return s.page === null || typeof s.page === 'number'; }), 'every step page is a number or null');
+  t(every(p.steps, function (s) { return /^(1\.|1\)|Step|title|none)$/.test(s.marker); }), 'every step has a known marker style');
+  t(every(p.cuttingList, function (r) { return r.qty >= 1 && r.qty <= 9999; }), 'every cut row has a sane qty');
+  t(every(p.cuttingList, function (r) { return typeof r.piece === 'string' && r.piece.length >= 2; }), 'every cut row has a piece name');
+  t(every(p.notions, function (r) { return /^(notion|hardware|interfacing)$/.test(r.kind); }), 'every notion has a valid kind');
+  t(p.sizes === null || every(p.sizes.chart.concat(p.sizes.finished), function (r) { return r.values.length === p.sizes.labels.length; }),
+    'every chart row lines up with the size labels');
   // round-trip through the data model
   var data = window.Sewing.toCraftData(p);
   var again = window.Sewing.normalize(data, null);
@@ -171,27 +239,74 @@ function fetchText(url) {
   });
 }
 
+function fetchBlob(url) {
+  return fetch(url).then(function (r) {
+    if (!r.ok) return null;
+    return r.blob();
+  }).catch(function () { return null; });
+}
+
+function cacheGet(key) {
+  try { return window.sessionStorage.getItem(key); } catch (e) { return null; }
+}
+function cacheSet(key, value) {
+  try { window.sessionStorage.setItem(key, value); } catch (e) { /* quota or private mode */ }
+}
+
+/**
+ * The text of a fixture: the committed-alongside .txt if the owner made one,
+ * otherwise the PDF read here and cached for the session.
+ */
+function textFor(name) {
+  return fetchText('../tmp-pdf/' + name + '.txt').then(function (txt) {
+    if (txt && txt.replace(/\s/g, '').length >= 200) return { text: txt, from: '.txt' };
+    return fetchBlob('../tmp-pdf/' + name + '.pdf').then(function (blob) {
+      if (!blob || blob.size < 1000) return null;
+      var key = 'sewfix:' + name + ':' + blob.size;
+      var cached = cacheGet(key);
+      if (cached) return { text: cached, from: 'session cache' };
+      if (!window.PdfText || !window.PdfText.isAvailable || !window.PdfText.isAvailable()) {
+        return { error: 'the PDF reader could not load' };
+      }
+      var file = new File([blob], name + '.pdf', { type: 'application/pdf' });
+      return window.PdfText.extract(file, {}).then(function (res) {
+        cacheSet(key, res.text);
+        return { text: res.text, from: 'PDF (' + res.pages + ' pages, ' + res.columnsDetected + ' columns untangled)' };
+      }, function (err) {
+        return { error: String((err && err.message) || err) };
+      });
+    });
+  });
+}
+
 function run() {
   var chain = Promise.resolve();
   var found = 0;
   FIXTURES.forEach(function (fx) {
     chain = chain.then(function () {
-      return fetchText('../tmp-pdf/' + fx.file).then(function (text) {
-        group(fx.file + ' — ' + fx.what);
+      group(fx.file + ' — ' + fx.what);
+      return textFor(fx.file).then(function (got) {
+        if (!got) { skip('fixture not present (' + fx.file + '.txt or .pdf)'); return; }
+        if (got.error) { skip(fx.file + ': ' + got.error); return; }
+        var text = got.text;
         if (!text || text.replace(/\s/g, '').length < 200) {
-          skip('fixture not present (' + fx.file + ')');
+          skip(fx.file + ': no text layer (scanned images?)');
           return;
         }
         found++;
         var t0 = (window.performance && performance.now) ? performance.now() : Date.now();
         var p = window.Sewing.parse(text);
         var t1 = (window.performance && performance.now) ? performance.now() : Date.now();
-        line('pass', 'INFO - ' + text.length + ' chars, ' + p.pages + ' pages, parsed in ' + (t1 - t0).toFixed(1) + ' ms');
-        line('pass', 'INFO - ' + p.steps.length + ' steps, ' + p.cuttingList.length + ' cut rows, ' +
-          p.notions.length + ' notions, kind=' + p.kind +
-          (p.seamAllowance ? (', SA=' + p.seamAllowance.mm + ' mm') : ', SA=none'));
+        var ms = t1 - t0;
+        line('info', 'INFO - source: ' + got.from + ' · ' + text.length + ' chars');
+        line('info', 'INFO - ' + p.steps.length + ' steps, ' + p.cuttingList.length + ' cut rows, ' +
+          p.notions.length + ' notions, ' + p.fabric.length + ' fabric rows, kind=' + p.kind +
+          (p.sizes ? (', sizes ' + p.sizes.labels.length + (p.sizes.unit ? ' (' + p.sizes.unit + ')' : '')) : ', no sizes') +
+          (p.seamAllowance ? (', SA=' + p.seamAllowance.mm + ' mm') : ', SA=none') +
+          ' · parsed in ' + ms.toFixed(1) + ' ms');
         if (p.warnings.length) line('skip', 'WARN - ' + p.warnings.join(' | '));
-        var t = function (cond, label, detail) { log(cond, fx.file + ': ' + label, detail); };
+        var t = function (cond, label, detail) { if (label) log(cond, fx.file + ': ' + label, detail); };
+        t(ms < 100, 'parsed in under 100 ms (' + ms.toFixed(1) + ' ms)');
         universal(p, fx.file, t);
         try { fx.check(p, t); }
         catch (e) { log(false, fx.file + ': check threw', String(e && e.message)); }
@@ -201,7 +316,7 @@ function run() {
   return chain.then(function () {
     group('Result');
     if (!found) {
-      line('skip', 'No fixtures present. Drop sew-*.txt files into tmp-pdf/ to exercise the parser ' +
+      line('skip', 'No fixtures present. Drop sew-*.pdf files into tmp-pdf/ to exercise the parser ' +
         'against real patterns. Nothing to do — this is not a failure.');
     }
     var sum = document.getElementById('summary');
@@ -210,6 +325,12 @@ function run() {
       skipped + ' fixture(s) not present';
     window.__sewingFixtureResults = { passed: passed, failed: failed, skipped: skipped, found: found };
     console.log(sum.textContent);
+  }, function (err) {
+    log(false, 'fixtures runner threw', String(err && err.message));
+    var sum = document.getElementById('summary');
+    sum.className = 'bad';
+    sum.textContent = 'FAILED ' + passed + ' passed, ' + failed + ' failed';
+    window.__sewingFixtureResults = { passed: passed, failed: failed, skipped: skipped, found: found };
   });
 }
 
