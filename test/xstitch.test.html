@@ -114,7 +114,8 @@ var API = ['normalize', 'summary', 'hexFor', 'nearestFloss', 'rgbToLab', 'deltaE
 assertTrue(Array.isArray(X.TEMPLATES) && X.TEMPLATES.length === 3, 'TEMPLATES is an array of 3');
 assertTrue(Array.isArray(X.SYMBOLS) && X.SYMBOLS.length >= 60, 'SYMBOLS has at least 60 glyphs');
 assertTrue(!!X.FLOSS && Array.isArray(X.FLOSS.dmc), 'FLOSS.dmc is an array');
-assertEqual(X.printableHTML({}), '', 'printableHTML is a stub returning an empty string (TODO B7)');
+assertTrue(X.printableHTML({}).indexOf('<!DOCTYPE html>') === 0,
+  'printableHTML always returns a whole document, even for an empty project');
 
 /* =====================================================================
  * 2. DMC table and hexFor
@@ -1306,18 +1307,442 @@ assertEqual(X.parseKey('* 1 skein in each colour\n107 110 120 130').entries.leng
 })();
 
 /* =====================================================================
- * 14. extractGrid stub
+ * 14. printableHTML (B7)
  * ===================================================================== */
-group('extractGrid (beta stub)');
+group('printableHTML');
 
-X.extractGrid(null, 0, {}).then(function (r) {
-  assertEqual(r.ok, false, 'extractGrid resolves ok:false for now');
-  assertEqual(r.warnings, ['not implemented'], 'extractGrid says it is not implemented');
+function printData(w, h, palette, fill) {
+  var cells = new Int16Array(w * h);
+  for (var i = 0; i < cells.length; i++) cells[i] = fill(i % w, Math.floor(i / w));
+  return X.normalize({
+    design: { w: w, h: h, title: 'Tiny sampler', designer: 'Someone' },
+    fabric: { count: 14, kind: 'aida', color: 'White' },
+    palette: palette,
+    chart: { w: w, h: h, cells: cells },
+    strandsDefault: 2
+  }, null);
+}
+
+function parseHtml(html) {
+  return new DOMParser().parseFromString(html, 'text/html');
+}
+
+(function () {
+  var data = printData(20, 20, [{ code: '310' }, { code: '666' }], function (x, y) {
+    return (x + y) % 2 === 0 ? 0 : 1;
+  });
+  var html = X.printableHTML(data, { stitchesPerPage: { w: 10, h: 10 } });
+  var doc = parseHtml(html);
+
+  assertTrue(html.indexOf('<!DOCTYPE html>') === 0, 'printableHTML returns a whole document');
+  assertEqual(doc.title, 'Tiny sampler', 'the document title is the design title');
+  assertTrue(html.indexOf('Tiny sampler') > 0, 'the title appears in the body too');
+  assertEqual(doc.querySelectorAll('.chart-page').length, 4,
+    'a 20x20 chart at 10x10 per page makes four chart pages');
+  assertEqual(doc.querySelectorAll('.page').length, 5, 'plus one cover page');
+  assertEqual(doc.querySelectorAll('.cover').length, 1, 'exactly one cover');
+  assertEqual(doc.querySelectorAll('script').length, 0, 'there are no script tags');
+  assertTrue(html.toLowerCase().indexOf('<script') < 0, 'and none in the raw string either');
+  assertTrue(html.indexOf('http://') < 0 && html.indexOf('https://') < 0 ||
+    html.indexOf('www.w3.org/2000/svg') > 0,
+    'the only external reference is the SVG namespace');
+
+  /* one glyph per filled cell, across all four pages */
+  var glyphs = 0;
+  var texts = doc.querySelectorAll('.grid text');
+  for (var i = 0; i < texts.length; i++) {
+    if (texts[i].getAttribute('class') === 'rule') continue;
+    glyphs += texts[i].textContent.length;
+  }
+  assertEqual(glyphs, 400, 'every one of the 400 cells gets a symbol glyph');
+
+  var svgs = doc.querySelectorAll('svg.grid');
+  assertEqual(svgs.length, 4, 'one inline SVG per chart page');
+  assertTrue(/mm$/.test(svgs[0].getAttribute('width')),
+    'the SVG is sized in millimetres so it prints the same on A4 and Letter');
+  assertTrue(parseFloat(svgs[0].getAttribute('width')) <= 188 &&
+    parseFloat(svgs[0].getAttribute('height')) <= 186,
+    'and fits inside the printable area of both paper sizes');
+  /* the centre of a 20x20 design is (10,10), the corner of all four tiles */
+  var arrows = (html.match(/<path d="M[-\d. ]+L[-\d. ]+L[-\d. ]+Z" fill="#111111"\/>/g) || []).length;
+  assertEqual(arrows, 16,
+    'centre arrows: the centre of a 20x20 design falls on all four tile edges, so each tile ' +
+    'gets both a column pair and a row pair');
+  assertEqual(doc.querySelectorAll('.pagehead .tag')[0].textContent, 'A1',
+    'chart pages are labelled A1, A2, ... across then down');
+  assertEqual(doc.querySelectorAll('.pagehead .tag')[1].textContent, 'B1', 'second tile is B1');
+  assertEqual(doc.querySelectorAll('.pagehead .tag')[2].textContent, 'A2', 'third tile is A2');
+  assertEqual(doc.querySelectorAll('.chart-page .keystrip').length, 4,
+    'the key is repeated on every chart page');
+})();
+
+(function () {
+  var data = printData(20, 20, [{ code: '310' }, { code: '666' }], function (x, y) {
+    return (x + y) % 2 === 0 ? 0 : 1;
+  });
+  var noKey = X.printableHTML(data, { stitchesPerPage: { w: 10, h: 10 }, key: false });
+  assertEqual(parseHtml(noKey).querySelectorAll('.chart-page .keystrip').length, 0,
+    'key: false leaves the per-page key out');
+
+  var colour = X.printableHTML(data, { stitchesPerPage: { w: 10, h: 10 } });
+  var bw = X.printableHTML(data, { stitchesPerPage: { w: 10, h: 10 }, color: false });
+  assertTrue(colour.indexOf('<path fill="#') > 0, 'the colour variant fills cells with the floss colour');
+  assertTrue(bw.indexOf('<path fill="#') < 0, 'the black-and-white variant fills nothing');
+  assertTrue(bw.length < colour.length, 'and is smaller');
+  assertEqual(parseHtml(bw).querySelectorAll('.chart-page').length, 4,
+    'the black-and-white variant still has every page');
+})();
+
+(function () {
+  var data = printData(12, 12, [{ code: '310', name: 'Black <b>bold</b> & co' }], function () { return 0; });
+  var html = X.printableHTML(data, { stitchesPerPage: 12 });
+  assertTrue(html.indexOf('&lt;b&gt;') > 0, 'a < in a colour name is escaped');
+  assertTrue(html.indexOf('<b>bold</b>') < 0, 'and never lands in the page as markup');
+  assertTrue(html.indexOf('&amp; co') > 0, 'an & in a colour name is escaped too');
+  var doc = parseHtml(html);
+  assertEqual(doc.querySelectorAll('.chart-page').length, 1, '12x12 at 12 per page is one tile');
+  assertTrue(doc.body.textContent.indexOf('Black <b>bold</b> & co') > 0,
+    'and the name still reads correctly once parsed');
+})();
+
+(function () {
+  var html = X.printableHTML(X.normalize({
+    design: { w: 40, h: 50, title: 'Counts only' },
+    palette: [{ code: '310', stitchCount: 400 }]
+  }, null), {});
+  var doc = parseHtml(html);
+  assertEqual(doc.querySelectorAll('.chart-page').length, 0,
+    'a project with no grid prints the cover alone');
+  assertTrue(doc.body.textContent.indexOf('no chart grid yet') > 0, 'and says why');
+  assertTrue(doc.body.textContent.indexOf('14 ct') > 0, 'the finished-size table is still there');
+  assertEqual(X.printableHTML(null, null).indexOf('<!DOCTYPE html>'), 0,
+    'printableHTML never throws on rubbish input');
+})();
+
+(function () {
+  /* 500 x 500 is the documented ceiling: ~70 pages of chart. */
+  var t0 = performance.now();
+  var data = printData(500, 500, [{ code: '310' }, { code: '666' }, { code: '3801' }],
+    function (x, y) { return (x * 7 + y * 3) % 3; });
+  var html = X.printableHTML(data, {});
+  var ms = performance.now() - t0;
+  note('printableHTML on a 500x500 chart: ' + ms.toFixed(0) + ' ms, ' +
+    (html.length / 1048576).toFixed(2) + ' MB, ' +
+    (html.match(/class="page chart-page"/g) || []).length + ' chart pages');
+  assertEqual((html.match(/class="page chart-page"/g) || []).length, 63,
+    'a 500x500 chart at 60x80 per page is 63 chart pages');
+  assertTrue(ms < 3000, 'and takes under 3 seconds (' + ms.toFixed(0) + ' ms)');
+  assertTrue(html.length < 24 * 1048576, 'and stays well under a size a browser cannot open');
+})();
+
+/* =====================================================================
+ * 15. extractGrid (B3.4, beta)
+ * ===================================================================== */
+group('extractGrid: lattice, rulers and frequency matching');
+
+/* pdf.js operator numbers, matching the fallback table in xstitch.js. */
+var OP = { save: 10, restore: 11, transform: 12, rect: 19, path: 91, rgb: 59 };
+
+/** A fake pdf.js document over hand-built pages. */
+function fakeDoc(pages) {
+  return {
+    numPages: pages.length,
+    getPage: function (n) {
+      var p = pages[n - 1] || { ops: [], items: [] };
+      return Promise.resolve({
+        getOperatorList: function () {
+          var fn = [], args = [];
+          (p.ops || []).forEach(function (o) { fn.push(o[0]); args.push(o[1]); });
+          return Promise.resolve({ fnArray: fn, argsArray: args });
+        },
+        getTextContent: function () { return Promise.resolve({ items: p.items || [] }); },
+        cleanup: function () { /* no-op */ }
+      });
+    }
+  };
+}
+
+function textItem(s, x, y, font) {
+  return { str: s, transform: [1, 0, 0, 1, x, y], width: 3, height: 3, fontName: font || 'f2' };
+}
+
+var CELL = 8, PX0 = 100, PY0 = 60;
+
+/**
+ * A chart tile drawn the way KG-Chart draws one: a coloured square per stitch
+ * (optionally four quarter-squares), plus ruler numbers every 10 in the margins.
+ * `colorAt(col, row)` takes ABSOLUTE design coordinates.
+ */
+function tilePage(o) {
+  var ops = [], items = [];
+  var K = o.quarters ? 2 : 1;
+  var unit = CELL / K;
+  var x, y, kx, ky;
+  for (y = 0; y < o.rows; y++) {
+    for (x = 0; x < o.cols; x++) {
+      var rgb = o.colorAt(o.col + x, o.row + y);
+      if (!rgb) continue;
+      ops.push([OP.rgb, rgb]);
+      for (ky = 0; ky < K; ky++) {
+        for (kx = 0; kx < K; kx++) {
+          ops.push([OP.path, [[OP.rect], [
+            PX0 + x * CELL + kx * unit,
+            PY0 + (o.rows - 1 - y) * CELL + (K - 1 - ky) * unit,
+            unit * 0.96, unit * 0.96
+          ]]]);
+        }
+      }
+    }
+  }
+  if (!o.noRulers) {
+    for (x = 0; x < o.cols; x++) {
+      var ax = o.col + x + 1;
+      if (ax % 10) continue;
+      items.push(textItem(String(ax), PX0 + x * CELL, PY0 + o.rows * CELL + 12));
+      items.push(textItem(String(ax), PX0 + x * CELL, PY0 - 12));
+    }
+    for (y = 0; y < o.rows; y++) {
+      var ay = o.row + y + 1;
+      if (ay % 10) continue;
+      items.push(textItem(String(ay), PX0 - 14, PY0 + (o.rows - 1 - y) * CELL));
+      items.push(textItem(String(ay), PX0 + o.cols * CELL + 6, PY0 + (o.rows - 1 - y) * CELL));
+    }
+  }
+  items.push(textItem('Page footer', PX0 + 100, 20));
+  return { ops: ops, items: items };
+}
+
+/* Three colours with deliberately different areas, so the frequency ranking
+   has something unambiguous to lock onto. */
+var RGB = [[10, 20, 30], [200, 40, 40], [250, 250, 250]];
+function designColor(col, row) {
+  if (col < 6) return RGB[1];
+  if (row < 4) return RGB[2];
+  return RGB[0];
+}
+function designCounts(w, h) {
+  var n = [0, 0, 0];
+  for (var y = 0; y < h; y++) {
+    for (var x = 0; x < w; x++) {
+      var c = designColor(x, y);
+      n[c === RGB[0] ? 0 : (c === RGB[1] ? 1 : 2)]++;
+    }
+  }
+  return n;
+}
+
+var GW = 40, GH = 30, TW = 20, TH = 15;
+var counts = designCounts(GW, GH);
+
+function chartPages(opt) {
+  opt = opt || {};
+  var pages = [{ ops: [], items: [textItem('Cover page', 200, 700)] }];
+  for (var ty = 0; ty < GH / TH; ty++) {
+    for (var tx = 0; tx < GW / TW; tx++) {
+      pages.push(tilePage({
+        col: tx * TW, row: ty * TH, cols: TW, rows: TH,
+        colorAt: designColor, quarters: opt.quarters, noRulers: opt.noRulers
+      }));
+    }
+  }
+  return pages;
+}
+
+var synthKey = {
+  strandsDefault: 2,
+  design: { w: GW, h: GH },
+  entries: [
+    { code: '310', name: 'Black', hex: '0a141e', stitchCount: counts[0], symbol: '', strands: 2, kind: 'cross' },
+    { code: '666', name: 'Red', hex: 'c82828', stitchCount: counts[1], symbol: '', strands: 2, kind: 'cross' },
+    { code: 'B5200', name: 'Snow', hex: 'fafafa', stitchCount: counts[2], symbol: '', strands: 2, kind: 'cross' }
+  ]
+};
+
+/* --- the pure helpers, on their own --------------------------------- */
+(function () {
+  var vals = [], i;
+  for (i = 0; i < 60; i++) vals.push(137.5 + i * 7.36 + (i % 3 === 0 ? 0.04 : -0.03));
+  for (i = 0; i < 8; i++) vals.push(137.5 + i * 3.1);      // off-lattice noise
+  var fit = X._grid.combFit(vals, 7.4);
+  assertTrue(Math.abs(fit.pitch - 7.36) < 0.05,
+    'combFit recovers the lattice pitch through noise', 'got ' + fit.pitch.toFixed(3));
+  var off = ((fit.origin - 137.5) / fit.pitch) % 1;
+  assertTrue(Math.min(Math.abs(off), 1 - Math.abs(off)) < 0.05,
+    'and the lattice origin to within a twentieth of a cell', 'got ' + fit.origin.toFixed(2));
+  assertTrue(fit.strength > 0.8, 'with a strong comb score', 'got ' + fit.strength.toFixed(2));
+  assertEqual(X._grid.combFit([1, 2], 7), null, 'combFit refuses two points');
+})();
+
+(function () {
+  var marks = [], x, y;
+  for (y = 0; y < 14; y++) {
+    for (x = 0; x < 12; x++) marks.push({ x: 50 + x * 6, y: 90 + y * 6, id: 'aabbcc' });
+  }
+  var lat = X._grid.latticeOf(marks, 6);
+  assertTrue(!!lat, 'latticeOf accepts a clean 12x14 lattice of marks');
+  assertEqual([lat.cols, lat.rows], [12, 14], 'and gets the shape right');
+  assertEqual(lat.snapPct, 1, 'with every mark snapped');
+  assertEqual(X._grid.latticeOf(marks.slice(0, 20), 6), null,
+    'and refuses a handful of marks that could be anything');
+})();
+
+(function () {
+  var marks = [
+    { id: 'aa', n: 900 }, { id: 'bb', n: 300 }, { id: 'cc', n: 61 }
+  ];
+  var entries = [
+    { code: '310', stitchCount: 900, symbol: '' },
+    { code: '666', stitchCount: 300, symbol: '' },
+    { code: '777', stitchCount: 60, symbol: '' }
+  ];
+  var map = X._grid.matchGlyphs(marks, entries);
+  assertEqual([map.aa, map.bb, map.cc], [0, 1, 2],
+    'matchGlyphs pairs marks to key entries by stitch count, within 3%');
+
+  var bySymbol = X._grid.matchGlyphs(
+    [{ id: 'f2★', n: 5 }, { id: 'f2x', n: 900 }],
+    [{ code: '310', stitchCount: 900, symbol: 'x' }, { code: '666', stitchCount: 5, symbol: '★' }]
+  );
+  assertEqual([bySymbol['f2★'], bySymbol['f2x']], [1, 0],
+    'a symbol the key printed wins over the frequency ranking');
+
+  var merged = X._grid.matchGlyphs(
+    [{ id: 'aa', n: 1000 }, { id: 'bb', n: 40 }],
+    [{ code: '1', stitchCount: 600, symbol: '' }, { code: '2', stitchCount: 400, symbol: '' },
+     { code: '3', stitchCount: 40, symbol: '' }]
+  );
+  assertEqual(merged.bb, 2,
+    'two colours sharing one ink do not throw the rest of the ranking out of step');
+})();
+
+/* --- the whole path, over a fake document --------------------------- */
+var gridTests = X.extractGrid(fakeDoc(chartPages()), null, { key: synthKey })
+  .then(function (r) {
+    assertEqual(r.ok, true, 'extractGrid reads a synthetic four-tile chart');
+    assertEqual([r.w, r.h], [GW, GH], 'the tiles are placed by their ruler numbers');
+    assertEqual(r.tiles, 4, 'all four tiles were found');
+    assertEqual(r.colors, 3, 'three distinct inks');
+    assertEqual(r.matched, 3, 'all three matched a colour in the key');
+    assertEqual(r.agree + '/' + r.countable, '3/3', 'and every count agrees within 2%');
+    assertEqual(r.filled, GW * GH, 'every cell came back');
+    assertEqual(r.confidence, 1, 'confidence 1');
+    assertEqual(r.warnings, [], 'with nothing to warn about');
+    assertEqual(r.palette.length, 3, 'a palette is built from the key');
+    assertEqual(r.palette.map(function (p) { return p.stitchCount; }), counts,
+      'and each entry carries the count actually found in the grid');
+    var seen = [0, 0, 0];
+    for (var i = 0; i < r.cells.length; i++) if (r.cells[i] >= 0) seen[r.cells[i]]++;
+    assertEqual(seen, counts, 'the cells themselves hold the right palette indices');
+    assertEqual(r.cells[0], 1, 'the top-left cell is the red block');
+    assertEqual(r.cells[GW * GH - 1], 0, 'and the bottom-right is the black one');
+    return X.extractGrid(fakeDoc(chartPages({ quarters: true })), null, { key: synthKey });
+  })
+  .then(function (r) {
+    assertEqual(r.ok, true, 'a chart drawn as 2x2 quarter squares reads too');
+    assertEqual([r.w, r.h], [GW, GH], 'and the quarter squares are merged back into stitches');
+    assertEqual(r.filled, GW * GH, 'with the same number of cells');
+    return X.extractGrid(fakeDoc(chartPages({ noRulers: true })), null,
+      { key: synthKey, design: { w: GW, h: GH } });
+  })
+  .then(function (r) {
+    assertEqual([r.w, r.h], [GW, GH], 'with no ruler numbers the tiles fall back to page order');
+    assertTrue(r.warnings.join(' ').indexOf('page order') >= 0, 'and that is said out loud');
+    assertEqual(r.filled, GW * GH, 'and the grid is still complete');
+    return X.extractGrid(fakeDoc([
+      { ops: [], items: [textItem('A colour key, no chart', 100, 700)] },
+      { ops: [], items: [textItem('310 Black (1200 ct)', 100, 600)] },
+      { ops: [], items: [] }, { ops: [], items: [] },
+      { ops: [], items: [] }, { ops: [], items: [] }, { ops: [], items: [] }
+    ]), null, { key: synthKey });
+  })
+  .then(function (r) {
+    assertEqual(r.ok, false, 'a PDF with no grid at all reports ok:false');
+    assertEqual(r.warnings, ['no chart grid found in this PDF'], 'and says so plainly');
+    assertEqual(r.w, 0, 'with no size');
+    assertTrue(r.pages <= 6, 'giving up after a handful of pages rather than reading them all',
+      'scanned ' + r.pages);
+    return X.extractGrid(fakeDoc(chartPages()), null, { key: { entries: [] } });
+  })
+  .then(function (r) {
+    assertEqual(r.ok, false, 'a grid with no key to check it against is not accepted');
+    assertTrue(r.warnings.join(' ').indexOf('no colour key') >= 0, 'and says why');
+    assertEqual([r.w, r.h], [GW, GH], 'though the grid itself was read');
+    var wrong = {
+      strandsDefault: 2, design: { w: GW, h: GH },
+      entries: [
+        { code: '310', hex: '0a141e', stitchCount: 5, symbol: '', strands: 2 },
+        { code: '666', hex: 'c82828', stitchCount: 7, symbol: '', strands: 2 },
+        { code: 'B5200', hex: 'fafafa', stitchCount: 9, symbol: '', strands: 2 }
+      ]
+    };
+    return X.extractGrid(fakeDoc(chartPages()), null, { key: wrong });
+  })
+  .then(function (r) {
+    assertEqual(r.ok, false, 'a key whose counts do not match the grid is rejected');
+    assertTrue(r.warnings.join(' ').indexOf('only agree') >= 0,
+      'with the agreement percentage in the warning');
+    return X.extractGrid(fakeDoc(chartPages()), 2, { key: synthKey });
+  })
+  .then(function (r) {
+    assertEqual([r.w, r.h], [TW, TH], 'a single page number reads just that page');
+    assertEqual(r.tiles, 1, 'as one tile');
+    var seenP = 0, total = 0;
+    return X.extractGrid(fakeDoc(chartPages()), null, {
+      key: synthKey,
+      onProgress: function (n, t) { seenP = n; total = t; }
+    }).then(function () {
+      assertEqual([seenP, total], [5, 5], 'onProgress is called for every page');
+      var stop = 0;
+      return X.extractGrid(fakeDoc(chartPages()), null, {
+        key: synthKey,
+        cancelled: function () { return (stop++) > 1; }
+      });
+    });
+  })
+  .then(function (r) {
+    assertEqual(r.ok, false, 'cancelling mid-run returns ok:false');
+    assertTrue(r.warnings.indexOf('cancelled') >= 0 ||
+      r.warnings.indexOf('no chart grid found in this PDF') >= 0,
+      'without pretending it read anything');
+    /* One glyph per stitch: the path the spec originally assumed. */
+    var pages = [{ ops: [], items: [textItem('Cover', 200, 700)] }];
+    var glyphs = ['a', 'b', 'c'];
+    for (var ty = 0; ty < GH / TH; ty++) {
+      for (var tx = 0; tx < GW / TW; tx++) {
+        var pg = tilePage({ col: tx * TW, row: ty * TH, cols: TW, rows: TH, colorAt: designColor });
+        pg.ops = [];
+        for (var y = 0; y < TH; y++) {
+          for (var x = 0; x < TW; x++) {
+            var c = designColor(tx * TW + x, ty * TH + y);
+            var gi = c === RGB[0] ? 0 : (c === RGB[1] ? 1 : 2);
+            pg.items.push(textItem(glyphs[gi], PX0 + x * CELL, PY0 + (TH - 1 - y) * CELL, 'g' + gi));
+          }
+        }
+        pages.push(pg);
+      }
+    }
+    return X.extractGrid(fakeDoc(pages), null, { key: synthKey });
+  })
+  .then(function (r) {
+    assertEqual(r.ok, true, 'a chart that puts one text glyph per stitch also reads');
+    assertEqual([r.w, r.h], [GW, GH], 'at the right size');
+    assertEqual(r.filled, GW * GH, 'with every glyph snapped to a cell');
+    assertEqual(r.matched, 3, 'and the glyphs matched to the key');
+    return X.extractGrid(null, 0, {});
+  })
+  .then(function (r) {
+    assertEqual(r.ok, false, 'extractGrid on nothing at all resolves ok:false');
+    assertEqual(r.warnings, ['no PDF to read'], 'and says there was no PDF');
+    assertEqual(r.cells.length, 0, 'with an empty cell array, never undefined');
+  });
+
+gridTests.then(function () { finish(); }, function (e) {
+  log(false, 'the extractGrid chain threw', String(e && e.message ? e.message : e));
   finish();
 });
 
 /* =====================================================================
- * 15. Performance
+ * 16. Performance
  * ===================================================================== */
 group('Performance');
 

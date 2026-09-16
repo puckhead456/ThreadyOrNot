@@ -3046,30 +3046,1156 @@
   }
 
   /* ================================================================== *
-   * 10. Stubs
+   * 10. Printable chart (B7)
    * ================================================================== */
 
+  var PRINT_CELL = 10;           // SVG user units per stitch
+  var PRINT_PAD = { l: 26, t: 22, r: 16, b: 16 };
+  var PRINT_MAX_W_MM = 188;      // narrower of A4 (210) and Letter (216), less margins
+  var PRINT_MAX_H_MM = 186;      // leaves room for the repeated key under the grid
+
+  function pageLabel(tx, ty) {
+    var s = '', n = tx;
+    do { s = String.fromCharCode(65 + (n % 26)) + s; n = Math.floor(n / 26) - 1; } while (n >= 0);
+    return s + (ty + 1);
+  }
+
+  /** '#rrggbb' for a palette entry, never empty. */
+  function printHex(entry) {
+    var h = entry && entry.hex ? String(entry.hex).replace(/^#/, '') : '';
+    return /^[0-9a-fA-F]{6}$/.test(h) ? '#' + h : '#808080';
+  }
+
+  function inkFor(entry, color) {
+    if (!color) return '#111111';
+    return symbolInk(entry && entry.hex ? entry.hex : '808080') === 'light' ? '#ffffff' : '#111111';
+  }
+
+  /** '#rrggbb' blended 45% towards white — the printed cell wash. */
+  function washHex(hexWithHash) {
+    var r = parseInt(hexWithHash.substr(1, 2), 16);
+    var g = parseInt(hexWithHash.substr(3, 2), 16);
+    var b = parseInt(hexWithHash.substr(5, 2), 16);
+    return '#' + hex6(
+      Math.round(r + (255 - r) * 0.45),
+      Math.round(g + (255 - g) * 0.45),
+      Math.round(b + (255 - b) * 0.45)
+    );
+  }
+
+  /** The symbol actually printed for each palette index (never blank, never a dupe). */
+  function printSymbols(palette) {
+    var out = [], i, s, seen = {};
+    for (i = 0; i < palette.length; i++) {
+      s = str(palette[i].symbol, '').charAt(0);
+      if (!s || seen[s]) s = '';
+      if (s) seen[s] = 1;
+      out.push(s);
+    }
+    for (i = 0; i < out.length; i++) {
+      if (out[i]) continue;
+      for (var k = 0; k < SYMBOLS.length; k++) {
+        if (!seen[SYMBOLS[k]]) { out[i] = SYMBOLS[k]; seen[SYMBOLS[k]] = 1; break; }
+      }
+      if (!out[i]) out[i] = String(i % 10);
+    }
+    return out;
+  }
+
+  function skeinTextFor(stitches, strands, fabric) {
+    var n = clampInt(stitches, 0, 1e9, 0);
+    if (!n) return '';
+    var r = skeinRange({
+      stitchCount: n, count: fabric.count, over: fabric.over, strands: strands
+    });
+    return r.low === r.high ? String(r.low) : (r.low + '–' + r.high);
+  }
+
+  /** One chart tile as a self-contained <svg> string. */
+  function tileSvg(o) {
+    var cells = o.cells, W = o.W;
+    var x0 = o.x0, y0 = o.y0, cols = o.cols, rows = o.rows;
+    var color = o.color, syms = o.syms, palette = o.palette;
+    var C = PRINT_CELL, P = PRINT_PAD;
+    var vbW = P.l + cols * C + P.r, vbH = P.t + rows * C + P.b;
+    var scale = Math.min(PRINT_MAX_W_MM / vbW, PRINT_MAX_H_MM / vbH);
+    var out = [];
+    var x, y, i, v;
+
+    out.push('<svg class="grid" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ' +
+      vbW + ' ' + vbH + '" width="' + round2(vbW * scale) + 'mm" height="' +
+      round2(vbH * scale) + 'mm" role="img" aria-label="Chart page ' + xmlEsc(o.label) + '">');
+    out.push('<rect x="' + P.l + '" y="' + P.t + '" width="' + (cols * C) +
+      '" height="' + (rows * C) + '" fill="#ffffff"/>');
+
+    /* Colour fills: horizontal runs, one <path> per colour. A 500x500 chart is
+       70-odd pages, so this is the difference between a 5 MB page and a 12 MB
+       one. The colour is pre-blended towards white rather than drawn with
+       fill-opacity, because printers handle flat fills far more predictably. */
+    if (color) {
+      var runsBy = {}, runOrder = [];
+      for (y = 0; y < rows; y++) {
+        var run = -2, runStart = 0;
+        for (x = 0; x <= cols; x++) {
+          v = x < cols ? cells[(y0 + y) * W + (x0 + x)] : -2;
+          if (v !== run) {
+            if (run >= 0) {
+              if (!runsBy[run]) { runsBy[run] = []; runOrder.push(run); }
+              var rw = (x - runStart) * C;
+              runsBy[run].push('M' + (P.l + runStart * C) + ' ' + (P.t + y * C) +
+                'h' + rw + 'v' + C + 'h-' + rw + 'z');
+            }
+            run = v; runStart = x;
+          }
+        }
+      }
+      for (i = 0; i < runOrder.length; i++) {
+        out.push('<path fill="' + washHex(printHex(palette[runOrder[i]])) +
+          '" d="' + runsBy[runOrder[i]].join('') + '"/>');
+      }
+    }
+
+    /* minor grid and 10x10 majors: one <path> each */
+    var d = [], dm = [];
+    for (x = 0; x <= cols; x++) {
+      ((x0 + x) % 10 === 0 ? dm : d).push('M' + (P.l + x * C) + ' ' + P.t + 'V' + (P.t + rows * C));
+    }
+    for (y = 0; y <= rows; y++) {
+      ((y0 + y) % 10 === 0 ? dm : d).push('M' + P.l + ' ' + (P.t + y * C) + 'H' + (P.l + cols * C));
+    }
+    if (d.length) out.push('<path d="' + d.join('') + '" stroke="#b9b9b9" stroke-width="0.4" fill="none"/>');
+    if (dm.length) out.push('<path d="' + dm.join('') + '" stroke="#333333" stroke-width="1" fill="none"/>');
+    out.push('<rect x="' + P.l + '" y="' + P.t + '" width="' + (cols * C) + '" height="' +
+      (rows * C) + '" stroke="#111111" stroke-width="1.4" fill="none"/>');
+
+    /* symbols: one <text> per row per ink colour, glyphs placed by an x list */
+    var inks = {};
+    for (i = 0; i < palette.length; i++) {
+      inks[i] = color
+        ? (symbolInk(washHex(printHex(palette[i])).slice(1)) === 'light' ? '#ffffff' : '#111111')
+        : '#111111';
+    }
+    for (y = 0; y < rows; y++) {
+      var byInk = {}, order = [];
+      for (x = 0; x < cols; x++) {
+        v = cells[(y0 + y) * W + (x0 + x)];
+        if (v < 0 || v >= palette.length) continue;
+        var ink = inks[v];
+        if (!byInk[ink]) { byInk[ink] = { xs: [], s: [] }; order.push(ink); }
+        byInk[ink].xs.push(P.l + x * C + C / 2);
+        byInk[ink].s.push(syms[v]);
+      }
+      for (i = 0; i < order.length; i++) {
+        var g = byInk[order[i]];
+        out.push('<text x="' + g.xs.join(' ') + '" y="' + (P.t + y * C + C * 0.74) +
+          '" fill="' + order[i] + '" font-size="' + (C * 0.8) +
+          '" text-anchor="middle" font-family="DejaVu Sans, Segoe UI Symbol, Arial, sans-serif">' +
+          xmlEsc(g.s.join('')) + '</text>');
+      }
+    }
+
+    /* backstitch and knots that fall on this tile */
+    var bs = o.back, bd = [];
+    for (i = 0; i < bs.length; i++) {
+      var b = bs[i];
+      if (Math.max(b.x1, b.x2) < x0 || Math.min(b.x1, b.x2) > x0 + cols) continue;
+      if (Math.max(b.y1, b.y2) < y0 || Math.min(b.y1, b.y2) > y0 + rows) continue;
+      bd.push('M' + round2(P.l + (b.x1 - x0) * C) + ' ' + round2(P.t + (b.y1 - y0) * C) +
+        'L' + round2(P.l + (b.x2 - x0) * C) + ' ' + round2(P.t + (b.y2 - y0) * C));
+    }
+    if (bd.length) out.push('<path d="' + bd.join('') + '" stroke="#111111" stroke-width="1.6" ' +
+      'stroke-linecap="round" fill="none"/>');
+    for (i = 0; i < o.knots.length; i++) {
+      var kp = o.knots[i];
+      if (kp.x < x0 || kp.x > x0 + cols || kp.y < y0 || kp.y > y0 + rows) continue;
+      out.push('<circle cx="' + round2(P.l + (kp.x - x0) * C) + '" cy="' +
+        round2(P.t + (kp.y - y0) * C) + '" r="' + (C * 0.24) + '" fill="#111111"/>');
+    }
+
+    /* margin numbering every 10 stitches, top/bottom and both sides */
+    for (x = 0; x <= cols; x++) {
+      var ax = x0 + x;
+      if (ax % 10 !== 0 || ax === 0) continue;
+      out.push('<text class="rule" x="' + (P.l + x * C) + '" y="' + (P.t - 4) +
+        '" text-anchor="middle" font-size="7">' + ax + '</text>');
+      out.push('<text class="rule" x="' + (P.l + x * C) + '" y="' + (P.t + rows * C + 9) +
+        '" text-anchor="middle" font-size="7">' + ax + '</text>');
+    }
+    for (y = 0; y <= rows; y++) {
+      var ay = y0 + y;
+      if (ay % 10 !== 0 || ay === 0) continue;
+      out.push('<text class="rule" x="' + (P.l - 3) + '" y="' + (P.t + y * C + 2.5) +
+        '" text-anchor="end" font-size="7">' + ay + '</text>');
+      out.push('<text class="rule" x="' + (P.l + cols * C + 3) + '" y="' + (P.t + y * C + 2.5) +
+        '" font-size="7">' + ay + '</text>');
+    }
+
+    /* centre arrows */
+    var cxAbs = Math.floor(o.designW / 2), cyAbs = Math.floor(o.designH / 2);
+    if (cxAbs >= x0 && cxAbs <= x0 + cols) {
+      var px = P.l + (cxAbs - x0) * C;
+      out.push('<path d="M' + (px - 4) + ' ' + (P.t - 11) + 'L' + (px + 4) + ' ' + (P.t - 11) +
+        'L' + px + ' ' + (P.t - 3) + 'Z" fill="#111111"/>');
+      out.push('<path d="M' + (px - 4) + ' ' + (P.t + rows * C + 11) + 'L' + (px + 4) + ' ' +
+        (P.t + rows * C + 11) + 'L' + px + ' ' + (P.t + rows * C + 3) + 'Z" fill="#111111"/>');
+    }
+    if (cyAbs >= y0 && cyAbs <= y0 + rows) {
+      var py = P.t + (cyAbs - y0) * C;
+      out.push('<path d="M' + (P.l - 13) + ' ' + (py - 4) + 'L' + (P.l - 13) + ' ' + (py + 4) +
+        'L' + (P.l - 5) + ' ' + py + 'Z" fill="#111111"/>');
+      out.push('<path d="M' + (P.l + cols * C + 13) + ' ' + (py - 4) + 'L' + (P.l + cols * C + 13) +
+        ' ' + (py + 4) + 'L' + (P.l + cols * C + 5) + ' ' + py + 'Z" fill="#111111"/>');
+    }
+
+    out.push('</svg>');
+    return out.join('');
+  }
+
+  function keyStrip(palette, syms, used, color) {
+    var out = ['<ul class="keystrip">'];
+    for (var i = 0; i < palette.length; i++) {
+      if (used && !used[i]) continue;
+      var e = palette[i];
+      out.push('<li><span class="sw" style="background:' +
+        (color ? printHex(e) : '#ffffff') + ';color:' + inkFor(e, color) + '">' +
+        xmlEsc(syms[i]) + '</span><span class="kc">' + xmlEsc(e.code) + '</span></li>');
+    }
+    out.push('</ul>');
+    return out.join('');
+  }
+
+  var PRINT_CSS = [
+    '*{box-sizing:border-box}',
+    'html,body{margin:0;padding:0;background:#fff;color:#111;',
+    'font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;font-size:11pt;line-height:1.4}',
+    '@page{margin:9mm}',
+    '.page{padding:0 0 6mm;page-break-after:always;break-after:page}',
+    '.page:last-child{page-break-after:auto;break-after:auto}',
+    'h1{font-size:19pt;margin:0 0 2mm}',
+    'h2{font-size:12pt;margin:0 0 2mm;font-weight:600}',
+    '.sub{color:#555;margin:0 0 4mm}',
+    'table{border-collapse:collapse;width:100%;font-size:9.5pt}',
+    'th,td{border:1px solid #bbb;padding:1.2mm 2mm;text-align:left}',
+    'th{background:#f1f1f1;font-weight:600}',
+    'td.n,th.n{text-align:right}',
+    '.facts{width:auto;margin:0 0 5mm}',
+    '.facts td{border:0;padding:0.6mm 5mm 0.6mm 0}',
+    '.sw{display:inline-block;width:5.4mm;height:5.4mm;line-height:5.4mm;text-align:center;',
+    'border:1px solid #777;font-size:8pt;vertical-align:middle}',
+    '.grid{display:block;margin:0 auto}',
+    '.grid text.rule{fill:#444}',
+    '.keystrip{list-style:none;margin:3mm 0 0;padding:0;font-size:7.5pt;',
+    'display:flex;flex-wrap:wrap}',
+    '.keystrip li{display:flex;align-items:center;margin:0 3mm 1mm 0}',
+    '.keystrip .sw{width:4.2mm;height:4.2mm;line-height:4.2mm;font-size:6.5pt;margin-right:1mm}',
+    '.pagehead{display:flex;justify-content:space-between;align-items:baseline;',
+    'margin:0 0 2mm;font-size:9.5pt;color:#444}',
+    '.pagehead .tag{font-size:14pt;font-weight:700;color:#111;margin-right:6mm;flex:none}',
+    '.note{color:#555;font-size:9pt;margin:4mm 0 0}',
+    '.noprint{margin:0 0 4mm;padding:2mm 3mm;border:1px dashed #999;color:#555;font-size:9pt}',
+    '@media print{.noprint{display:none}}'
+  ].join('');
+
   /**
-   * extractGrid(pdfDoc, pageNo, opts) -> Promise<{ ok, warnings, ... }>
-   * TODO(B3.4): the "Try to read the grid (beta)" path — histogram the text
-   * item positions into a lattice, snap glyphs to cells, and accept only when
-   * the recovered per-symbol counts agree with the key's stitchCount column
-   * within 2% on at least 80% of colours. Deliberately not the v1 promise.
+   * printableHTML(data, opts) -> string (B7)
+   *
+   * A self-contained printable page: a cover block (title, designer, design
+   * size, finished size at 14/16/18 ct, fabric, strands and the floss list
+   * with symbol swatch, code, name, stitch count and skein range), then the
+   * chart tiled at `opts.stitchesPerPage` with 10x10 majors, margin numbering
+   * every 10, centre arrows, page labels (A1, A2…) and the key repeated under
+   * every chart page. No scripts, no external assets: the caller prints it.
+   *
+   * opts = { color: true, stitchesPerPage: { w: 60, h: 80 } | number,
+   *          key: true, title: '', counts: [14, 16, 18] }
    */
-  function extractGrid() {
-    return Promise.resolve({ ok: false, warnings: ['not implemented'] });
+  function printableHTML(data, opts) {
+    data = isObj(data) ? data : {};
+    opts = isObj(opts) ? opts : {};
+    var color = opts.color !== false;
+    var withKey = opts.key !== false;
+
+    var spp = opts.stitchesPerPage;
+    var sppW = 60, sppH = 80;
+    if (typeof spp === 'number') { sppW = sppH = clampInt(spp, 10, 200, 60); }
+    else if (isObj(spp)) {
+      sppW = clampInt(spp.w, 10, 200, 60);
+      sppH = clampInt(spp.h, 10, 200, 80);
+    }
+
+    var design = isObj(data.design) ? data.design : {};
+    var rawFabric = isObj(data.fabric) ? data.fabric : {};
+    var fabric = {
+      count: clampInt(rawFabric.count, 1, 40, 14),
+      over: rawFabric.over === 2 ? 2 : 1,
+      kind: str(rawFabric.kind, 'aida'),
+      color: str(rawFabric.color, 'White')
+    };
+    var strandsDefault = clampInt(data.strandsDefault, 1, 12, 2);
+
+    var palette = [];
+    var rawPal = Array.isArray(data.palette) ? data.palette : [];
+    for (var pi = 0; pi < rawPal.length; pi++) {
+      palette.push(normalizePaletteEntry(rawPal[pi], pi, strandsDefault));
+    }
+    var syms = printSymbols(palette);
+
+    var c = chartCells(data.chart);
+    var W = c ? c.w : clampInt(design.w, 0, 20000, 0);
+    var H = c ? c.h : clampInt(design.h, 0, 20000, 0);
+    var title = str(opts.title, '') || str(design.title, '') || 'Cross-stitch chart';
+
+    /* per-colour stitch counts: recovered from the chart when there is one */
+    var counts = [], ci;
+    for (ci = 0; ci < palette.length; ci++) counts.push(clampInt(palette[ci].stitchCount, 0, 1e9, 0));
+    if (c) {
+      for (ci = 0; ci < palette.length; ci++) counts[ci] = 0;
+      for (var q = 0; q < c.cells.length; q++) {
+        var cv = c.cells[q];
+        if (cv >= 0 && cv < counts.length) counts[cv]++;
+      }
+    }
+
+    var html = [];
+    html.push('<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">');
+    html.push('<meta name="viewport" content="width=device-width,initial-scale=1">');
+    html.push('<title>' + xmlEsc(title) + '</title>');
+    html.push('<style>' + PRINT_CSS + '</style></head><body>');
+
+    /* ---- cover ---- */
+    html.push('<section class="page cover">');
+    html.push('<p class="noprint">Use your browser’s Print command to print this, ' +
+      'or to save it as a PDF.</p>');
+    html.push('<h1>' + xmlEsc(title) + '</h1>');
+    if (design.designer) html.push('<p class="sub">' + xmlEsc(design.designer) + '</p>');
+
+    html.push('<table class="facts">');
+    if (W && H) {
+      html.push('<tr><td>Design size</td><td><b>' + W + ' × ' + H + ' stitches</b></td></tr>');
+    }
+    html.push('<tr><td>Fabric</td><td>' + xmlEsc(fabric.color) + ' ' + fabric.count + ' ct ' +
+      xmlEsc(fabric.kind) + (fabric.over === 2 ? ', over 2' : '') + '</td></tr>');
+    html.push('<tr><td>Strands</td><td>' + strandsDefault + '</td></tr>');
+    html.push('<tr><td>Colours</td><td>' + palette.length + '</td></tr>');
+    if (design.copyright) {
+      html.push('<tr><td>Copyright</td><td>' + xmlEsc(design.copyright) + '</td></tr>');
+    }
+    html.push('</table>');
+
+    if (W && H) {
+      var tbl = sizeTable({ w: W, h: H, over: fabric.over },
+        Array.isArray(opts.counts) && opts.counts.length ? opts.counts : [14, 16, 18]);
+      html.push('<h2>Finished size</h2><table><tr><th>Fabric</th><th class="n">Inches</th>' +
+        '<th class="n">Centimetres</th><th class="n">Fabric to buy</th></tr>');
+      for (var t = 0; t < tbl.length; t++) {
+        var fs = finishedSize({ w: W, h: H, count: tbl[t].count, over: fabric.over });
+        html.push('<tr><td>' + tbl[t].count + ' ct</td><td class="n">' + fs.wIn + ' × ' +
+          fs.hIn + '</td><td class="n">' + fs.wCm + ' × ' + fs.hCm + '</td><td class="n">' +
+          fs.fabricIn.w + ' × ' + fs.fabricIn.h + ' in</td></tr>');
+      }
+      html.push('</table>');
+    }
+
+    if (palette.length) {
+      html.push('<h2 style="margin-top:5mm">Floss</h2><table><tr><th>Symbol</th><th>Code</th>' +
+        '<th>Name</th><th class="n">Stitches</th><th class="n">Skeins</th></tr>');
+      for (var f = 0; f < palette.length; f++) {
+        var e = palette[f];
+        html.push('<tr><td><span class="sw" style="background:' +
+          (color ? printHex(e) : '#ffffff') + ';color:' + inkFor(e, color) + '">' +
+          xmlEsc(syms[f]) + '</span></td><td>' +
+          xmlEsc((e.brand ? e.brand + ' ' : '') + e.code) + '</td><td>' +
+          xmlEsc(e.name) + '</td><td class="n">' + (counts[f] || '') + '</td><td class="n">' +
+          xmlEsc(skeinTextFor(counts[f], e.strands, fabric)) + '</td></tr>');
+      }
+      html.push('</table>');
+    }
+    if (!c) {
+      html.push('<p class="note">This project has no chart grid yet, so there are no chart ' +
+        'pages to print.</p>');
+    }
+    html.push('</section>');
+
+    /* ---- chart tiles ---- */
+    if (c) {
+      var chart = isObj(data.chart) ? data.chart : {};
+      var back = Array.isArray(chart.back) ? chart.back : [];
+      var knots = Array.isArray(chart.knots) ? chart.knots : [];
+      var tilesX = Math.ceil(W / sppW), tilesY = Math.ceil(H / sppH);
+      for (var ty = 0; ty < tilesY; ty++) {
+        for (var tx = 0; tx < tilesX; tx++) {
+          var x0 = tx * sppW, y0 = ty * sppH;
+          var cols = Math.min(sppW, W - x0), rows = Math.min(sppH, H - y0);
+          var label = pageLabel(tx, ty);
+          var used = {}, anyUsed = false;
+          for (var uy = 0; uy < rows; uy++) {
+            for (var ux = 0; ux < cols; ux++) {
+              var uv = c.cells[(y0 + uy) * W + (x0 + ux)];
+              if (uv >= 0) { used[uv] = 1; anyUsed = true; }
+            }
+          }
+          html.push('<section class="page chart-page">');
+          html.push('<div class="pagehead"><span class="tag">' + xmlEsc(label) + '</span>' +
+            '<span>' + xmlEsc(title) + ' · columns ' + (x0 + 1) + '–' + (x0 + cols) +
+            ', rows ' + (y0 + 1) + '–' + (y0 + rows) + '</span></div>');
+          html.push(tileSvg({
+            cells: c.cells, W: W, x0: x0, y0: y0, cols: cols, rows: rows,
+            color: color, syms: syms, palette: palette, back: back, knots: knots,
+            designW: W, designH: H, label: label
+          }));
+          if (withKey && anyUsed) html.push(keyStrip(palette, syms, used, color));
+          html.push('</section>');
+        }
+      }
+    }
+
+    html.push('</body></html>');
+    return html.join('');
+  }
+
+  /* ================================================================== *
+   * 10b. PDF grid extraction (B3.4) — the "Try to read the grid" beta
+   *
+   * What the real charts turned out to look like (KG-Chart LE, 2026-09-16):
+   * the symbol glyphs are NOT one text item per stitch. Only a handful of
+   * colours are drawn with a real font; every other cell is a vector path.
+   * What IS one item per stitch is the *coloured square*: each stitch is four
+   * quarter-squares (`re` + `f`) filled with the colour's exact RGB. So this
+   * reads the page's operator list, keeps the axis-aligned rectangles of the
+   * dominant size, fits a lattice to them, merges the 2x2 quarter cells, and
+   * uses the per-colour stitch counts in the key to name the colours. Text
+   * glyphs are still collected and used when a generator does put one glyph
+   * per stitch (and to match by symbol when the key printed one).
+   * ================================================================== */
+
+  /* pdf.js operator numbers; overridden from window.pdfjsLib.OPS when present. */
+  var PDF_OPS_FALLBACK = {
+    save: 10, restore: 11, transform: 12, rectangle: 19, constructPath: 91,
+    setFillRGBColor: 59, setFillGray: 57, setFillCMYKColor: 61
+  };
+
+  function pdfOps() {
+    var O = window.pdfjsLib && window.pdfjsLib.OPS;
+    if (!O || typeof O.constructPath !== 'number') return PDF_OPS_FALLBACK;
+    return {
+      save: O.save, restore: O.restore, transform: O.transform,
+      rectangle: O.rectangle, constructPath: O.constructPath,
+      setFillRGBColor: O.setFillRGBColor, setFillGray: O.setFillGray,
+      setFillCMYKColor: O.setFillCMYKColor
+    };
+  }
+
+  function mulCtm(a, b) {
+    return [
+      a[0] * b[0] + a[1] * b[2], a[0] * b[1] + a[1] * b[3],
+      a[2] * b[0] + a[3] * b[2], a[2] * b[1] + a[3] * b[3],
+      a[4] * b[0] + a[5] * b[2] + b[4], a[4] * b[1] + a[5] * b[3] + b[5]
+    ];
   }
 
   /**
-   * printableHTML(data, opts) -> string
-   * TODO(B7): a self-contained printable page — cover block (title, size
-   * table, fabric, floss list with skein ranges), then chart pages tiled at a
-   * chosen stitches-per-page with 10x10 majors, margin numbering every 10,
-   * centre arrows and a repeated key. Built in phase 2 with the chart
-   * renderer, so the two share one cell-drawing routine.
+   * combFit(values, hint) -> { pitch, origin, strength } | null
+   * The autocorrelation the spec asks for, done as a comb (Fourier) fit: the
+   * candidate pitch whose unit phasor sum over all positions is longest is the
+   * lattice spacing, and the sum's phase is the lattice origin. Robust against
+   * the 20-30% of marks that are not on the lattice at all.
    */
-  function printableHTML() {
-    return '';
+  function combFit(vals, hint) {
+    var i, k, bins = {};
+    for (i = 0; i < vals.length; i++) {
+      k = Math.round(vals[i] * 20);
+      bins[k] = (bins[k] || 0) + 1;
+    }
+    var keys = Object.keys(bins);
+    if (keys.length < 4 || !(hint > 0.2)) return null;
+    var pos = new Float64Array(keys.length), wt = new Float64Array(keys.length);
+    var total = 0, lo = Infinity;
+    for (i = 0; i < keys.length; i++) {
+      pos[i] = parseInt(keys[i], 10) / 20;
+      wt[i] = bins[keys[i]];
+      total += wt[i];
+      if (pos[i] < lo) lo = pos[i];
+    }
+    if (!total) return null;
+    var best = null;
+    for (var s = -160; s <= 160; s++) {
+      var p = hint * (1 + s * 0.002);
+      if (!(p > 0.2)) continue;
+      var re = 0, im = 0;
+      for (i = 0; i < pos.length; i++) {
+        var a = 2 * Math.PI * pos[i] / p;
+        re += wt[i] * Math.cos(a);
+        im += wt[i] * Math.sin(a);
+      }
+      var mag = Math.sqrt(re * re + im * im) / total;
+      if (!best || mag > best.mag) best = { mag: mag, p: p, ph: Math.atan2(im, re) };
+    }
+    if (!best) return null;
+    var origin = best.ph / (2 * Math.PI) * best.p;
+    origin += Math.round((lo - origin) / best.p) * best.p;
+    return { pitch: best.p, origin: origin, strength: best.mag };
+  }
+
+  /** Lattice origin for a pitch we already know (used for narrow edge tiles). */
+  function phaseFit(vals, pitch) {
+    if (!(pitch > 0.2) || !vals || !vals.length) return null;
+    var re = 0, im = 0, lo = Infinity, i;
+    for (i = 0; i < vals.length; i++) {
+      var a = 2 * Math.PI * vals[i] / pitch;
+      re += Math.cos(a); im += Math.sin(a);
+      if (vals[i] < lo) lo = vals[i];
+    }
+    var mag = Math.sqrt(re * re + im * im) / vals.length;
+    var origin = Math.atan2(im, re) / (2 * Math.PI) * pitch;
+    origin += Math.round((lo - origin) / pitch) * pitch;
+    return { pitch: pitch, origin: origin, strength: mag };
+  }
+
+  function modeKey(map) {
+    var best = null, bn = 0, ks = Object.keys(map);
+    for (var i = 0; i < ks.length; i++) {
+      if (map[ks[i]] > bn) { bn = map[ks[i]]; best = parseFloat(ks[i]); }
+    }
+    return { value: best, votes: bn };
+  }
+
+  function hex6(r, g, b) {
+    var v = ((r & 255) << 16) | ((g & 255) << 8) | (b & 255);
+    var s = v.toString(16);
+    while (s.length < 6) s = '0' + s;
+    return s;
+  }
+
+  /** Every axis-aligned rectangle on a page, in page space, with its fill. */
+  function collectRects(ops, OPS) {
+    var ctm = [1, 0, 0, 1, 0, 0], stack = [], fill = '000000';
+    var rects = [], sizes = {};
+    var fns = ops.fnArray, args = ops.argsArray;
+    for (var i = 0; i < fns.length; i++) {
+      var f = fns[i], a = args[i];
+      if (f === OPS.save) { stack.push(ctm.slice()); }
+      else if (f === OPS.restore) { if (stack.length) ctm = stack.pop(); }
+      else if (f === OPS.transform) { ctm = mulCtm([a[0], a[1], a[2], a[3], a[4], a[5]], ctm); }
+      else if (f === OPS.setFillRGBColor) { fill = hex6(a[0], a[1], a[2]); }
+      else if (f === OPS.setFillGray) {
+        var gv = Math.round(num(a[0], 0) * 255);
+        fill = hex6(gv, gv, gv);
+      } else if (f === OPS.setFillCMYKColor) {
+        var cc = num(a[0], 0), mm = num(a[1], 0), yy = num(a[2], 0), kk = num(a[3], 0);
+        fill = hex6(Math.round(255 * (1 - Math.min(1, cc + kk))),
+          Math.round(255 * (1 - Math.min(1, mm + kk))),
+          Math.round(255 * (1 - Math.min(1, yy + kk))));
+      } else if (f === OPS.constructPath) {
+        var codes = a[0], co = a[1];
+        if (!codes || !co || codes.length * 4 !== co.length) continue;
+        var allRect = true;
+        for (var q = 0; q < codes.length; q++) {
+          if (codes[q] !== OPS.rectangle) { allRect = false; break; }
+        }
+        if (!allRect) continue;
+        for (var r = 0; r < codes.length; r++) {
+          var bx = co[r * 4], by = co[r * 4 + 1], bw = co[r * 4 + 2], bh = co[r * 4 + 3];
+          var W = bw * ctm[0], H = bh * ctm[3];
+          if (!(W > 0.05) || !(H > 0.05)) continue;
+          rects.push({
+            x: bx * ctm[0] + by * ctm[2] + ctm[4],
+            y: bx * ctm[1] + by * ctm[3] + ctm[5],
+            w: W, h: H, id: fill
+          });
+          var sk = Math.round(W * 10) / 10;
+          sizes[sk] = (sizes[sk] || 0) + 1;
+        }
+      }
+    }
+    return { rects: rects, sizes: sizes };
+  }
+
+  /** Single-character text items on a page, keyed by font + glyph. */
+  function collectGlyphs(tc) {
+    var out = [], nums = [];
+    var items = (tc && tc.items) || [];
+    for (var i = 0; i < items.length; i++) {
+      var it = items[i];
+      var s = str(it.str, '');
+      if (!s || !it.transform) continue;
+      var trimmed = s.replace(/\s+/g, '');
+      if (!trimmed) continue;
+      var x = num(it.transform[4], 0), y = num(it.transform[5], 0);
+      if (/^\d{1,4}$/.test(trimmed)) { nums.push({ v: parseInt(trimmed, 10), x: x, y: y }); continue; }
+      if (trimmed.length !== 1) continue;
+      out.push({ x: x, y: y, w: 1, h: 1, id: str(it.fontName, 'f') + '' + trimmed });
+    }
+    return { marks: out, nums: nums };
+  }
+
+  /**
+   * latticeOf(marks, hint) -> tile | null
+   * Fits the lattice, snaps the marks, merges the KxK sub-cells a generator
+   * may use for quarter stitches, and reports how well the marks snapped.
+   */
+  function latticeOf(marks, hint, forced) {
+    var minMarks = forced ? 12 : 80;
+    if (!marks || marks.length < minMarks) return null;
+    var i, xs = [], ys = [];
+    for (i = 0; i < marks.length; i++) { xs.push(marks[i].x); ys.push(marks[i].y); }
+    var fx, fy;
+    if (forced) {
+      /* A narrow edge tile has too few columns to fit a pitch to. Reuse the
+         pitch the rest of the chart agreed on and only solve for the phase. */
+      fx = phaseFit(xs, forced.pitchX) || combFit(xs, hint);
+      fy = phaseFit(ys, forced.pitchY) || combFit(ys, hint);
+    } else {
+      fx = combFit(xs, hint);
+      fy = combFit(ys, hint);
+    }
+    if (!fx || !fy) return null;
+
+    var minA = Infinity, maxA = -Infinity, minB = Infinity, maxB = -Infinity;
+    var snap = [], good = 0;
+    for (i = 0; i < marks.length; i++) {
+      var ax = (marks[i].x - fx.origin) / fx.pitch;
+      var by = (marks[i].y - fy.origin) / fy.pitch;
+      var A = Math.round(ax), B = Math.round(by);
+      if (Math.abs(ax - A) > 0.2 || Math.abs(by - B) > 0.2) continue;
+      good++;
+      snap.push([A, B, marks[i].id]);
+      if (A < minA) minA = A;
+      if (A > maxA) maxA = A;
+      if (B < minB) minB = B;
+      if (B > maxB) maxB = B;
+    }
+    var snapPct = good / marks.length;
+    if (!snap.length || snapPct < 0.8) return null;
+
+    var cols = maxA - minA + 1, rows = maxB - minB + 1;
+    var minSide = forced ? 1 : 4;
+    if (cols < minSide || rows < minSide || cols > 4000 || rows > 4000) return null;
+
+    var sub = [];
+    for (i = 0; i < cols * rows; i++) sub.push(null);
+    for (i = 0; i < snap.length; i++) {
+      /* PDF y grows upwards; chart rows grow downwards. */
+      sub[(rows - 1 - (snap[i][1] - minB)) * cols + (snap[i][0] - minA)] = snap[i][2];
+    }
+
+    /* KG-Chart draws each stitch as 2x2 quarter squares (so quarter stitches
+       can differ). Work out the factor, smallest first: a k that is a multiple
+       of the real one is uniform too. */
+    function uniformity(k, off) {
+      var tot = 0, same = 0;
+      for (var y = off; y + k <= rows; y += k) {
+        for (var x = off; x + k <= cols; x += k) {
+          var v = sub[y * cols + x];
+          if (v === null) continue;
+          tot++;
+          var ok = true;
+          for (var dy = 0; dy < k && ok; dy++) {
+            for (var dx = 0; dx < k; dx++) {
+              if (sub[(y + dy) * cols + x + dx] !== v) { ok = false; break; }
+            }
+          }
+          if (ok) same++;
+        }
+      }
+      return tot > 20 ? same / tot : -1;
+    }
+
+    /* A chart of big solid blocks is uniform at any k, so an aligned k only
+       counts when shifting the window by one sub-cell makes it visibly worse. */
+    var kOk = {};
+    for (var k = 2; k <= 3; k++) {
+      var u0 = uniformity(k, 0);
+      if (u0 < 0.9) continue;
+      var u1 = uniformity(k, 1);
+      if (u1 < 0 || u0 - u1 >= 0.15) kOk[k] = true;
+    }
+
+    return {
+      sub: sub, cols: cols, rows: rows, kOk: kOk, snapPct: snapPct, forced: !!forced,
+      originX: fx.origin + minA * fx.pitch, originY: fy.origin + minB * fy.pitch,
+      x0: fx.origin + minA * fx.pitch, x1: fx.origin + maxA * fx.pitch,
+      y0: fy.origin + minB * fy.pitch, y1: fy.origin + maxB * fy.pitch,
+      fx: fx, fy: fy, minA: minA, minB: minB, maxA: maxA, maxB: maxB,
+      strength: Math.min(fx.strength, fy.strength)
+    };
+  }
+
+  /**
+   * How many stitches one ruler step covers, read straight off the margin
+   * numbers: two labels 10 apart in value are 10 cells apart on the page. Used
+   * to pin down the sub-cell factor K without guessing.
+   */
+  function rulerK(lat, nums) {
+    var cols = [], rows = [], i;
+    for (i = 0; i < nums.length; i++) {
+      var n = nums[i];
+      if (n.v < 1 || n.v > 20000) continue;
+      if (n.x < lat.x0 - 2 || n.x > lat.x1 + lat.fx.pitch * 4 + 2) {
+        if (n.y >= lat.y0 - lat.fy.pitch * 4 && n.y <= lat.y1 + lat.fy.pitch * 4) rows.push(n);
+      } else if (n.y < lat.y0 - 2 || n.y > lat.y1 + lat.fy.pitch * 4 + 2) {
+        cols.push(n);
+      }
+    }
+    function stepOf(list, pitch, coord) {
+      var seen = {}, pts = [], j;
+      for (j = 0; j < list.length; j++) {
+        var key = list[j].v;
+        if (seen[key]) continue;
+        seen[key] = 1;
+        pts.push({ v: list[j].v, p: list[j][coord] });
+      }
+      if (pts.length < 2) return 0;
+      pts.sort(function (a, b) { return a.v - b.v; });
+      var best = 0, bn = 0, tally = {};
+      for (j = 1; j < pts.length; j++) {
+        var dv = pts[j].v - pts[j - 1].v;
+        if (dv < 5) continue;
+        var kk = Math.round(Math.abs(pts[j].p - pts[j - 1].p) / dv / pitch);
+        if (kk < 1 || kk > 4) continue;
+        tally[kk] = (tally[kk] || 0) + 1;
+        if (tally[kk] > bn) { bn = tally[kk]; best = kk; }
+      }
+      return best;
+    }
+    return stepOf(cols, lat.fx.pitch, 'x') || stepOf(rows, lat.fy.pitch, 'y') || 0;
+  }
+
+  /** Collapse a lattice's KxK sub-cells into the stitch grid. */
+  function mergeTile(lat, K) {
+    if (!lat) return null;
+    K = clampInt(K, 1, 4, 1);
+    var cols = lat.cols, rows = lat.rows, sub = lat.sub;
+    var gc = Math.ceil(cols / K), gr = Math.ceil(rows / K);
+    if (!lat.forced && (gc < 10 || gr < 10)) return null;
+    if (gc < 1 || gr < 1) return null;
+    var grid = [];
+    for (var gy = 0; gy < gr; gy++) {
+      for (var gx = 0; gx < gc; gx++) grid.push(sub[(gy * K) * cols + (gx * K)]);
+    }
+    lat.K = K;
+    lat.gc = gc;
+    lat.gr = gr;
+    lat.grid = grid;
+    lat.cellW = lat.fx.pitch * K;
+    lat.cellH = lat.fy.pitch * K;
+    lat.sub = null;
+    return lat;
+  }
+
+  /** Place a tile in whole-design coordinates from its ruler numbers. */
+  function placeTile(tile, nums) {
+    var rowVotes = {}, colVotes = {}, i;
+    for (i = 0; i < nums.length; i++) {
+      var n = nums[i];
+      if (n.v < 1 || n.v > 20000) continue;
+      if (n.x < tile.x0 - 2 || n.x > tile.x1 + tile.cellW + 2) {
+        /* left or right margin: a row label */
+        if (n.y < tile.y0 - tile.cellH || n.y > tile.y1 + tile.cellH * 2) continue;
+        var b = Math.round((n.y - tile.fy.origin) / tile.fy.pitch) - tile.minB;
+        var cellRow = tile.gr - 1 - Math.floor(b / tile.K);
+        var ro = n.v - cellRow;
+        if (ro >= 1) rowVotes[ro] = (rowVotes[ro] || 0) + 1;
+      } else if (n.y < tile.y0 - 2 || n.y > tile.y1 + tile.cellH + 2) {
+        /* above or below: a column label */
+        var a = Math.round((n.x - tile.fx.origin) / tile.fx.pitch) - tile.minA;
+        var cellCol = Math.floor(a / tile.K);
+        var co = n.v - cellCol;
+        if (co >= 1) colVotes[co] = (colVotes[co] || 0) + 1;
+      }
+    }
+    var rm = modeKey(rowVotes), cm = modeKey(colVotes);
+    return {
+      col: cm.value === null ? null : cm.value - 1,
+      row: rm.value === null ? null : rm.value - 1,
+      colVotes: cm.votes, rowVotes: rm.votes
+    };
+  }
+
+  /** The sub-cell factor: the ruler numbers decide it when they can. */
+  function pickK(lat, nums) {
+    var k = rulerK(lat, nums);
+    if (k >= 1) return k;
+    if (lat.kOk[2]) return 2;
+    if (lat.kOk[3]) return 3;
+    return 1;
+  }
+
+  /**
+   * One page -> { tile } when it reads as a chart page, or
+   * { pending: marks, hint, nums } when it looks like one but was too narrow
+   * to fit a lattice to on its own, or null.
+   */
+  function extractPage(page, OPS) {
+    return page.getOperatorList().then(function (ops) {
+      var col = collectRects(ops, OPS);
+      var dom = modeKey(col.sizes);
+      var lat = null, source = 'rects', keep = null;
+      if (dom.value !== null && dom.votes >= 40) {
+        keep = [];
+        var lim = dom.value * 0.25;
+        for (var i = 0; i < col.rects.length; i++) {
+          var r = col.rects[i];
+          if (Math.abs(r.w - dom.value) <= lim && Math.abs(r.h - dom.value) <= lim) keep.push(r);
+        }
+        if (keep.length >= 200) lat = latticeOf(keep, dom.value);
+      }
+      return page.getTextContent().then(function (tc) {
+        var g = collectGlyphs(tc);
+        var hint = dom.value;
+        if (!lat && g.marks.length >= 200) {
+          /* a generator that really does put one glyph per stitch */
+          var gx = [], gi;
+          for (gi = 1; gi < g.marks.length; gi++) gx.push(Math.abs(g.marks[gi].x - g.marks[gi - 1].x));
+          gx.sort(function (a, b) { return a - b; });
+          var hintG = 0;
+          for (gi = 0; gi < gx.length; gi++) { if (gx[gi] > 1) { hintG = gx[gi]; break; } }
+          if (hintG > 0) {
+            lat = latticeOf(g.marks, hintG);
+            if (lat) { source = 'glyphs'; hint = hintG; }
+            else if (!keep || keep.length < 40) { keep = g.marks; hint = hintG; }
+          }
+        }
+        if (page.cleanup) { try { page.cleanup(); } catch (e) { /* ignore */ } }
+        var tile = lat ? mergeTile(lat, pickK(lat, g.nums)) : null;
+        if (tile) {
+          tile.source = source;
+          tile.place = placeTile(tile, g.nums);
+          return { tile: tile };
+        }
+        if (keep && keep.length >= 40 && keep.length <= 20000 && hint > 0) {
+          return { pending: keep, hint: hint, nums: g.nums };
+        }
+        return null;
+      });
+    }, function () { return null; });
+  }
+
+  /** Greedy glyph -> key-entry assignment (symbol, then counts, then colour). */
+  function matchGlyphs(marks, entries) {
+    var i, j, map = {}, usedE = {}, usedM = {};
+    var byCount = {}, colByCount = {};
+    for (i = 0; i < entries.length; i++) {
+      var sc = entries[i].stitchCount;
+      if (sc === null || sc === undefined) continue;
+      (byCount[sc] = byCount[sc] || []).push(i);
+    }
+    for (i = 0; i < marks.length; i++) {
+      (colByCount[marks[i].n] = colByCount[marks[i].n] || []).push(i);
+    }
+
+    /* 1. the symbol the key printed, when the mark is a real text glyph */
+    for (i = 0; i < marks.length; i++) {
+      var glyph = marks[i].id.indexOf('') > 0 ? marks[i].id.split('')[1] : '';
+      if (!glyph) continue;
+      for (j = 0; j < entries.length; j++) {
+        if (usedE[j]) continue;
+        if (str(entries[j].symbol, '') === glyph) {
+          map[marks[i].id] = j; usedE[j] = 1; usedM[i] = 1; break;
+        }
+      }
+    }
+
+    /* 2. a stitch count that is unique on both sides */
+    var ks = Object.keys(colByCount);
+    for (i = 0; i < ks.length; i++) {
+      var cs = colByCount[ks[i]], es = byCount[ks[i]];
+      if (!cs || !es || cs.length !== 1 || es.length !== 1) continue;
+      if (usedM[cs[0]] || usedE[es[0]]) continue;
+      map[marks[cs[0]].id] = es[0]; usedE[es[0]] = 1; usedM[cs[0]] = 1;
+    }
+
+    /* 3. frequency ranking: both sides sorted descending, paired within 3% */
+    var rm = [], re = [];
+    for (i = 0; i < marks.length; i++) if (!usedM[i]) rm.push(i);
+    for (j = 0; j < entries.length; j++) {
+      if (usedE[j]) continue;
+      if (entries[j].stitchCount === null || entries[j].stitchCount === undefined) continue;
+      re.push(j);
+    }
+    rm.sort(function (a, b) { return marks[b].n - marks[a].n; });
+    re.sort(function (a, b) { return entries[b].stitchCount - entries[a].stitchCount; });
+    var mi = 0, ei = 0;
+    while (mi < rm.length && ei < re.length) {
+      var mn = marks[rm[mi]].n, en = entries[re[ei]].stitchCount;
+      if (Math.abs(mn - en) <= Math.max(3, en * 0.03)) {
+        map[marks[rm[mi]].id] = re[ei]; usedE[re[ei]] = 1; usedM[rm[mi]] = 1;
+        mi++; ei++;
+      } else if (mn > en) { mi++; } else { ei++; }
+    }
+
+    /* 4. whatever is left: nearest colour, when the mark carries one */
+    for (i = 0; i < marks.length; i++) {
+      if (usedM[i]) continue;
+      var mhex = /^[0-9a-f]{6}$/.test(marks[i].id) ? marks[i].id : null;
+      if (!mhex) continue;
+      var lab = hexToLab(mhex), bestJ = -1, bestD = 1e9;
+      if (!lab) continue;
+      for (j = 0; j < entries.length; j++) {
+        if (usedE[j] || !entries[j].hex) continue;
+        var el = hexToLab(entries[j].hex);
+        if (!el) continue;
+        var dd = deltaE76(lab, el);
+        if (dd < bestD) { bestD = dd; bestJ = j; }
+      }
+      if (bestJ >= 0 && bestD < 30) { map[marks[i].id] = bestJ; usedE[bestJ] = 1; usedM[i] = 1; }
+    }
+    return map;
+  }
+
+  /**
+   * extractGrid(doc, pageNo, opts) -> Promise<Result>   (B3.4, beta)
+   *
+   *   doc     a pdf.js PDFDocumentProxy, or a PdfText.open() handle
+   *   pageNo  a 1-based page to read on its own, or null/0 for the whole
+   *           document (the normal case: every chart page becomes a tile and
+   *           the tiles are placed by their ruler numbers)
+   *   opts = {
+   *     key,                 // the parseKey result, for naming the colours
+   *     design: { w, h },    // the declared design size, when known
+   *     onProgress(page, total),
+   *     cancelled() -> bool, // polled between pages
+   *     maxPages: 200, budgetMs: 30000
+   *   }
+   *
+   * Result = { ok, w, h, originX, originY, cellW, cellH, cells: Int16Array,
+   *            glyphs: string[], counts: number[], palette, colors, matched,
+   *            agree, confidence, ms, pages, tiles, warnings }
+   */
+  function extractGrid(doc, pageNo, opts) {
+    opts = isObj(opts) ? opts : {};
+    var warnings = [];
+    var t0 = (window.performance && performance.now) ? performance.now() : Date.now();
+    function now() { return ((window.performance && performance.now) ? performance.now() : Date.now()) - t0; }
+    function fail(msg, extra) {
+      pushOnce(warnings, msg);
+      var out = {
+        ok: false, w: 0, h: 0, originX: 0, originY: 0, cellW: 0, cellH: 0,
+        cells: new Int16Array(0), glyphs: [], counts: [], palette: null,
+        colors: 0, matched: 0, agree: 0, countable: 0, filled: 0, confidence: 0,
+        ms: Math.round(now()), pages: 0, tiles: 0, warnings: warnings
+      };
+      if (extra) { for (var k in extra) if (extra.hasOwnProperty(k)) out[k] = extra[k]; }
+      return out;
+    }
+
+    var pdf = doc && doc.getPage ? doc : (doc && doc.doc && doc.doc.getPage ? doc.doc : null);
+    if (!pdf) return Promise.resolve(fail('no PDF to read'));
+    var OPS = pdfOps();
+    var total = clampInt(pdf.numPages, 1, 5000, 1);
+    var first = 1, last = total;
+    if (pageNo) {
+      first = last = clampInt(pageNo, 1, total, 1);
+    }
+    var maxPages = clampInt(opts.maxPages, 1, 5000, 200);
+    if (last - first + 1 > maxPages) last = first + maxPages - 1;
+    var budget = clampInt(opts.budgetMs, 1000, 600000, 30000);
+
+    var tiles = [], pending = [], scanned = 0, misses = 0, stopped = false;
+
+    function step(n) {
+      if (n > last || stopped) return Promise.resolve();
+      if (now() > budget) { pushOnce(warnings, 'gave up after ' + Math.round(budget / 1000) + ' seconds'); stopped = true; return Promise.resolve(); }
+      if (typeof opts.cancelled === 'function' && opts.cancelled()) { stopped = true; return Promise.resolve(); }
+      if (typeof opts.onProgress === 'function') {
+        try { opts.onProgress(n - first + 1, last - first + 1); } catch (e) { /* ignore */ }
+      }
+      return pdf.getPage(n).then(function (page) {
+        return extractPage(page, OPS);
+      }, function () { return null; }).then(function (res) {
+        scanned++;
+        if (res && res.tile) { res.tile.page = n; tiles.push(res.tile); misses = 0; }
+        else if (res && res.pending) { res.page = n; pending.push(res); misses = 0; }
+        else {
+          misses++;
+          /* Nothing that looks like a chart in the first handful of pages:
+             stop early so a PDF with no grid fails in under a second. */
+          if (!tiles.length && misses >= 6 && !pageNo) { stopped = true; return; }
+        }
+        return new Promise(function (r) { window.setTimeout(r, 0); }).then(function () {
+          return step(n + 1);
+        });
+      });
+    }
+
+    /* Second pass: tiles too narrow to fit a pitch to, retried with the pitch
+       the rest of the chart agreed on. */
+    function retryPending() {
+      if (!tiles.length || !pending.length) return;
+      var ws = [], hs = [], ks = {};
+      for (var i = 0; i < tiles.length; i++) {
+        ws.push(tiles[i].fx.pitch); hs.push(tiles[i].fy.pitch);
+        ks[tiles[i].K] = (ks[tiles[i].K] || 0) + 1;
+      }
+      ws.sort(function (a, b) { return a - b; });
+      hs.sort(function (a, b) { return a - b; });
+      var forced = {
+        pitchX: ws[Math.floor(ws.length / 2)],
+        pitchY: hs[Math.floor(hs.length / 2)],
+        K: modeKey(ks).value || 1
+      };
+      for (var p = 0; p < pending.length; p++) {
+        var lat = latticeOf(pending[p].pending, pending[p].hint, forced);
+        if (!lat) continue;
+        var t = mergeTile(lat, rulerK(lat, pending[p].nums) || forced.K);
+        if (!t) continue;
+        t.source = 'edge';
+        t.page = pending[p].page;
+        t.place = placeTile(t, pending[p].nums);
+        tiles.push(t);
+      }
+      tiles.sort(function (a, b) { return a.page - b.page; });
+    }
+
+    return step(first).then(function () {
+      retryPending();
+      return null;
+    }).then(function () {
+      if (typeof opts.cancelled === 'function' && opts.cancelled()) {
+        return fail('cancelled');
+      }
+      if (!tiles.length) {
+        return fail('no chart grid found in this PDF', { pages: scanned });
+      }
+
+      /* ---- place the tiles ---- */
+      var i, t, haveLabels = 0;
+      for (i = 0; i < tiles.length; i++) {
+        t = tiles[i];
+        if (t.place && t.place.col !== null && t.place.row !== null) haveLabels++;
+      }
+      if (haveLabels < tiles.length) {
+        /* fall back to page order at the first tile's size */
+        var tw = tiles[0].gc, th = tiles[0].gr;
+        var declaredW = isObj(opts.design) ? clampInt(opts.design.w, 1, 20000, 0) : 0;
+        var perRow = declaredW ? Math.ceil(declaredW / tw) : Math.ceil(Math.sqrt(tiles.length));
+        if (perRow < 1) perRow = 1;
+        for (i = 0; i < tiles.length; i++) {
+          t = tiles[i];
+          if (t.place && t.place.col !== null && t.place.row !== null) continue;
+          t.place = { col: (i % perRow) * tw, row: Math.floor(i / perRow) * th, colVotes: 0, rowVotes: 0 };
+        }
+        pushOnce(warnings, 'some pages had no ruler numbers, so they were placed in page order');
+      }
+
+      var W = 0, H = 0;
+      for (i = 0; i < tiles.length; i++) {
+        t = tiles[i];
+        if (t.place.col + t.gc > W) W = t.place.col + t.gc;
+        if (t.place.row + t.gr > H) H = t.place.row + t.gr;
+      }
+      if (W < 10 || H < 10 || W * H > 4000000) {
+        return fail('the grid came out an impossible size (' + W + ' × ' + H + ')', { pages: scanned });
+      }
+
+      /* ---- assemble ---- */
+      var ids = [], idIndex = {}, counts = [];
+      var raw = new Int32Array(W * H);
+      for (i = 0; i < raw.length; i++) raw[i] = -1;
+      for (i = 0; i < tiles.length; i++) {
+        t = tiles[i];
+        for (var y = 0; y < t.gr; y++) {
+          var Y = t.place.row + y;
+          if (Y < 0 || Y >= H) continue;
+          for (var x = 0; x < t.gc; x++) {
+            var X = t.place.col + x;
+            if (X < 0 || X >= W) continue;
+            var id = t.grid[y * t.gc + x];
+            if (id === null) continue;
+            var gi = idIndex[id];
+            if (gi === undefined) { gi = ids.length; idIndex[id] = gi; ids.push(id); counts.push(0); }
+            if (raw[Y * W + X] < 0) counts[gi]++;
+            raw[Y * W + X] = gi;
+          }
+        }
+      }
+      var filled = 0;
+      for (i = 0; i < raw.length; i++) if (raw[i] >= 0) filled++;
+
+      /* ---- name the colours from the key ---- */
+      var key = isObj(opts.key) ? opts.key : null;
+      var entries = key && Array.isArray(key.entries) ? key.entries : [];
+      var marks = [];
+      for (i = 0; i < ids.length; i++) marks.push({ id: ids[i], n: counts[i] });
+
+      var cells = new Int16Array(W * H);
+      var palette = null, matched = 0, agree = 0, countable = 0, ok = false, confidence = 0;
+
+      if (!entries.length) {
+        for (i = 0; i < raw.length; i++) cells[i] = raw[i] > 32000 ? -1 : raw[i];
+        pushOnce(warnings, 'there is no colour key to check this grid against');
+        return {
+          ok: false, w: W, h: H,
+          originX: tiles[0].originX, originY: tiles[0].originY,
+          cellW: tiles[0].cellW, cellH: tiles[0].cellH,
+          cells: cells, glyphs: ids.slice(), counts: counts.slice(), palette: null,
+          colors: ids.length, matched: 0, agree: 0, confidence: 0,
+          ms: Math.round(now()), pages: scanned, tiles: tiles.length,
+          filled: filled, warnings: warnings
+        };
+      }
+
+      var map = matchGlyphs(marks, entries);
+      var glyphToPal = new Int16Array(ids.length);
+      for (i = 0; i < ids.length; i++) {
+        var e = map[ids[i]];
+        glyphToPal[i] = (e === undefined) ? -1 : e;
+        if (e !== undefined) matched++;
+      }
+      for (i = 0; i < raw.length; i++) {
+        cells[i] = raw[i] < 0 ? -1 : glyphToPal[raw[i]];
+      }
+
+      /* per-entry recovered counts, for the 2% acceptance test */
+      var recovered = [];
+      for (i = 0; i < entries.length; i++) recovered.push(0);
+      for (i = 0; i < ids.length; i++) {
+        if (glyphToPal[i] >= 0) recovered[glyphToPal[i]] += counts[i];
+      }
+      for (i = 0; i < entries.length; i++) {
+        var want = entries[i].stitchCount;
+        if (want === null || want === undefined || want <= 0) continue;
+        countable++;
+        if (Math.abs(recovered[i] - want) <= Math.max(2, want * 0.02)) agree++;
+      }
+
+      palette = [];
+      for (i = 0; i < entries.length; i++) {
+        var en = entries[i];
+        palette.push(normalizePaletteEntry({
+          i: i, symbol: en.symbol || '', brand: en.brand || 'DMC', code: en.code,
+          name: en.name || '', hex: en.hex || null,
+          strands: en.strands || (key && key.strandsDefault) || 2,
+          kind: en.kind || 'cross',
+          stitchCount: recovered[i] || en.stitchCount || 0,
+          skeins: en.skeins || 0
+        }, i, (key && key.strandsDefault) || 2));
+      }
+
+      var agreePct = countable ? agree / countable : 0;
+      ok = countable > 0 && agreePct >= 0.8 && W >= 10 && H >= 10;
+      confidence = Math.round(Math.min(1, agreePct * (matched / Math.max(1, ids.length))) * 100) / 100;
+
+      if (matched < ids.length) {
+        pushOnce(warnings, (ids.length - matched) + ' symbol' +
+          (ids.length - matched === 1 ? '' : 's') + ' could not be matched to a colour in the key');
+      }
+      if (!ok) {
+        pushOnce(warnings, 'the stitch counts in the key only agree with the grid on ' +
+          Math.round(agreePct * 100) + '% of colours');
+      }
+
+      return {
+        ok: ok, w: W, h: H,
+        originX: tiles[0].originX, originY: tiles[0].originY,
+        cellW: tiles[0].cellW, cellH: tiles[0].cellH,
+        cells: cells, glyphs: ids.slice(), counts: counts.slice(), palette: palette,
+        colors: ids.length, matched: matched, agree: agree, countable: countable,
+        confidence: confidence, ms: Math.round(now()), pages: scanned,
+        tiles: tiles.length, filled: filled, warnings: warnings
+      };
+    }, function (err) {
+      return fail('that PDF could not be read (' + ((err && err.message) || 'unknown error') + ')');
+    });
   }
 
   /* ================================================================== *
@@ -3123,7 +4249,16 @@
     toOXS: toOXS,
     parseKey: parseKey,
     extractGrid: extractGrid,
-    printableHTML: printableHTML
+    printableHTML: printableHTML,
+
+    /* internals, exposed for test/xstitch.test.html only */
+    _grid: {
+      combFit: combFit,
+      latticeOf: latticeOf,
+      placeTile: placeTile,
+      matchGlyphs: matchGlyphs,
+      collectGlyphs: collectGlyphs
+    }
   };
 
   /* Registers with the shell when it is present; the file also loads

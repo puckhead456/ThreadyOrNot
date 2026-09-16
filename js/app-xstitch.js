@@ -2047,6 +2047,15 @@
           }
         });
         body.appendChild(grid);
+
+        if (!hasChart(data) && gridIsWorthTrying(keyFromPalette(data))) {
+          var beta = button('btn ghost block xs-beta-btn', '🔍 Try to read the grid (beta)');
+          on(beta, 'click', function () { openGridBetaSheet(projectId); });
+          body.appendChild(beta);
+          body.appendChild(el('p', 'muted xs-import-note',
+            'Some chart PDFs draw every stitch as a coloured square. When they do, the whole ' +
+            'grid can be read out of the file and you get stitch-by-stitch counting.'));
+        }
       },
       footer: [{ text: 'Close', cls: 'btn primary', onClick: function (api) { api.close(); } }],
       onClose: function () {
@@ -2525,11 +2534,35 @@
     });
     card.appendChild(go);
 
+    /* The beta grid reader, offered only when the key has counts to check
+       against and the PDF is still open. Failing costs the stitcher nothing. */
+    if (handle && gridIsWorthTrying(key)) {
+      var betaBox = el('div', 'xs-beta-box');
+      betaBox.hidden = true;
+      var beta = button('btn ghost block xs-beta-btn', '🔍 Try to read the grid (beta)');
+      on(beta, 'click', function () {
+        beta.disabled = true;
+        go.disabled = true;
+        runGridBeta(handle, key, betaBox, function (res) {
+          applyPdf(projectId, edits, key, handle, progressLine, res);
+        }).then(function () {
+          beta.disabled = false;
+          go.disabled = false;
+        });
+      });
+      card.appendChild(beta);
+      card.appendChild(betaBox);
+      card.appendChild(el('p', 'muted xs-import-note',
+        'Reading the grid gets you stitch-by-stitch counting instead of a count per colour. ' +
+        'It only works on charts that draw every stitch as a coloured square.'));
+    }
+
     setPreview(card);
   }
 
-  function applyPdf(projectId, edits, key, handle, progressLine) {
-    var palette = edits.entries.map(function (e, i) {
+  function applyPdf(projectId, edits, key, handle, progressLine, grid) {
+    var source = (grid && grid.ok && grid.palette) ? grid.palette : edits.entries;
+    var palette = source.map(function (e, i) {
       return {
         i: i, symbol: e.symbol || '', brand: e.brand || 'DMC', code: e.code,
         name: e.name || '', hex: e.hex || '808080',
@@ -2559,17 +2592,32 @@
       if (key.fabric.color) cd.fabric.color = key.fabric.color;
       if (key.strandsDefault) cd.strandsDefault = key.strandsDefault;
       cd.progress.mode = 'counts';
+      cd.progress.done = '';
+      cd.progress.doneCount = 0;
+      if (grid && grid.ok) {
+        cd.design.w = grid.w;
+        cd.design.h = grid.h;
+        cd.chart = {
+          w: grid.w, h: grid.h,
+          cells: X.packCells(grid.cells, grid.w, grid.h),
+          part: [], back: [], knots: []
+        };
+        cd.progress.mode = 'cells';
+        cd.current.cx = 0;
+        cd.current.cy = 0;
+      }
       cd.notesKey = (key.sizes || []).map(function (s) {
         return s.count + ' ct: ' + s.wIn + ' × ' + s.hIn + ' in';
       }).join('\n');
       cd.source = {
         kind: 'pdf', fileName: '', importedAt: Date.now(),
-        warnings: key.warnings.slice(0, 12)
+        warnings: key.warnings.concat(grid && grid.ok ? ['grid read from the PDF by the beta reader'] : [])
+          .slice(0, 12)
       };
       return X.normalize(cd, null);
     });
 
-    if (view) { view.img = null; view.paletteKey = null; }
+    if (view) { view.img = null; view.cellsKey = null; view.doneKey = null; view.paletteKey = null; }
     C.render();
 
     if (!handle || typeof handle.renderPage !== 'function') {
@@ -2584,7 +2632,8 @@
       fb('done');
       var bits = ['Read ' + plural(pages, 'page')];
       if (palette.length) bits.push(plural(palette.length, 'colour'));
-      if (key.design.w) bits.push(key.design.w + ' × ' + key.design.h + ' stitches');
+      if (grid && grid.ok) bits.push(grid.w + ' × ' + grid.h + ' stitches from the grid');
+      else if (key.design.w) bits.push(key.design.w + ' × ' + key.design.h + ' stitches');
       toast(bits.join(' · '), { ms: totalPages > MAX_PAGES ? 5200 : 3200 });
       if (totalPages > MAX_PAGES) {
         // A 72-page chart would be ~20 MB of images, so only the first 40 are
@@ -2656,6 +2705,311 @@
     });
   }
 
+  /* ---- grid extraction beta (B3.4) ------------------------------------ */
+
+  /** A parseKey-shaped object built back out of the palette we already have. */
+  function keyFromPalette(data) {
+    var entries = data.palette.map(function (e) {
+      return {
+        symbol: e.symbol || '', brand: e.brand || 'DMC', code: e.code, name: e.name || '',
+        hex: e.hex || null, strands: e.strands || data.strandsDefault,
+        stitchCount: e.stitchCount || null, skeins: e.skeins || null, kind: e.kind || 'cross'
+      };
+    });
+    return {
+      entries: entries, strandsDefault: data.strandsDefault,
+      design: { w: data.design.w, h: data.design.h }
+    };
+  }
+
+  function gridIsWorthTrying(key) {
+    if (!key || !key.entries || key.entries.length < 2) return false;
+    var withCounts = 0;
+    for (var i = 0; i < key.entries.length; i++) {
+      if (key.entries[i].stitchCount) withCounts++;
+    }
+    return withCounts >= Math.max(2, Math.ceil(key.entries.length * 0.6));
+  }
+
+  /**
+   * Run the beta reader against an open pdf.js document and report into
+   * `box`. `onUse` is called with the result when the stitcher accepts it.
+   */
+  function runGridBeta(handle, key, box, onUse) {
+    clear(box);
+    box.hidden = false;
+    var line = el('p', 'muted xs-render-progress', 'Reading the chart pages…');
+    box.appendChild(line);
+    var t0 = Date.now();
+
+    var doc = handle && handle.doc ? handle.doc : handle;
+    return X.extractGrid(doc, null, {
+      key: key,
+      design: key && key.design,
+      onProgress: function (n, total) {
+        line.textContent = 'Reading page ' + n + ' of ' + total + '…';
+      }
+    }).then(function (res) {
+      clear(box);
+      var secs = ((Date.now() - t0) / 1000).toFixed(1);
+      if (!res || !res.ok) {
+        box.appendChild(el('p', null,
+          'Couldn’t read this chart’s grid — the pages are still here.'));
+        if (res && res.warnings && res.warnings.length) {
+          box.appendChild(warningList('Why', res.warnings.slice(0, 3), true));
+        }
+        fb('alert');
+        return res;
+      }
+      var head = el('p', 'xs-beta-ok');
+      head.textContent = 'Read ' + res.w + ' × ' + res.h + ' stitches, ' +
+        res.matched + ' of ' + res.colors + ' colours matched.';
+      box.appendChild(head);
+      box.appendChild(el('p', 'muted',
+        comma(res.filled || 0) + ' stitches in ' + secs + ' s. Using it replaces the colour ' +
+        'key with the one read from the grid and switches counting to individual ' +
+        'stitches, which starts from zero — any counts you have now are not carried over.'));
+      if (res.warnings.length) box.appendChild(warningList('Notes', res.warnings.slice(0, 4), true));
+      var use = button('btn primary block', 'Use it');
+      on(use, 'click', function () { onUse(res); });
+      box.appendChild(use);
+      fb('done');
+      return res;
+    }, function () {
+      clear(box);
+      box.appendChild(el('p', null,
+        'Couldn’t read this chart’s grid — the pages are still here.'));
+      return null;
+    });
+  }
+
+  function applyGrid(projectId, res) {
+    var palette = res.palette.map(function (e, i) {
+      return {
+        i: i, symbol: e.symbol || '', brand: e.brand || 'DMC', code: e.code,
+        name: e.name || '', hex: e.hex || '808080', strands: e.strands, bsStrands: 1,
+        kind: e.kind || 'cross', blendWith: null,
+        stitchCount: e.stitchCount || 0, skeins: e.skeins || 0, have: !!e.have
+      };
+    });
+    X.assignSymbols(palette);
+
+    Store.updateCraftData(projectId, function (cd) {
+      cd.palette = palette;
+      cd.design.w = res.w;
+      cd.design.h = res.h;
+      cd.chart = {
+        w: res.w, h: res.h,
+        cells: X.packCells(res.cells, res.w, res.h),
+        part: [], back: [], knots: []
+      };
+      cd.progress.mode = 'cells';
+      cd.progress.done = '';
+      cd.progress.doneCount = 0;
+      cd.progress.perColor = palette.map(function (e, i) { return { i: i, done: 0 }; });
+      cd.current.paletteIndex = 0;
+      cd.current.cx = 0;
+      cd.current.cy = 0;
+      var warn = (cd.source.warnings || []).slice(0);
+      cd.source.warnings = warn.concat(['grid read from the PDF by the beta reader'])
+        .concat(res.warnings || []).slice(0, 12);
+      return X.normalize(cd, null);
+    });
+    if (view) { view.img = null; view.cellsKey = null; view.doneKey = null; view.paletteKey = null; }
+    C.closeAllSheets();
+    C.render();
+    fb('done');
+    toast('Grid read · ' + res.w + ' × ' + res.h + ' stitches · ' +
+      plural(palette.length, 'colour'), { ms: 4200 });
+  }
+
+  /** "Try to read the grid (beta)" from the Pages sheet: re-pick the PDF. */
+  function openGridBetaSheet(projectId) {
+    var proj = Store.project(projectId);
+    if (!proj) return;
+    var data = dataOf(proj);
+    var key = keyFromPalette(data);
+    var handle = null;
+
+    C.openSheet({
+      title: 'Read the grid (beta)',
+      cls: 'sheet-xs-beta',
+      build: function (body) {
+        body.appendChild(el('p', 'muted',
+          'Some chart PDFs draw every stitch as a coloured square, and when they do we can ' +
+          'read the whole grid straight out of the file. Pick the same PDF again — it is not ' +
+          'kept on this device — and I will try. Nothing is changed unless it works and you ' +
+          'say so.'));
+        if (!gridIsWorthTrying(key)) {
+          body.appendChild(el('p', 'muted',
+            'This project’s key has no stitch counts, so there is nothing to check a grid ' +
+            'against. Import the PDF again first.'));
+          return;
+        }
+        var box = el('div', 'xs-beta-box');
+        box.hidden = true;
+
+        var pick = document.createElement('input');
+        pick.type = 'file';
+        pick.accept = '.pdf,application/pdf';
+        pick.className = 'sr-only';
+        var go = button('btn primary block', 'Choose the chart PDF');
+        on(go, 'click', function () { pick.click(); });
+        on(pick, 'change', function () {
+          var f = pick.files && pick.files[0];
+          if (!f) return;
+          if (!window.PdfText || !window.PdfText.isAvailable()) {
+            toast('PDFs cannot be read here');
+            return;
+          }
+          go.disabled = true;
+          clear(box);
+          box.hidden = false;
+          box.appendChild(el('p', 'muted', 'Opening ' + f.name + '…'));
+          window.PdfText.open(f).then(function (h) {
+            handle = h;
+            return runGridBeta(h, key, box, function (res) { applyGrid(projectId, res); });
+          }, function () {
+            clear(box);
+            box.appendChild(el('p', 'muted', 'That PDF could not be opened.'));
+          }).then(function () { go.disabled = false; });
+        });
+        body.appendChild(go);
+        body.appendChild(pick);
+        body.appendChild(box);
+      },
+      footer: [{ text: 'Close', cls: 'btn ghost', onClick: function (api) { api.close(); } }],
+      onClose: function () {
+        if (handle && handle.destroy) { try { handle.destroy(); } catch (e) { /* ignore */ } }
+        handle = null;
+      }
+    });
+  }
+
+  /* ---- printable chart (B7) ------------------------------------------- */
+
+  function openPrintable(html, title) {
+    var w = null;
+    try { w = window.open('', '_blank'); } catch (e) { w = null; }
+    if (w && w.document) {
+      try {
+        w.document.open();
+        w.document.write(html);
+        w.document.close();
+        if (w.focus) w.focus();
+        return true;
+      } catch (e) { /* fall through to the blob link */ }
+    }
+    var url;
+    try {
+      url = URL.createObjectURL(new Blob([html], { type: 'text/html' }));
+    } catch (e2) {
+      toast('That chart could not be opened for printing');
+      return false;
+    }
+    C.openSheet({
+      title: 'Printable chart',
+      build: function (body) {
+        body.appendChild(el('p', 'muted',
+          'Your browser blocked the new window, so here is the link instead. ' +
+          'Open it, then use your browser’s Print command.'));
+        var a = el('a', 'btn primary block', 'Open printable chart');
+        a.href = url;
+        a.target = '_blank';
+        a.rel = 'noopener';
+        body.appendChild(a);
+        var save = el('a', 'linkish', 'or save it as a file');
+        save.href = url;
+        save.download = ((title || 'chart').replace(/[^\w -]+/g, '').trim() || 'chart') + '.html';
+        body.appendChild(save);
+      },
+      footer: [{ text: 'Close', cls: 'btn ghost', onClick: function (api) { api.close(); } }],
+      onClose: function () {
+        window.setTimeout(function () {
+          try { URL.revokeObjectURL(url); } catch (e) { /* ignore */ }
+        }, 60000);
+      }
+    });
+    return false;
+  }
+
+  function openPrintSheet(projectId) {
+    var proj = Store.project(projectId);
+    if (!proj) return;
+    var data = dataOf(proj);
+    if (!hasChart(data)) { toast('There is no chart grid to print yet'); return; }
+
+    var settings = { color: true, spp: 60, key: true };
+    var saved = Store.craftSettings(CRAFT);
+    if (saved.printSpp) settings.spp = clampInt(saved.printSpp, 10, 200, 60);
+    if (saved.printColor === false) settings.color = false;
+
+    var estimate;
+    function sppBox() { return { w: settings.spp, h: Math.round(settings.spp * 4 / 3) }; }
+    function syncEstimate() {
+      var box = sppBox();
+      var n = Math.ceil(data.chart.w / box.w) * Math.ceil(data.chart.h / box.h);
+      estimate.textContent = data.chart.w + ' × ' + data.chart.h + ' stitches · ' +
+        box.w + ' × ' + box.h + ' per page · ' + plural(n + 1, 'page') + ' including the cover';
+    }
+
+    C.openSheet({
+      title: 'Printable chart',
+      cls: 'sheet-xs-print',
+      build: function (body) {
+        body.appendChild(el('p', 'muted',
+          'A print-ready page opens in a new tab: a cover with the size table and floss list, ' +
+          'then the chart tiled with 10 × 10 lines, margin numbers and the key on every page. ' +
+          'Print it, or save it as a PDF.'));
+
+        var colourSeg = C.segmented(
+          [{ id: 'color', label: 'Colour' }, { id: 'bw', label: 'Black & white' }],
+          settings.color ? 'color' : 'bw',
+          function (v) { settings.color = v === 'color'; }
+        );
+        body.appendChild(field('Style', colourSeg.node,
+          'Black and white prints faster and uses much less ink.'));
+
+        var sppStep = C.stepper(settings.spp, 10, 120, 'stitches per page');
+        body.appendChild(field('Stitches across a page', sppStep.node,
+          'The page height follows at 4:3, the way most charts are tiled.'));
+        on(sppStep.node, 'click', function () {
+          window.setTimeout(function () { settings.spp = sppStep.get(); syncEstimate(); }, 0);
+        });
+        on(sppStep.node, 'input', function () { settings.spp = sppStep.get(); syncEstimate(); });
+
+        body.appendChild(C.switchRow('Key on every chart page',
+          'Just the colours used on that page.', settings.key,
+          function (v) { settings.key = v; }));
+
+        estimate = el('p', 'muted xs-print-estimate');
+        body.appendChild(estimate);
+        syncEstimate();
+      },
+      footer: [
+        { text: 'Cancel', cls: 'btn ghost', onClick: function (api) { api.close(); } },
+        {
+          text: 'Open printable chart',
+          cls: 'btn primary',
+          onClick: function (api) {
+            var fresh = dataOf(Store.project(projectId));
+            var html;
+            try {
+              html = X.printableHTML(fresh, {
+                color: settings.color, key: settings.key, stitchesPerPage: sppBox()
+              });
+            } catch (e) { html = ''; }
+            if (!html) { toast('That chart could not be prepared for printing'); return; }
+            Store.setCraftSetting(CRAFT, 'printSpp', settings.spp);
+            Store.setCraftSetting(CRAFT, 'printColor', settings.color);
+            api.close();
+            openPrintable(html, fresh.design.title || 'chart');
+          }
+        }
+      ]
+    });
+  }
+
   /* ---- photo ---------------------------------------------------------- */
 
   function photoAvailable() {
@@ -2695,6 +3049,133 @@
     opts.brand = 'DMC';
 
     var previewCanvas, statusLine, readout, runBtn, pickBtn, warnBox;
+
+    /* ---- crop frame (B6) ---------------------------------------------- */
+    var cropWrap, cropImg, cropBox, cropHint, cropReset, cropLockRow;
+    var cropUrl = null, srcW = 0, srcH = 0;
+    var crop = null;             // { x, y, w, h } in SOURCE pixels, null = all
+    var aspectLock = false;
+    var MIN_CROP = 20;
+    var CORNER_IDS = ['tl', 'tr', 'bl', 'br'];
+
+    function cropOpt() {
+      if (!crop || !srcW || !srcH) return null;
+      if (crop.x <= 0 && crop.y <= 0 && crop.w >= srcW && crop.h >= srcH) return null;
+      return { x: Math.round(crop.x), y: Math.round(crop.y), w: Math.round(crop.w), h: Math.round(crop.h) };
+    }
+
+    function syncCropBox() {
+      if (!cropBox || !srcW || !srcH || !crop) return;
+      cropBox.style.left = (crop.x / srcW * 100) + '%';
+      cropBox.style.top = (crop.y / srcH * 100) + '%';
+      cropBox.style.width = (crop.w / srcW * 100) + '%';
+      cropBox.style.height = (crop.h / srcH * 100) + '%';
+      opts.crop = cropOpt();
+      if (cropHint) {
+        cropHint.textContent = opts.crop
+          ? ('Cropping ' + Math.round(crop.w) + ' × ' + Math.round(crop.h) + ' of ' +
+             srcW + ' × ' + srcH + ' pixels')
+          : ('Using the whole photo, ' + srcW + ' × ' + srcH + ' pixels');
+      }
+      if (cropReset) cropReset.hidden = !opts.crop;
+    }
+
+    function resetCrop() {
+      if (!srcW || !srcH) return;
+      crop = { x: 0, y: 0, w: srcW, h: srcH };
+      syncCropBox();
+    }
+
+    function clampCrop() {
+      if (crop.w < MIN_CROP) crop.w = MIN_CROP;
+      if (crop.h < MIN_CROP) crop.h = MIN_CROP;
+      if (crop.w > srcW) crop.w = srcW;
+      if (crop.h > srcH) crop.h = srcH;
+      if (crop.x < 0) crop.x = 0;
+      if (crop.y < 0) crop.y = 0;
+      if (crop.x + crop.w > srcW) crop.x = srcW - crop.w;
+      if (crop.y + crop.h > srcH) crop.y = srcH - crop.h;
+    }
+
+    function bindCrop() {
+      var drag = null;
+
+      function start(e, mode) {
+        if (!crop || !srcW) return;
+        var r = cropImg.getBoundingClientRect();
+        if (!r.width || !r.height) return;
+        drag = {
+          mode: mode, px: e.clientX, py: e.clientY,
+          sx: r.width / srcW, sy: r.height / srcH,
+          x: crop.x, y: crop.y, w: crop.w, h: crop.h,
+          ratio: crop.h > 0 ? crop.w / crop.h : 1
+        };
+        try { e.target.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+        e.preventDefault();
+        e.stopPropagation();
+      }
+
+      function move(e) {
+        if (!drag) return;
+        var dx = (e.clientX - drag.px) / drag.sx;
+        var dy = (e.clientY - drag.py) / drag.sy;
+        var right = drag.x + drag.w, bottom = drag.y + drag.h;
+
+        if (drag.mode === 'move') {
+          crop.x = drag.x + dx;
+          crop.y = drag.y + dy;
+          crop.w = drag.w;
+          crop.h = drag.h;
+        } else {
+          var nx = drag.x, ny = drag.y, nr = right, nb = bottom;
+          if (drag.mode.charAt(1) === 'l') nx = Math.min(drag.x + dx, right - MIN_CROP);
+          else nr = Math.max(right + dx, drag.x + MIN_CROP);
+          if (drag.mode.charAt(0) === 't') ny = Math.min(drag.y + dy, bottom - MIN_CROP);
+          else nb = Math.max(bottom + dy, drag.y + MIN_CROP);
+          crop.x = nx; crop.y = ny; crop.w = nr - nx; crop.h = nb - ny;
+          if (aspectLock && drag.ratio > 0) {
+            /* keep the shape: the longer change wins, the anchored corner stays */
+            var byW = crop.w / drag.ratio;
+            var byH = crop.h * drag.ratio;
+            if (Math.abs(byW - crop.h) < Math.abs(byH - crop.w)) crop.h = byW;
+            else crop.w = byH;
+            if (drag.mode.charAt(1) === 'l') crop.x = nr - crop.w;
+            if (drag.mode.charAt(0) === 't') crop.y = nb - crop.h;
+          }
+        }
+        clampCrop();
+        syncCropBox();
+        schedule();
+        e.preventDefault();
+      }
+
+      function end() { if (drag) { drag = null; schedule(); } }
+
+      on(cropBox, 'pointerdown', function (e) {
+        if (e.target !== cropBox) return;
+        start(e, 'move');
+      });
+      CORNER_IDS.forEach(function (id) {
+        var handle = el('span', 'xs-crop-h xs-crop-' + id);
+        handle.setAttribute('role', 'button');
+        handle.setAttribute('aria-label', 'Drag the ' + id + ' corner of the crop');
+        on(handle, 'pointerdown', function (e) { start(e, id); });
+        on(handle, 'pointermove', move);
+        on(handle, 'pointerup', end);
+        on(handle, 'pointercancel', end);
+        cropBox.appendChild(handle);
+      });
+      on(cropBox, 'pointermove', move);
+      on(cropBox, 'pointerup', end);
+      on(cropBox, 'pointercancel', end);
+    }
+
+    function loadSource(f) {
+      if (cropUrl) { try { URL.revokeObjectURL(cropUrl); } catch (e) { /* ignore */ } }
+      cropUrl = URL.createObjectURL(f);
+      cropImg.src = cropUrl;
+      cropWrap.hidden = true;
+    }
 
     function schedule() {
       if (timer) clearTimeout(timer);
@@ -2809,10 +3290,48 @@
           file = pick.files && pick.files[0];
           if (!file) return;
           pickBtn.textContent = file.name;
+          crop = null;
+          opts.crop = null;
+          loadSource(file);
           run();
         });
         body.appendChild(pickBtn);
         body.appendChild(pick);
+
+        /* the source photo with a draggable crop frame */
+        cropWrap = el('div', 'xs-crop');
+        cropWrap.hidden = true;
+        cropImg = el('img');
+        cropImg.alt = 'The photo you picked';
+        cropWrap.appendChild(cropImg);
+        cropBox = el('div', 'xs-crop-box');
+        cropBox.setAttribute('role', 'group');
+        cropBox.setAttribute('aria-label', 'Crop frame — drag to move, drag a corner to resize');
+        cropWrap.appendChild(cropBox);
+        on(cropImg, 'load', function () {
+          srcW = cropImg.naturalWidth || 0;
+          srcH = cropImg.naturalHeight || 0;
+          if (!srcW || !srcH) { cropWrap.hidden = true; return; }
+          cropWrap.hidden = false;
+          resetCrop();
+        });
+        on(cropImg, 'error', function () { cropWrap.hidden = true; });
+        body.appendChild(cropWrap);
+        bindCrop();
+
+        var cropRow = el('div', 'xs-crop-row');
+        cropHint = el('span', 'muted xs-crop-hint', '');
+        cropRow.appendChild(cropHint);
+        cropReset = button('linkish xs-crop-reset', 'Reset crop');
+        cropReset.hidden = true;
+        on(cropReset, 'click', function () { resetCrop(); schedule(); });
+        cropRow.appendChild(cropReset);
+        body.appendChild(cropRow);
+
+        cropLockRow = C.switchRow('Keep the crop shape',
+          'Locks the frame to its current shape while you drag a corner.',
+          false, function (v) { aspectLock = v; });
+        body.appendChild(cropLockRow);
 
         previewCanvas = document.createElement('canvas');
         previewCanvas.className = 'xs-photo-preview';
@@ -2883,6 +3402,8 @@
         if (timer) clearTimeout(timer);
         if (token) { try { P.cancel(token); } catch (e) { /* ignore */ } }
         token = null;
+        if (cropUrl) { try { URL.revokeObjectURL(cropUrl); } catch (e) { /* ignore */ } }
+        cropUrl = null;
       }
     });
   }
@@ -2966,6 +3487,7 @@
       items.push({ icon: '📄', label: 'Chart pages', run: function () { openPagesSheet(project.id); } });
     }
     if (hasChart(data)) {
+      items.push({ icon: '🖨', label: 'Printable chart', run: function () { openPrintSheet(project.id); } });
       items.push({ icon: '💾', label: 'Export as OXS', run: function () { exportOxs(project.id); } });
     }
     return items;
@@ -3030,11 +3552,23 @@
   var FAQ = [
     {
       q: 'Why couldn’t it read my chart’s grid?',
-      a: 'PDF charts draw their squares in hundreds of different ways, so reading the grid itself ' +
-        'is unreliable. Instead we read the colour key, the fabric and the size — which are plain ' +
-        'text on almost every chart — and show the chart pages as images you can pan and zoom. ' +
-        'For real squares you can mark off one by one, import an .oxs file (WinStitch, MacStitch, ' +
-        'KXStitch, FlossCross and Cross Stitch Saga all export it) or make a chart from a photo.'
+      a: 'PDF charts draw their squares in hundreds of different ways, so reading the grid is never ' +
+        'guaranteed. What we always read is the colour key, the fabric and the size — plain text on ' +
+        'almost every chart — plus the chart pages as images you can pan and zoom. After a PDF ' +
+        'import there is also a “Try to read the grid (beta)” button: on charts that draw every ' +
+        'stitch as a coloured square it recovers the whole grid and checks it against the stitch ' +
+        'counts in the key, and if those do not agree it tells you and changes nothing. You can ' +
+        'also import an .oxs file (WinStitch, MacStitch, KXStitch, FlossCross and Cross Stitch Saga ' +
+        'all export one) or make a chart from a photo.'
+    },
+    {
+      q: 'Can I print my chart?',
+      a: 'Yes, once the project has a real grid — from an .oxs file, a photo or the beta grid ' +
+        'reader. “Printable chart” in the ⋯ menu opens a print-ready page in a new tab: a cover ' +
+        'with the finished-size table and the full floss list, then the chart tiled with 10 × 10 ' +
+        'lines, numbers down the margins, centre arrows and the key on every page. Choose colour ' +
+        'or black and white, then print it or save it as a PDF. Charts you imported from someone ' +
+        'else’s pattern are for your own use only.'
     },
     {
       q: 'What does “over 2” mean?',

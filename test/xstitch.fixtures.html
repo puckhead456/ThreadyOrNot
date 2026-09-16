@@ -483,6 +483,158 @@ function diffPair(name) {
   if (countable) info('stitch-count agreement within 2%: ' + countAgree + ' of ' + countable);
 }
 
+/* -------------------------------------------------------------------- *
+ * Grid extraction beta (B3.4) against the real charts.
+ *
+ * What the KG-Chart exports actually contain: NOT one text glyph per stitch
+ * (only a handful of colours use a real font; the rest are vector paths) but
+ * one coloured square per stitch in the page's operator list. `extractGrid`
+ * reads those, fits the lattice, places the tiles by their ruler numbers and
+ * names the colours from the key's stitch counts.
+ * -------------------------------------------------------------------- */
+
+function loadChartDoc(name) {
+  return fetchBlob('../tmp-pdf/' + name + '.pdf').then(function (blob) {
+    if (!blob || !window.pdfjsLib) return null;
+    return blob.arrayBuffer().then(function (buf) {
+      return window.pdfjsLib.getDocument({ data: buf }).promise
+        .then(function (doc) { return { doc: doc, bytes: blob.size }; },
+              function () { return null; });
+    });
+  });
+}
+
+var GRID_FIXTURES = [
+  {
+    name: 'xs-pokemon-tr', label: 'KG-Chart LE quadrant, 38 pages',
+    check: function (n, r, key) {
+      eq(r.ok, true, n + ': the grid reads');
+      eq([r.w, r.h], [298, 500], n + ': 298 x 500 stitches');
+      log(r.matched >= 95, n + ': at least 95 colours matched', r.matched + ' of ' + r.colors);
+      var sum = keySum(key);
+      log(Math.abs(r.filled - sum) <= sum * 0.02,
+        n + ': the cells found are within 2% of the key’s summed stitch counts',
+        r.filled + ' vs ' + sum);
+      log(r.ms < 15000, n + ': under the 15 second budget', r.ms + ' ms');
+    }
+  },
+  {
+    name: 'xs-pokemon-tl', label: 'KG-Chart LE quadrant, 72 pages (the budget case)',
+    check: function (n, r, key) {
+      eq(r.ok, true, n + ': the grid reads');
+      eq([r.w, r.h], [500, 500], n + ': 500 x 500 stitches');
+      log(r.matched >= 100, n + ': at least 100 colours matched', r.matched + ' of ' + r.colors);
+      eq(r.filled, keySum(key), n + ': every stitch in the key is accounted for');
+      log(r.ms < 15000, n + ': 72 pages in under 15 seconds', r.ms + ' ms');
+    }
+  },
+  {
+    name: 'xs-pacman', label: 'KG-Chart LE, small, no symbol glyphs in the text layer',
+    check: function (n, r, key) {
+      /* The spec expected this one to fail, because it has no text glyphs at
+         all. Reading the coloured squares instead, it succeeds. Two of its ten
+         colours are drawn with the same RGB, so nine inks carry ten colours. */
+      eq(r.ok, true, n + ': the grid reads even with no symbol glyphs anywhere');
+      eq([r.w, r.h], [224, 288], n + ': 224 x 288 stitches');
+      eq(r.filled, keySum(key), n + ': every stitch in the key is accounted for');
+      log(r.colors < key.entries.length,
+        n + ': two colours share one ink, so there are fewer inks than key rows',
+        r.colors + ' inks, ' + key.entries.length + ' rows');
+      log(r.matched >= 8, n + ': and at least eight of the ten still match', 'matched ' + r.matched);
+    }
+  },
+  {
+    name: 'xs-portal', label: 'KG-Chart LE, a one-column edge tile',
+    check: function (n, r, key) {
+      eq(r.ok, true, n + ': the grid reads');
+      eq([r.w, r.h], [key.design.w, key.design.h], n + ': the size the key declares');
+      eq(r.filled, keySum(key), n + ': including the single-column tile on the right edge');
+    }
+  },
+  {
+    name: 'xs-typechar', label: 'KG-Chart LE, narrow edge tiles',
+    check: function (n, r, key) {
+      eq(r.ok, true, n + ': the grid reads');
+      eq([r.w, r.h], [key.design.w, key.design.h], n + ': the size the key declares');
+      eq(r.filled, keySum(key), n + ': every stitch accounted for');
+      eq(r.warnings, [], n + ': with no warnings');
+    }
+  },
+  {
+    name: 'xs-metalgreymon', label: 'Spriter v0.3.3 — no lattice to find',
+    check: function (n, r) {
+      eq(r.ok, false, n + ': reports ok:false rather than guessing');
+      eq(r.warnings, ['no chart grid found in this PDF'], n + ': and says so plainly');
+      log(r.ms < 2000, n + ': and gives up in under 2 seconds', r.ms + ' ms');
+    }
+  },
+  {
+    name: 'xs-dmc-2234', label: 'DMC embroidery sheet — not a counted chart at all',
+    check: function (n, r) {
+      eq(r.ok, false, n + ': reports ok:false');
+      log(r.ms < 2000, n + ': quickly', r.ms + ' ms');
+    }
+  }
+];
+
+function keySum(key) {
+  var t = 0;
+  for (var i = 0; i < key.entries.length; i++) t += key.entries[i].stitchCount || 0;
+  return t;
+}
+
+function runGridFixture(fx) {
+  h('h3', fx.name + ' - ' + fx.label);
+  var key = keyResults[fx.name];
+  if (!key) { skip(fx.name + ' grid (no key parsed)'); return Promise.resolve(); }
+  return loadChartDoc(fx.name).then(function (loaded) {
+    if (!loaded) { skip(fx.name + ' grid'); return null; }
+    var pageSeen = 0;
+    var t0 = performance.now();
+    return X.extractGrid(loaded.doc, null, {
+      key: key, design: key.design,
+      onProgress: function (p) { pageSeen = p; }
+    }).then(function (r) {
+      var wall = Math.round(performance.now() - t0);
+      info(loaded.doc.numPages + ' pages · ' + (loaded.bytes / 1048576).toFixed(1) + ' MB · ' +
+        'scanned ' + r.pages + ' · ' + r.tiles + ' tiles · ' + wall + ' ms wall');
+      table([[r.ok ? 'yes' : 'no', r.w + ' x ' + r.h, r.colors, r.matched,
+        r.agree + ' / ' + (r.countable || 0), r.filled || 0, keySum(key), r.confidence, r.ms]],
+        ['ok', 'size', 'inks', 'matched', 'counts agree', 'cells', 'key total',
+         'confidence', 'ms']);
+      r.warnings.forEach(function (w) { warn(w); });
+      log(pageSeen > 0, fx.name + ': onProgress reported page numbers', 'last ' + pageSeen);
+      log(r.cells instanceof Int16Array, fx.name + ': cells come back as an Int16Array');
+      try { fx.check(fx.name, r, key); }
+      catch (e) { log(false, fx.name + ': grid assertions threw', String(e && e.message)); }
+      /* the printable export, on a chart we only just recovered */
+      if (r.ok && r.palette) {
+        var data = X.normalize({
+          design: { w: r.w, h: r.h, title: fx.name },
+          fabric: key.fabric.count ? { count: key.fabric.count, kind: key.fabric.kind || 'aida' } : {},
+          palette: r.palette, chart: { w: r.w, h: r.h, cells: r.cells },
+          strandsDefault: key.strandsDefault
+        }, null);
+        var p0 = performance.now();
+        var html = X.printableHTML(data, {});
+        var pms = Math.round(performance.now() - p0);
+        var pages = (html.match(/class="page chart-page"/g) || []).length;
+        info('printableHTML: ' + pages + ' chart pages, ' +
+          (html.length / 1048576).toFixed(2) + ' MB, ' + pms + ' ms');
+        eq(pages, Math.ceil(r.w / 60) * Math.ceil(r.h / 80),
+          fx.name + ': printableHTML tiles the recovered chart at 60 x 80');
+        log(html.toLowerCase().indexOf('<script') < 0,
+          fx.name + ': the printable page has no scripts');
+      }
+      try { loaded.doc.destroy(); } catch (e) { /* ignore */ }
+      return r;
+    }, function (e) {
+      log(false, fx.name + ': extractGrid rejected', String(e && e.message));
+      return null;
+    });
+  });
+}
+
 /* -------------------------------------------------------------------- */
 
 function finish() {
@@ -504,11 +656,16 @@ chain = chain.then(function () { h('h2', 'OXS fixtures (parseOXS / toOXS)'); });
 OXS_FIXTURES.forEach(function (fx) {
   chain = chain.then(function () { return runOxsFixture(fx); });
 });
+chain = chain.then(function () {
+  h('h2', 'Paired fixture diff');
+  diffPair('xs-flosscross');
+  h('h2', 'Grid extraction beta (extractGrid)');
+  info('These read the PDFs’ operator lists, so they are the slow part of this page.');
+});
+GRID_FIXTURES.forEach(function (fx) {
+  chain = chain.then(function () { return runGridFixture(fx); });
+});
 chain
-  .then(function () {
-    h('h2', 'Paired fixture diff');
-    diffPair('xs-flosscross');
-  })
   .catch(function (e) { log(false, 'fixture run threw', String(e && e.message ? e.message : e)); })
   .then(finish);
 </script>

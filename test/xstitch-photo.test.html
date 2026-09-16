@@ -574,6 +574,45 @@ runAll([
   },
 
   function () {
+    /* The contract the crop frame in the photo sheet depends on: crop is in
+       SOURCE pixels, stats.source reports the full frame and the cropped
+       region, and a frame dragged past the edge is clamped rather than
+       rejected. The frame's own minimum is 20 x 20 source pixels. */
+    group('Crop frame contract');
+    return XP.convert(flag400, { stitchWidth: 40, maxColors: 4, crop: null, seed: 1 })
+      .then(function (r) {
+        assertEqual([r.stats.source.w, r.stats.source.h], [400, 300],
+          'stats.source reports the whole photo when there is no crop');
+        assertEqual([r.stats.source.cropW, r.stats.source.cropH], [400, 300],
+          'and the crop matches it');
+        return XP.convert(flag400, {
+          stitchWidth: 40, maxColors: 4, crop: { x: 120, y: 40, w: 200, h: 150 }, seed: 1
+        });
+      }).then(function (r) {
+        assertEqual([r.stats.source.w, r.stats.source.h], [400, 300],
+          'a crop does not change the reported source size');
+        assertEqual([r.stats.source.cropW, r.stats.source.cropH], [200, 150],
+          'stats.source carries the cropped region the frame asked for');
+        assertEqual([r.data.design.w, r.data.design.h], [40, 30],
+          'and the grid takes its aspect from the crop, not the photo');
+        return XP.convert(flag400, {
+          stitchWidth: 30, maxColors: 4, crop: { x: 380, y: 290, w: 400, h: 400 }, seed: 1
+        });
+      }).then(function (r) {
+        assertTrue(r.ok === true, 'a frame dragged past the edge still converts', r.error);
+        assertEqual([r.stats.source.cropW, r.stats.source.cropH], [20, 10],
+          'and is clamped to what is actually there');
+        return XP.convert(flag400, {
+          stitchWidth: 20, maxColors: 4, crop: { x: 10, y: 10, w: 20, h: 20 }, seed: 1
+        });
+      }).then(function (r) {
+        assertTrue(r.ok === true, 'the frame’s 20 x 20 minimum converts', r.error);
+        assertEqual([r.data.design.w, r.data.design.h], [20, 20],
+          'a 20 x 20 source crop gives a 20 x 20 grid');
+      });
+  },
+
+  function () {
     group('Preview pixels match the palette');
     return XP.convert(flag400, { stitchWidth: 40, maxColors: 6, seed: 1234 }).then(function (r) {
       var cells = cellsOf(r);

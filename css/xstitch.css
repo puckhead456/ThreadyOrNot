@@ -438,6 +438,86 @@
   font-variant-numeric: tabular-nums;
   margin: 0 0 10px;
 }
+/* The grid-reader beta and the printable-chart options. */
+.xs-beta-btn { margin-top: 10px; }
+.xs-beta-box {
+  margin: 10px 0 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+.xs-beta-box p { margin: 0 0 6px; }
+.xs-beta-ok { font-weight: 700; }
+.xs-print-estimate { margin: 10px 0 0; font-variant-numeric: tabular-nums; }
+
+/* The crop frame over the decoded photo. Handles are 28 px so a thumb can
+   grab them at 375 px wide; the visible corner mark inside is smaller. */
+.xs-crop {
+  position: relative;
+  /* the sheet body is a flex column: without this the box (overflow:hidden,
+     so min-height resolves to 0) collapses to its border. */
+  flex: none;
+  margin: 10px 0 6px;
+  overflow: hidden;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.xs-crop img {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: 44vh;
+  object-fit: contain;
+  pointer-events: none;
+}
+.xs-crop-box {
+  position: absolute;
+  box-sizing: border-box;
+  border: 2px solid var(--primary);
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.45);
+  cursor: move;
+  touch-action: none;
+}
+.xs-crop-h {
+  position: absolute;
+  width: 28px;
+  height: 28px;
+  touch-action: none;
+  cursor: nwse-resize;
+}
+.xs-crop-h::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 14px;
+  height: 14px;
+  margin: -7px 0 0 -7px;
+  border-radius: 3px;
+  background: var(--primary);
+  border: 2px solid var(--primary-text);
+  box-shadow: var(--shadow);
+}
+.xs-crop-tl { left: -14px; top: -14px; }
+.xs-crop-tr { right: -14px; top: -14px; cursor: nesw-resize; }
+.xs-crop-bl { left: -14px; bottom: -14px; cursor: nesw-resize; }
+.xs-crop-br { right: -14px; bottom: -14px; }
+
+.xs-crop-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 0 0 8px;
+}
+.xs-crop-hint { font-size: 12px; font-variant-numeric: tabular-nums; }
+.xs-crop-reset { flex: none; }
+
 .xs-advanced { margin: 10px 0; }
 .xs-advanced summary {
   cursor: pointer;
