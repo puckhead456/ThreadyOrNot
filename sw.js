@@ -2,7 +2,7 @@
 
 /* Stitchkeeper service worker.
    Bump CACHE_VERSION whenever any precached file changes. */
-const CACHE_VERSION = 'v11';
+const CACHE_VERSION = 'v12';
 const CACHE_NAME = 'stitchkeeper-' + CACHE_VERSION;
 
 const PRECACHE_URLS = [
@@ -11,6 +11,8 @@ const PRECACHE_URLS = [
   './manifest.webmanifest',
   './css/app.css',
   './css/themes.css',
+  './css/xstitch.css',
+  './css/sewing.css',
   './js/themes.js',
   './js/patterns.js',
   './js/pdftext.js',
@@ -22,7 +24,15 @@ const PRECACHE_URLS = [
   './js/audio.js',
   './js/store.js',
   './js/tour.js',
+  // Crafts (docs/CRAFTS.md). A craft file that has not landed yet simply fails
+  // its own cache.add above and the rest of the install carries on.
+  './js/blobstore.js',
+  './js/xstitch.js',
+  './js/xstitch-photo.js',
+  './js/sewing.js',
   './js/app.js',
+  './js/app-xstitch.js',
+  './js/app-sewing.js',
   './icons/icon-192.png',
   './icons/icon-512.png',
   './icons/apple-touch-icon.png',

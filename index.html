@@ -20,6 +20,9 @@
 <!-- Styles -->
 <link rel="stylesheet" href="./css/app.css">
 <link rel="stylesheet" href="./css/themes.css">
+<!-- Craft modules: theme variables only, loaded after themes.css. -->
+<link rel="stylesheet" href="./css/xstitch.css">
+<link rel="stylesheet" href="./css/sewing.css">
 
 <!-- Fonts -->
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -160,6 +163,27 @@
   </nav>
 </section>
 
+<!-- =============================== CRAFT ============================= -->
+<!-- Cross-stitch, sewing and anything else a craft module registers. Same
+     topbar as #screen-project; everything below it is the module's. -->
+<section id="screen-craft" class="screen" aria-label="Project" hidden>
+  <header class="topbar">
+    <button type="button" id="c-back" class="icon-btn" aria-label="Back to projects">
+      <span aria-hidden="true">‹</span>
+    </button>
+    <button type="button" id="c-title" class="title-btn" aria-label="Edit project">
+      <span id="c-emoji" class="title-emoji" aria-hidden="true">🧵</span>
+      <span id="c-name" class="title-name">Project</span>
+    </button>
+    <button type="button" id="c-timer" class="chip timer-chip" aria-label="Toggle timer">0:00:00</button>
+    <button type="button" id="c-menu" class="icon-btn" aria-label="Project menu">
+      <span aria-hidden="true">⋯</span>
+    </button>
+  </header>
+
+  <main id="craft-body" class="screen-body craft-body"></main>
+</section>
+
 <!-- Toasts -->
 <div id="toasts" class="toasts" aria-live="polite"></div>
 
@@ -173,7 +197,17 @@
 <script src="./js/audio.js"></script>
 <script src="./js/store.js"></script>
 <script src="./js/tour.js"></script>
+<!-- Crafts (docs/CRAFTS.md): pure logic registers with Store at script time,
+     the UI files register with App. App.init runs on DOMContentLoaded, after
+     all of them, so registration order never matters. A craft file that is
+     missing or fails to load must never break crochet. -->
+<script src="./js/blobstore.js"></script>
+<script src="./js/xstitch.js"></script>
+<script src="./js/xstitch-photo.js"></script>
+<script src="./js/sewing.js"></script>
 <script src="./js/app.js"></script>
+<script src="./js/app-xstitch.js"></script>
+<script src="./js/app-sewing.js"></script>
 
 <script>
 (function () {

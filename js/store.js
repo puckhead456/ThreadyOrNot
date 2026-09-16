@@ -60,6 +60,117 @@
     return JSON.parse(JSON.stringify(obj));
   }
 
+  /** A plain, JSON-safe copy of an object — or {} when it cannot be one. */
+  function jsonObject(raw) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+    try {
+      var copy = JSON.parse(JSON.stringify(raw));
+      if (!copy || typeof copy !== 'object' || Array.isArray(copy)) return {};
+      return copy;
+    } catch (e) {
+      return {};
+    }
+  }
+
+  /* ------------------------------------------------------------------ *
+   * Crafts
+   *
+   * The shell knows three things about a craft: its id, how to repair its
+   * opaque `craftData`, and how to write a home-card summary line. Crochet is
+   * the default and needs no registration at all — it is what every old save
+   * and every project without a `craft` migrates to.
+   * ------------------------------------------------------------------ */
+
+  var DEFAULT_CRAFT = 'crochet';
+  var crafts = Object.create(null);   // id -> { id, normalize, summary, templates }
+  var craftOrder = [];
+
+  /**
+   * Called at script time by a craft's pure-logic module.
+   * @param {{id:string, normalize?:Function, summary?:Function, templates?:Array}} def
+   */
+  function registerCraft(def) {
+    if (!def || typeof def !== 'object') return null;
+    var id = str(def.id, '').trim();
+    if (!id) return null;
+    var entry = {
+      id: id,
+      normalize: typeof def.normalize === 'function' ? def.normalize : null,
+      summary: typeof def.summary === 'function' ? def.summary : null,
+      templates: []
+    };
+    if (Array.isArray(def.templates)) {
+      for (var i = 0; i < def.templates.length; i++) {
+        var t = def.templates[i];
+        if (!t || typeof t !== 'object') continue;
+        if (!str(t.id, '').trim()) continue;
+        var copy = deepCopy(t);
+        copy.craft = id;
+        entry.templates.push(copy);
+      }
+    }
+    if (!crafts[id]) craftOrder.push(id);
+    crafts[id] = entry;
+
+    // A craft that registers AFTER Store.load() (a lazily added module, a test)
+    // still gets its templates seeded and its projects repaired.
+    if (state) {
+      seedCraftTemplates(id);
+      renormalizeCraft(id);
+      save();
+    }
+    return entry;
+  }
+
+  function craftIds() {
+    return craftOrder.slice();
+  }
+
+  function craftDef(id) {
+    var key = str(id, '');
+    return (key && crafts[key]) || null;
+  }
+
+  /** Every craft-supplied built-in template definition, in registration order. */
+  function craftTemplateDefs() {
+    var out = [];
+    for (var i = 0; i < craftOrder.length; i++) {
+      var c = crafts[craftOrder[i]];
+      if (!c) continue;
+      for (var j = 0; j < c.templates.length; j++) out.push(c.templates[j]);
+    }
+    return out;
+  }
+
+  /**
+   * Repair a project's opaque craftData through its module. Never throws; with
+   * no module registered the data is kept exactly as it was, so a craft whose
+   * script failed to load does not lose the user's work.
+   */
+  function normalizeCraftData(craftId, raw, rawProject) {
+    var data = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+    var c = crafts[craftId];
+    if (!c || !c.normalize) return data;
+    try {
+      var out = c.normalize(data, rawProject);
+      if (out && typeof out === 'object' && !Array.isArray(out)) return out;
+    } catch (e) {
+      /* a broken module must never stop the app loading */
+    }
+    return data;
+  }
+
+  /** Re-run one craft's normalize over the projects already in memory. */
+  function renormalizeCraft(id) {
+    var c = crafts[id];
+    if (!c || !c.normalize || !state || !Array.isArray(state.projects)) return;
+    for (var i = 0; i < state.projects.length; i++) {
+      var p = state.projects[i];
+      if (p.craft !== id) continue;
+      p.craftData = normalizeCraftData(id, p.craftData, p);
+    }
+  }
+
   /* ------------------------------------------------------------------ *
    * Templates
    * ------------------------------------------------------------------ */
@@ -133,10 +244,18 @@
     }
   ];
 
-  /** The shipped definition for a built-in id, or null for user templates. */
+  /**
+   * The shipped definition for a built-in id, or null for user templates.
+   * Craft modules contribute their own built-ins through registerCraft.
+   */
   function builtInDef(id) {
-    for (var i = 0; i < BUILTIN_TEMPLATES.length; i++) {
+    var i;
+    for (i = 0; i < BUILTIN_TEMPLATES.length; i++) {
       if (BUILTIN_TEMPLATES[i].id === id) return BUILTIN_TEMPLATES[i];
+    }
+    var extra = craftTemplateDefs();
+    for (i = 0; i < extra.length; i++) {
+      if (extra[i].id === id) return extra[i];
     }
     return null;
   }
@@ -173,6 +292,13 @@
       groupSize: clampInt(t.groupSize, 0, 50, 10),
       parts: parts,
       checklist: checklist,
+      // Crafts: old templates have no idea and migrate to crochet.
+      craft: str(t.craft, '').trim() || DEFAULT_CRAFT,
+      // Seed craftData for projects made from this template (deep-copied on use).
+      craftData:
+        t.craftData && typeof t.craftData === 'object' && !Array.isArray(t.craftData)
+          ? jsonObject(t.craftData)
+          : null,
       builtIn: !!builtInDef(id),
       updatedAt: clampInt(t.updatedAt, 0, 1e15, 0) || now()
     };
@@ -216,11 +342,23 @@
         blob.builtIn = true;
       }
     }
-    // Re-seed anything shipped that this save is missing.
-    for (var k = 0; k < BUILTIN_TEMPLATES.length; k++) {
-      if (!findTemplate(out, BUILTIN_TEMPLATES[k].id)) out.push(seedTemplate(BUILTIN_TEMPLATES[k]));
+    // Re-seed anything shipped that this save is missing — crochet's built-ins
+    // and every built-in a craft module declared before load().
+    var defs = BUILTIN_TEMPLATES.concat(craftTemplateDefs());
+    for (var k = 0; k < defs.length; k++) {
+      if (!findTemplate(out, defs[k].id)) out.push(seedTemplate(defs[k]));
     }
     return out;
+  }
+
+  /** Late registration: add just this craft's missing built-ins. */
+  function seedCraftTemplates(craftId) {
+    var c = crafts[craftId];
+    if (!c || !state) return;
+    var list = templateList();
+    for (var i = 0; i < c.templates.length; i++) {
+      if (!findTemplate(list, c.templates[i].id)) list.push(seedTemplate(c.templates[i]));
+    }
   }
 
   function templateList() {
@@ -229,14 +367,18 @@
     return s.templates;
   }
 
-  /** Built-ins in shipped order first, then user templates by name. */
-  function templates() {
+  /**
+   * Built-ins in shipped order first, then user templates by name.
+   * @param {string} [craft] when given, only templates for that craft.
+   */
+  function templates(craft) {
     var list = templateList();
     var built = [];
     var user = [];
-    for (var i = 0; i < BUILTIN_TEMPLATES.length; i++) {
-      var b = findTemplate(list, BUILTIN_TEMPLATES[i].id);
-      if (b) built.push(b);
+    var defs = BUILTIN_TEMPLATES.concat(craftTemplateDefs());
+    for (var i = 0; i < defs.length; i++) {
+      var b = findTemplate(list, defs[i].id);
+      if (b && built.indexOf(b) === -1) built.push(b);
     }
     for (var j = 0; j < list.length; j++) {
       if (!builtInDef(list[j].id)) user.push(list[j]);
@@ -244,7 +386,12 @@
     user.sort(function (a, b2) {
       return a.name.toLowerCase() < b2.name.toLowerCase() ? -1 : a.name.toLowerCase() > b2.name.toLowerCase() ? 1 : 0;
     });
-    return built.concat(user);
+    var out = built.concat(user);
+    var want = str(craft, '').trim();
+    if (!want) return out;
+    return out.filter(function (t) {
+      return (t.craft || DEFAULT_CRAFT) === want;
+    });
   }
 
   function template(id) {
@@ -291,6 +438,8 @@
       groupSize: tpl.groupSize,
       parts: ok.parts,
       checklist: ok.checklist,
+      craft: tpl.craft || (existing ? existing.craft : DEFAULT_CRAFT),
+      craftData: tpl.craftData !== undefined ? tpl.craftData : existing ? existing.craftData : null,
       updatedAt: now()
     });
     if (existing) list[list.indexOf(existing)] = next;
@@ -338,6 +487,8 @@
       checklist: proj.checklist
         .map(function (c) { return str(c.text, '').trim(); })
         .filter(function (t) { return !!t; }),
+      craft: proj.craft || DEFAULT_CRAFT,
+      craftData: null,
       builtIn: false,
       updatedAt: now()
     };
@@ -490,6 +641,9 @@
     for (var k = 0; k < parts.length; k++) if (parts[k].id === activePartId) found = true;
     if (!found) activePartId = parts[0].id;
 
+    // Crafts: every save made before September 2026 is a crochet project.
+    var craft = str(p.craft, '').trim() || DEFAULT_CRAFT;
+
     return {
       id: str(p.id, '') || uid(),
       name: str(p.name, '') || 'Untitled project',
@@ -518,7 +672,11 @@
       // Size names detected from a pasted pattern (e.g. ['XS','S','M']); shared by all parts.
       sizes: Array.isArray(p.sizes) && p.sizes.length
         ? p.sizes.map(function (x) { return str(x, ''); }).filter(Boolean)
-        : null
+        : null,
+      // Crafts: 'crochet' | 'crossstitch' | 'sewing' | anything a module registers.
+      craft: craft,
+      // Opaque to the shell — owned by the craft module, repaired by its normalize.
+      craftData: normalizeCraftData(craft, p.craftData, p)
     };
   }
 
@@ -536,12 +694,32 @@
         // Guided help: which tours have been completed, and whether the
         // first-run welcome card has been answered.
         toursSeen: [],
-        welcomed: false
+        welcomed: false,
+        // Per-craft settings shared across projects (body measurements, fabric
+        // defaults…): { [craftId]: object }, opaque to the shell.
+        crafts: {}
       },
-      templates: BUILTIN_TEMPLATES.map(seedTemplate),
+      // Crochet's built-ins plus every built-in a craft module declared.
+      templates: normalizeTemplates(null),
       projects: [],
       activeProjectId: null
     };
+  }
+
+  /** `Settings.crafts` — one opaque JSON object per craft id. */
+  function normalizeCraftSettings(raw) {
+    var out = {};
+    if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+      var keys = Object.keys(raw);
+      for (var i = 0; i < keys.length && i < 50; i++) {
+        var id = str(keys[i], '').trim();
+        if (!id) continue;
+        var v = raw[keys[i]];
+        if (!v || typeof v !== 'object' || Array.isArray(v)) continue;
+        out[id] = jsonObject(v);
+      }
+    }
+    return out;
   }
 
   function normalizeState(raw) {
@@ -562,7 +740,9 @@
         toursSeen: Array.isArray(s.toursSeen)
           ? s.toursSeen.filter(function (t) { return typeof t === 'string' && t; })
           : [],
-        welcomed: !!s.welcomed
+        welcomed: !!s.welcomed,
+        // Old saves have no craft settings at all.
+        crafts: normalizeCraftSettings(s.crafts)
       },
       templates: normalizeTemplates(raw.templates),
       projects: Array.isArray(raw.projects) ? raw.projects.map(normalizeProject) : [],
@@ -650,6 +830,30 @@
 
   function settings() {
     return getState().settings;
+  }
+
+  /**
+   * The (always-present) settings bag for one craft. Opaque to the shell;
+   * mutating the returned object directly is fine as long as you then save().
+   */
+  function craftSettings(craftId) {
+    var id = str(craftId, '').trim();
+    if (!id) return {};
+    var s = settings();
+    if (!s.crafts || typeof s.crafts !== 'object' || Array.isArray(s.crafts)) s.crafts = {};
+    if (!s.crafts[id] || typeof s.crafts[id] !== 'object' || Array.isArray(s.crafts[id])) {
+      s.crafts[id] = {};
+    }
+    return s.crafts[id];
+  }
+
+  function setCraftSetting(craftId, key, value) {
+    var bag = craftSettings(craftId);
+    var k = str(key, '');
+    if (!k) return bag;
+    bag[k] = value;
+    save();
+    return bag;
   }
 
   function setSetting(key, value) {
@@ -1217,6 +1421,16 @@
       template(opts.templateId || 'blank') ||
       template('blank') ||
       seedTemplate(BUILTIN_TEMPLATES[0]);
+
+    // The craft comes from the caller, else from the template, else crochet.
+    var craft = str(opts.craft, '').trim() || str(tpl.craft, '').trim() || DEFAULT_CRAFT;
+
+    // Template seed first, then whatever the New project sheet collected.
+    var seed = tpl.craftData && tpl.craft === craft ? jsonObject(tpl.craftData) : {};
+    var extra = jsonObject(opts.craftData);
+    var keys = Object.keys(extra);
+    for (var i = 0; i < keys.length; i++) seed[keys[i]] = extra[keys[i]];
+
     var proj = normalizeProject({
       id: uid(),
       name: (opts.name || '').trim() || tpl.name,
@@ -1230,13 +1444,70 @@
       notes: str(opts.notes, ''),
       templateId: tpl.id,
       timer: { totalMs: 0, runningSince: null },
+      // Non-crochet crafts get the one `Main` part too, so everything in the
+      // shell that assumes parts.length >= 1 keeps working.
       parts: tpl.parts.map(function (p) { return makePart(p.name, p.makeCount); }),
       checklist: tpl.checklist.map(function (t) { return { id: uid(), text: t, done: false }; }),
-      history: []
+      history: [],
+      craft: craft,
+      craftData: seed
     });
     projects().push(proj);
     save();
     return proj;
+  }
+
+  /**
+   * The ONLY door a craft module writes project state through: undo snapshot,
+   * mutate, bump updatedAt, debounced save. `patchOrFn` is either an object
+   * merged into craftData or a function that mutates it in place.
+   * @returns {object|null} the project's craftData
+   */
+  function updateCraftData(projectId, patchOrFn) {
+    var proj = project(projectId);
+    if (!proj) return null;
+    snapshot(proj);
+    if (!proj.craftData || typeof proj.craftData !== 'object' || Array.isArray(proj.craftData)) {
+      proj.craftData = {};
+    }
+    if (typeof patchOrFn === 'function') {
+      try {
+        var res = patchOrFn(proj.craftData, proj);
+        if (res && typeof res === 'object' && !Array.isArray(res)) proj.craftData = res;
+      } catch (e) {
+        /* a throwing mutator leaves whatever it managed to do, undoable */
+      }
+    } else if (patchOrFn && typeof patchOrFn === 'object' && !Array.isArray(patchOrFn)) {
+      var keys = Object.keys(patchOrFn);
+      for (var i = 0; i < keys.length; i++) proj.craftData[keys[i]] = patchOrFn[keys[i]];
+    }
+    touch(proj);
+    return proj.craftData;
+  }
+
+  /** The crochet home-card line — the fallback for any craft without one. */
+  function crochetSummary(p) {
+    var prt = activePart(p);
+    if (!prt) return '';
+    var bits = [prt.name, (p && p.countMode === 'rounds' ? 'Rnd' : 'Row') + ' ' + prt.row];
+    var target = currentTarget(prt);
+    bits.push(target ? prt.stitch + '/' + target + ' sts' : prt.stitch + ' sts');
+    return bits.join(' · ');
+  }
+
+  /** Home-card summary line: the craft's own, else the crochet one. */
+  function summaryFor(p) {
+    if (!p) return '';
+    var c = crafts[p.craft];
+    if (c && c.summary) {
+      try {
+        var s = c.summary(p);
+        if (typeof s === 'string' && s) return s;
+      } catch (e) {
+        /* fall through to the generic line */
+      }
+    }
+    return crochetSummary(p);
   }
 
   function updateProject(projectId, patch) {
@@ -2055,6 +2326,16 @@
   window.Store = {
     KEY: KEY,
     VERSION: VERSION,
+    DEFAULT_CRAFT: DEFAULT_CRAFT,
+
+    // crafts (the plugin contract — docs/CRAFTS.md)
+    registerCraft: registerCraft,
+    crafts: craftIds,
+    craftDef: craftDef,
+    updateCraftData: updateCraftData,
+    summaryFor: summaryFor,
+    craftSettings: craftSettings,
+    setCraftSetting: setCraftSetting,
 
     // templates (v2 — data in state)
     templates: templates,

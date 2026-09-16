@@ -467,8 +467,127 @@
       );
   }
 
+  /* ================================================================== *
+   * 7. Open a document and keep it around
+   *
+   * `extract` loads, reads and throws the document away. A craft that also
+   * wants to rasterise chart pages needs the document to stay open, so:
+   *
+   *   PdfText.open(file) -> Promise<{
+   *     doc,                       // the pdf.js PDFDocumentProxy
+   *     numPages,
+   *     textOf(pageNo)             -> Promise<string>            (same line
+   *                                   grouping, column splitting and furniture
+   *                                   dropping as extract, for one page)
+   *     renderPage(pageNo, { scale | maxWidth }) -> Promise<HTMLCanvasElement>
+   *     destroy()                  // release it when the sheet closes
+   *   }>
+   * ================================================================== */
+
+  function pageSize(page) {
+    var size = { width: 612, height: 792 };
+    try {
+      var vp = page.getViewport({ scale: 1 });
+      if (vp && vp.width) size.width = vp.width;
+      if (vp && vp.height) size.height = vp.height;
+    } catch (e) {
+      /* fall back to US Letter */
+    }
+    return size;
+  }
+
+  /**
+   * @param {File|Blob} file
+   * @returns {Promise<Object>}
+   */
+  function open(file) {
+    if (!file) return Promise.reject(new Error('No file to read.'));
+    var lib;
+    return loadLib()
+      .then(function (l) {
+        lib = l;
+        return readArrayBuffer(file);
+      })
+      .then(function (buf) {
+        return lib.getDocument({
+          data: new Uint8Array(buf),
+          isEvalSupported: false,
+          disableFontFace: true
+        }).promise;
+      })
+      .then(
+        function (doc) {
+          var destroyed = false;
+
+          function textOf(pageNo) {
+            var n = parseInt(pageNo, 10);
+            if (!isFinite(n) || n < 1 || n > (doc.numPages || 0)) {
+              return Promise.resolve('');
+            }
+            return doc.getPage(n).then(function (page) {
+              return page.getTextContent().then(function (tc) {
+                var size = pageSize(page);
+                var res = pageLines(tc.items || [], size.width, size.height);
+                if (typeof page.cleanup === 'function') page.cleanup();
+                return res.lines
+                  .map(function (l) { return l.text; })
+                  .join('\n');
+              });
+            });
+          }
+
+          function renderPage(pageNo, opts) {
+            opts = opts || {};
+            var n = parseInt(pageNo, 10);
+            if (!isFinite(n) || n < 1 || n > (doc.numPages || 0)) {
+              return Promise.reject(new Error('No page ' + pageNo + ' in that PDF.'));
+            }
+            return doc.getPage(n).then(function (page) {
+              var base = pageSize(page);
+              var scale = 1;
+              if (typeof opts.scale === 'number' && opts.scale > 0) {
+                scale = opts.scale;
+              } else if (typeof opts.maxWidth === 'number' && opts.maxWidth > 0 && base.width > 0) {
+                scale = opts.maxWidth / base.width;
+              }
+              var vp = page.getViewport({ scale: scale });
+              var canvas = document.createElement('canvas');
+              canvas.width = Math.max(1, Math.round(vp.width));
+              canvas.height = Math.max(1, Math.round(vp.height));
+              var ctx2d = canvas.getContext('2d');
+              if (!ctx2d) return Promise.reject(new Error('This device cannot draw the page.'));
+              var task = page.render({ canvasContext: ctx2d, viewport: vp });
+              var done = task && task.promise ? task.promise : Promise.resolve();
+              return done.then(function () {
+                if (typeof page.cleanup === 'function') page.cleanup();
+                return canvas;
+              });
+            });
+          }
+
+          return {
+            doc: doc,
+            numPages: doc.numPages || 0,
+            textOf: textOf,
+            renderPage: renderPage,
+            destroy: function () {
+              if (destroyed) return;
+              destroyed = true;
+              if (doc && typeof doc.destroy === 'function') {
+                try { doc.destroy(); } catch (e) { /* ignore */ }
+              }
+            }
+          };
+        },
+        function (err) {
+          throw friendlyError(err);
+        }
+      );
+  }
+
   window.PdfText = {
     extract: extract,
+    open: open,
     isAvailable: isAvailable,
     /** Exposed for the dev fixtures page / tests. */
     _pageLines: pageLines,

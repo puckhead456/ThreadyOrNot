@@ -200,6 +200,40 @@ UI:
 - Project overflow menu: **Save as template** → opens the Template editor pre-filled from `Store.templateFromProject`, so the user can tweak and save.
 - Empty state text for user templates section when none: "Your saved templates will show up here."
 
+## Crafts
+
+The app serves more than crochet. A **craft** is a plug-in module in its own files
+(`js/<craft>.js` pure logic, `js/app-<craft>.js` UI, `css/<craft>.css`) that registers
+itself with the shell at script time. Crochet is the shell itself: it is never
+registered, it is the default, and its code paths are untouched by any of this.
+
+The full contract — file list, script order, `App.registerCraft(def)` and its `ctx`
+helpers, `#screen-craft`, the ⋯ menu rules, `BlobStore`, `PdfText.open`,
+`ctx.pdfDropZone` and `Tour.register` — lives in **`docs/CRAFTS.md`**. The data model
+half of it is:
+
+```js
+Project.craft: 'crochet' | 'crossstitch' | 'sewing'   // default 'crochet'; every old save migrates to it
+Project.craftData: object                              // opaque to the shell, owned by the craft module
+Template.craft: 'crochet' | 'crossstitch' | 'sewing'   // default 'crochet'
+Template.craftData: object | null                      // seed craftData for projects made from it (deep-copied)
+Settings.crafts: { [craftId]: object }                 // per-craft settings shared across projects
+```
+
+All five normalise on load and on import, so a save written before September 2026 comes
+back as a crochet project with `craftData: {}` and `settings.crafts: {}`. When no module
+is registered for a project's craft id, its `craftData` is kept byte for byte, so a craft
+file that failed to load never costs the user their work.
+
+Store API: `Store.registerCraft({ id, normalize, summary, templates })` (called by the
+pure-logic module at script time), `Store.crafts()`, `Store.craftDef(id)`,
+`Store.templates(craft?)`, `Store.createProject({ craft, craftData, … })`,
+`Store.updateCraftData(projectId, patchOrFn)` (the only door a craft writes project state
+through — undo snapshot, mutate, touch, debounced save), `Store.summaryFor(project)`,
+`Store.craftSettings(id)`, `Store.setCraftSetting(id, key, value)`. Craft built-in
+templates re-seed on load and again whenever a craft registers late. Nothing added for
+crafts runs on the crochet tap path.
+
 ## Guided help (tours)
 
 New file `js/tour.js` → `window.Tour`. A spotlight walkthrough engine plus declarative tour definitions. No dependencies.

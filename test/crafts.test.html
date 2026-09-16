@@ -1,0 +1,480 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Crafts (Store) tests</title>
+<style>
+  body { font: 14px/1.4 Menlo, Consolas, monospace; background:#111; color:#eee; padding:16px; }
+  .pass { color:#7bd389; }
+  .fail { color:#ff6b6b; background:#2a1414; }
+  .group { margin-top:18px; font-weight:bold; color:#9cf; border-bottom:1px solid #333; padding-bottom:4px; }
+  #summary { margin-top:20px; font-size:18px; font-weight:bold; }
+  #summary.ok { color:#7bd389; }
+  #summary.bad { color:#ff6b6b; }
+  .note { color:#aaa; }
+</style>
+</head>
+<body>
+<h1>Crafts test suite</h1>
+<p class="note">
+  The shell half of docs/CRAFTS.md, against the real <code>js/store.js</code>: a fake craft is
+  registered in this page and driven through load, templates, createProject, updateCraftData,
+  undo, settings and an export/import round trip. The App half needs the whole index.html DOM and
+  is verified in the Browser pane instead.
+</p>
+<p class="note">This page borrows localStorage and puts it back when it finishes.</p>
+<div id="out"></div>
+<div id="summary"></div>
+
+<script src="../js/patterns.js"></script>
+<script src="../js/store.js"></script>
+<script>
+'use strict';
+
+var out = document.getElementById('out');
+var passed = 0;
+var failed = 0;
+
+function log(ok, label, detail) {
+  if (ok) { passed++; } else { failed++; }
+  var line = (ok ? 'PASS' : 'FAIL') + ' - ' + label + (detail ? '  (' + detail + ')' : '');
+  var div = document.createElement('div');
+  div.className = ok ? 'pass' : 'fail';
+  div.textContent = line;
+  out.appendChild(div);
+  if (ok) { console.log(line); } else { console.error(line); }
+}
+
+function group(title) {
+  var div = document.createElement('div');
+  div.className = 'group';
+  div.textContent = title;
+  out.appendChild(div);
+  console.log('== ' + title + ' ==');
+}
+
+function deepEqual(a, b) {
+  if (a === b) return true;
+  if (a === null || b === null) return a === b;
+  if (typeof a !== typeof b) return false;
+  if (typeof a !== 'object') return a === b;
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  var ak = Object.keys(a), bk = Object.keys(b);
+  if (ak.length !== bk.length) return false;
+  for (var i = 0; i < ak.length; i++) {
+    if (!deepEqual(a[ak[i]], b[ak[i]])) return false;
+  }
+  return true;
+}
+
+function assertEqual(actual, expected, label) {
+  var ok = deepEqual(actual, expected);
+  log(ok, label, ok ? '' : ('expected ' + JSON.stringify(expected) + ' got ' + JSON.stringify(actual)));
+}
+
+function assertTrue(cond, label) { log(!!cond, label); }
+
+/* ---------------------------------------------------------------------- *
+ * Borrow localStorage
+ * ---------------------------------------------------------------------- */
+
+var KEY = Store.KEY;
+var ORIGINAL = null;
+try { ORIGINAL = window.localStorage.getItem(KEY); } catch (e) { ORIGINAL = null; }
+
+function seed(raw) {
+  try {
+    if (raw === null) window.localStorage.removeItem(KEY);
+    else window.localStorage.setItem(KEY, JSON.stringify(raw));
+  } catch (e) { /* private mode: Store.load() just starts fresh */ }
+  return Store.load();
+}
+
+function restore() {
+  try {
+    Store.flush();
+    if (ORIGINAL === null) window.localStorage.removeItem(KEY);
+    else window.localStorage.setItem(KEY, ORIGINAL);
+  } catch (e) { /* ignore */ }
+}
+
+/* ---------------------------------------------------------------------- *
+ * The fake craft
+ * ---------------------------------------------------------------------- */
+
+var normalizeCalls = 0;
+var lastRawProject = null;
+
+function demoNormalize(raw, rawProject) {
+  normalizeCalls++;
+  lastRawProject = rawProject;
+  var d = raw && typeof raw === 'object' ? raw : {};
+  return {
+    v: 1,
+    beads: typeof d.beads === 'number' && isFinite(d.beads) ? Math.max(0, Math.floor(d.beads)) : 0,
+    label: typeof d.label === 'string' ? d.label : '',
+    done: !!d.done
+  };
+}
+
+var DEMO_TEMPLATES = [
+  {
+    id: 'demo-basic',
+    name: 'Demo basic',
+    emoji: '🔷',
+    parts: [{ name: 'Main', makeCount: 1 }],
+    checklist: ['Sort the beads'],
+    craftData: { beads: 5, label: 'seeded' }
+  },
+  {
+    id: 'demo-big',
+    name: 'Demo big',
+    emoji: '🔶',
+    parts: [{ name: 'Main', makeCount: 1 }],
+    checklist: [],
+    craftData: { beads: 99 }
+  }
+];
+
+/* ====================================================================== */
+group('1. Before anything registers');
+/* ====================================================================== */
+
+assertTrue(typeof Store.registerCraft === 'function', 'Store.registerCraft exists');
+assertTrue(typeof Store.crafts === 'function', 'Store.crafts exists');
+assertTrue(typeof Store.templates === 'function', 'Store.templates exists');
+assertTrue(typeof Store.updateCraftData === 'function', 'Store.updateCraftData exists');
+assertTrue(typeof Store.summaryFor === 'function', 'Store.summaryFor exists');
+assertTrue(typeof Store.craftSettings === 'function', 'Store.craftSettings exists');
+assertTrue(typeof Store.setCraftSetting === 'function', 'Store.setCraftSetting exists');
+assertEqual(Store.DEFAULT_CRAFT, 'crochet', 'the default craft is crochet');
+assertEqual(Store.crafts(), [], 'no craft is registered until a module asks');
+assertEqual(Store.registerCraft(null), null, 'registerCraft(null) is ignored');
+assertEqual(Store.registerCraft({ normalize: demoNormalize }), null, 'registerCraft with no id is ignored');
+assertEqual(Store.craftDef('demo'), null, 'craftDef for an unregistered id is null');
+
+/* ====================================================================== */
+group('2. Registering a craft');
+/* ====================================================================== */
+
+var entry = Store.registerCraft({
+  id: 'demo',
+  normalize: demoNormalize,
+  summary: function (p) { return 'Demo · ' + p.craftData.beads + ' beads'; },
+  templates: DEMO_TEMPLATES
+});
+assertTrue(!!entry, 'registerCraft returns the entry');
+assertEqual(Store.crafts(), ['demo'], 'crafts() lists it');
+assertTrue(!!Store.craftDef('demo'), 'craftDef finds it');
+assertEqual(Store.craftDef('demo').id, 'demo', 'craftDef carries the id');
+assertTrue(typeof Store.craftDef('demo').normalize === 'function', 'craftDef carries normalize');
+assertEqual(DEMO_TEMPLATES[0].craft, undefined, 'registerCraft does not mutate the caller’s template array');
+
+/* ====================================================================== */
+group('3. Loading a stale save (migration)');
+/* ====================================================================== */
+
+// A save written before crafts existed: no craft, no craftData, no settings.crafts.
+seed({
+  version: 1,
+  settings: { theme: 'stardew-night', haptics: true },
+  templates: null,
+  projects: [
+    { id: 'old1', name: 'Snor the bear', emoji: '🐻', countMode: 'rounds', parts: [{ id: 'pa', name: 'Body', row: 3, stitch: 4 }] }
+  ],
+  activeProjectId: null
+});
+
+var old = Store.project('old1');
+assertEqual(old.craft, 'crochet', 'a project with no craft migrates to crochet');
+assertEqual(old.craftData, {}, 'a project with no craftData migrates to {}');
+assertEqual(Store.settings().crafts, {}, 'settings.crafts migrates to {}');
+assertEqual(old.name, 'Snor the bear', 'nothing else about the old project changed');
+assertEqual(old.parts[0].row, 3, 'the old row count survived');
+
+// Junk craftData for a registered craft is repaired by the module's normalize.
+normalizeCalls = 0;
+seed({
+  version: 1,
+  settings: { crafts: { demo: { fabric: 14 }, bad: 'not an object', '': {} } },
+  projects: [
+    { id: 'd1', name: 'Beaded thing', craft: 'demo', craftData: { beads: '12', label: 7, junk: true } },
+    { id: 'g1', name: 'Ghost craft', craft: 'ghost', craftData: { keep: 'me', n: 3 } },
+    { id: 'c1', name: 'Plain crochet', craft: 'crochet', craftData: { stray: 1 } }
+  ],
+  activeProjectId: null
+});
+
+assertTrue(normalizeCalls >= 1, 'normalize ran on load');
+var d1 = Store.project('d1');
+assertEqual(d1.craft, 'demo', 'the craft id survived the load');
+assertEqual(d1.craftData, { v: 1, beads: 0, label: '', done: false }, 'normalize repaired the junk craftData');
+assertTrue(!!lastRawProject && lastRawProject.name === 'Beaded thing', 'normalize is handed the raw project');
+
+var g1 = Store.project('g1');
+assertEqual(g1.craft, 'ghost', 'an unregistered craft id is kept, not reset');
+assertEqual(g1.craftData, { keep: 'me', n: 3 }, 'an unregistered craft’s data is kept exactly as it was');
+
+var c1 = Store.project('c1');
+assertEqual(c1.craftData, { stray: 1 }, 'crochet has no normalize, so its craftData passes through');
+
+assertEqual(Store.settings().crafts.demo, { fabric: 14 }, 'settings.crafts keeps a real object');
+assertTrue(Store.settings().crafts.bad === undefined, 'settings.crafts drops a non-object');
+assertTrue(Store.settings().crafts[''] === undefined, 'settings.crafts drops an empty id');
+
+// Arrays and primitives are not craftData.
+seed({ version: 1, projects: [{ id: 'x1', name: 'x', craft: 'crochet', craftData: [1, 2] },
+                              { id: 'x2', name: 'x', craft: 'crochet', craftData: 'nope' }] });
+assertEqual(Store.project('x1').craftData, {}, 'an array craftData normalises to {}');
+assertEqual(Store.project('x2').craftData, {}, 'a string craftData normalises to {}');
+
+/* ====================================================================== */
+group('4. Templates: craft field, filtering and re-seeding');
+/* ====================================================================== */
+
+seed(null);
+var all = Store.templates();
+assertTrue(all.length >= 5, 'templates() returns crochet’s three plus the demo two');
+assertEqual(Store.template('blank').craft, 'crochet', 'a crochet built-in is craft: crochet');
+assertEqual(Store.template('blank').craftData, null, 'a crochet built-in has no craftData seed');
+assertEqual(Store.template('demo-basic').craft, 'demo', 'a demo built-in was seeded with craft: demo');
+assertEqual(Store.template('demo-basic').craftData, { beads: 5, label: 'seeded' }, 'the demo template carries its craftData seed');
+
+var crochetOnly = Store.templates('crochet');
+assertEqual(crochetOnly.length, 3, 'templates("crochet") returns the three crochet built-ins');
+assertEqual(crochetOnly.map(function (t) { return t.id; }), ['blank', 'sheep', 'dragon'], 'in shipped order');
+
+var demoOnly = Store.templates('demo');
+assertEqual(demoOnly.map(function (t) { return t.id; }), ['demo-basic', 'demo-big'], 'templates("demo") returns the demo built-ins');
+assertEqual(Store.templates('nobody'), [], 'templates() for an unknown craft is empty');
+
+// Re-seeding: a save that lost the demo templates gets them back on load.
+seed({
+  version: 1,
+  templates: [{ id: 'blank', name: 'Single piece', parts: [{ name: 'Main', makeCount: 1 }] }],
+  projects: []
+});
+assertTrue(!!Store.template('demo-basic'), 'a missing craft built-in is re-seeded on load');
+assertTrue(!!Store.template('sheep'), 'a missing crochet built-in is still re-seeded on load');
+assertEqual(Store.template('demo-big').name, 'Demo big', 're-seeded from the shipped definition');
+
+// A user template stays a user template and defaults to crochet.
+var userTpl = Store.saveTemplate({ name: 'My scarf', parts: [{ name: 'Scarf', makeCount: 1 }], checklist: [] });
+assertEqual(userTpl.craft, 'crochet', 'a template saved with no craft defaults to crochet');
+assertEqual(userTpl.builtIn, false, 'it is not a built-in');
+assertTrue(Store.templates('crochet').length === 4, 'the user template joins the crochet list');
+assertTrue(Store.templates('demo').length === 2, '…and not the demo list');
+
+// Late registration seeds that craft's templates into an already-loaded state.
+assertTrue(!Store.template('late-one'), 'the late craft has nothing seeded yet');
+Store.registerCraft({
+  id: 'late',
+  normalize: function (raw) { return { late: true, n: (raw && raw.n) || 0 }; },
+  templates: [{ id: 'late-one', name: 'Late craft', emoji: '🕰️', parts: [{ name: 'Main', makeCount: 1 }] }]
+});
+assertEqual(Store.crafts(), ['demo', 'late'], 'crafts() keeps registration order');
+assertTrue(!!Store.template('late-one'), 'registering late seeds that craft’s built-ins straight away');
+assertEqual(Store.template('late-one').craft, 'late', 'the late template is tagged with its craft');
+assertEqual(Store.templates('late').length, 1, 'templates("late") finds it');
+
+// …and repairs the projects that were waiting for it.
+seed({ version: 1, projects: [{ id: 'l1', name: 'Waiting', craft: 'late2', craftData: { n: 4, junk: 1 } }] });
+assertEqual(Store.project('l1').craftData, { n: 4, junk: 1 }, 'before its module lands the data is untouched');
+Store.registerCraft({ id: 'late2', normalize: function (raw) { return { n: (raw && raw.n) || 0 }; } });
+assertEqual(Store.project('l1').craftData, { n: 4 }, 'registering late re-normalises the projects already loaded');
+
+/* ====================================================================== */
+group('5. createProject');
+/* ====================================================================== */
+
+seed(null);
+
+var plain = Store.createProject({ name: 'Plain' });
+assertEqual(plain.craft, 'crochet', 'createProject defaults to crochet');
+assertEqual(plain.craftData, {}, 'and to an empty craftData');
+
+var fromTpl = Store.createProject({ name: 'From demo template', templateId: 'demo-basic' });
+assertEqual(fromTpl.craft, 'demo', 'the template’s craft wins when opts.craft is missing');
+assertEqual(fromTpl.craftData, { v: 1, beads: 5, label: 'seeded', done: false }, 'the template craftData is deep-copied and normalised');
+assertEqual(Store.template('demo-basic').craftData, { beads: 5, label: 'seeded' }, 'the template itself was not mutated');
+assertEqual(fromTpl.parts.length, 1, 'a craft project still gets one part…');
+assertEqual(fromTpl.parts[0].name, 'Main', '…named Main');
+assertEqual(fromTpl.checklist.length, 1, 'the template checklist came across');
+assertEqual(fromTpl.templateId, 'demo-basic', 'templateId is recorded');
+
+var withData = Store.createProject({
+  name: 'Sheet fields',
+  templateId: 'demo-basic',
+  craft: 'demo',
+  craftData: { beads: 42, label: 'from the sheet' }
+});
+assertEqual(withData.craftData.beads, 42, 'opts.craftData overrides the template seed');
+assertEqual(withData.craftData.label, 'from the sheet', 'and brings its own keys');
+assertEqual(withData.craftData.v, 1, 'normalize still ran over the merged result');
+
+var crossCraft = Store.createProject({ name: 'Crochet from demo template', templateId: 'demo-basic', craft: 'crochet' });
+assertEqual(crossCraft.craft, 'crochet', 'opts.craft beats the template craft');
+assertEqual(crossCraft.craftData, {}, 'a template seed for another craft is not applied');
+
+var unknownCraft = Store.createProject({ name: 'Unknown', craft: 'nosuch', craftData: { a: 1 } });
+assertEqual(unknownCraft.craft, 'nosuch', 'an unregistered craft id is accepted');
+assertEqual(unknownCraft.craftData, { a: 1 }, 'its data is kept verbatim');
+
+/* ====================================================================== */
+group('6. updateCraftData + undo');
+/* ====================================================================== */
+
+seed(null);
+var proj = Store.createProject({ name: 'Counter', craft: 'demo', templateId: 'demo-basic' });
+Store.clearUndo();
+var startedAt = proj.updatedAt;
+proj.updatedAt = startedAt - 5000;
+
+assertEqual(Store.updateCraftData('nope', { beads: 1 }), null, 'updateCraftData on an unknown project is null');
+assertEqual(Store.canUndo(), false, '…and pushes no undo entry');
+
+var afterPatch = Store.updateCraftData(proj.id, { beads: 6, label: 'patched' });
+assertEqual(afterPatch.beads, 6, 'an object patch merges into craftData');
+assertEqual(afterPatch.label, 'patched', 'every key in the patch lands');
+assertEqual(afterPatch.v, 1, 'keys the patch did not mention are left alone');
+assertTrue(Store.project(proj.id).updatedAt > startedAt - 5000, 'updateCraftData bumps updatedAt');
+assertEqual(Store.canUndo(), true, 'updateCraftData pushed an undo snapshot');
+
+Store.updateCraftData(proj.id, function (data) { data.beads += 1; data.done = true; });
+assertEqual(Store.project(proj.id).craftData.beads, 7, 'a mutator function mutates in place');
+assertEqual(Store.project(proj.id).craftData.done, true, 'and its other writes stick');
+
+Store.updateCraftData(proj.id, function () { return { v: 1, beads: 100, label: 'replaced', done: false }; });
+assertEqual(Store.project(proj.id).craftData.beads, 100, 'a mutator that returns an object replaces craftData');
+
+Store.undo();
+assertEqual(Store.project(proj.id).craftData.beads, 7, 'undo puts the previous craftData back');
+Store.undo();
+assertEqual(Store.project(proj.id).craftData.beads, 6, 'undo again walks back another step');
+assertEqual(Store.project(proj.id).craftData.done, false, 'the whole object is restored, not just one key');
+Store.undo();
+assertEqual(Store.project(proj.id).craftData.beads, 5, 'undo reaches the value the template seeded');
+assertEqual(Store.canUndo(), false, 'the undo stack is empty again');
+
+Store.updateCraftData(proj.id, function () { throw new Error('module bug'); });
+assertTrue(!!Store.project(proj.id), 'a throwing mutator does not take the project with it');
+assertEqual(Store.project(proj.id).craftData.beads, 5, 'and leaves the data as it was');
+
+/* ====================================================================== */
+group('7. Per-craft settings');
+/* ====================================================================== */
+
+seed(null);
+assertEqual(Store.craftSettings('demo'), {}, 'craftSettings is an empty object to start with');
+assertEqual(Store.craftSettings(''), {}, 'craftSettings("") is a throwaway empty object');
+Store.setCraftSetting('demo', 'fabricCount', 14);
+Store.setCraftSetting('demo', 'threads', ['DMC 310']);
+assertEqual(Store.craftSettings('demo'), { fabricCount: 14, threads: ['DMC 310'] }, 'setCraftSetting writes into the bag');
+assertEqual(Store.settings().crafts.demo.fabricCount, 14, 'it lives under settings.crafts');
+assertEqual(Store.craftSettings('late'), {}, 'another craft gets its own bag');
+Store.setCraftSetting('late', 'x', 1);
+assertEqual(Store.craftSettings('demo').fabricCount, 14, 'the bags do not bleed into each other');
+assertEqual(Store.setCraftSetting('demo', '', 1), Store.craftSettings('demo'), 'an empty key changes nothing');
+
+/* ====================================================================== */
+group('8. Export / import round trip');
+/* ====================================================================== */
+
+seed(null);
+Store.setCraftSetting('demo', 'fabricCount', 18);
+var exported = Store.createProject({
+  name: 'Round trip',
+  craft: 'demo',
+  templateId: 'demo-basic',
+  craftData: { beads: 3, label: 'exported' }
+});
+var exportedId = exported.id;
+var json = Store.exportJSON();
+var parsed = JSON.parse(json);
+var parsedProject = parsed.projects.filter(function (p) { return p.id === exportedId; })[0];
+assertEqual(parsedProject.craft, 'demo', 'the backup carries Project.craft');
+assertEqual(parsedProject.craftData.beads, 3, 'the backup carries Project.craftData');
+assertEqual(parsed.settings.crafts.demo.fabricCount, 18, 'the backup carries Settings.crafts');
+var parsedTpl = parsed.templates.filter(function (t) { return t.id === 'demo-basic'; })[0];
+assertEqual(parsedTpl.craft, 'demo', 'the backup carries Template.craft');
+assertEqual(parsedTpl.craftData, { beads: 5, label: 'seeded' }, 'the backup carries Template.craftData');
+
+// Into a clean slate.
+seed(null);
+assertTrue(!Store.project(exportedId), 'the fresh state does not have it');
+var n = Store.importJSON(json);
+assertTrue(n >= 1, 'importJSON reports the projects it read');
+var back = Store.project(exportedId);
+assertTrue(!!back, 'the project came back');
+assertEqual(back.craft, 'demo', 'craft survived the round trip');
+assertEqual(back.craftData, { v: 1, beads: 3, label: 'exported', done: false }, 'craftData survived and was re-normalised');
+assertEqual(Store.template('demo-basic').craft, 'demo', 'Template.craft survived the round trip');
+
+/* ====================================================================== */
+group('9. summaryFor');
+/* ====================================================================== */
+
+seed(null);
+var demoProj = Store.createProject({ name: 'Summary demo', craft: 'demo', craftData: { beads: 11 } });
+assertEqual(Store.summaryFor(demoProj), 'Demo · 11 beads', 'summaryFor uses the craft’s own summary');
+
+var crochetProj = Store.createProject({ name: 'Summary crochet', templateId: 'blank' });
+assertEqual(Store.summaryFor(crochetProj), 'Main · Row 0 · 0 sts', 'a crochet project gets the crochet line');
+Store.updateProject(crochetProj.id, { countMode: 'rounds' });
+Store.tapRow(crochetProj.id, crochetProj.parts[0].id);
+Store.tapStitch(crochetProj.id, crochetProj.parts[0].id);
+assertEqual(Store.summaryFor(crochetProj), 'Main · Rnd 1 · 1 sts', 'it follows the rounds/rows word and the counters');
+
+var noSummary = Store.createProject({ name: 'Late craft project', craft: 'late' });
+assertEqual(Store.summaryFor(noSummary), 'Main · Row 0 · 0 sts', 'a craft with no summary() falls back to the generic line');
+
+var ghost = Store.createProject({ name: 'Ghost', craft: 'ghost' });
+assertEqual(Store.summaryFor(ghost), 'Main · Row 0 · 0 sts', 'a craft with no module at all falls back too');
+
+assertEqual(Store.summaryFor(null), '', 'summaryFor(null) is an empty string');
+
+// A summary() that throws must not take the home screen down.
+Store.registerCraft({ id: 'boom', summary: function () { throw new Error('nope'); } });
+var boom = Store.createProject({ name: 'Boom', craft: 'boom' });
+assertEqual(Store.summaryFor(boom), 'Main · Row 0 · 0 sts', 'a throwing summary() falls back instead of blowing up');
+
+// A normalize() that throws leaves the data alone.
+Store.registerCraft({ id: 'boom2', normalize: function () { throw new Error('nope'); } });
+seed({ version: 1, projects: [{ id: 'b2', name: 'Boom two', craft: 'boom2', craftData: { keep: 1 } }] });
+assertEqual(Store.project('b2').craftData, { keep: 1 }, 'a throwing normalize() leaves craftData untouched');
+
+/* ====================================================================== */
+group('10. Crochet is untouched');
+/* ====================================================================== */
+
+seed(null);
+var sheep = Store.createProject({ name: 'Sunny', templateId: 'sheep' });
+assertEqual(sheep.craft, 'crochet', 'a sheep project is crochet');
+assertEqual(sheep.parts.length, 5, 'the sheep template still makes five parts');
+assertEqual(sheep.countMode, 'rounds', 'the sheep template is still rounds');
+assertEqual(sheep.checklist.length, 8, 'the sheep checklist still has eight items');
+var body = sheep.parts[0];
+Store.tapStitch(sheep.id, body.id);
+Store.tapStitch(sheep.id, body.id);
+Store.tapStitch(sheep.id, body.id);
+Store.tapStitch(sheep.id, body.id);
+Store.tapStitch(sheep.id, body.id);
+assertEqual(Store.part(Store.project(sheep.id), body.id).stitch, 5, 'five taps is five stitches');
+assertEqual(Store.project(sheep.id).craftData, {}, 'tapping never touches craftData');
+Store.undo();
+assertEqual(Store.part(Store.project(sheep.id), body.id).stitch, 4, 'undo still walks stitches back one at a time');
+
+/* ---------------------------------------------------------------------- */
+restore();
+
+var summaryEl = document.getElementById('summary');
+var finalLine = passed + ' passed, ' + failed + ' failed';
+summaryEl.textContent = finalLine;
+summaryEl.className = failed === 0 ? 'ok' : 'bad';
+console.log(finalLine);
+
+// The debounced save may still be armed from the assertions above.
+window.setTimeout(restore, 400);
+</script>
+</body>
+</html>

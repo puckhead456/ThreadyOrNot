@@ -1663,6 +1663,81 @@ textarea.mono {
 }
 
 /* --------------------------------------------------------------------------
+   16b. Crafts (docs/CRAFTS.md)
+
+   The shell's share of the craft plumbing: the #screen-craft body a module
+   renders into, the New-project craft picker, the read-only tag in Edit
+   project and the little craft badge on a home card. Theme variables only —
+   each craft's own look lives in css/xstitch.css / css/sewing.css.
+   -------------------------------------------------------------------------- */
+
+/* The <main> a craft module owns. Same scrolling column as .project-body, but
+   with no fixed bottom bar reserved: a craft renders its own inside. */
+.craft-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap);
+  padding-bottom: calc(20px + env(safe-area-inset-bottom));
+}
+.craft-body > * { flex: 0 0 auto; }
+
+/* A craft that wants a bottom bar renders .bottombar inside .craft-body. */
+.craft-body > .bottombar {
+  margin-top: auto;
+  position: sticky;
+  bottom: calc(-1 * (20px + env(safe-area-inset-bottom)));
+  margin-left: calc(-1 * var(--pad));
+  margin-right: calc(-1 * var(--pad));
+  margin-bottom: calc(-1 * (20px + env(safe-area-inset-bottom)));
+}
+
+/* The card shown when a project's craft module did not load. */
+.craft-missing { text-align: center; }
+.craft-missing-emoji { font-size: 40px; line-height: 1; }
+.craft-missing-title { font-size: 18px; margin: 8px 0 4px; }
+.craft-missing .btn { margin-top: 12px; }
+
+/* New project → the craft picker. A .seg with an emoji in each label, so it
+   needs a little more room and wraps on a narrow phone. */
+.craft-seg { flex-wrap: wrap; }
+.craft-seg button {
+  flex: 1 1 8em;
+  min-height: 52px;
+  font-size: 15px;
+  padding: 4px 6px;
+}
+
+/* Edit project → the craft, read-only. */
+.craft-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  font-weight: 700;
+}
+.craft-tag-emoji { font-size: 20px; line-height: 1; }
+
+/* Craft-specific New-project fields mount here. */
+.craft-fields:empty { display: none; }
+
+/* Templates list: which craft a template sets up. */
+.tpl-craft-tag { white-space: nowrap; }
+
+/* Home card: which craft this project is, under its emoji. */
+.pc-craft {
+  grid-area: emoji;
+  align-self: end;
+  justify-self: center;
+  font-size: 15px;
+  line-height: 1;
+  opacity: 0.85;
+}
+
+/* --------------------------------------------------------------------------
    17. Larger screens
    -------------------------------------------------------------------------- */
 

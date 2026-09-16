@@ -1114,8 +1114,30 @@
     });
   }
 
+  /**
+   * A craft module ships its own walkthrough: same { id, title, blurb, steps }
+   * shape as the built-in four. It then shows up in Tour.list(), and so in
+   * Settings → Help & tours, with no further wiring.
+   * @param {{id:string, title:string, blurb:string, steps:Function}} def
+   * @returns {boolean} whether it was added
+   */
+  function register(def) {
+    if (!def || typeof def !== 'object') return false;
+    var id = typeof def.id === 'string' ? def.id.trim() : '';
+    if (!id || typeof def.steps !== 'function') return false;
+    TOURS[id] = {
+      id: id,
+      title: typeof def.title === 'string' && def.title ? def.title : id,
+      blurb: typeof def.blurb === 'string' ? def.blurb : '',
+      steps: def.steps
+    };
+    if (ORDER.indexOf(id) === -1) ORDER.push(id);
+    return true;
+  }
+
   window.Tour = {
     start: start,
+    register: register,
     prompt: prompt,
     stop: stop,
     list: list,

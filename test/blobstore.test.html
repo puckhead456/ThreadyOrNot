@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>BlobStore tests</title>
+<style>
+  body { font: 14px/1.4 Menlo, Consolas, monospace; background:#111; color:#eee; padding:16px; }
+  .pass { color:#7bd389; }
+  .fail { color:#ff6b6b; background:#2a1414; }
+  .group { margin-top:18px; font-weight:bold; color:#9cf; border-bottom:1px solid #333; padding-bottom:4px; }
+  #summary { margin-top:20px; font-size:18px; font-weight:bold; }
+  #summary.ok { color:#7bd389; }
+  #summary.bad { color:#ff6b6b; }
+</style>
+</head>
+<body>
+<h1>BlobStore test suite</h1>
+<p class="group">js/blobstore.js — the IndexedDB box for chart page images.</p>
+<div id="out"></div>
+<div id="summary">running…</div>
+
+<script src="../js/blobstore.js"></script>
+<script>
+'use strict';
+
+var out = document.getElementById('out');
+var passed = 0;
+var failed = 0;
+
+function log(ok, label, detail) {
+  if (ok) { passed++; } else { failed++; }
+  var line = (ok ? 'PASS' : 'FAIL') + ' - ' + label + (detail ? '  (' + detail + ')' : '');
+  var div = document.createElement('div');
+  div.className = ok ? 'pass' : 'fail';
+  div.textContent = line;
+  out.appendChild(div);
+  if (ok) { console.log(line); } else { console.error(line); }
+}
+
+function group(title) {
+  var div = document.createElement('div');
+  div.className = 'group';
+  div.textContent = title;
+  out.appendChild(div);
+  console.log('== ' + title + ' ==');
+}
+
+function assertEqual(actual, expected, label) {
+  var ok = actual === expected;
+  log(ok, label, ok ? '' : ('expected ' + JSON.stringify(expected) + ' got ' + JSON.stringify(actual)));
+}
+
+function assertTrue(cond, label) { log(!!cond, label); }
+
+function assertArray(actual, expected, label) {
+  var ok = Array.isArray(actual) && actual.length === expected.length &&
+    actual.slice().sort().join('|') === expected.slice().sort().join('|');
+  log(ok, label, ok ? '' : ('expected ' + JSON.stringify(expected) + ' got ' + JSON.stringify(actual)));
+}
+
+function finish() {
+  var summaryEl = document.getElementById('summary');
+  var finalLine = passed + ' passed, ' + failed + ' failed';
+  summaryEl.textContent = finalLine;
+  summaryEl.className = failed === 0 ? 'ok' : 'bad';
+  console.log(finalLine);
+}
+
+var B = window.BlobStore;
+var PRE = 'test:blobstore:' + Date.now() + ':';
+
+function blobText(b) {
+  if (!b) return Promise.resolve(null);
+  if (typeof b.text === 'function') return b.text();
+  return new Promise(function (resolve) {
+    var fr = new FileReader();
+    fr.onload = function () { resolve(String(fr.result)); };
+    fr.readAsText(b);
+  });
+}
+
+function run() {
+  group('API surface');
+  assertTrue(!!B, 'window.BlobStore exists');
+  ['put', 'get', 'delete', 'keys', 'deletePrefix', 'available', 'usage'].forEach(function (k) {
+    assertTrue(typeof B[k] === 'function', 'BlobStore.' + k + ' is a function');
+  });
+  assertEqual(B.DB_NAME, 'stitchkeeper-blobs', 'database is stitchkeeper-blobs');
+  assertEqual(B.STORE, 'blobs', 'object store is blobs');
+
+  if (!B.available()) {
+    group('IndexedDB is not available in this browser — round-trip tests skipped');
+    return unavailablePath().then(finish);
+  }
+
+  group('Round trip: a real Blob');
+  var blob = new Blob(['chart page pixels'], { type: 'image/jpeg' });
+  var kBlob = PRE + 'chartpage:1';
+  var kStr = PRE + 'chartpage:2';
+  var kOther = 'test:blobstore:other:' + Date.now();
+
+  return B.put(kBlob, blob)
+    .then(function (ok) {
+      assertEqual(ok, true, 'put(key, Blob) resolves true');
+      return B.get(kBlob);
+    })
+    .then(function (got) {
+      assertTrue(got instanceof Blob, 'get returns a Blob');
+      assertEqual(got.type, 'image/jpeg', 'the Blob keeps its type');
+      assertEqual(got.size, blob.size, 'the Blob keeps its size');
+      return blobText(got);
+    })
+    .then(function (txt) {
+      assertEqual(txt, 'chart page pixels', 'the bytes survive the round trip');
+
+      group('Round trip: a string');
+      return B.put(kStr, 'hello floss');
+    })
+    .then(function (ok) {
+      assertEqual(ok, true, 'put(key, string) resolves true');
+      return B.get(kStr);
+    })
+    .then(function (got) {
+      assertTrue(got instanceof Blob, 'a stored string comes back as a Blob');
+      return blobText(got);
+    })
+    .then(function (txt) {
+      assertEqual(txt, 'hello floss', 'the string survives the round trip');
+
+      group('Round trip: an ArrayBuffer');
+      var buf = new Uint8Array([1, 2, 3, 4, 5]).buffer;
+      return B.put(PRE + 'buf:1', buf);
+    })
+    .then(function (ok) {
+      assertEqual(ok, true, 'put(key, ArrayBuffer) resolves true');
+      return B.get(PRE + 'buf:1');
+    })
+    .then(function (got) {
+      assertEqual(got.size, 5, 'the ArrayBuffer stored 5 bytes');
+
+      group('Missing keys and bad input');
+      return B.get(PRE + 'nope');
+    })
+    .then(function (got) {
+      assertEqual(got, null, 'get on a missing key resolves null');
+      return B.put('', 'x');
+    })
+    .then(function (ok) {
+      assertEqual(ok, false, 'put with an empty key resolves false');
+      return B.put(PRE + 'bad', null);
+    })
+    .then(function (ok) {
+      assertEqual(ok, false, 'put with a null value resolves false');
+      return B.get('');
+    })
+    .then(function (got) {
+      assertEqual(got, null, 'get with an empty key resolves null');
+
+      group('keys(prefix)');
+      return B.put(kOther, 'not mine');
+    })
+    .then(function () {
+      return B.keys(PRE);
+    })
+    .then(function (list) {
+      assertArray(list, [kBlob, kStr, PRE + 'buf:1'], 'keys(prefix) finds exactly the prefixed keys');
+      return B.keys(PRE + 'chartpage:');
+    })
+    .then(function (list) {
+      assertArray(list, [kBlob, kStr], 'keys() narrows on a longer prefix');
+      return B.keys(PRE + 'zzz');
+    })
+    .then(function (list) {
+      assertArray(list, [], 'keys() on an unused prefix is empty');
+
+      group('usage()');
+      return B.usage();
+    })
+    .then(function (u) {
+      assertTrue(u && typeof u.count === 'number', 'usage() resolves { count, bytes }');
+      assertTrue(u.count >= 4, 'usage() counts at least the four keys just written');
+      assertTrue(u.bytes >= blob.size, 'usage() sums at least the blob we wrote');
+
+      group('delete + deletePrefix');
+      return B['delete'](kStr);
+    })
+    .then(function (ok) {
+      assertEqual(ok, true, 'delete resolves true');
+      return B.get(kStr);
+    })
+    .then(function (got) {
+      assertEqual(got, null, 'the deleted key is gone');
+      return B.keys(PRE);
+    })
+    .then(function (list) {
+      assertEqual(list.length, 2, 'two of our keys are left');
+      return B.deletePrefix(PRE);
+    })
+    .then(function (n) {
+      assertEqual(n, 2, 'deletePrefix resolves the number it removed');
+      return B.keys(PRE);
+    })
+    .then(function (list) {
+      assertArray(list, [], 'deletePrefix cleared the whole prefix');
+      return B.get(kOther);
+    })
+    .then(function (got) {
+      assertTrue(got instanceof Blob, 'deletePrefix left a key outside the prefix alone');
+      return B.deletePrefix(PRE);
+    })
+    .then(function (n) {
+      assertEqual(n, 0, 'deletePrefix on an empty prefix resolves 0');
+      return B['delete'](kOther);
+    })
+    .then(function () {
+      return unavailablePath();
+    })
+    .then(finish, function (err) {
+      log(false, 'unexpected rejection', String(err && err.message ? err.message : err));
+      finish();
+    });
+}
+
+/* ---------------------------------------------------------------------- *
+ * No IndexedDB: nothing rejects, every call gives the empty answer.
+ * ---------------------------------------------------------------------- */
+function unavailablePath() {
+  group('IndexedDB unavailable (private mode, old WebView)');
+
+  // In Chrome `indexedDB` lives on Window.prototype, so there is usually no own
+  // descriptor to keep: shadow it, then delete the shadow to put it back.
+  var ownBefore = null;
+  var hid = false;
+  try {
+    ownBefore = Object.getOwnPropertyDescriptor(window, 'indexedDB') || null;
+    Object.defineProperty(window, 'indexedDB', { value: undefined, configurable: true, writable: true });
+    hid = true;
+  } catch (e) {
+    log(true, 'cannot hide window.indexedDB in this browser — checking the live path instead');
+  }
+  B._reset();
+
+  var wasHidden = !window.indexedDB;
+  assertTrue(wasHidden ? !B.available() : true, 'available() is false with no indexedDB');
+
+  return B.put('x:1', 'y')
+    .then(function (ok) {
+      assertEqual(ok, wasHidden ? false : true, 'put resolves false instead of rejecting');
+      return B.get('x:1');
+    })
+    .then(function (got) {
+      assertEqual(got === null, wasHidden, 'get resolves null instead of rejecting');
+      return B['delete']('x:1');
+    })
+    .then(function (ok) {
+      assertEqual(ok, wasHidden ? false : true, 'delete resolves false instead of rejecting');
+      return B.keys('x:');
+    })
+    .then(function (list) {
+      assertTrue(Array.isArray(list), 'keys resolves an array instead of rejecting');
+      assertEqual(list.length, 0, 'keys is empty');
+      return B.deletePrefix('x:');
+    })
+    .then(function (n) {
+      assertEqual(n, 0, 'deletePrefix resolves 0 instead of rejecting');
+      return B.usage();
+    })
+    .then(function (u) {
+      assertEqual(u === null, wasHidden, 'usage resolves null instead of rejecting');
+    })
+    .then(function () {
+      // Put the browser back the way we found it.
+      try {
+        if (hid) {
+          if (ownBefore) Object.defineProperty(window, 'indexedDB', ownBefore);
+          else delete window.indexedDB;
+        }
+      } catch (e) { /* ignore */ }
+      B._reset();
+      assertTrue(!hid || !!window.indexedDB, 'window.indexedDB restored');
+    });
+}
+
+run();
+</script>
+</body>
+</html>

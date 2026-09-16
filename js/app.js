@@ -161,6 +161,14 @@
     els.live = $('#live-region');
     els.toasts = $('#toasts');
 
+    // Craft screen (docs/CRAFTS.md) — absent from an old cached index.html,
+    // so everything that touches it is guarded.
+    els.craft = $('#screen-craft');
+    els.craftBody = $('#craft-body');
+    els.cEmoji = $('#c-emoji');
+    els.cName = $('#c-name');
+    els.cTimer = $('#c-timer');
+
     els.homeEmpty = $('#home-empty');
     els.welcome = $('#welcome-card');
     els.homeList = $('#home-list');
@@ -540,6 +548,10 @@
       updateThemeColor();
       // The diagram paints with the theme's own colours.
       setDiagramPalette();
+      // So do craft canvases, which cache their palette the same way.
+      if (activeCraft && activeCraft.def && typeof activeCraft.def.onTheme === 'function') {
+        try { activeCraft.def.onTheme(); } catch (e) { /* ignore */ }
+      }
     });
   }
 
@@ -601,6 +613,146 @@
   }
 
   /* ================================================================== *
+   * 9b. Crafts (docs/CRAFTS.md)
+   *
+   * Crochet is the shell itself and is never registered; it is listed here so
+   * the craft picker, the home-card badge and the Settings line can treat all
+   * crafts alike. Every entry point checks the module exists before calling
+   * into it, so a craft file that failed to load degrades to a friendly card.
+   * ================================================================== */
+
+  var CROCHET = {
+    id: 'crochet',
+    name: 'Crochet',
+    emoji: '🧶',
+    tagline: 'Rows, rounds and stitches, with the live 3D piece.'
+  };
+
+  var craftDefs = Object.create(null);
+  var craftOrder = [];
+
+  /** The project screen currently painted by a craft module, if any. */
+  var activeCraft = null;
+
+  function registerCraft(def) {
+    if (!def || typeof def !== 'object') return null;
+    var id = typeof def.id === 'string' ? def.id.trim() : '';
+    if (!id || id === CROCHET.id) return null;
+    if (!craftDefs[id]) craftOrder.push(id);
+    craftDefs[id] = def;
+    // Registering after boot (a late module, a console experiment) still shows
+    // up straight away.
+    if (booted) {
+      if (typeof def.onInit === 'function') {
+        try { def.onInit(ctx); } catch (e) { /* a broken module is not fatal */ }
+      }
+      render();
+    }
+    return def;
+  }
+
+  /** `[{ id, name, emoji, tagline }]` — crochet first, then registration order. */
+  function craftList() {
+    var out = [CROCHET];
+    craftOrder.forEach(function (id) {
+      var d = craftDefs[id];
+      if (!d) return;
+      out.push({
+        id: id,
+        name: d.name || id,
+        emoji: d.emoji || '🧵',
+        tagline: d.tagline || ''
+      });
+    });
+    return out;
+  }
+
+  /** Display info for any craft id, including one whose module never loaded. */
+  function craftInfo(id) {
+    var key = id || CROCHET.id;
+    if (key === CROCHET.id) return CROCHET;
+    var d = craftDefs[key];
+    if (d) return { id: key, name: d.name || key, emoji: d.emoji || '🧵', tagline: d.tagline || '' };
+    return { id: key, name: key, emoji: '🧵', tagline: '' };
+  }
+
+  /** True once more than one craft can be picked. */
+  function multiCraft() {
+    return craftOrder.length > 0;
+  }
+
+  function isCraftProject(p) {
+    return !!(p && p.craft && p.craft !== CROCHET.id);
+  }
+
+  /** The registered module for a project, or null (crochet, or not loaded). */
+  function craftFor(p) {
+    if (!isCraftProject(p)) return null;
+    return craftDefs[p.craft] || null;
+  }
+
+  /* ================================================================== *
+   * 9c. The craft context — the shell's own helpers, handed to modules
+   * ================================================================== */
+
+  var ctx = {
+    // DOM + controls
+    el: el,
+    button: button,
+    on: on,
+    clear: clear,
+    field: field,
+    textInput: textInput,
+    numInput: numInput,
+    textArea: textArea,
+    stepper: stepper,
+    segmented: segmented,
+    switchRow: switchRow,
+
+    // Chrome
+    openSheet: openSheet,
+    confirmSheet: confirmSheet,
+    closeAllSheets: closeAllSheets,
+    toast: toast,
+    announce: announce,
+    fb: fb,
+    render: render,
+
+    // Project plumbing
+    currentProject: currentProject,
+    openProjectEditor: openProjectEditor,
+    openChecklistSheet: openChecklistSheet,
+    openNotesSheet: openNotesSheet,
+    openHistorySheet: openHistorySheet,
+    openStatusSheet: openStatusSheet,
+    celebrate: celebrate,
+
+    // Presentation
+    prefersReducedMotion: prefersReducedMotion,
+    cssVar: cssVar,
+
+    // Files
+    isPdfFile: isPdfFile,
+    firstFile: firstFile,
+    pdfDropZone: pdfDropZone,
+    /** The name docs/CRAFTS.md uses in its ctx table for the same builder. */
+    readPdfInto: pdfDropZone,
+
+    // Help
+    addFaq: addFaq
+  };
+
+  function addFaq(entry) {
+    if (!entry || typeof entry !== 'object') return false;
+    var q = typeof entry.q === 'string' ? entry.q.trim() : '';
+    var a = typeof entry.a === 'string' ? entry.a.trim() : '';
+    if (!q || !a) return false;
+    for (var i = 0; i < FAQ.length; i++) if (FAQ[i].q === q) return false;
+    FAQ.push({ q: q, a: a });
+    return true;
+  }
+
+  /* ================================================================== *
    * 10. Current selection helpers
    * ================================================================== */
 
@@ -629,11 +781,22 @@
 
   function render() {
     var p = currentProject();
-    if (p) {
+    if (p && isCraftProject(p)) {
+      // A craft module owns this screen.
+      els.home.hidden = true;
+      els.project.hidden = true;
+      if (els.craft) els.craft.hidden = false;
+      destroyLiveDiagram();
+      renderCraftProject(p);
+    } else if (p) {
+      destroyCraftProject();
+      if (els.craft) els.craft.hidden = true;
       els.home.hidden = true;
       els.project.hidden = false;
       renderProject(p);
     } else {
+      destroyCraftProject();
+      if (els.craft) els.craft.hidden = true;
       els.project.hidden = true;
       els.home.hidden = false;
       // Leaving the project screen: the diagram goes with it.
@@ -648,6 +811,10 @@
    * ================================================================== */
 
   function projectSummary(p) {
+    // Crafts write their own line; Store.summaryFor falls back to this one.
+    var craftLine = craftFor(p) && typeof Store.summaryFor === 'function' ? Store.summaryFor(p) : '';
+    if (typeof craftLine === 'string' && craftLine) return craftLine;
+
     var prt = Store.activePart(p);
     if (!prt) return '';
     var bits = [prt.name, shortRowWord(p) + ' ' + prt.row];
@@ -661,6 +828,14 @@
     card.setAttribute('aria-label', 'Open ' + p.name);
 
     card.appendChild(el('span', 'pc-emoji', p.emoji));
+    // More than one craft in the app: say which one this card is.
+    if (multiCraft()) {
+      var info = craftInfo(p.craft);
+      var badge = el('span', 'pc-craft', info.emoji);
+      badge.setAttribute('title', info.name);
+      badge.setAttribute('aria-label', info.name);
+      card.appendChild(badge);
+    }
     card.appendChild(el('span', 'pc-name', p.name));
 
     var pill = el('span', 'pill ' + p.status + ' pc-pill', p.status);
@@ -878,6 +1053,83 @@
     updateCounters(p, prt);
     updateBottomBar(p, prt);
     mountLiveDiagram();
+  }
+
+  /* ================================================================== *
+   * 13b. Render — craft project (#screen-craft)
+   * ================================================================== */
+
+  function updateCraftTimerChip(p) {
+    if (!els.cTimer) return;
+    var text = fmtDuration(Store.elapsedMs(p));
+    els.cTimer.textContent = text;
+    var running = !!(p.timer && p.timer.runningSince);
+    els.cTimer.classList.toggle('running', running);
+    els.cTimer.setAttribute('aria-label', (running ? 'Stop' : 'Start') + ' timer, ' + text);
+  }
+
+  /** The friendly card a project gets when its craft module is not loaded. */
+  function craftMissingCard(p) {
+    var info = craftInfo(p.craft);
+    var card = el('section', 'card craft-missing');
+    card.appendChild(el('div', 'craft-missing-emoji', info.emoji));
+    card.appendChild(el('h2', 'craft-missing-title', 'This project needs the ' + info.name + ' module'));
+    card.appendChild(
+      el(
+        'p',
+        'muted',
+        'Its counting screen lives in a file that has not loaded. Nothing is lost — open the app ' +
+          'online once so it can be cached, then come back.'
+      )
+    );
+    var back = button('btn primary block', 'Back to projects');
+    on(back, 'click', goHome);
+    card.appendChild(back);
+    return card;
+  }
+
+  function renderCraftProject(p) {
+    if (!els.craftBody) return;
+    if (els.cEmoji) els.cEmoji.textContent = p.emoji;
+    if (els.cName) els.cName.textContent = p.name;
+    updateCraftTimerChip(p);
+
+    var def = craftFor(p);
+
+    // Switching craft or project: the old screen gets torn down first.
+    if (activeCraft && (activeCraft.id !== p.craft || activeCraft.projectId !== p.id)) {
+      destroyCraftProject();
+    }
+
+    if (!def || typeof def.renderProject !== 'function') {
+      destroyCraftProject();
+      clear(els.craftBody);
+      els.craftBody.appendChild(craftMissingCard(p));
+      return;
+    }
+
+    if (!activeCraft) {
+      clear(els.craftBody);
+      activeCraft = { id: p.craft, projectId: p.id, def: def };
+    }
+
+    try {
+      def.renderProject(p, els.craftBody, ctx);
+    } catch (e) {
+      destroyCraftProject();
+      clear(els.craftBody);
+      els.craftBody.appendChild(craftMissingCard(p));
+    }
+  }
+
+  function destroyCraftProject() {
+    if (!activeCraft) return;
+    var def = activeCraft.def;
+    activeCraft = null;
+    if (def && typeof def.destroyProject === 'function') {
+      try { def.destroyProject(); } catch (e) { /* ignore */ }
+    }
+    if (els.craftBody) clear(els.craftBody);
   }
 
   /* ================================================================== *
@@ -1523,7 +1775,31 @@
     if (editing && !p) return;
 
     var chosenTemplate = 'blank';
+    var chosenCraft = p ? p.craft || 'crochet' : 'crochet';
     var nameInput, notesArea, emoji, modeSeg, groupStep;
+    var modeField, groupField, craftFieldsWrap, craftFieldsApi, pdfHint;
+
+    /* Rows/Rounds and the stitch group size only mean something to crochet. */
+    function syncCraftOnlyFields() {
+      var crochet = chosenCraft === 'crochet';
+      if (modeField) modeField.hidden = !crochet;
+      if (groupField) groupField.hidden = !crochet;
+      if (pdfHint) pdfHint.hidden = !crochet;
+    }
+
+    function mountCraftFields() {
+      if (!craftFieldsWrap) return;
+      clear(craftFieldsWrap);
+      craftFieldsApi = null;
+      var def = craftDefs[chosenCraft];
+      if (!def || typeof def.newProjectFields !== 'function') return;
+      try {
+        craftFieldsApi = def.newProjectFields(craftFieldsWrap, ctx) || null;
+      } catch (e) {
+        clear(craftFieldsWrap);
+        craftFieldsApi = null;
+      }
+    }
 
     openSheet({
       title: editing ? 'Edit project' : 'New project',
@@ -1534,18 +1810,46 @@
         emoji = emojiGrid(p ? p.emoji : '🧶');
         body.appendChild(field('Emoji', emoji.node));
 
+        // Crafts: pickable on a new project, a read-only tag afterwards.
+        if (multiCraft()) {
+          if (editing) {
+            var info = craftInfo(chosenCraft);
+            var tag = el('div', 'craft-tag');
+            tag.appendChild(el('span', 'craft-tag-emoji', info.emoji));
+            tag.appendChild(el('span', null, info.name));
+            body.appendChild(field('Craft', tag, 'A project keeps the craft it was made with.'));
+          } else {
+            var craftSeg = segmented(
+              craftList().map(function (c) { return { id: c.id, label: c.emoji + ' ' + c.name }; }),
+              chosenCraft,
+              function (id) {
+                chosenCraft = id;
+                syncCraftOnlyFields();
+                mountCraftFields();
+                if (typeof renderTemplatePicker === 'function') renderTemplatePicker();
+              }
+            );
+            craftSeg.node.classList.add('craft-seg');
+            body.appendChild(field('Craft', craftSeg.node));
+          }
+        }
+
         if (!editing) {
           var grid = el('div', 'tpl-grid');
 
-          function renderTemplatePicker() {
+          var renderTemplatePicker = function () {
             clear(grid);
-            var list = Store.templates();
+            var list = Store.templates(chosenCraft);
             if (!list.length) {
               grid.appendChild(el('p', 'muted', 'No templates yet.'));
               return;
             }
-            // The chosen template may have just been deleted in the editor.
-            if (!Store.template(chosenTemplate)) chosenTemplate = list[0].id;
+            // The chosen template may have just been deleted in the editor, or
+            // belong to the craft we just switched away from.
+            var chosen = Store.template(chosenTemplate);
+            if (!chosen || (chosen.craft || 'crochet') !== chosenCraft) {
+              chosenTemplate = list[0].id;
+            }
             list.forEach(function (tpl) {
               var card = button('tpl-card' + (tpl.id === chosenTemplate ? ' on' : ''));
               card.appendChild(el('span', 'tpl-emoji', tpl.emoji));
@@ -1565,7 +1869,7 @@
               });
               grid.appendChild(card);
             });
-          }
+          };
 
           renderTemplatePicker();
           body.appendChild(field('Template', grid));
@@ -1583,17 +1887,30 @@
           [{ id: 'rows', label: 'Rows' }, { id: 'rounds', label: 'Rounds' }],
           p ? p.countMode : 'rows'
         );
-        body.appendChild(field('Count', modeSeg.node));
+        modeField = field('Count', modeSeg.node);
+        body.appendChild(modeField);
 
         groupStep = stepper(p ? p.groupSize : 10, 0, 50, 'group size');
-        body.appendChild(
-          field('Stitch group size', groupStep.node, 'A buzz every N stitches while you count. 0 = no grouping.')
-        );
+        groupField =
+          field('Stitch group size', groupStep.node, 'A buzz every N stitches while you count. 0 = no grouping.');
+        body.appendChild(groupField);
+
+        // Craft-specific new-project fields go here.
+        if (!editing) {
+          craftFieldsWrap = el('div', 'craft-fields');
+          body.appendChild(craftFieldsWrap);
+          mountCraftFields();
+        }
 
         notesArea = textArea(p ? p.notes : '', '', 'Hook 4mm · Paintbox DK · pattern link…');
         body.appendChild(field('Notes', notesArea));
 
-        if (!editing) body.appendChild(el('p', 'pdf-hint', PDF_HINT));
+        if (!editing) {
+          pdfHint = el('p', 'pdf-hint', PDF_HINT);
+          body.appendChild(pdfHint);
+        }
+
+        syncCraftOnlyFields();
 
         if (editing) {
           var zone = el('div', 'danger-zone');
@@ -1631,6 +1948,13 @@
               Store.updateProject(p.id, patch);
             } else {
               patch.templateId = chosenTemplate;
+              patch.craft = chosenCraft;
+              // Whatever the craft's own new-project fields collected.
+              var seed = null;
+              if (craftFieldsApi && typeof craftFieldsApi.get === 'function') {
+                try { seed = craftFieldsApi.get(); } catch (e) { seed = null; }
+              }
+              patch.craftData = seed && typeof seed === 'object' ? seed : {};
               var created = Store.createProject(patch);
               Store.setActiveProject(created.id);
             }
@@ -1642,22 +1966,39 @@
     });
   }
 
+  /* The undo window is 6 seconds; only once it has passed do the project's
+     BlobStore entries (chart page images and friends) actually go. */
+  var DELETE_UNDO_MS = 6000;
+
   function deleteProjectFlow(projectId) {
     var p = Store.project(projectId);
     if (!p) return;
     var name = p.name;
+    var undone = false;
     Store.deleteProject(projectId);
     render();
     toast('Deleted “' + name + '”.', {
-      ms: 6000,
+      ms: DELETE_UNDO_MS,
       actionText: 'Undo',
       onAction: function () {
+        undone = true;
         if (Store.undo()) {
           fb('undo');
           render();
         }
       }
     });
+    window.setTimeout(function () {
+      if (undone) return;
+      // Undone through the bottom bar rather than the toast, or re-imported.
+      if (Store.project(projectId)) return;
+      if (!window.BlobStore || typeof window.BlobStore.deletePrefix !== 'function') return;
+      try {
+        window.BlobStore.deletePrefix('p:' + projectId + ':');
+      } catch (e) {
+        /* the images just stay; nothing the user can see */
+      }
+    }, DELETE_UNDO_MS + 400);
   }
 
   function addPartFlow(projectId) {
@@ -1994,6 +2335,25 @@
     return bits.join(' · ');
   }
 
+  /**
+   * The craft tag on a template card. Shown once there is more than one craft
+   * to tell apart — or whenever a template is not a crochet one, even if that
+   * craft's UI module has not loaded, so the list is never ambiguous.
+   */
+  function templateCraftTag(tpl) {
+    var craft = tpl.craft || 'crochet';
+    if (!multiCraft() && craft === 'crochet') return null;
+    var info = craftInfo(craft);
+    var tag = el('span', 'tpl-tag tpl-craft-tag', info.emoji + ' ' + info.name);
+    tag.setAttribute('title', info.name);
+    return tag;
+  }
+
+  /** In the template editor, the tag shows under the same rule. */
+  function showTemplateCraft(craft) {
+    return multiCraft() || (craft || 'crochet') !== 'crochet';
+  }
+
   /** Renders the tap-to-edit template list into `container`. */
   function renderTemplateList(container, onChanged) {
     clear(container);
@@ -2009,6 +2369,8 @@
       main.appendChild(el('span', 'tpl-item-name', tpl.name));
       main.appendChild(el('span', 'tpl-item-sub', templateSub(tpl)));
       item.appendChild(main);
+      var craftTag = templateCraftTag(tpl);
+      if (craftTag) item.appendChild(craftTag);
       if (tpl.builtIn) item.appendChild(el('span', 'tpl-tag', 'Built-in'));
       on(item, 'click', function () {
         openTemplateEditor({
@@ -2075,6 +2437,7 @@
 
     var editingId = source.id || '';
     var isBuiltIn = !!source.builtIn;
+    var templateCraft = source.craft || 'crochet';
     var model = {
       parts: (source.parts || []).map(function (p) {
         return { name: p.name, makeCount: p.makeCount };
@@ -2199,16 +2562,32 @@
         emoji = emojiGrid(source.emoji || '🧶');
         body.appendChild(field('Emoji', emoji.node));
 
+        // Crafts: which one this template belongs to, read-only.
+        if (showTemplateCraft(templateCraft)) {
+          var cInfo = craftInfo(templateCraft);
+          var cTag = el('div', 'craft-tag');
+          cTag.appendChild(el('span', 'craft-tag-emoji', cInfo.emoji));
+          cTag.appendChild(el('span', null, cInfo.name));
+          body.appendChild(field('Craft', cTag));
+        }
+
         modeSeg = segmented(
           [{ id: 'rows', label: 'Rows' }, { id: 'rounds', label: 'Rounds' }],
           source.countMode === 'rounds' ? 'rounds' : 'rows'
         );
-        body.appendChild(field('Count', modeSeg.node));
+        var modeField = field('Count', modeSeg.node);
+        body.appendChild(modeField);
 
         groupStep = stepper(typeof source.groupSize === 'number' ? source.groupSize : 10, 0, 50, 'group size');
-        body.appendChild(
-          field('Stitch group size', groupStep.node, 'New projects start with this group size. 0 = no grouping.')
-        );
+        var groupField =
+          field('Stitch group size', groupStep.node, 'New projects start with this group size. 0 = no grouping.');
+        body.appendChild(groupField);
+
+        // Rows/Rounds and group size are crochet-only.
+        if (templateCraft !== 'crochet') {
+          modeField.hidden = true;
+          groupField.hidden = true;
+        }
 
         partsWrap = el('div', 'tpl-parts-edit');
         body.appendChild(field('Parts', partsWrap, 'Wings ×2, legs ×4 — each piece is counted separately.'));
@@ -2272,7 +2651,8 @@
                 countMode: modeSeg.get(),
                 groupSize: groupStep.get(),
                 parts: model.parts,
-                checklist: model.checklist
+                checklist: model.checklist,
+                craft: templateCraft
               });
             } catch (e) {
               toast(e && e.message ? e.message : 'That template is not valid');
@@ -2321,6 +2701,256 @@
     return fileList[0];
   }
 
+  /* ================================================================== *
+   * 16b. The reusable PDF drop zone (ctx.pdfDropZone)
+   *
+   * The dashed box, the hidden file input, "Reading page 3 of 21…" and the
+   * non-PDF toast, factored out of the crochet Import sheet so craft modules
+   * get exactly the same thing. The crochet sheet still uses it, so it stays
+   * tested by the app itself.
+   *
+   *   pdfDropZone({
+   *     label, linkText, icon, tour, ariaLabel, rejectMessage,
+   *     accept: ['.pdf', '.oxs'],   // default PDF only
+   *     confirm(file) -> boolean | Promise<boolean>,   // gate before reading
+   *     onText(res),                // { text, pages, chars, columnsDetected }
+   *     onPages(handle),            // PdfText.open handle, for page.render()
+   *     onFile(file),               // a non-PDF file that matched `accept`
+   *     onError(err)                // default: a toast
+   *   }) -> HTMLElement   (with .zone, .setBusy, .showResult, .destroy on it)
+   * ================================================================== */
+
+  function fileHasExt(file, ext) {
+    var name = String((file && file.name) || '').toLowerCase();
+    var want = String(ext || '').toLowerCase();
+    return !!want && name.length >= want.length && name.slice(-want.length) === want;
+  }
+
+  function pdfDropZone(opts) {
+    opts = opts || {};
+    var accept = Array.isArray(opts.accept) && opts.accept.length
+      ? opts.accept.map(function (e) { return String(e).toLowerCase(); })
+      : ['.pdf'];
+    var wantsPdf = accept.indexOf('.pdf') >= 0;
+    var reading = false;
+    var docGuard = null;
+
+    var wrap = el('div', 'dz-wrap');
+    var zone = button('dz', null, opts.ariaLabel || 'Choose a pattern PDF');
+    if (opts.tour) zone.setAttribute('data-tour', opts.tour);
+    zone.appendChild(el('span', 'dz-icon', opts.icon || '📄'));
+
+    var label = typeof opts.label === 'string' && opts.label
+      ? opts.label
+      : 'Drop a pattern PDF here, or choose a file';
+    var linkText = typeof opts.linkText === 'string' && opts.linkText ? opts.linkText : 'choose a file';
+    var line = el('span', 'dz-line');
+    var at = label.lastIndexOf(linkText);
+    if (at >= 0) {
+      line.appendChild(document.createTextNode(label.slice(0, at)));
+      line.appendChild(el('span', 'dz-link', label.slice(at)));
+    } else {
+      line.appendChild(document.createTextNode(label + ' '));
+      line.appendChild(el('span', 'dz-link', linkText));
+    }
+    zone.appendChild(line);
+
+    var zoneLabel = el('span', 'dz-status');
+    zoneLabel.hidden = true;
+    zone.appendChild(zoneLabel);
+    var progress = el('span', 'dz-bar');
+    progress.hidden = true;
+    var progressFill = el('span', 'dz-bar-fill');
+    progress.appendChild(progressFill);
+    zone.appendChild(progress);
+
+    var acceptAttr = accept.slice();
+    if (wantsPdf) acceptAttr = ['application/pdf'].concat(acceptAttr);
+    var fileInput = document.createElement('input');
+    fileInput.type = 'file';
+    fileInput.accept = acceptAttr.join(',');
+    fileInput.className = 'sr-only';
+    fileInput.setAttribute('data-import-file', '1');
+    fileInput.tabIndex = -1;
+    fileInput.setAttribute('aria-hidden', 'true');
+
+    var resultLine = el('p', 'dz-result muted');
+    resultLine.hidden = true;
+
+    function setBusy(text, frac) {
+      reading = !!text;
+      zone.classList.toggle('busy', reading);
+      zone.disabled = reading;
+      zoneLabel.textContent = text || '';
+      zoneLabel.hidden = !text;
+      progress.hidden = !text;
+      progressFill.style.width = Math.round(Math.max(0, Math.min(1, frac || 0)) * 100) + '%';
+    }
+
+    function showResult(res) {
+      if (!res) return;
+      var bits = [plural(res.pages, 'page')];
+      if (res.columnsDetected) bits.push(plural(res.columnsDetected, 'column') + ' untangled');
+      bits.push(Number(res.chars).toLocaleString() + ' characters');
+      resultLine.textContent = 'Read ' + bits.join(' · ');
+      resultLine.hidden = false;
+    }
+
+    function fail(err) {
+      setBusy('', 0);
+      if (typeof opts.onError === 'function') {
+        try {
+          opts.onError(err);
+          return;
+        } catch (e) {
+          /* fall through to the toast */
+        }
+      }
+      toast((err && err.message) || 'Couldn’t read that PDF (it may be scanned images).', { ms: 4200 });
+    }
+
+    /** onPages + onText: build the text out of the already-open document. */
+    function gatherText(handle) {
+      var total = handle.numPages || 0;
+      var blocks = [];
+      var chain = Promise.resolve();
+      var step = function (n) {
+        return function () {
+          setBusy('Reading page ' + n + ' of ' + total + '…', total ? n / total : 0);
+          return handle.textOf(n).then(function (txt) {
+            blocks.push('=== PAGE ' + n + ' ===\n' + txt);
+          });
+        };
+      };
+      for (var n = 1; n <= total; n++) chain = chain.then(step(n));
+      return chain.then(function () {
+        setBusy('', 0);
+        var text = blocks.join('\n\n').replace(/\n{3,}/g, '\n\n').trim();
+        var res = { text: text, pages: total, chars: text.length, columnsDetected: 0 };
+        showResult(res);
+        try { opts.onText(res); } catch (e) { fail(e); }
+      }, fail);
+    }
+
+    function readPdf(file) {
+      setBusy('Reading page 1…', 0.02);
+      if (typeof opts.onPages === 'function') {
+        window.PdfText.open(file).then(function (handle) {
+          setBusy('', 0);
+          try {
+            opts.onPages(handle);
+          } catch (e) {
+            fail(e);
+            return;
+          }
+          if (typeof opts.onText === 'function') gatherText(handle);
+        }, fail);
+        return;
+      }
+      window.PdfText.extract(file, {
+        onProgress: function (page, total) {
+          setBusy('Reading page ' + page + ' of ' + total + '…', total ? page / total : 0);
+        }
+      }).then(function (res) {
+        setBusy('', 0);
+        showResult(res);
+        if (typeof opts.onText === 'function') {
+          try { opts.onText(res); } catch (e) { fail(e); }
+        }
+      }, fail);
+    }
+
+    function matchesAccept(file) {
+      for (var i = 0; i < accept.length; i++) {
+        if (fileHasExt(file, accept[i])) return true;
+      }
+      return false;
+    }
+
+    function takeFile(file) {
+      if (reading || !file) return;
+      var isPdf = wantsPdf && isPdfFile(file);
+      if (!isPdf) {
+        if (matchesAccept(file) && typeof opts.onFile === 'function') {
+          try { opts.onFile(file); } catch (e) { fail(e); }
+          return;
+        }
+        toast(opts.rejectMessage || (accept.length === 1 && wantsPdf ? 'That isn’t a PDF' : 'That file type isn’t supported'));
+        return;
+      }
+      if (!window.PdfText || !window.PdfText.isAvailable()) {
+        toast('The PDF reader isn’t available. Paste the text instead.', { ms: 4200 });
+        return;
+      }
+      if (typeof opts.confirm !== 'function') {
+        readPdf(file);
+        return;
+      }
+      var gate;
+      try {
+        gate = opts.confirm(file);
+      } catch (e) {
+        gate = false;
+      }
+      Promise.resolve(gate).then(function (ok) {
+        if (ok !== false) readPdf(file);
+      }, noop);
+    }
+
+    on(fileInput, 'change', function () {
+      var f = firstFile(fileInput.files);
+      fileInput.value = '';
+      takeFile(f);
+    });
+
+    on(zone, 'click', function () {
+      if (!reading) fileInput.click();
+    });
+
+    function over(e) {
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+      zone.classList.add('over');
+    }
+    on(zone, 'dragenter', over);
+    on(zone, 'dragover', over);
+    on(zone, 'dragleave', function () { zone.classList.remove('over'); });
+    on(zone, 'drop', function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      zone.classList.remove('over');
+      takeFile(firstFile(e.dataTransfer && e.dataTransfer.files));
+    });
+
+    // Anywhere else in the window, a dropped PDF would make the browser
+    // navigate away from the app. Swallow it while the zone is alive.
+    docGuard = function (e) {
+      e.preventDefault();
+      if (e.type === 'drop') zone.classList.remove('over');
+    };
+    document.addEventListener('dragover', docGuard);
+    document.addEventListener('drop', docGuard);
+
+    wrap.appendChild(zone);
+    wrap.appendChild(fileInput);
+    wrap.appendChild(resultLine);
+
+    wrap.zone = zone;
+    wrap.fileInput = fileInput;
+    wrap.setBusy = setBusy;
+    wrap.showResult = showResult;
+    wrap.take = takeFile;
+    wrap.isReading = function () { return reading; };
+    /** Call from the sheet's onClose so the document-level guard goes too. */
+    wrap.destroy = function () {
+      if (!docGuard) return;
+      document.removeEventListener('dragover', docGuard);
+      document.removeEventListener('drop', docGuard);
+      docGuard = null;
+    };
+    return wrap;
+  }
+
   /**
    * Paste a whole pattern, see the sections the parser found, then either
    * create/update one part per section or drop the lot into the active part.
@@ -2330,10 +2960,8 @@
     if (!p) return;
     var activeName = (Store.activePart(p) || {}).name || 'this part';
     var area, list, rows = [];
-    var zone, zoneLabel, fileInput, progress, progressFill, resultLine;
+    var dropZone = null;
     var checkField, checkList, checkItems = [];
-    var reading = false;
-    var docGuard = null;
 
     function buildRows() {
       var secs = Store.splitSections(area.value);
@@ -2464,137 +3092,29 @@
       return out;
     }
 
-    /* ---------------- PDF drop zone ---------------- */
-
-    function setZoneBusy(text, frac) {
-      reading = !!text;
-      zone.classList.toggle('busy', reading);
-      zone.disabled = reading;
-      zoneLabel.textContent = text || '';
-      zoneLabel.hidden = !text;
-      progress.hidden = !text;
-      progressFill.style.width = Math.round(Math.max(0, Math.min(1, frac || 0)) * 100) + '%';
-    }
-
-    function showResult(res) {
-      var bits = [plural(res.pages, 'page')];
-      if (res.columnsDetected) bits.push(plural(res.columnsDetected, 'column') + ' untangled');
-      bits.push(Number(res.chars).toLocaleString() + ' characters');
-      resultLine.textContent = 'Read ' + bits.join(' · ');
-      resultLine.hidden = false;
-    }
-
-    function readPdf(file) {
-      setZoneBusy('Reading page 1…', 0.02);
-      window.PdfText.extract(file, {
-        onProgress: function (page, total) {
-          setZoneBusy('Reading page ' + page + ' of ' + total + '…', total ? page / total : 0);
-        }
-      }).then(
-        function (res) {
-          setZoneBusy('', 0);
-          area.value = res.text;
-          showResult(res);
-          refresh();
-          announce('Read ' + plural(res.pages, 'page') + ' from the PDF.');
-        },
-        function (err) {
-          setZoneBusy('', 0);
-          toast((err && err.message) || 'Couldn’t read that PDF (it may be scanned images).', { ms: 4200 });
-        }
-      );
-    }
-
-    function takeFile(file) {
-      if (reading) return;
-      if (!file) return;
-      if (!isPdfFile(file)) {
-        toast('That isn’t a PDF');
-        return;
-      }
-      if (!window.PdfText || !window.PdfText.isAvailable()) {
-        toast('The PDF reader isn’t available. Paste the text instead.', { ms: 4200 });
-        return;
-      }
-      if (!area.value.trim()) {
-        readPdf(file);
-        return;
-      }
-      confirmSheet({
-        title: 'Replace the pattern text?',
-        message: 'Reading “' + (file.name || 'that PDF') + '” will replace what is in the box.',
-        confirmText: 'Replace'
-      }).then(function (ok) {
-        if (ok) readPdf(file);
-      });
-    }
+    /* ---------------- PDF drop zone (the shared builder) ---------------- */
 
     function buildZone(body) {
-      var wrap = el('div', 'dz-wrap');
-
-      zone = button('dz', null, 'Choose a pattern PDF');
-      zone.setAttribute('data-tour', 'import-drop');
-      zone.appendChild(el('span', 'dz-icon', '📄'));
-      var line = el('span', 'dz-line');
-      line.appendChild(document.createTextNode('Drop a pattern PDF here, or '));
-      line.appendChild(el('span', 'dz-link', 'choose a file'));
-      zone.appendChild(line);
-      zoneLabel = el('span', 'dz-status');
-      zoneLabel.hidden = true;
-      zone.appendChild(zoneLabel);
-      progress = el('span', 'dz-bar');
-      progress.hidden = true;
-      progressFill = el('span', 'dz-bar-fill');
-      progress.appendChild(progressFill);
-      zone.appendChild(progress);
-
-      fileInput = document.createElement('input');
-      fileInput.type = 'file';
-      fileInput.accept = 'application/pdf,.pdf';
-      fileInput.className = 'sr-only';
-      fileInput.setAttribute('data-import-file', '1');
-      fileInput.tabIndex = -1;
-      fileInput.setAttribute('aria-hidden', 'true');
-      on(fileInput, 'change', function () {
-        var f = firstFile(fileInput.files);
-        fileInput.value = '';
-        takeFile(f);
+      dropZone = pdfDropZone({
+        tour: 'import-drop',
+        ariaLabel: 'Choose a pattern PDF',
+        label: 'Drop a pattern PDF here, or choose a file',
+        // Reading a second PDF over a box that already has text is a surprise.
+        confirm: function (file) {
+          if (!area.value.trim()) return true;
+          return confirmSheet({
+            title: 'Replace the pattern text?',
+            message: 'Reading “' + (file.name || 'that PDF') + '” will replace what is in the box.',
+            confirmText: 'Replace'
+          });
+        },
+        onText: function (res) {
+          area.value = res.text;
+          refresh();
+          announce('Read ' + plural(res.pages, 'page') + ' from the PDF.');
+        }
       });
-
-      on(zone, 'click', function () {
-        if (!reading) fileInput.click();
-      });
-
-      function over(e) {
-        e.preventDefault();
-        if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
-        zone.classList.add('over');
-      }
-      on(zone, 'dragenter', over);
-      on(zone, 'dragover', over);
-      on(zone, 'dragleave', function () { zone.classList.remove('over'); });
-      on(zone, 'drop', function (e) {
-        e.preventDefault();
-        e.stopPropagation();
-        zone.classList.remove('over');
-        takeFile(firstFile(e.dataTransfer && e.dataTransfer.files));
-      });
-
-      // Anywhere else in the window, a dropped PDF would make the browser
-      // navigate away from the app. Swallow it while the sheet is open.
-      docGuard = function (e) {
-        e.preventDefault();
-        if (e.type === 'drop') zone.classList.remove('over');
-      };
-      document.addEventListener('dragover', docGuard);
-      document.addEventListener('drop', docGuard);
-
-      wrap.appendChild(zone);
-      wrap.appendChild(fileInput);
-      resultLine = el('p', 'dz-result muted');
-      resultLine.hidden = true;
-      wrap.appendChild(resultLine);
-      body.appendChild(wrap);
+      body.appendChild(dropZone);
     }
 
     openSheet({
@@ -2621,11 +3141,7 @@
         refresh();
       },
       onClose: function () {
-        if (docGuard) {
-          document.removeEventListener('dragover', docGuard);
-          document.removeEventListener('drop', docGuard);
-          docGuard = null;
-        }
+        if (dropZone) dropZone.destroy();
       },
       footer: [
         {
@@ -3151,10 +3667,46 @@
     });
   }
 
+  /** The ⋯ menu for a craft project: v1 hides the crochet-only entries. */
+  function craftMenuItems(p) {
+    var def = craftFor(p);
+    var items = [];
+
+    if (def && typeof def.openImportSheet === 'function') {
+      items.push({
+        icon: '📋',
+        label: 'Import pattern',
+        run: function () {
+          try { def.openImportSheet(p.id); } catch (e) { toast('That sheet could not open'); }
+        }
+      });
+    }
+    items.push({ icon: '✅', label: 'Checklist', run: function () { openChecklistSheet(p.id); } });
+
+    // The craft's own entries sit above Notes.
+    if (def && typeof def.menuItems === 'function') {
+      var extra = [];
+      try { extra = def.menuItems(p) || []; } catch (e) { extra = []; }
+      if (Array.isArray(extra)) {
+        extra.forEach(function (it) {
+          if (!it || typeof it.run !== 'function' || !it.label) return;
+          items.push({ icon: it.icon || '•', label: it.label, run: it.run });
+        });
+      }
+    }
+
+    items.push({ icon: '📝', label: 'Notes', run: function () { openNotesSheet(p.id); } });
+    items.push({ icon: '🕘', label: 'History', run: function () { openHistorySheet(p.id); } });
+    items.push({ icon: '🏷️', label: 'Status', run: function () { openStatusSheet(p.id); } });
+    items.push({ icon: '📤', label: 'Export backup', run: function () { exportBackup(); } });
+    items.push({ icon: '❓', label: 'Show me around', run: function () { startTour('counter'); } });
+    return items;
+  }
+
   function openMenuSheet(projectId) {
     var p = Store.project(projectId);
     if (!p) return;
-    var items = [
+    var items = isCraftProject(p) ? craftMenuItems(p) : [
       { icon: '🧩', label: 'Parts', run: function () { openPartsSheet(p.id); } },
       { icon: '📋', label: 'Import pattern', run: function () { openImportSheet(p.id, ''); } },
       { icon: '✅', label: 'Checklist', run: function () { openChecklistSheet(p.id); } },
@@ -3596,6 +4148,26 @@
         /* ---- Help & tours ---- */
         body.appendChild(helpSection());
 
+        /* ---- Crafts ---- */
+        if (multiCraft()) {
+          var craftField = el('div', 'field');
+          craftField.appendChild(el('div', 'field-label', 'Crafts'));
+          var craftRows = el('div', 'help-list');
+          craftList().forEach(function (c) {
+            var row = el('div', 'help-item');
+            var cmain = el('div', 'help-main');
+            cmain.appendChild(el('div', 'help-name', c.emoji + ' ' + c.name));
+            if (c.tagline) cmain.appendChild(el('div', 'help-blurb', c.tagline));
+            row.appendChild(cmain);
+            craftRows.appendChild(row);
+          });
+          craftField.appendChild(craftRows);
+          craftField.appendChild(
+            el('div', 'field-hint', 'Pick the craft when you start a project — it cannot be changed later.')
+          );
+          body.appendChild(craftField);
+        }
+
         /* ---- About ---- */
         var about = el('div', 'field');
         about.appendChild(el('div', 'field-label', 'About'));
@@ -3645,6 +4217,24 @@
       fb('tap');
     });
     on($('#p-menu'), 'click', function () {
+      var p = currentProject();
+      if (p) openMenuSheet(p.id);
+    });
+
+    // Craft header (#screen-craft) — the same four controls.
+    on($('#c-back'), 'click', goHome);
+    on($('#c-title'), 'click', function () {
+      var p = currentProject();
+      if (p) openProjectEditor(p.id);
+    });
+    on(els.cTimer, 'click', function () {
+      var p = currentProject();
+      if (!p) return;
+      Store.toggleTimer(p.id);
+      updateCraftTimerChip(p);
+      fb('tap');
+    });
+    on($('#c-menu'), 'click', function () {
       var p = currentProject();
       if (p) openMenuSheet(p.id);
     });
@@ -3746,6 +4336,10 @@
 
   function tick() {
     var p = currentProject();
+    if (p && els.craft && !els.craft.hidden) {
+      if (p.timer && p.timer.runningSince) updateCraftTimerChip(p);
+      return;
+    }
     if (p && !els.project.hidden) {
       if (p.timer && p.timer.runningSince) updateTimerChip(p);
       return;
@@ -3764,6 +4358,8 @@
    * 23. Boot
    * ================================================================== */
 
+  var booted = false;
+
   function init() {
     cacheEls();
     Store.load();
@@ -3776,6 +4372,17 @@
 
     applyTheme(Store.settings().theme, false);
     bindEvents();
+
+    // Craft modules registered while their scripts evaluated; now the shell is
+    // ready they can add FAQ entries, tours and whatever else they need.
+    craftOrder.forEach(function (id) {
+      var d = craftDefs[id];
+      if (d && typeof d.onInit === 'function') {
+        try { d.onInit(ctx); } catch (e) { /* a broken module is not fatal */ }
+      }
+    });
+    booted = true;
+
     render();
     window.setInterval(tick, 1000);
   }
@@ -3793,6 +4400,11 @@
     startTour: startTour,
     startWelcomeTour: startWelcomeTour,
     applyTheme: applyTheme,
+    // Crafts (docs/CRAFTS.md)
+    registerCraft: registerCraft,
+    crafts: craftList,
+    ctx: ctx,
+    pdfDropZone: pdfDropZone,
     version: APP_VERSION
   };
 
