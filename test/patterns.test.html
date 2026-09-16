@@ -626,6 +626,142 @@ assertEqual(P.parse('Round 6 if you wish.')[0].row, null, '"Round 6 if you wish.
 assertEqual(P.parse('Round 6: sc in each st')[0].row, 6, '"Round 6: ..." is still a row marker');
 
 // -----------------------------------------------------------------------
+group('v2.2: live diagram - expand() stitch lists');
+// -----------------------------------------------------------------------
+
+// A bare instruction, parsed as row 1 so expand() can find it.
+function expandOf(instr, prev, state) {
+  return P.expand(P.parse('1. ' + instr), 1, prev, state || null);
+}
+function typesOf(instr, prev) {
+  return expandOf(instr, prev).stitches.map(function (s) { return s.t; }).join(',');
+}
+
+// expand() must produce exactly as many stitches as evaluate() counts.
+[
+  ['6 sc in magic ring', null],
+  ['Inc x 6', 6],
+  ['(Sc 1, Inc) x 6', 12],
+  ['(Sc 2, Inc) x 6', 18],
+  ['(Sc 3, Inc) x 6', 24],
+  ['Sc around', 30],
+  ['(Sc 3, Dec) x 6', 30],
+  ['Dec x 6', 12],
+  ['(inc, 2sc) x5, inc, sc', 15],
+  ['Inc, sc, repeat around', 10],
+  ['Dec, 2sc, repeat around', 24],
+  ['Skip 1st stitch, 13Sc', 14],
+  ['Skip 1st stitch, 3Hdc in each stitch', 21],
+  ['Hdc 7, Hdc Dec', 9],
+  ['Sc 10 , A (Sc 3) , Sc 3 , A (Sc 3) , Sc 11', 30],
+  ['A (Hdc Inc x 5) , Hdc Inc x 13', 18],
+  ['Sc, (Bbl, Slst)x5, 7sc', 18],
+  ['2Sc, (Inc, Sc, Bbl, Inc, 2Sc)x2, Inc, 2Sc, Inc', 18],
+  ['(2sc, Dec)x4, Dec', 18],
+  ['Increase around', 5],
+  ['11HdcInc', 12],
+  ['5 Sc in Magic Ring', null],
+  ['Sc in each st', 24],
+  ['Mr6', null],
+  ['3Hdc in each stitch', 20],
+  ['Hdc 10', null],
+  ['Dc 8', null],
+  ['Tr 6', null]
+].forEach(function (c) {
+  var want = P.evaluate(c[0], c[1]);
+  var got = expandOf(c[0], c[1]).stitches.length;
+  log(want !== null && got === want, 'expand == evaluate for "' + c[0] + '" (prev ' + c[1] + ')',
+    'evaluate ' + want + ', expand ' + got);
+});
+
+assertEqual(typesOf('Inc x 6', 6), 'inc,inc,inc,inc,inc,inc,inc,inc,inc,inc,inc,inc', 'inc yields TWO entries of t:"inc"');
+assertEqual(typesOf('Dec x 6', 12), 'dec,dec,dec,dec,dec,dec', 'dec yields ONE entry of t:"dec"');
+assertEqual(typesOf('(Sc 1, Inc) x 3', 6), 'sc,inc,inc,sc,inc,inc,sc,inc,inc', 'a group multiplier repeats the group stitch by stitch');
+assertEqual(typesOf('Sc 2, Hdc 2, Dc 1, Tr 1', null), 'sc,sc,hdc,hdc,dc,tr', 'stitch kinds are kept');
+assertEqual(typesOf('Sl st 3', null), 'sl,sl,sl', 'slip stitches are t:"sl"');
+assertEqual(typesOf('Inc, sc, repeat around', 10), 'inc,inc,sc,inc,inc,sc,inc,inc,sc,inc,inc,sc,inc,inc,sc', '"repeat around" fills from prevCount');
+assertEqual(expandOf('Sc in each st', 7).stitches.length, 7, 'a fill row follows prevCount exactly');
+
+assertEqual(expandOf('Hdc 10', null).height, 1.5, 'height 1.5 for an hdc row');
+assertEqual(expandOf('Dc 8', null).height, 2, 'height 2 for a dc row');
+assertEqual(expandOf('Tr 6', null).height, 2.5, 'height 2.5 for a tr row');
+assertEqual(expandOf('Sc 10', null).height, 1, 'height 1 for an sc row');
+assertEqual(expandOf('Hdc 9, Sc 1', null).height, 1.5, 'height comes from the dominant stitch');
+
+// unevaluable row + explicit count -> generic stitches
+var vague = P.expand(P.parse('1. Work the fancy wiggle thing all the way round (24)'), 1, null, null);
+assertEqual(vague.stitches.length, 24, 'an unevaluable row with a count yields 24 stitches');
+assertTrue(vague.stitches.every(function (s) { return s.t === 'x' && s.c === null; }), 'those 24 stitches are generic {t:"x", c:null}');
+assertEqual(P.expand(P.parse('1. Sew it all together nicely'), 1, null, null).stitches, [], 'no count and nothing to evaluate -> no stitches');
+assertTrue(P.expand(null, 1, null, null).stitches.length === 0, 'expand(null, ...) does not throw');
+assertTrue(P.expand(P.parse('1. Sc 6 (6)'), 9, null, null).stitches.length === 0, 'a row number with no line returns nothing');
+
+// -----------------------------------------------------------------------
+group('v2.2: live diagram - colours');
+// -----------------------------------------------------------------------
+
+var legendText =
+  'Head\n' +
+  'In Twilight :\n' +
+  '( A = Almond )\n' +
+  '( S = Sand )\n' +
+  '1. 8 Sc into Magic Ring (8)\n' +
+  '2. Sc 2 , A (Sc 3) , Sc 3 (8)\n' +
+  '3. Sc 8 (8) Fasten off Almond .';
+var legendCols = P.colors(legendText);
+assertEqual(legendCols.legend, { A: 'Almond', S: 'Sand' }, 'colors(): "( A = Almond )" / "( S = Sand )" build the legend');
+assertEqual(legendCols.names, ['Almond', 'Sand', 'Twilight'], 'colors(): every colour mentioned, once each');
+assertEqual(P.colors('MC = Main Colour\nCC = Cream').legend, { MC: 'Main Colour', CC: 'Cream' }, 'colors(): "MC = Main Colour" legend form');
+assertEqual(P.colors('1. Sc in each st (6)').names, [], 'colors(): a pattern with no colours has no names');
+
+var legendLines = P.parse(legendText);
+var lrow2 = P.expand(legendLines, 2, 8, P.expand(legendLines, 1, null, null).state);
+assertEqual(lrow2.stitches.map(function (s) { return s.c; }),
+  [null, null, 'Almond', 'Almond', 'Almond', null, null, null],
+  'a colour-prefixed group "A (Sc 3)" tags just those 3 stitches with the legend name');
+assertEqual(P.expand(P.parse('1. Sc 2 , A (Sc 3) , Sc 3 (8)'), 1, null, null).stitches[2].c, 'A',
+  'with no legend the prefix letter itself is the colour name');
+
+var flowText =
+  'Body\n' +
+  'In Sand\n' +
+  '1. 6 sc in magic ring (6)\n' +
+  '2. Inc in each st (12)\n' +
+  'Colour change to teal\n' +
+  '3. Sc in each st (12)\n' +
+  '4. Sc in each st (12)';
+var flow = P.parse(flowText);
+var fs2 = null, fprev = null, fcolors = [];
+[1, 2, 3, 4].forEach(function (n) {
+  var r = P.expand(flow, n, fprev, fs2);
+  fs2 = r.state; fprev = r.stitches.length; fcolors.push(r.color);
+});
+assertEqual(fcolors, ['Sand', 'Sand', 'teal', 'teal'], 'base colour flows row to row and a "Colour change to" note switches it');
+assertEqual(P.expand(P.parse('Head\nIn Color A\n1. Mr6 - (6)'), 1, null, null).color, 'Color A', '"In Color A" sets the base colour');
+assertEqual(P.expand(P.parse('Head\nWith MC\n1. Mr6 - (6)'), 1, null, null).color, 'MC', '"With MC" sets the base colour');
+assertEqual(P.expand(P.parse('Head\nUsing Mustard\n1. Mr6 - (6)'), 1, null, null).color, 'Mustard', '"Using Mustard" sets the base colour');
+assertEqual(P.expand(P.parse('1. Sc 6 (6)\nFasten off Almond'), 1, null, null).color, null, '"Fasten off X" does not become the base colour');
+
+assertEqual(P.colorHex('black'), '#1c1c1c', 'colorHex black');
+assertEqual(P.colorHex('WHITE'), '#fdfdfb', 'colorHex is case-insensitive');
+assertEqual(P.colorHex('Almond'), '#efdecd', 'colorHex almond');
+assertEqual(P.colorHex('Sand'), '#e3cda4', 'colorHex sand');
+assertEqual(P.colorHex('twilight'), '#2b3556', 'colorHex twilight -> dark navy');
+assertEqual(P.colorHex('Mustard'), '#d4a017', 'colorHex mustard');
+assertEqual(P.colorHex('mint'), '#a8e6cf', 'colorHex mint');
+assertEqual(P.colorHex('grey'), P.colorHex('gray'), 'colorHex grey == gray');
+assertEqual(P.colorHex('turquoise'), '#40e0d0', 'colorHex turquoise');
+assertEqual(P.colorHex('black yarn'), '#1c1c1c', 'colorHex ignores a trailing "yarn"');
+assertEqual(P.colorHex('light blue'), '#78a1cf', 'colorHex "light blue" mixes blue 35% toward white');
+assertEqual(P.colorHex('pale yellow'), '#f9e487', 'colorHex "pale yellow" lightens like "light"');
+assertEqual(P.colorHex('dark green'), '#2c662e', 'colorHex "dark green" mixes green 30% toward black');
+assertEqual(P.colorHex('deep teal'), '#146161', 'colorHex "deep teal" darkens like "dark"');
+assertEqual(P.colorHex('baby pink'), '#f4c2c2', 'colorHex knows "baby pink" outright');
+['Color A', 'Colour B', 'MC', 'CC', 'A', 'B', 'z', 'wibble', '', null].forEach(function (n) {
+  assertEqual(P.colorHex(n), null, 'colorHex(' + JSON.stringify(n) + ') == null');
+});
+
+// -----------------------------------------------------------------------
 var summaryEl = document.getElementById('summary');
 var finalLine = passed + ' passed, ' + failed + ' failed';
 summaryEl.textContent = finalLine;

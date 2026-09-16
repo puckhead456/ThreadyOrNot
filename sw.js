@@ -2,7 +2,7 @@
 
 /* Stitchkeeper service worker.
    Bump CACHE_VERSION whenever any precached file changes. */
-const CACHE_VERSION = 'v8';
+const CACHE_VERSION = 'v9';
 const CACHE_NAME = 'stitchkeeper-' + CACHE_VERSION;
 
 const PRECACHE_URLS = [
@@ -18,6 +18,7 @@ const PRECACHE_URLS = [
   './js/vendor/pdf.min.js',
   './js/vendor/pdf.worker.min.js',
   './js/celebrate.js',
+  './js/diagram.js',
   './js/audio.js',
   './js/store.js',
   './js/tour.js',

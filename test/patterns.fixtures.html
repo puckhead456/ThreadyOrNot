@@ -174,7 +174,8 @@ function finish() {
 
 Promise.all([get('bee.txt'), get('cardigan.txt'), get('bear.txt'), get('cato.txt')]).then(function (res) {
   out.textContent = '';
-  try { run(res[0], res[1]); runBear(res[2]); runCato(res[3]); consistency(res[2], res[3]); } catch (e) {
+  try { run(res[0], res[1]); runBear(res[2]); runCato(res[3]); consistency(res[2], res[3]);
+        runDiagram(res[2], res[0], res[3], res[1]); } catch (e) {
     log(false, 'fixture run threw: ' + (e && e.stack ? e.stack : e));
   }
   return runPdfs();
@@ -369,6 +370,99 @@ function consistency() {
   h('div', agree + ' / ' + total + ' rows agree (' + pct + '%)', 'note');
   bad.forEach(function (b) { out.appendChild(el('div', 'warn', b)); });
   log(pct >= 90, 'consistency: computed counts agree with printed counts on at least 90% of rows', pct + '% of ' + total);
+}
+
+// ------------------------------------------- live diagram: colours + expand
+
+// Walk a section row by row, carrying expand()'s state, and return one
+// { color, stitches } per row (index 0 = row 1).
+function walkRows(text, upTo) {
+  var lines = P.parse(text);
+  var sum = P.summary(lines);
+  var last = upTo || sum.maxRow || 0;
+  var state = null, prev = null, rows = [];
+  for (var row = 1; row <= last; row++) {
+    var r = P.expand(lines, row, prev, state);
+    state = r.state;
+    if (r.stitches.length) prev = r.stitches.length;
+    rows.push(r);
+  }
+  return rows;
+}
+
+function runDiagram(bearRaw, beeRaw, catoRaw, cardiganRaw) {
+  var bear = clean(bearRaw), bee = clean(beeRaw), cato = clean(catoRaw), cardigan = clean(cardiganRaw);
+  h('h2', 'LIVE DIAGRAM (Patterns.colors / Patterns.expand / Patterns.colorHex)');
+
+  // --- bear: colour legend, row colours, colour-prefixed groups
+  var bearCols = P.colors(bear);
+  eq(bearCols.legend, { A: 'Almond', S: 'Sand' }, 'bear colors(): legend A=Almond, S=Sand');
+  ['Almond', 'Sand', 'Twilight'].forEach(function (n) {
+    log(bearCols.names.indexOf(n) >= 0, 'bear colors(): names include "' + n + '"', JSON.stringify(bearCols.names));
+  });
+
+  var bearHead = sectionNamed(P.splitSections(bear), 'Head');
+  if (bearHead) {
+    var hr = walkRows(bearHead.text, 5);
+    eq(hr[0].color, 'Twilight', 'bear Head round 1 base colour is "Twilight" ("In Twilight :")');
+    var r5 = hr[4];
+    eq(r5.stitches.length, 30, 'bear Head round 5 ("Sc 10 , A (Sc 3) , Sc 3 , A (Sc 3) , Sc 11") expands to 30 stitches');
+    var almond = [];
+    r5.stitches.forEach(function (s, i) { if (s.c === 'Almond') almond.push(i + 1); });
+    eq(almond, [11, 12, 13, 17, 18, 19], 'bear Head round 5: the 6 Almond stitches sit at 11-13 and 17-19');
+    eq(r5.color, 'Twilight', 'bear Head round 5 base colour is still Twilight');
+    log(r5.stitches.every(function (s) { return s.t === 'sc'; }), 'bear Head round 5: every stitch is an sc');
+  } else { log(false, 'bear Head found (diagram)'); }
+
+  // --- bee: "Colour change to X" notes between rows
+  var beeBody = P.splitSections(bee)[0];
+  if (beeBody) {
+    var br = walkRows(beeBody.text, 6);
+    eq(br[4].color, 'black', 'bee keyring row 5 base colour is black ("Colour change to black" attaches to row 5)');
+    eq(br[5].color, 'yellow', 'bee keyring row 6 base colour is yellow');
+    eq(br[4].stitches.length, 15, 'bee keyring row 5 expands to 15 stitches');
+  } else { log(false, 'bee keyring Body found (diagram)'); }
+
+  // --- cato: "In Color A" / "In Color B" / "in color C", none of them real colours
+  var catoHead = sectionNamed(P.splitSections(cato), 'Head');
+  if (catoHead) {
+    eq(walkRows(catoHead.text, 1)[0].color, 'Color A', 'cato Head base colour is "Color A"');
+  } else { log(false, 'cato Head found (diagram)'); }
+  var catoNames = P.colors(cato).names;
+  ['Color A', 'Color B', 'Color C'].forEach(function (n) {
+    log(catoNames.indexOf(n) >= 0, 'cato colors(): names include "' + n + '"', JSON.stringify(catoNames));
+  });
+  eq(P.colorHex('Color A'), null, 'colorHex("Color A") is null - the app maps scheme letters itself');
+
+  // --- every row of every fixture: never throws, totals match the printed count
+  var threw = [], mismatch = [], rowsSeen = 0, counted = 0;
+  [['bear', bear], ['bee', bee], ['cato', cato], ['cardigan', cardigan]].forEach(function (pair) {
+    P.splitSections(pair[1]).forEach(function (s) {
+      var lines = P.parse(s.text);
+      var maxRow = P.summary(lines).maxRow || 0;
+      var state = null, prev = null;
+      for (var row = 1; row <= maxRow; row++) {
+        var res;
+        try { res = P.expand(lines, row, prev, state); }
+        catch (e) { threw.push(pair[0] + ' / ' + s.name + ' row ' + row + ': ' + e); continue; }
+        state = res.state;
+        rowsSeen++;
+        var line = P.lineFor(lines, row);
+        if (line && line.count !== null && line.count !== undefined) {
+          counted++;
+          if (res.stitches.length !== line.count) {
+            mismatch.push(pair[0] + ' / ' + s.name + ' row ' + row + ': count ' + line.count +
+              ' vs expand ' + res.stitches.length + ' - ' + line.text.trim().slice(0, 70));
+          }
+        }
+        if (res.stitches.length) prev = res.stitches.length;
+      }
+    });
+  });
+  h('div', 'expand() walked ' + rowsSeen + ' rows across the four fixtures, ' + counted + ' of them with a printed count', 'note');
+  log(threw.length === 0, 'expand() never throws on any fixture row', threw.slice(0, 3).join(' | '));
+  log(mismatch.length === 0, 'expand() produces exactly `count` stitches for every counted row', mismatch.length + ' mismatches');
+  mismatch.forEach(function (m) { out.appendChild(el('div', 'warn', m)); });
 }
 
 function run(bee, cardigan) {

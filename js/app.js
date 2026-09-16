@@ -185,6 +185,7 @@
     els.patternTag = $('#pattern-line-tag');
     els.patternText = $('#pattern-line-text');
     els.patternNotes = $('#pattern-line-notes');
+    els.stitchSection = $('.stitch-section');
     els.stitchBtn = $('#stitch-btn');
     els.stitchNumber = $('#stitch-number');
     els.stitchReadout = $('#stitch-readout');
@@ -535,7 +536,11 @@
     if (!id) return;
     document.documentElement.setAttribute('data-theme', id);
     if (persist !== false) Store.setSetting('theme', id);
-    window.requestAnimationFrame(updateThemeColor);
+    window.requestAnimationFrame(function () {
+      updateThemeColor();
+      // The diagram paints with the theme's own colours.
+      setDiagramPalette();
+    });
   }
 
   function updateThemeColor() {
@@ -631,6 +636,8 @@
     } else {
       els.project.hidden = true;
       els.home.hidden = false;
+      // Leaving the project screen: the diagram goes with it.
+      destroyLiveDiagram();
       renderHome();
     }
     syncWakeLock();
@@ -870,6 +877,7 @@
     renderTabs(p);
     updateCounters(p, prt);
     updateBottomBar(p, prt);
+    mountLiveDiagram();
   }
 
   /* ================================================================== *
@@ -912,17 +920,20 @@
       case 'stitch':
         fb('tap');
         updateCounters(p, prt);
+        pushDiagram('stitch');
         break;
 
       case 'group':
         fb('group');
         updateCounters(p, prt);
+        pushDiagram('stitch');
         break;
 
       case 'alert':
         fb('alert');
         flashStitchButton();
         updateCounters(p, prt);
+        pushDiagram('stitch');
         toast('Stitch ' + res.stitch + ' — check your pattern');
         break;
 
@@ -931,6 +942,7 @@
         fb('row');
         updateCounters(p, prt);
         updateBottomBar(p, prt);
+        pushDiagram('round');
         announce(rowWord(p) + ' ' + prt.row);
         break;
 
@@ -962,6 +974,7 @@
 
       default:
         updateCounters(p, prt);
+        pushDiagram('none');
     }
   }
 
@@ -1039,6 +1052,393 @@
     // Keyboard activation (Enter/Space) produces a click with detail === 0.
     on(btn, 'click', function (e) {
       if (e.detail === 0) doStitchTap();
+    });
+  }
+
+  /* ================================================================== *
+   * 15b. Live 3D diagram
+   *
+   * Entirely optional: without window.Diagram (or with the setting off) no
+   * canvas is created and every entry point below is a no-op, so the counter
+   * behaves exactly as it did before.
+   * ================================================================== */
+
+  var live = { handle: null, canvas: null, btn: null };
+  var viewer = { handle: null, canvas: null, readout: null, sheet: null };
+
+  function prefersReducedMotion() {
+    try {
+      return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function diagramAvailable() {
+    return !!(
+      window.Diagram &&
+      typeof window.Diagram.mount === 'function' &&
+      window.Store &&
+      typeof Store.diagramModel === 'function'
+    );
+  }
+
+  function diagramEnabled() {
+    return diagramAvailable() && Store.settings().liveDiagram !== false;
+  }
+
+  /** '#4a3728' / 'rgb(…)' → 'rgba(74,55,40,a)'. Unparseable colours pass through. */
+  function withAlpha(color, a) {
+    var c = String(color || '').trim();
+    if (!c) return 'rgba(0,0,0,' + a + ')';
+    var hex = c.charAt(0) === '#' ? c.slice(1) : null;
+    if (hex && hex.length === 3) {
+      hex = hex.charAt(0) + hex.charAt(0) + hex.charAt(1) + hex.charAt(1) + hex.charAt(2) + hex.charAt(2);
+    }
+    if (hex && /^[0-9a-fA-F]{6}$/.test(hex)) {
+      return (
+        'rgba(' + parseInt(hex.slice(0, 2), 16) + ',' + parseInt(hex.slice(2, 4), 16) + ',' +
+        parseInt(hex.slice(4, 6), 16) + ',' + a + ')'
+      );
+    }
+    var m = c.match(/^rgba?\(([^)]+)\)$/i);
+    if (m) {
+      var parts = m[1].split(',');
+      if (parts.length >= 3) {
+        return 'rgba(' + parts[0].trim() + ',' + parts[1].trim() + ',' + parts[2].trim() + ',' + a + ')';
+      }
+    }
+    return c;
+  }
+
+  function cssVar(cs, name, fallback) {
+    var v = (cs.getPropertyValue(name) || '').trim();
+    return v || fallback;
+  }
+
+  function diagramPalette() {
+    var cs = window.getComputedStyle(document.documentElement);
+    return {
+      ghost: withAlpha(cssVar(cs, '--text', '#000000'), 0.35),
+      ink: cssVar(cs, '--primary-text', '#ffffff'),
+      glow: cssVar(cs, '--accent-2', '#e6a23c'),
+      bg: cssVar(cs, '--primary', '#4f9868')
+    };
+  }
+
+  /** The model for whatever is on screen, or null. */
+  function currentModel() {
+    var p = currentProject();
+    var prt = p ? Store.activePart(p) : null;
+    if (!p || !prt) return null;
+    try {
+      return Store.diagramModel(prt, p);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /**
+   * Push the current model at whatever is mounted.
+   * @param {'stitch'|'round'|'none'} animate
+   */
+  function pushDiagram(animate) {
+    if (!live.handle && !viewer.handle) return;
+    var model = currentModel();
+    if (!model) return;
+    var opts = { animate: animate || 'none' };
+    if (live.handle) {
+      try {
+        live.handle.setModel(model, opts);
+      } catch (e) {
+        /* a renderer that gave up must not break counting */
+      }
+    }
+    if (viewer.handle) {
+      try {
+        viewer.handle.setModel(model, opts);
+      } catch (e) {
+        /* ignore */
+      }
+      updateViewerReadout();
+    }
+  }
+
+  function setDiagramPalette() {
+    var pal = null;
+    [live.handle, viewer.handle].forEach(function (h) {
+      if (!h || typeof h.setPalette !== 'function') return;
+      if (!pal) pal = diagramPalette();
+      try {
+        h.setPalette(pal);
+      } catch (e) {
+        /* ignore */
+      }
+    });
+  }
+
+  function resizeDiagrams() {
+    [live.handle, viewer.handle].forEach(function (h) {
+      if (!h || typeof h.resize !== 'function') return;
+      try {
+        h.resize();
+      } catch (e) {
+        /* ignore */
+      }
+    });
+  }
+
+  function destroyLiveDiagram() {
+    if (live.handle) {
+      try {
+        live.handle.destroy();
+      } catch (e) {
+        /* ignore */
+      }
+      live.handle = null;
+    }
+    if (live.canvas && live.canvas.parentNode) live.canvas.parentNode.removeChild(live.canvas);
+    live.canvas = null;
+    if (live.btn && live.btn.parentNode) live.btn.parentNode.removeChild(live.btn);
+    live.btn = null;
+    if (els.stitchBtn) els.stitchBtn.classList.remove('has-diagram');
+  }
+
+  /** Mount (or refresh) the canvas inside the stitch button. */
+  function mountLiveDiagram() {
+    if (!diagramEnabled() || !els.stitchBtn) {
+      destroyLiveDiagram();
+      return;
+    }
+    if (!live.canvas) {
+      var c = document.createElement('canvas');
+      c.id = 'stitch-canvas';
+      c.className = 'stitch-canvas';
+      c.setAttribute('aria-hidden', 'true');
+      // Behind the caption and the number, which the CSS lifts above it.
+      els.stitchBtn.insertBefore(c, els.stitchBtn.firstChild);
+      live.canvas = c;
+    }
+    if (!live.handle) {
+      try {
+        live.handle = window.Diagram.mount(live.canvas, {
+          palette: diagramPalette(),
+          reducedMotion: prefersReducedMotion(),
+          interactive: false
+        });
+      } catch (e) {
+        live.handle = null;
+      }
+      if (!live.handle) {
+        destroyLiveDiagram();
+        return;
+      }
+    }
+    if (!live.btn && els.stitchSection) {
+      var b = button('stitch-3d', '⤢', 'Open 3D view');
+      b.id = 'stitch-3d';
+      on(b, 'click', function (e) {
+        e.stopPropagation();
+        openViewerSheet();
+      });
+      els.stitchSection.appendChild(b);
+      live.btn = b;
+    }
+    els.stitchBtn.classList.add('has-diagram');
+    resizeDiagrams();
+    pushDiagram('none');
+  }
+
+  /** "Rnd 5 · 13 / 24" for the viewer header. */
+  function viewerReadoutText(p, prt) {
+    if (!p || !prt) return '';
+    var ri = Store.repeatInfo(prt);
+    var target = Store.currentTarget(prt);
+    var text = shortRowWord(p) + ' ' + ri.workingRow + ' · ' + prt.stitch;
+    text += target ? ' / ' + target : ' sts';
+    return text;
+  }
+
+  function updateViewerReadout() {
+    if (!viewer.readout) return;
+    var p = currentProject();
+    var prt = p ? Store.activePart(p) : null;
+    viewer.readout.textContent = viewerReadoutText(p, prt);
+  }
+
+  function destroyViewer() {
+    if (viewer.handle) {
+      try {
+        viewer.handle.destroy();
+      } catch (e) {
+        /* ignore */
+      }
+    }
+    viewer.handle = null;
+    viewer.canvas = null;
+    viewer.readout = null;
+    viewer.sheet = null;
+  }
+
+  function openViewerSheet() {
+    var p = currentProject();
+    var prt = p ? Store.activePart(p) : null;
+    if (!p || !prt) return;
+
+    openSheet({
+      title: prt.name,
+      cls: 'sheet-viewer',
+      build: function (body, api) {
+        viewer.sheet = api;
+
+        // The round / stitch readout lives in the sheet header, beside the name.
+        var readout = el('div', 'viewer-readout', viewerReadoutText(p, prt));
+        viewer.readout = readout;
+        var head = api.dialog.querySelector('.sheet-head');
+        if (head) {
+          var closeBtn = head.querySelector('.sheet-close');
+          if (closeBtn) head.insertBefore(readout, closeBtn);
+          else head.appendChild(readout);
+        } else {
+          body.appendChild(readout);
+        }
+
+        var stage = el('div', 'viewer-stage');
+        var canvas = document.createElement('canvas');
+        canvas.className = 'viewer-canvas';
+        canvas.setAttribute('aria-label', prt.name + ' in 3D');
+        stage.appendChild(canvas);
+        body.appendChild(stage);
+
+        if (!diagramAvailable()) {
+          stage.appendChild(el('div', 'viewer-empty', 'The 3D view is not available on this device.'));
+          return;
+        }
+        try {
+          viewer.handle = window.Diagram.mount(canvas, {
+            palette: diagramPalette(),
+            reducedMotion: prefersReducedMotion(),
+            interactive: true
+          });
+        } catch (e) {
+          viewer.handle = null;
+        }
+        if (!viewer.handle) {
+          stage.appendChild(el('div', 'viewer-empty', 'The 3D view could not start.'));
+          return;
+        }
+        viewer.canvas = canvas;
+        if (typeof viewer.handle.setInteractive === 'function') {
+          try {
+            viewer.handle.setInteractive(true);
+          } catch (e2) {
+            /* ignore */
+          }
+        }
+        // The sheet is still animating in — size it once it has landed.
+        window.requestAnimationFrame(function () {
+          resizeDiagrams();
+          pushDiagram('none');
+        });
+      },
+      footer: [
+        {
+          text: 'Yarn colours',
+          cls: 'btn ghost',
+          onClick: function () {
+            openYarnSheet(p.id);
+          }
+        },
+        {
+          text: 'Close',
+          cls: 'btn primary',
+          onClick: function (api) {
+            api.close();
+          }
+        }
+      ],
+      onClose: destroyViewer
+    });
+  }
+
+  /* ---- Yarn colours ---- */
+
+  function yarnRow(projectId, name, label) {
+    var proj = Store.project(projectId);
+    var row = el('div', 'yarn-row');
+    var swatch = el('span', 'yarn-swatch');
+    var main = el('div', 'yarn-main');
+    main.appendChild(el('div', 'yarn-name', label));
+    var reset = button('linkish yarn-reset', 'Reset to detected');
+    main.appendChild(reset);
+
+    var pick = document.createElement('input');
+    pick.type = 'color';
+    pick.className = 'yarn-pick';
+    pick.setAttribute('aria-label', label + ' colour');
+
+    function sync() {
+      var hex = Store.yarnColorFor(Store.project(projectId), name);
+      swatch.style.background = hex;
+      pick.value = hex;
+      reset.hidden = !Store.hasYarnColor(Store.project(projectId), name);
+    }
+
+    function apply(hex) {
+      Store.setYarnColor(projectId, name, hex);
+      sync();
+      // Both the button and the viewer follow the new palette straight away.
+      pushDiagram('none');
+    }
+
+    on(pick, 'input', function () {
+      apply(pick.value);
+    });
+    on(pick, 'change', function () {
+      apply(pick.value);
+    });
+    on(reset, 'click', function () {
+      apply(null);
+      fb('tap');
+    });
+
+    row.appendChild(swatch);
+    row.appendChild(main);
+    row.appendChild(pick);
+    if (proj) sync();
+    return row;
+  }
+
+  function openYarnSheet(projectId) {
+    var p = Store.project(projectId);
+    if (!p) return;
+    openSheet({
+      title: 'Yarn colours',
+      build: function (body) {
+        var list = el('div', 'list');
+        list.appendChild(yarnRow(p.id, Store.MAIN_YARN || '*', 'Main yarn'));
+
+        var names = [];
+        try {
+          names = Store.yarnColorNames(p) || [];
+        } catch (e) {
+          names = [];
+        }
+        names.forEach(function (n) {
+          list.appendChild(yarnRow(p.id, n, n));
+        });
+        body.appendChild(list);
+
+        body.appendChild(
+          el(
+            'div',
+            'field-hint',
+            names.length
+              ? 'Colours picked up from your pattern. Change one and the 3D piece changes with it.'
+              : 'No colour names found in this pattern yet — the main yarn colours the whole piece.'
+          )
+        );
+      }
     });
   }
 
@@ -2694,6 +3094,7 @@
       { icon: '📋', label: 'Import pattern', run: function () { openImportSheet(p.id, ''); } },
       { icon: '✅', label: 'Checklist', run: function () { openChecklistSheet(p.id); } },
       { icon: '📝', label: 'Notes', run: function () { openNotesSheet(p.id); } },
+      { icon: '🎨', label: 'Yarn colours', run: function () { openYarnSheet(p.id); } },
       { icon: '🕘', label: 'History', run: function () { openHistorySheet(p.id); } },
       { icon: '🏷️', label: 'Status', run: function () { openStatusSheet(p.id); } },
       {
@@ -3070,6 +3471,15 @@
             Store.setSetting('autoAdvance', v);
           })
         );
+        if (diagramAvailable()) {
+          toggles.appendChild(
+            switchRow('Live diagram', 'Your piece, in 3D, inside the stitch button.', s.liveDiagram !== false, function (v) {
+              Store.setSetting('liveDiagram', v);
+              if (v) mountLiveDiagram();
+              else destroyLiveDiagram();
+            })
+          );
+        }
         if (wakeSupported) {
           toggles.appendChild(
             switchRow('Keep screen awake', 'While a project is open.', s.keepAwake, function (v) {
@@ -3208,6 +3618,7 @@
       fb('undo');
       updateCounters(p, Store.activePart(p));
       updateBottomBar(p, Store.activePart(p));
+      pushDiagram('none');
     });
     on($('#stitch-reset'), 'click', function () {
       var p = currentProject();
@@ -3255,6 +3666,7 @@
         render();
       }
     });
+    window.addEventListener('resize', debounce(resizeDiagrams, 120));
     window.addEventListener('pagehide', function () {
       Store.flush();
     });

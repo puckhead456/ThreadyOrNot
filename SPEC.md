@@ -354,3 +354,61 @@ Status change sheet: Active / Paused / Finished / Frogged with short explanation
 - `manifest.webmanifest`: name "Stitchkeeper", short_name "Stitchkeeper", start_url "./", scope "./", display "standalone", background/theme colors, icons 192/512 (any + maskable).
 - `sw.js`: precache app shell on install (`./`, `./index.html`, css, js, manifest, icons), cache-first for same-origin + fonts.googleapis/gstatic (opaque ok), network-first for `./index.html` navigation with cache fallback. Bump `CACHE_VERSION` on release; delete old caches on activate; `self.skipWaiting()` + `clients.claim()`.
 - `index.html` has `<link rel="apple-touch-icon">`, `apple-mobile-web-app-capable`, `apple-mobile-web-app-status-bar-style` = `black-translucent`, viewport `viewport-fit=cover`.
+
+
+## Live 3D diagram (branch `feature/live-diagram`)
+
+Goal: inside the big stitch button, show the piece being made as a **slowly rotating 3D model**, updated in real time as the user taps. A round-worked piece is a **stack of rings** (one ring per round, ring circumference = stitch count), which is a solid of revolution: sphere for increase-then-decrease, cone for a horn, tube for a body. Each stitch is a small bump on its ring, coloured by yarn. A row-worked piece is a gently curved sheet of stitch bumps. Colours come from the pattern (colour changes, colour prefixes, legends) or the user's yarn colour settings. The current round shows only the stitches tapped so far; future rounds from the pattern are faint wireframe ghosts. With no pattern, the model is built purely from what was actually tapped.
+
+### Three work packages, three contracts
+
+**1. Parser additions (`js/patterns.js`)**
+```js
+Patterns.colors(text) → {
+  legend: { 'A': 'Almond', 'S': 'Sand' },          // from "( A = Almond )", "A = Almond", "MC = Main colour"
+  names: ['Twilight','Almond','Sand','black','yellow','Color A','Color B'],  // every yarn colour name mentioned, first-seen order
+}
+Patterns.expand(lines, rowNumber, prevCount, state) → {
+  stitches: [ { t: 'sc'|'hdc'|'dc'|'tr'|'inc'|'dec'|'sl'|'ch'|'bbl'|'puff'|'x', c: string|null } ],  // one entry per PRODUCED stitch; inc yields 2 entries (t:'inc'), dec yields 1 (t:'dec'); c = colour NAME or null (= row colour)
+  color: string|null,          // the row's base colour name (state carried from previous rows), null if unknown
+  height: number,              // 1 (sc/sl/x), 1.5 (hdc), 2 (dc), 2.5 (tr): dominant stitch of the row
+  state: object                // opaque; pass back for the next row (tracks current colour, legend)
+}
+Patterns.colorHex(name) → '#rrggbb' | null
+```
+Rules: colour state flows row to row: `In Twilight :`, `In Color A`, `With MC`, `Using yellow` set the base colour (from notes attached to the row or header lines before it); `Colour change to black`, `change to Color B`, `switch to yellow` attached to row N sets the base from row N; `Fasten off Almond` ends a secondary colour; prefixes `A (Sc 5)`, `S (Dec x 12)`, `MC: sc 6`, `(in B) sc 3` colour just that group; `Rnd 5 (yellow): ...` colours the row. When a row cannot be evaluated but has a count, emit `count` × `{t:'x', c:null}`. Never throw; on any failure return `count` generic stitches. `colorHex` knows ~120 yarn colour words (black, white, cream, ivory, almond, sand, beige, tan, brown, chocolate, twilight → dark navy, navy, teal, sage, mint, forest, olive, lime, yellow, mustard, gold, orange, coral, peach, pink, blush, rose, red, burgundy, maroon, purple, lavender, lilac, plum, grey/gray, silver, charcoal, sky, baby blue, denim, turquoise, aqua, ...) and returns null for `Color A`, `MC`, `CC` and unknown words (the app maps those).
+
+**2. Renderer (`js/diagram.js`, new, `window.Diagram`) — 3D, WebGL**
+```js
+Model = {
+  mode: 'rounds' | 'rows',
+  rounds: [ {                      // in work order; index 0 = first round/row
+    count: number,                 // stitches this round will have (known or planned); 0 allowed
+    done: number,                  // stitches completed so far (= count when finished)
+    stitches: [ { t, c: '#hex'|null } ],   // may be shorter than count (then repeat last / generic)
+    color: '#hex',                 // base colour for the round
+    height: number,                // 1 = sc height
+    ghost: boolean,                // planned from pattern, not started
+  } ],
+  current: number,                 // index of the round being worked
+  defaultColor: '#hex',
+}
+Diagram.mount(canvas, { palette: { ghost, ink, glow, bg }, reducedMotion, interactive: false }) → handle
+handle.setModel(model, { animate: 'stitch' | 'round' | 'none' })
+handle.setPalette(palette); handle.resize(); handle.destroy()
+handle.setInteractive(true|false)   // drag to rotate, wheel/pinch to zoom (used by the expanded viewer)
+```
+Implementation: raw WebGL 1 (no dependency; ~1 vertex + 1 fragment shader, Lambert + soft rim light, vertex colours). If raw WebGL proves too slow to write well, vendoring three.js r128 UMD (`three.min.js`, cdnjs) into `js/vendor/` is acceptable; say which you chose. Canvas 2D fallback (flat shaded silhouette) when WebGL is unavailable.
+- **Geometry, rounds mode**: ring i has radius `R_i = max(R_min, count_i * SW / 2π)` and sits at height `y_i = -Σ height_k * SH` (round 1 at the top; the piece grows downward). Between consecutive rings build a triangle strip. Each stitch of a ring occupies an angular slice; subdivide each slice into 4 segments and displace the middle vertices outward (+bump) and the slice edges inward, so the surface reads as a knobby crochet texture; `inc` slices are wider, `dec` narrower, `sl`/`ch` flat. Vertex colour = stitch colour (or the round colour). Round 0/1 stitches (magic ring) = a small cap. The ring being worked: only `done` slices are solid; the remaining slices of that ring (and every ghost round) are drawn as a translucent wireframe in `palette.ghost`. Close the top with a cap when round 1 is a magic ring; leave the bottom open (you see inside a tube slightly, which looks right).
+- **Rows mode**: rows stacked bottom-up as a sheet in the XZ plane tilted toward the camera, width = count × SW, row height by `height`; each stitch is a bump; odd/even rows offset half a stitch; current row partial from left (odd) or right (even); ghost rows wireframe. Gentle curvature (cylinder radius ≈ 3× width) so rotation shows depth.
+- **Camera & motion**: perspective camera, slight downward pitch (~20°), auto-rotate around the vertical axis at ~12°/s (pauses for 1.5s after each model change so the new stitch is seen, then resumes), model auto-fit so the whole solid part (ghosts capped so they can't shrink the real piece below 45% of the view) fits with 8% margin; scale and camera distance ease over 200ms. `interactive`: pointer drag rotates (inertia), wheel/pinch zooms, double-tap resets. `reducedMotion`: no auto-rotate, no scale-in.
+- **Animation**: `animate:'stitch'` → the newest bump scales in from 0 over 140ms with slight overshoot; `'round'` → the finished ring flashes once with `palette.glow`. Redraw only via requestAnimationFrame while something changes or auto-rotating; must stay ≤ 4ms/frame for 60 rounds × 60 stitches on a mid phone (cap 160 slices per ring; subsample beyond). DPR-aware, transparent clear colour so the button colour shows through.
+- Deliver `test/diagram.test.html`: canvas + buttons for sample models (sphere 6→48→6, cone/horn, striped tube, bear head with a belly-panel colour run, a 30-row blanket), a "tap" button that advances `done` with animation, a "complete round" button, an interactive toggle, and a theme switcher for the background colour.
+
+**3. App integration (`js/store.js`, `js/app.js`, `index.html`, `css/app.css`, `js/tour.js`)**
+- `Part.rowStitches: number[]` (index = row number, 1-based; value = stitch count when that row was completed). `tapRow` records `part.stitch` (or the target when auto-advanced) before resetting; `untapRow` pops; `resetPart` clears; normalised on load.
+- `Project.yarnColors: { [name]: '#hex' }` with reserved key `'*'` = main yarn colour (default warm cream `#f1e3c8`).
+- `Store.diagramModel(part, project) → Model`: rows 1..max(part.row + 1, pattern maxRow, rowStitches.length); per row: if a pattern line exists → `Patterns.expand` (state carried row to row), colours resolved as `yarnColors[name] || Patterns.colorHex(name) || yarnColors['*']`; else if `rowStitches[row]` → that many generic stitches in the main colour; else if it is the current row → `count = max(part.stitch, target || 0)`; `done` from rowStitches / part.stitch; `ghost = row > current`. Cache per part (key: patternText, sizeIndex, yarnColors, row, rowStitches.length) and on the tap path only mutate the current round's `done`/`count`.
+- App: `<canvas id="stitch-canvas">` inside `#stitch-btn` behind the caption/number (absolute, inset 0, `pointer-events:none`; number/caption get a soft text shadow), `Diagram.mount` when the project screen renders, `setModel(..., {animate:'stitch'})` on the tap fast path, `'round'` on row completion, `setPalette` on theme change, `destroy` when leaving. A small ⤢ button in the corner of the stitch section opens the **3D viewer sheet**: full-height canvas with `interactive: true`, the part name, round/stitch readout, and a Yarn colours button. Settings toggle **Live diagram** (default on; off removes the canvas). New sheet **Yarn colours** (project overflow menu + from the viewer): Main yarn plus every name from `Patterns.colors` across the project's parts, each with `<input type="color">` and the resolved swatch; edits update the model live.
+- Tour: add one counter-tour step for the diagram ("This is your piece growing as you count. Tap ⤢ to spin it around.").
+- Bump `CACHE_VERSION`, precache `./js/diagram.js` (and `three.min.js` if vendored).
