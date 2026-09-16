@@ -1125,6 +1125,22 @@
     return state.b64;
   }
 
+  /**
+   * refitBits(b64, n) -> base64 holding exactly n bits.
+   * Anything past bit n-1 is dropped and anything missing reads as 0, so a
+   * bitmap kept from an older, differently sized chart cannot mark the wrong
+   * items. An all-zero result is stored as '' to keep craftData small.
+   */
+  function refitBits(b64, n) {
+    if (!(n > 0)) return '';
+    var s = str(b64, '');
+    if (!s) return '';
+    var bits = unpackBits(s, n);
+    var any = false;
+    for (var i = 0; i < n; i++) if (bits[i]) { any = true; break; }
+    return any ? packBits(bits, n) : '';
+  }
+
   /** popcount over the first n bits of a base64 bitmap. */
   function countBits(b64, n) {
     var bytes = b64ToBytes(b64);
@@ -1304,34 +1320,57 @@
   }
 
   /**
-   * progressStats(data) -> { done, total, pct, byColor: [{ i, done, total }] }
-   * Works in both 'cells' and 'counts' mode.
+   * progressStats(data) -> {
+   *   done, total, pct,
+   *   byColor: [{ i, done, total, back, knots, part, complete }],
+   *   breakdown: { cross, part, back, knots }
+   * }
+   *
+   * `done` / `total` / `pct` cover the whole piece: one per full cross, one per
+   * fractional stitch, one per knot or bead and one per backstitch segment.
+   * `breakdown` splits that four ways, each as `{ done, total }`.
+   *
+   * `byColor[i].done` / `.total` stay CROSSES ONLY — the tap button, the group
+   * readout and the "412 left" line all count crosses — with the three extra
+   * layers in their own `{ done, total }` sub-objects and `complete` true when
+   * every layer of that colour is finished.
+   *
+   * A part stitch with two palette indexes counts once towards each of them in
+   * `byColor` (it is half of each colour's work) but only once in the totals.
+   *
+   * Works in both 'cells' and 'counts' mode; the three extra layers only exist
+   * alongside a cell chart.
    */
+  function blankTally() { return { done: 0, total: 0 }; }
+
   function progressStats(data) {
     data = isObj(data) ? data : {};
     var palette = Array.isArray(data.palette) ? data.palette : [];
     var progress = isObj(data.progress) ? data.progress : {};
     var byColor = [];
-    var i, done = 0, total = 0;
+    var i;
+    var breakdown = { cross: blankTally(), part: blankTally(), back: blankTally(), knots: blankTally() };
+
+    for (i = 0; i < palette.length; i++) {
+      byColor.push({
+        i: num(palette[i].i, i), done: 0, total: 0,
+        back: blankTally(), knots: blankTally(), part: blankTally(), complete: false
+      });
+    }
 
     var c = progress.mode === 'cells' ? chartCells(data.chart) : null;
     if (c) {
       var n = c.w * c.h;
       var bits = unpackBits(str(progress.done, ''), n);
-      var dTot = [], tTot = [];
-      for (i = 0; i < palette.length; i++) { dTot.push(0); tTot.push(0); }
       for (i = 0; i < n; i++) {
         var v = c.cells[i];
         if (v < 0) continue;
-        total++;
-        if (v < tTot.length) tTot[v]++;
+        breakdown.cross.total++;
+        if (v < byColor.length) byColor[v].total++;
         if (bits[i]) {
-          done++;
-          if (v < dTot.length) dTot[v]++;
+          breakdown.cross.done++;
+          if (v < byColor.length) byColor[v].done++;
         }
-      }
-      for (i = 0; i < palette.length; i++) {
-        byColor.push({ i: num(palette[i].i, i), done: dTot[i], total: tTot[i] });
       }
     } else {
       var per = Array.isArray(progress.perColor) ? progress.perColor : [];
@@ -1342,18 +1381,220 @@
           if (clampInt(per[k].i, 0, 1e9, -1) === num(palette[i].i, i)) { d = clampInt(per[k].done, 0, 1e9, 0); break; }
         }
         if (t && d > t) d = t;
-        total += t;
-        done += d;
-        byColor.push({ i: num(palette[i].i, i), done: d, total: t });
+        breakdown.cross.total += t;
+        breakdown.cross.done += d;
+        byColor[i].done = d;
+        byColor[i].total = t;
       }
     }
+
+    /* backstitch, knots/beads and fractionals: one bit per list entry */
+    var chart = c ? data.chart : null;
+    if (chart) {
+      var back = Array.isArray(chart.back) ? chart.back : [];
+      var bb = unpackBits(str(progress.doneBack, ''), back.length);
+      for (i = 0; i < back.length; i++) {
+        var bd = bb[i] ? 1 : 0;
+        breakdown.back.total++;
+        breakdown.back.done += bd;
+        var bi = clampInt(back[i].i, -1, 9999, -1);
+        if (bi >= 0 && bi < byColor.length) { byColor[bi].back.total++; byColor[bi].back.done += bd; }
+      }
+
+      var knots = Array.isArray(chart.knots) ? chart.knots : [];
+      var kb = unpackBits(str(progress.doneKnots, ''), knots.length);
+      for (i = 0; i < knots.length; i++) {
+        var kd = kb[i] ? 1 : 0;
+        breakdown.knots.total++;
+        breakdown.knots.done += kd;
+        var ki = clampInt(knots[i].i, -1, 9999, -1);
+        if (ki >= 0 && ki < byColor.length) { byColor[ki].knots.total++; byColor[ki].knots.done += kd; }
+      }
+
+      var part = Array.isArray(chart.part) ? chart.part : [];
+      var pb = unpackBits(str(progress.donePart, ''), part.length);
+      for (i = 0; i < part.length; i++) {
+        var pd = pb[i] ? 1 : 0;
+        breakdown.part.total++;
+        breakdown.part.done += pd;
+        var pa = clampInt(part[i].a, -1, 9999, -1);
+        var pbb = clampInt(part[i].b, -1, 9999, -1);
+        if (pa >= 0 && pa < byColor.length) { byColor[pa].part.total++; byColor[pa].part.done += pd; }
+        if (pbb >= 0 && pbb !== pa && pbb < byColor.length) { byColor[pbb].part.total++; byColor[pbb].part.done += pd; }
+      }
+    }
+
+    for (i = 0; i < byColor.length; i++) {
+      var e = byColor[i];
+      var eTotal = e.total + e.back.total + e.knots.total + e.part.total;
+      var eDone = e.done + e.back.done + e.knots.done + e.part.done;
+      e.complete = eTotal > 0 && eDone >= eTotal;
+    }
+
+    var done = breakdown.cross.done + breakdown.part.done + breakdown.back.done + breakdown.knots.done;
+    var total = breakdown.cross.total + breakdown.part.total + breakdown.back.total + breakdown.knots.total;
 
     return {
       done: done,
       total: total,
       pct: total > 0 ? Math.round(done / total * 100) : 0,
-      byColor: byColor
+      byColor: byColor,
+      breakdown: breakdown
     };
+  }
+
+  /* ---- hit tests for the three extra layers (B5.2 mark tools) ------- */
+
+  var HIT_TOL = 0.35;          // fraction of a cell
+
+  function dist2(ax, ay, bx, by) {
+    var dx = ax - bx, dy = ay - by;
+    return dx * dx + dy * dy;
+  }
+
+  /**
+   * nearestBack(chart, x, y, tol) -> index into chart.back, or -1.
+   * `x`/`y` are chart coordinates in cells; the backstitch lattice runs on the
+   * cell corners, so 3.5 is the middle of the fourth column. A segment counts
+   * as hit when the point is within `tol` cells (default 0.35) of one of its
+   * endpoints or of its midpoint — the three places a fingertip lands. The
+   * closest of the candidates wins, and ties keep the earlier segment.
+   */
+  function nearestBack(chart, x, y, tol) {
+    var list = isObj(chart) && Array.isArray(chart.back) ? chart.back : [];
+    var t = num(tol, HIT_TOL);
+    if (!(t > 0)) t = HIT_TOL;
+    var px = num(x, NaN), py = num(y, NaN);
+    if (!isFinite(px) || !isFinite(py)) return -1;
+    var best = -1, bestD = t * t * (1 + 1e-9);
+    for (var i = 0; i < list.length; i++) {
+      var b = list[i];
+      var d = Math.min(
+        dist2(px, py, b.x1, b.y1),
+        dist2(px, py, b.x2, b.y2),
+        dist2(px, py, (b.x1 + b.x2) / 2, (b.y1 + b.y2) / 2)
+      );
+      if (d < bestD) { bestD = d; best = i; }
+    }
+    return best;
+  }
+
+  /** nearestKnot(chart, x, y, tol) -> index into chart.knots, or -1. */
+  function nearestKnot(chart, x, y, tol) {
+    var list = isObj(chart) && Array.isArray(chart.knots) ? chart.knots : [];
+    var t = num(tol, HIT_TOL);
+    if (!(t > 0)) t = HIT_TOL;
+    var px = num(x, NaN), py = num(y, NaN);
+    if (!isFinite(px) || !isFinite(py)) return -1;
+    var best = -1, bestD = t * t * (1 + 1e-9);
+    for (var i = 0; i < list.length; i++) {
+      var d = dist2(px, py, list[i].x, list[i].y);
+      if (d < bestD) { bestD = d; best = i; }
+    }
+    return best;
+  }
+
+  /**
+   * nearestPart(chart, x, y) -> index into chart.part, or -1.
+   * Fractionals sit inside a cell rather than on the lattice, so this is plain
+   * cell containment: whichever part stitch lives in the tapped square.
+   */
+  function nearestPart(chart, x, y) {
+    var list = isObj(chart) && Array.isArray(chart.part) ? chart.part : [];
+    var px = num(x, NaN), py = num(y, NaN);
+    if (!isFinite(px) || !isFinite(py)) return -1;
+    var cx = Math.floor(px), cy = Math.floor(py);
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].x === cx && list[i].y === cy) return i;
+    }
+    return -1;
+  }
+
+  /* ---- what the big tap button is counting right now ---------------- */
+
+  var TAP_ORDER = ['cross', 'back', 'knots', 'part'];
+  var TAP_CAPTIONS = { cross: 'STITCHES', back: 'BACKSTITCH', knots: 'KNOTS', part: 'PARTS' };
+
+  /**
+   * tapLayer(colorStat) -> 'cross' | 'back' | 'knots' | 'part' | null
+   *
+   * The layer the big tap button should advance through for one colour: full
+   * crosses until they are gone, then backstitch, then knots and beads, then
+   * fractionals; null when that colour has nothing left at all.
+   *
+   * `colorStat` is one entry of progressStats().byColor. A whole stats object
+   * or a whole XSData plus a palette index work too, so callers that already
+   * hold cached stats never have to recount.
+   */
+  function tapLayer(colorStat, pi) {
+    var s = colorStat;
+    if (isObj(s) && Array.isArray(s.byColor)) s = s.byColor[clampInt(pi, 0, 9999, 0)];
+    else if (isObj(s) && Array.isArray(s.palette)) s = progressStats(s).byColor[clampInt(pi, 0, 9999, 0)];
+    if (!isObj(s)) return null;
+    if (num(s.total, 0) > num(s.done, 0)) return 'cross';
+    for (var i = 1; i < TAP_ORDER.length; i++) {
+      var sub = s[TAP_ORDER[i]];
+      if (isObj(sub) && num(sub.total, 0) > num(sub.done, 0)) return TAP_ORDER[i];
+    }
+    return null;
+  }
+
+  /** tapCaption(layer) -> the word on the big button. */
+  function tapCaption(layer) {
+    return TAP_CAPTIONS[layer] || TAP_CAPTIONS.cross;
+  }
+
+  /* ---- craftData size guard (research doc B9 risk #4) --------------- */
+
+  var SIZE_WARN_BYTES = 1048576;      // 1 MB
+  var SIZE_BUDGET_BYTES = 5242880;    // the ~5 MB localStorage gets per origin
+
+  /**
+   * dataSize(craftData) -> bytes.
+   * The length of the JSON the shell will hand to localStorage for this
+   * project. Everything heavy in here (RLE cells, base64 bitmaps, floss codes)
+   * is ASCII, so the string length is the byte count; a non-ASCII title can
+   * make the real figure a byte or two larger, which never matters at the 1 MB
+   * scale this guards.
+   */
+  function dataSize(craftData) {
+    var s;
+    try { s = JSON.stringify(craftData === undefined ? null : craftData); }
+    catch (e) { return 0; }
+    return typeof s === 'string' ? s.length : 0;
+  }
+
+  /**
+   * toCountsMode(data) -> XSData with the cell grid dropped.
+   *
+   * The escape hatch when craftData gets too big for localStorage: chart page
+   * images, the palette and the per-colour tallies all survive, per-stitch
+   * tracking does not. The tallies are read out of the bitmaps BEFORE the
+   * chart goes, so "412 of 1,234 done" is still true afterwards, and any
+   * palette entry without a stitch count inherits the one the chart implied.
+   */
+  function toCountsMode(data) {
+    var d = normalize(data, null);
+    var st = progressStats(d);
+    var perColor = [], totalDone = 0, i;
+    for (i = 0; i < d.palette.length; i++) {
+      var c = st.byColor[i] || { done: 0, total: 0 };
+      if (!d.palette[i].stitchCount && c.total) d.palette[i].stitchCount = c.total;
+      perColor.push({ i: i, done: c.done });
+      totalDone += c.done;
+    }
+    d.chart = null;
+    d.progress.mode = 'counts';
+    d.progress.done = '';
+    d.progress.doneBack = '';
+    d.progress.doneBackCount = 0;
+    d.progress.donePart = '';
+    d.progress.donePartCount = 0;
+    d.progress.doneKnots = '';
+    d.progress.doneKnotsCount = 0;
+    d.progress.perColor = perColor;
+    d.progress.doneCount = totalDone;
+    return normalize(d, null);
   }
 
   /* ================================================================== *
@@ -1545,6 +1786,18 @@
     var done = str(pr.done, '');
     if (mode !== 'cells') done = '';
 
+    /* The three extra layers are one bit per list entry, so a chart that has
+       been re-imported at a different size gets its bitmaps re-cut to the new
+       length (extra bits dropped, missing ones zero) rather than silently
+       marking the wrong segments. They are small lists — hundreds, not
+       hundreds of thousands — so refitting them on every load is free. */
+    var nBack = out.chart ? out.chart.back.length : 0;
+    var nPart = out.chart ? out.chart.part.length : 0;
+    var nKnots = out.chart ? out.chart.knots.length : 0;
+    var doneBack = mode === 'cells' ? refitBits(pr.doneBack, nBack) : '';
+    var donePart = mode === 'cells' ? refitBits(pr.donePart, nPart) : '';
+    var doneKnots = mode === 'cells' ? refitBits(pr.doneKnots, nKnots) : '';
+
     var perColor = [];
     var seen = {};
     if (Array.isArray(pr.perColor)) {
@@ -1583,13 +1836,21 @@
       mode: mode,
       done: done,
       doneCount: mode === 'cells' ? countBits(done, nCells) : clampInt(pr.doneCount, 0, 1e9, 0),
+      doneBack: doneBack,
+      doneBackCount: countBits(doneBack, nBack),
+      donePart: donePart,
+      donePartCount: countBits(donePart, nPart),
+      doneKnots: doneKnots,
+      doneKnotsCount: countBits(doneKnots, nKnots),
       perColor: perColor,
       pageDone: pageDone,
       blocks: blocks
     };
     if (mode === 'cells') {
       var st = progressStats(out);
-      out.progress.doneCount = st.done;
+      /* doneCount stays the popcount of `done` — the crosses — while
+         stats.done is the whole piece including the three extra layers. */
+      out.progress.doneCount = st.breakdown.cross.done;
       for (var sc = 0; sc < st.byColor.length && sc < out.progress.perColor.length; sc++) {
         out.progress.perColor[sc].done = st.byColor[sc].done;
       }
@@ -1634,6 +1895,9 @@
     out.stash = stash;
 
     out.notesKey = str(d.notesKey, '');
+    /* When the "this chart is large" sheet was last shown for this project, so
+       it is offered once per import rather than after every tap (risk #4). */
+    out.sizeWarnedAt = clampInt(d.sizeWarnedAt, 0, 1e15, 0);
 
     var so = isObj(d.source) ? d.source : {};
     var warnings = [];
@@ -1674,10 +1938,11 @@
     try { stats = progressStats(data); } catch (e2) { stats = { done: 0, total: 0, pct: 0, byColor: [] }; }
 
     if (palette.length) {
+      /* A colour is finished when every layer of it is — crosses, backstitch,
+         knots and fractionals — and stats.pct counts all four too. */
       var doneColors = 0;
       for (var i = 0; i < stats.byColor.length; i++) {
-        var c = stats.byColor[i];
-        if (c.total > 0 && c.done >= c.total) doneColors++;
+        if (stats.byColor[i].complete) doneColors++;
       }
       parts.push(doneColors + ' of ' + palette.length + ' colour' + (palette.length === 1 ? '' : 's'));
     } else if (design.w && design.h) {
@@ -2212,6 +2477,12 @@
     }
     lines.push('</fullstitches>');
 
+    /* OXS carries a `marked` flag on <stitch> ONLY. <partstitch>, <backstitch>
+       and the ornament objects have no equivalent in the format, so our
+       progress.donePart / doneBack / doneKnots bitmaps are deliberately NOT
+       written here: they stay in craftData (and therefore in the app's own
+       JSON backup) and an OXS round-trip brings those layers back unmarked.
+       Writing an invented attribute would only confuse other stitching apps.*/
     lines.push('<partstitches>');
     if (chart) {
       for (i = 0; i < chart.part.length; i++) {
@@ -4234,6 +4505,7 @@
     bitsState: bitsState,
     bitsB64: bitsB64,
     countBits: countBits,
+    refitBits: refitBits,
 
     /* geometry + floss maths */
     finishedSize: finishedSize,
@@ -4243,6 +4515,22 @@
     skeinRange: skeinRange,
     confetti: confetti,
     progressStats: progressStats,
+
+    /* backstitch / knot / fractional tracking */
+    nearestBack: nearestBack,
+    nearestKnot: nearestKnot,
+    nearestPart: nearestPart,
+    tapLayer: tapLayer,
+    tapCaption: tapCaption,
+    TAP_ORDER: TAP_ORDER,
+    TAP_CAPTIONS: TAP_CAPTIONS,
+    HIT_TOL: HIT_TOL,
+
+    /* storage guard (B9 risk #4) */
+    dataSize: dataSize,
+    toCountsMode: toCountsMode,
+    SIZE_WARN_BYTES: SIZE_WARN_BYTES,
+    SIZE_BUDGET_BYTES: SIZE_BUDGET_BYTES,
 
     /* import / export */
     parseOXS: parseOXS,

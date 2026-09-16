@@ -292,6 +292,21 @@
 }
 .xs-tool-seg { flex: 1 1 auto; }
 .xs-tool-seg button { font-size: 12px; padding: 6px 8px; }
+
+/* Which layer the mark tools act on: crosses, backstitch, knots, fractionals.
+   Only shown when the chart actually has more than one. */
+.xs-layer-seg {
+  width: 100%;
+  margin-bottom: 8px;
+  /* a direct child of the sheet's flex column, so it must refuse to shrink */
+  flex: 0 0 auto;
+}
+.xs-layer-seg button {
+  font-size: 11px;
+  padding: 7px 3px;
+  min-width: 0;
+  flex: 1 1 0;
+}
 .xs-erase { min-height: 38px; padding: 6px 12px; }
 .xs-erase.on { background: var(--danger); color: var(--primary-text); border-color: var(--danger); }
 
@@ -421,6 +436,19 @@
 
 .xs-import-more { margin-top: 14px; }
 .xs-import-note { margin-top: 12px; font-size: 12px; }
+
+/* Storage footer in the Pages sheet: craftData size + BlobStore usage. */
+.xs-storage {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.xs-storage-line {
+  font-size: 12px;
+  margin: 0 0 4px;
+  font-variant-numeric: tabular-nums;
+}
+.xs-storage .btn { margin-top: 8px; }
 .xs-render-progress { margin: 8px 0; font-variant-numeric: tabular-nums; }
 
 .xs-photo-preview {

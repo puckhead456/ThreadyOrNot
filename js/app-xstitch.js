@@ -142,6 +142,14 @@
       cellsKey: null,
       bits: null,
       doneKey: null,
+      // one bitsState per extra layer, indexed the same way as chart.back /
+      // chart.knots / chart.part, so marking one is a single byte write
+      backBits: null, backKey: null,
+      knotBits: null, knotKey: null,
+      partBits: null, partKey: null,
+      tapLayer: 'cross',   // what the big button is counting right now
+      tapLayerColour: -1,
+      sizeBytes: null,     // cached X.dataSize; re-measured when the chart changes
       paletteKey: null,
       fabricKey: null,
       img: null, imgCanvas: null,        // chart look: pale swatches + done
@@ -181,6 +189,7 @@
         view.img = null;
         view.stats = null;
         view.cursor = 0;
+        view.sizeBytes = null;     // re-measure once, not on every tap
       }
       if (view.doneKey !== data.progress.done || !view.bits) {
         view.bits = X.bitsState(data.progress.done, view.w * view.h);
@@ -188,8 +197,28 @@
         view.img = null;
         view.stats = null;
       }
+      /* The extra layers are tiny lists, so their bitmaps are decoded whole
+         whenever the stored string changes. They are drawn as vectors over the
+         cell image, so they never invalidate view.img. */
+      if (view.backKey !== data.progress.doneBack || !view.backBits) {
+        view.backBits = X.bitsState(data.progress.doneBack, chart.back.length);
+        view.backKey = data.progress.doneBack;
+        view.stats = null;
+      }
+      if (view.knotKey !== data.progress.doneKnots || !view.knotBits) {
+        view.knotBits = X.bitsState(data.progress.doneKnots, chart.knots.length);
+        view.knotKey = data.progress.doneKnots;
+        view.stats = null;
+      }
+      if (view.partKey !== data.progress.donePart || !view.partBits) {
+        view.partBits = X.bitsState(data.progress.donePart, chart.part.length);
+        view.partKey = data.progress.donePart;
+        view.stats = null;
+      }
     } else {
       view.w = 0; view.h = 0; view.cells = null; view.bits = null;
+      view.backBits = null; view.knotBits = null; view.partBits = null;
+      view.backKey = null; view.knotKey = null; view.partKey = null;
       view.img = null; view.liveImg = null;
       view.stats = null;
     }
@@ -214,14 +243,48 @@
     if (hasChart(data) && !view.img) buildImages(data);
   }
 
-  /** Keep view.stats in step with a one-cell change, instead of recounting. */
-  function bumpStats(pi, delta) {
+  /**
+   * Keep view.stats in step with a one-item change, instead of recounting.
+   * `layer` is 'cross' (the default), 'back', 'knots' or 'part'; `pis` is the
+   * palette index, or an array of them for a fractional shared by two colours
+   * (it counts towards each colour but only once in the totals).
+   */
+  function bumpStats(pis, delta, layer) {
     if (!view || !view.stats) return;
+    layer = layer || 'cross';
     var s = view.stats;
-    var c = s.byColor[pi];
-    if (c) c.done = Math.max(0, Math.min(c.total || Infinity, c.done + delta));
+    var list = typeof pis === 'number' ? [pis] : (pis || []);
+    for (var k = 0; k < list.length; k++) {
+      var c = s.byColor[list[k]];
+      if (!c) continue;
+      var t = layer === 'cross' ? c : c[layer];
+      if (!t) continue;
+      t.done = Math.max(0, Math.min(t.total || Infinity, t.done + delta));
+      c.complete = colourComplete(c);
+    }
+    if (s.breakdown && s.breakdown[layer]) {
+      var b = s.breakdown[layer];
+      b.done = Math.max(0, Math.min(b.total || Infinity, b.done + delta));
+    }
     s.done = Math.max(0, s.done + delta);
     s.pct = s.total > 0 ? Math.round(s.done / s.total * 100) : 0;
+  }
+
+  /** Every layer of one colour finished. */
+  function colourComplete(c) {
+    if (!c) return false;
+    var t = c.total + c.back.total + c.knots.total + c.part.total;
+    var d = c.done + c.back.done + c.knots.done + c.part.done;
+    return t > 0 && d >= t;
+  }
+
+  /** The palette indexes a fractional stitch belongs to. */
+  function partColours(p) {
+    var out = [];
+    if (!p) return out;
+    if (p.a >= 0) out.push(p.a);
+    if (p.b >= 0 && p.b !== p.a) out.push(p.b);
+    return out;
   }
 
   function paletteSignature(data) {
@@ -325,6 +388,30 @@
 
   var GRID_MIN_PX = 8;
 
+  /* Which half of a cell a fractional stitch fills. OXS `direction` 1-4 names
+     one of the four corner triangles; when the part stitch carries a second
+     palette index that colour takes the complementary half. */
+  var TRI_UL = [[0, 0], [1, 0], [0, 1]], TRI_LR = [[1, 0], [1, 1], [0, 1]];
+  var TRI_UR = [[0, 0], [1, 0], [1, 1]], TRI_LL = [[0, 0], [0, 1], [1, 1]];
+  var PART_TRIS = {
+    1: [TRI_UL, TRI_LR],
+    2: [TRI_LR, TRI_UL],
+    3: [TRI_UR, TRI_LL],
+    4: [TRI_LL, TRI_UR]
+  };
+
+  function drawTri(g, x, y, z, d, half, style) {
+    var pair = PART_TRIS[d] || PART_TRIS[1];
+    var t = pair[half] || pair[0];
+    g.beginPath();
+    g.moveTo(x + t[0][0] * z, y + t[0][1] * z);
+    g.lineTo(x + t[1][0] * z, y + t[1][1] * z);
+    g.lineTo(x + t[2][0] * z, y + t[2][1] * z);
+    g.closePath();
+    g.fillStyle = style;
+    g.fill();
+  }
+
   function makeChartView(opts) {
     opts = opts || {};
     var wrap = el('div', 'xs-chart-wrap' + (opts.cls ? ' ' + opts.cls : ''));
@@ -405,7 +492,76 @@
 
       if (z >= GRID_MIN_PX) drawGrid(g, s, z);
       if (z >= GRID_MIN_PX * 1.5) drawSymbols(g, s, z);
+      if (z >= GRID_MIN_PX) drawExtras(g, s, z);
       drawCrosshair(g, z);
+    }
+
+    /**
+     * Backstitch, knots/beads and fractionals, over the cell image. Same
+     * visual language as the cells: done is the floss colour at full strength,
+     * not-done is thinner and washed towards the fabric (a knot goes from
+     * filled disc to open ring). Under 8 px per cell they are unreadable
+     * scribble on a phone, so they simply do not appear.
+     */
+    function drawExtras(g, s, z) {
+      var data = view.data;
+      var chart = data && data.chart;
+      if (!chart) return;
+      var pal = data.palette;
+      var ground = view.paintTables ? view.paintTables.ground : [250, 248, 243];
+      var i;
+
+      function ink(pi, done) {
+        var rgb = (pi >= 0 && pi < pal.length && X.hexToRgb(pal[pi].hex)) || [24, 24, 24];
+        if (done) return 'rgb(' + rgb[0] + ',' + rgb[1] + ',' + rgb[2] + ')';
+        var m = mix(ground, rgb, 0.38);
+        return 'rgb(' + m[0] + ',' + m[1] + ',' + m[2] + ')';
+      }
+
+      var part = chart.part, pbits = view.partBits;
+      for (i = 0; i < part.length; i++) {
+        var p = part[i];
+        var px = st.ox + p.x * z, py = st.oy + p.y * z;
+        if (px + z < 0 || py + z < 0 || px > s.w || py > s.h) continue;
+        var pd = pbits ? ((pbits.bytes[i >> 3] >> (i & 7)) & 1) : 0;
+        drawTri(g, px, py, z, p.d, 0, ink(p.a, pd));
+        if (p.b >= 0) drawTri(g, px, py, z, p.d, 1, ink(p.b, pd));
+      }
+
+      var back = chart.back, bbits = view.backBits;
+      g.lineCap = 'round';
+      for (i = 0; i < back.length; i++) {
+        var b = back[i];
+        var x1 = st.ox + b.x1 * z, y1 = st.oy + b.y1 * z;
+        var x2 = st.ox + b.x2 * z, y2 = st.oy + b.y2 * z;
+        if (Math.max(x1, x2) < 0 || Math.max(y1, y2) < 0 ||
+            Math.min(x1, x2) > s.w || Math.min(y1, y2) > s.h) continue;
+        var bd = bbits ? ((bbits.bytes[i >> 3] >> (i & 7)) & 1) : 0;
+        g.beginPath();
+        g.lineWidth = bd ? Math.max(2, z * 0.18) : Math.max(1, z * 0.085);
+        g.strokeStyle = ink(b.i, bd);
+        g.moveTo(x1, y1);
+        g.lineTo(x2, y2);
+        g.stroke();
+      }
+
+      var knots = chart.knots, kbits = view.knotBits;
+      for (i = 0; i < knots.length; i++) {
+        var k = knots[i];
+        var kx = st.ox + k.x * z, ky = st.oy + k.y * z;
+        if (kx < -z || ky < -z || kx > s.w + z || ky > s.h + z) continue;
+        var kd = kbits ? ((kbits.bytes[i >> 3] >> (i & 7)) & 1) : 0;
+        g.beginPath();
+        g.arc(kx, ky, Math.max(2, z * 0.26), 0, Math.PI * 2);
+        if (kd) {
+          g.fillStyle = ink(k.i, 1);
+          g.fill();
+        } else {
+          g.lineWidth = Math.max(1, z * 0.09);
+          g.strokeStyle = ink(k.i, 0);
+          g.stroke();
+        }
+      }
     }
 
     function drawGrid(g, s, z) {
@@ -487,12 +643,15 @@
 
     /* ---- pointer handling ---- */
 
+    /* `fx`/`fy` are the same point in fractional cell units: the backstitch
+       lattice runs on the cell corners, so a hit test needs them. */
     function cellAt(clientX, clientY) {
       var r = canvas.getBoundingClientRect();
-      var x = Math.floor((clientX - r.left - st.ox) / st.z);
-      var y = Math.floor((clientY - r.top - st.oy) / st.z);
+      var fx = (clientX - r.left - st.ox) / st.z;
+      var fy = (clientY - r.top - st.oy) / st.z;
+      var x = Math.floor(fx), y = Math.floor(fy);
       if (x < 0 || y < 0 || x >= view.w || y >= view.h) return null;
-      return { x: x, y: y, i: y * view.w + x };
+      return { x: x, y: y, i: y * view.w + x, fx: fx, fy: fy };
     }
 
     function showCoord(c) {
@@ -559,7 +718,11 @@
       }
       if (painting) {
         var c = cellAt(e.clientX, e.clientY);
-        if (c && c.i !== painting.last) {
+        // Crosses only need a new cell to be worth another call; the vector
+        // layers hit-test off the exact point, so they want every move (they
+        // de-duplicate on the item they hit).
+        var every = opts.paintEvery && opts.paintEvery();
+        if (c && (every || c.i !== painting.last)) {
           opts.onPaint(c);
           painting.last = c.i;
           showCoord(c);
@@ -893,7 +1056,23 @@
   function leftOf(stats, i) {
     var c = stats.byColor[i];
     if (!c) return 0;
-    return Math.max(0, c.total - c.done);
+    return Math.max(0, c.total - c.done) +
+      Math.max(0, c.back.total - c.back.done) +
+      Math.max(0, c.knots.total - c.knots.done) +
+      Math.max(0, c.part.total - c.part.done);
+  }
+
+  /**
+   * '2 of 6 backstitch', '0 of 2 knots', '1 of 3 parts' — only for the layers
+   * this colour actually has.
+   */
+  function extraBits(c) {
+    var out = [];
+    if (!c) return out;
+    if (c.back && c.back.total) out.push(c.back.done + ' of ' + c.back.total + ' backstitch');
+    if (c.knots && c.knots.total) out.push(c.knots.done + ' of ' + c.knots.total + ' knot' + (c.knots.total === 1 ? '' : 's'));
+    if (c.part && c.part.total) out.push(c.part.done + ' of ' + c.part.total + ' part' + (c.part.total === 1 ? '' : 's'));
+    return out;
   }
 
   function buildKeyRows(project, data) {
@@ -970,6 +1149,7 @@
       var bits = [];
       if (c.total) bits.push(comma(c.total) + ' sts');
       bits.push(comma(Math.max(0, c.total - c.done)) + ' left');
+      extraBits(c).forEach(function (b) { bits.push(b); });
       if (KIND_LABEL[e.kind]) bits.push(KIND_LABEL[e.kind]);
       n.cbSub.textContent = bits.join(' · ');
       n.colourBar.hidden = false;
@@ -981,28 +1161,46 @@
       n.colourBar.hidden = false;
     }
 
-    /* tap button */
-    var colourStat = cur >= 0 ? (stats.byColor[cur] || { done: 0, total: 0 }) : { done: 0, total: 0 };
-    n.stitchNum.textContent = comma(colourStat.done);
+    /* tap button — its caption follows whatever this colour has left to do */
+    var colourStat = cur >= 0 ? stats.byColor[cur] : null;
+    var layer = cur >= 0 ? displayLayer(colourStat) : 'cross';
+    var tally = layerTally(colourStat, layer) || { done: 0, total: 0 };
+    if (cur >= 0 && (view.tapLayer !== layer || view.tapLayerColour !== cur)) {
+      var switched = view.tapLayerColour === cur && view.tapLayer !== layer;
+      view.tapLayer = layer;
+      view.tapLayerColour = cur;
+      if (switched) {
+        C.announce(layer === 'cross'
+          ? 'The button is counting stitches again'
+          : 'Crosses done — the button is now counting ' + LAYER_NOUNS[layer]);
+      }
+    }
+    n.stitchCap.textContent = X.tapCaption(layer);
+    n.stitchNum.textContent = comma(tally.done);
     n.stitchBtn.disabled = cur < 0;
     n.stitchBtn.setAttribute('aria-label',
-      e ? ('Mark a stitch of ' + paletteLabel(e) + ', ' + comma(colourStat.done) + ' done') : 'No colour selected');
+      e ? ('Mark a ' + LAYER_NOUN[layer] + ' of ' + paletteLabel(e) + ', ' + comma(tally.done) + ' done')
+        : 'No colour selected');
 
     var group = clampInt(project.groupSize, 0, 50, 10);
     var readBits = [];
-    if (group > 0 && colourStat.done > 0) {
-      readBits.push('Group ' + (Math.floor((colourStat.done - 1) / group) + 1) +
-        ' · stitch ' + (((colourStat.done - 1) % group) + 1) + ' of ' + group);
+    if (layer === 'cross' && group > 0 && tally.done > 0) {
+      readBits.push('Group ' + (Math.floor((tally.done - 1) / group) + 1) +
+        ' · stitch ' + (((tally.done - 1) % group) + 1) + ' of ' + group);
     }
-    if (colourStat.total) {
-      readBits.push(comma(colourStat.done) + ' / ' + comma(colourStat.total));
+    if (tally.total) {
+      readBits.push(comma(tally.done) + ' / ' + comma(tally.total) +
+        (layer === 'cross' ? '' : ' ' + LAYER_NOUNS[layer]));
     }
     n.readout.textContent = readBits.join(' · ');
     n.readout.hidden = !readBits.length;
 
+    var extras = stats.breakdown
+      ? stats.breakdown.back.total + stats.breakdown.knots.total + stats.breakdown.part.total : 0;
     n.barFill.style.width = (stats.total ? Math.round(stats.done / stats.total * 100) : 0) + '%';
     n.barLabel.textContent = stats.total
-      ? (comma(stats.done) + ' of ' + comma(stats.total) + ' stitches · ' + stats.pct + '%')
+      ? (comma(stats.done) + ' of ' + comma(stats.total) +
+         (extras ? ' · ' : ' stitches · ') + stats.pct + '%')
       : 'No stitch counts yet';
 
     /* key rows */
@@ -1010,7 +1208,8 @@
       var row = n.rows[r];
       var pe = pal[row.i];
       if (!pe) continue;
-      var st = stats.byColor[row.i] || { done: 0, total: 0 };
+      var st = stats.byColor[row.i] ||
+        { done: 0, total: 0, complete: false, back: { done: 0, total: 0 }, knots: { done: 0, total: 0 }, part: { done: 0, total: 0 } };
       row.sw.textContent = pe.symbol || '';
       row.sw.style.background = swatchHex(pe);
       row.sw.style.color = X.symbolInk(pe.hex) === 'light' ? '#fff' : '#111';
@@ -1018,12 +1217,18 @@
       var left = Math.max(0, st.total - st.done);
       var subBits = [];
       if (st.total) subBits.push(comma(left) + ' left of ' + comma(st.total));
-      else subBits.push(comma(st.done) + ' done');
+      else if (st.done) subBits.push(comma(st.done) + ' done');
+      extraBits(st).forEach(function (b) { subBits.push(b); });
+      if (!subBits.length) subBits.push(comma(st.done) + ' done');
       if (KIND_LABEL[pe.kind]) subBits.push(KIND_LABEL[pe.kind]);
       if (pe.strands) subBits.push(pe.strands + ' strand' + (pe.strands === 1 ? '' : 's'));
       row.sub.textContent = subBits.join(' · ');
-      row.fill.style.width = (st.total ? Math.round(st.done / st.total * 100) : 0) + '%';
-      var complete = st.total > 0 && st.done >= st.total;
+      /* The bar and the ✓ cover every layer this colour has, so a colour with
+         backstitch left is not ticked just because its crosses are done. */
+      var allTotal = st.total + st.back.total + st.knots.total + st.part.total;
+      var allDone = st.done + st.back.done + st.knots.done + st.part.done;
+      row.fill.style.width = (allTotal ? Math.round(allDone / allTotal * 100) : 0) + '%';
+      var complete = !!st.complete;
       row.tick.hidden = !complete;
       row.row.classList.toggle('current', row.i === cur);
       row.row.classList.toggle('complete', complete);
@@ -1039,7 +1244,12 @@
 
     /* bottom bar */
     n.btnWake.classList.toggle('on', !!Store.settings().keepAwake);
-    n.btnPages.disabled = !data.pages.length;
+    /* The Pages sheet also holds the storage footer and the image-only escape
+       hatch, so it stays reachable for an oversized chart that has no page
+       images of its own. Measured once per chart, never on the tap path. */
+    if (view.sizeBytes === null || view.sizeBytes === undefined) view.sizeBytes = X.dataSize(data);
+    n.btnPages.disabled = !data.pages.length &&
+      !(hasChart(data) && view.sizeBytes > X.SIZE_WARN_BYTES);
     n.btnChart.disabled = !hasChart(data);
 
     redrawAll();
@@ -1196,6 +1406,62 @@
     return -1;
   }
 
+  /** The next not-done item of one extra layer for `pi`, in chart order. */
+  function nextLayerItemFor(layer, pi) {
+    var items = layerItems(view.data, layer);
+    var state = view[LAYER_BITS[layer]];
+    if (!state) return -1;
+    for (var i = 0; i < items.length; i++) {
+      if (((state.bytes[i >> 3] >> (i & 7)) & 1)) continue;
+      if (layerColours(layer, items[i]).indexOf(pi) >= 0) return i;
+    }
+    return -1;
+  }
+
+  /** The last done item of one extra layer for `pi`, in chart order. */
+  function lastLayerItemFor(layer, pi) {
+    var items = layerItems(view.data, layer);
+    var state = view[LAYER_BITS[layer]];
+    if (!state) return -1;
+    for (var i = items.length - 1; i >= 0; i--) {
+      if (!((state.bytes[i >> 3] >> (i & 7)) & 1)) continue;
+      if (layerColours(layer, items[i]).indexOf(pi) >= 0) return i;
+    }
+    return -1;
+  }
+
+  /**
+   * What the button shows for one colour. `X.tapLayer` picks the next layer
+   * with work left; when a colour is completely finished we keep showing the
+   * layer it actually has, so a backstitch-only colour never reads "STITCHES 0".
+   */
+  function displayLayer(stat) {
+    var l = X.tapLayer(stat);
+    if (l) return l;
+    if (!stat) return 'cross';
+    if (stat.total > 0) return 'cross';
+    if (stat.back.total > 0) return 'back';
+    if (stat.knots.total > 0) return 'knots';
+    if (stat.part.total > 0) return 'part';
+    return 'cross';
+  }
+
+  /** The tally the button's big number is showing. */
+  function layerTally(stat, layer) {
+    if (!stat) return { done: 0, total: 0 };
+    return layer === 'cross' ? { done: stat.done, total: stat.total } : stat[layer];
+  }
+
+  /** Which layer "−1" should take back: the most advanced one with work done. */
+  function unmarkLayerFor(pi) {
+    var c = view.stats && view.stats.byColor[pi];
+    if (!c) return 'cross';
+    if (c.part && c.part.done > 0) return 'part';
+    if (c.knots && c.knots.done > 0) return 'knots';
+    if (c.back && c.back.done > 0) return 'back';
+    return 'cross';
+  }
+
   function advanceStitch(projectId) {
     var p = Store.project(projectId);
     if (!p) return;
@@ -1210,6 +1476,18 @@
     var before = beforeByColor[pi] || { done: 0, total: 0 };
 
     if (hasChart(data) && data.progress.mode === 'cells') {
+      /* Crosses first; when this colour has only backstitch, knots or
+         fractionals left the same button walks those instead. */
+      var stats = view.stats || X.progressStats(data);
+      var layer = X.tapLayer(stats, pi);
+      if (layer && layer !== 'cross') {
+        var lidx = nextLayerItemFor(layer, pi);
+        if (lidx >= 0) {
+          // markLayerItem does its own feedback, re-sync and milestone check.
+          markLayerItem(projectId, layer, lidx, true);
+          return;
+        }
+      }
       var at = nextCellFor(pi, view.cursor);
       if (at < 0) {
         toast(paletteLabel(entry) + ' is finished');
@@ -1270,8 +1548,10 @@
     var finishedColour = null;
     for (var i = 0; i < stats.byColor.length; i++) {
       var after = stats.byColor[i];
-      var before = beforeByColor && beforeByColor[i] ? beforeByColor[i] : { done: 0, total: 0 };
-      if (after.total > 0 && after.done >= after.total && before.done < after.total) {
+      var before = beforeByColor && beforeByColor[i] ? beforeByColor[i] : { done: 0, total: 0, complete: false };
+      // "Finished" now means every layer of that colour: crosses, backstitch,
+      // knots and fractionals.
+      if (after.complete && !before.complete) {
         finishedColour = i;
         break;
       }
@@ -1300,11 +1580,11 @@
     var data = dataOf(p);
     syncModel(data);
     var stats = view.stats;
-    var after = stats.byColor[pi] || { done: 0, total: 0 };
+    var after = stats.byColor[pi] || { done: 0, total: 0, complete: false };
     var entry = data.palette[pi];
     var group = clampInt(p.groupSize, 0, 50, 10);
 
-    var finishedColour = after.total > 0 && after.done >= after.total && before.done < after.total;
+    var finishedColour = !!after.complete && !before.complete;
     if (finishedColour) fb('done');
     else if (group > 0 && after.done > 0 && after.done % group === 0) fb('group');
     else fb('tap');
@@ -1322,7 +1602,8 @@
     var out = [];
     if (!view || !view.stats) return out;
     for (var i = 0; i < view.stats.byColor.length; i++) {
-      out.push({ done: view.stats.byColor[i].done, total: view.stats.byColor[i].total });
+      var c = view.stats.byColor[i];
+      out.push({ done: c.done, total: c.total, complete: !!c.complete });
     }
     return out;
   }
@@ -1335,6 +1616,15 @@
     var pi = clampInt(data.current.paletteIndex, 0, data.palette.length - 1, 0);
 
     if (hasChart(data) && data.progress.mode === 'cells') {
+      var undoLayer = unmarkLayerFor(pi);
+      if (undoLayer !== 'cross') {
+        var lidx = lastLayerItemFor(undoLayer, pi);
+        if (lidx >= 0) {
+          markLayerItem(projectId, undoLayer, lidx, false);
+          fb('undo');
+          return;
+        }
+      }
       var at = lastDoneCellFor(pi);
       if (at < 0) { toast('Nothing to take back'); return; }
       X.setBit(view.bits, at, false);
@@ -1389,9 +1679,27 @@
           if (cells[i] === pi) X.setBit(view.bits, i, false);
         }
         var b64 = X.bitsB64(view.bits);
+        /* Backstitch, knots and fractionals of this colour go back too — the
+           sheet says "every stitch you have marked in this colour". */
+        var extras = {};
+        ['back', 'knots', 'part'].forEach(function (layer) {
+          var state = view[LAYER_BITS[layer]];
+          var items = layerItems(d2, layer);
+          if (!state || !items.length) return;
+          for (var k = 0; k < items.length; k++) {
+            if (layerColours(layer, items[k]).indexOf(pi) >= 0) X.setBit(state, k, false);
+          }
+          extras[layer] = X.bitsB64(state);
+          view[LAYER_KEY[layer]] = extras[layer];
+        });
         Store.updateCraftData(projectId, function (cd) {
           cd.progress.done = b64;
           cd.progress.doneCount = X.countBits(b64, view.w * view.h);
+          Object.keys(extras).forEach(function (layer) {
+            var f = LAYER_FIELD[layer];
+            cd.progress[f[0]] = extras[layer];
+            cd.progress[f[1]] = X.countBits(extras[layer], layerItems(cd, layer).length);
+          });
           setPerColor(cd, pi, 0);
         });
         view.doneKey = b64;
@@ -1510,6 +1818,56 @@
     { id: 'page', label: 'All of this colour' }
   ];
 
+  /* The four things a chart can hold. The switch decides what every mark tool
+     acts on; layers the chart does not have are never offered. */
+  /* Short labels: the theme font is Press Start 2P, which is a full em wide
+     per character, so "Backstitch" alone would overflow 375 px. The hint under
+     the chart always names the layer in full. */
+  var LAYER_DEFS = [
+    { id: 'cross', label: 'Crosses' },
+    { id: 'back', label: 'Back' },
+    { id: 'knots', label: 'Knots' },
+    { id: 'part', label: 'Parts' }
+  ];
+  var LAYER_LIST = { back: 'back', knots: 'knots', part: 'part' };
+  var LAYER_BITS = { back: 'backBits', knots: 'knotBits', part: 'partBits' };
+  var LAYER_KEY = { back: 'backKey', knots: 'knotKey', part: 'partKey' };
+  var LAYER_FIELD = {
+    back: ['doneBack', 'doneBackCount'],
+    knots: ['doneKnots', 'doneKnotsCount'],
+    part: ['donePart', 'donePartCount']
+  };
+  var LAYER_NOUN = { cross: 'stitch', back: 'backstitch segment', knots: 'knot or bead', part: 'fractional' };
+  var LAYER_NOUNS = { cross: 'stitches', back: 'backstitch segments', knots: 'knots and beads', part: 'fractionals' };
+
+  function layerItems(data, layer) {
+    var chart = data && data.chart;
+    var name = LAYER_LIST[layer];
+    if (!chart || !name) return [];
+    return chart[name] || [];
+  }
+
+  function availableLayers(data) {
+    var out = [LAYER_DEFS[0]];
+    if (layerItems(data, 'back').length) out.push(LAYER_DEFS[1]);
+    if (layerItems(data, 'knots').length) out.push(LAYER_DEFS[2]);
+    if (layerItems(data, 'part').length) out.push(LAYER_DEFS[3]);
+    return out;
+  }
+
+  /** Where on the grid one item of an extra layer lives, in cells. */
+  function layerAnchor(layer, item) {
+    if (layer === 'back') return { x: (item.x1 + item.x2) / 2, y: (item.y1 + item.y2) / 2 };
+    if (layer === 'part') return { x: item.x + 0.5, y: item.y + 0.5 };
+    return { x: item.x, y: item.y };
+  }
+
+  /** The palette indexes one item belongs to. */
+  function layerColours(layer, item) {
+    if (layer === 'part') return partColours(item);
+    return item && item.i >= 0 ? [item.i] : [];
+  }
+
   function openChartSheet(projectId) {
     var p = Store.project(projectId);
     if (!p) return;
@@ -1519,6 +1877,7 @@
       return;
     }
     var tool = 'tap';
+    var layer = 'cross';
     var erase = false;
     var chart = null;
 
@@ -1526,6 +1885,26 @@
       title: 'Chart',
       cls: 'sheet-chart',
       build: function (body) {
+        var layers = availableLayers(data);
+        var hint = el('p', 'muted xs-hint');
+
+        function setHint() {
+          hint.textContent = (layer === 'cross'
+            ? 'Drag to pan, pinch or use the buttons to zoom, double-tap to fit. Symbols appear once the squares are big enough.'
+            : 'Marking ' + LAYER_NOUNS[layer] + '. Tap one to mark it, or switch to Drag and sweep along them. ' +
+              'Zoom in until the squares are big enough to see them.');
+        }
+
+        if (layers.length > 1) {
+          var layerSeg = C.segmented(layers, layer, function (v) {
+            layer = v;
+            setHint();
+            C.announce('Marking ' + LAYER_NOUNS[layer]);
+          });
+          layerSeg.node.classList.add('xs-layer-seg');
+          body.appendChild(layerSeg.node);
+        }
+
         var toolbar = el('div', 'xs-tools');
         var seg = C.segmented(TOOLS, tool, function (v) { tool = v; });
         seg.node.classList.add('xs-tool-seg');
@@ -1544,8 +1923,9 @@
           cls: 'xs-full',
           interactive: true,
           paintMode: function () { return tool === 'paint'; },
-          onPaint: function (c) { markCell(projectId, c, !erase); },
-          onTap: function (c) { applyTool(projectId, tool, c, !erase); }
+          paintEvery: function () { return layer !== 'cross'; },
+          onPaint: function (c) { paintAt(projectId, layer, c, !erase, true); },
+          onTap: function (c) { applyTool(projectId, tool, layer, c, !erase); }
         });
         body.appendChild(chart.node);
 
@@ -1561,9 +1941,7 @@
         zoomRow.appendChild(zIn);
         body.appendChild(zoomRow);
 
-        var hint = el('p', 'muted xs-hint',
-          'Drag to pan, pinch or use the buttons to zoom, double-tap to fit. ' +
-          'Symbols appear once the squares are big enough.');
+        setHint();
         body.appendChild(hint);
 
         window.requestAnimationFrame(function () { if (chart) chart.fit(); });
@@ -1597,10 +1975,156 @@
     });
   }
 
-  function applyTool(projectId, tool, c, value) {
-    if (tool === 'block') markBlock(projectId, c, value);
-    else if (tool === 'page') markWholeColour(projectId, value);
-    else markCell(projectId, c, value);
+  function applyTool(projectId, tool, layer, c, value) {
+    if (tool === 'block') markBlock(projectId, layer, c, value);
+    else if (tool === 'page') markWholeColour(projectId, layer, value);
+    else paintAt(projectId, layer, c, value, false);
+  }
+
+  /**
+   * One tap or one step of a drag, on whichever layer the switch is showing.
+   * `sweeping` is true during a drag: a finger running along a line of
+   * backstitch should catch the segments it actually crosses, so only their
+   * midpoints count, while a deliberate tap is also allowed to land on an
+   * endpoint (X.nearestBack's own rule).
+   */
+  function paintAt(projectId, layer, c, value, sweeping) {
+    if (layer === 'cross') { markCell(projectId, c, value); return; }
+    var chart = view.data && view.data.chart;
+    if (!chart) return;
+    var idx = -1;
+    if (layer === 'back') idx = sweeping ? sweepBack(chart, c.fx, c.fy) : X.nearestBack(chart, c.fx, c.fy, X.HIT_TOL);
+    else if (layer === 'knots') idx = X.nearestKnot(chart, c.fx, c.fy, X.HIT_TOL);
+    else if (layer === 'part') idx = X.nearestPart(chart, c.fx, c.fy);
+    if (idx < 0) {
+      if (!sweeping) toast('No ' + LAYER_NOUN[layer] + ' there — zoom in and tap closer');
+      return;
+    }
+    markLayerItem(projectId, layer, idx, value);
+  }
+
+  /** The nearest backstitch segment whose MIDPOINT the finger is on. */
+  function sweepBack(chart, fx, fy) {
+    var list = chart.back || [];
+    var tol = X.HIT_TOL;
+    var best = -1, bestD = tol * tol * (1 + 1e-9);
+    for (var i = 0; i < list.length; i++) {
+      var mx = (list[i].x1 + list[i].x2) / 2 - fx;
+      var my = (list[i].y1 + list[i].y2) / 2 - fy;
+      var d = mx * mx + my * my;
+      if (d < bestD) { bestD = d; best = i; }
+    }
+    return best;
+  }
+
+  /**
+   * Mark (or unmark) one backstitch segment, knot or fractional. Single-item
+   * path: one bit flip, one base64 re-encode of a list that is hundreds long,
+   * and an incremental tally bump — never a full recount.
+   */
+  function markLayerItem(projectId, layer, idx, value) {
+    var state = view[LAYER_BITS[layer]];
+    var items = layerItems(view.data, layer);
+    var item = items[idx];
+    if (!state || !item) return false;
+    var was = ((state.bytes[idx >> 3] >> (idx & 7)) & 1) === 1;
+    if (was === !!value) return false;
+
+    var beforeByColor = snapshotByColor();
+    X.setBit(state, idx, value);
+    var b64 = X.bitsB64(state);
+    var fields = LAYER_FIELD[layer];
+    var delta = value ? 1 : -1;
+    var at = layerAnchor(layer, item);
+    var cx = clampInt(Math.floor(at.x), 0, Math.max(0, view.w - 1), 0);
+    var cy = clampInt(Math.floor(at.y), 0, Math.max(0, view.h - 1), 0);
+
+    Store.updateCraftData(projectId, function (cd) {
+      cd.progress[fields[0]] = b64;
+      cd.progress[fields[1]] = Math.max(0, (cd.progress[fields[1]] || 0) + delta);
+      cd.current.cx = cx;
+      cd.current.cy = cy;
+    });
+    view[LAYER_KEY[layer]] = b64;
+    bumpStats(layerColours(layer, item), delta, layer);
+    view.cx = cx;
+    view.cy = cy;
+
+    fb('tap');
+    var p = Store.project(projectId);
+    var data = dataOf(p);
+    syncModel(data);
+    syncScreen(p, data);
+    if (value) noteMilestones(projectId, beforeByColor);
+    return true;
+  }
+
+  /** Every item of one layer inside the tapped 10×10 block. */
+  function markLayerBlock(projectId, layer, c, value) {
+    var items = layerItems(view.data, layer);
+    var state = view[LAYER_BITS[layer]];
+    if (!state) return;
+    var bx = Math.floor(c.x / 10) * 10, by = Math.floor(c.y / 10) * 10;
+    var hit = [];
+    for (var i = 0; i < items.length; i++) {
+      var at = layerAnchor(layer, items[i]);
+      if (at.x < bx || at.x > bx + 10 || at.y < by || at.y > by + 10) continue;
+      hit.push(i);
+    }
+    var total = flipLayer(projectId, layer, hit, value, c);
+    if (!total) { toast('That block has no ' + LAYER_NOUNS[layer] + ' left to ' + (value ? 'mark' : 'clear')); return; }
+    toast((value ? 'Marked ' : 'Cleared ') + Math.abs(total) + ' ' + LAYER_NOUNS[layer] + ' in this 10×10 block');
+  }
+
+  /** Every item of one layer that belongs to the current colour. */
+  function markLayerColour(projectId, layer, value) {
+    var p = Store.project(projectId);
+    if (!p) return;
+    var data = dataOf(p);
+    var pi = clampInt(data.current.paletteIndex, 0, Math.max(0, data.palette.length - 1), 0);
+    var items = layerItems(data, layer);
+    var hit = [];
+    for (var i = 0; i < items.length; i++) {
+      if (layerColours(layer, items[i]).indexOf(pi) >= 0) hit.push(i);
+    }
+    var total = flipLayer(projectId, layer, hit, value, null);
+    if (!total) { toast('Nothing to change'); return; }
+    toast((value ? 'Marked ' : 'Cleared ') + Math.abs(total) + ' ' + LAYER_NOUNS[layer] + ' of ' +
+      paletteLabel(data.palette[pi]));
+  }
+
+  /** Bulk flip of a list of indexes in one layer. Returns the signed delta. */
+  function flipLayer(projectId, layer, idxs, value, c) {
+    var state = view[LAYER_BITS[layer]];
+    var items = layerItems(view.data, layer);
+    if (!state) return 0;
+    var beforeByColor = snapshotByColor();
+    var total = 0;
+    for (var k = 0; k < idxs.length; k++) {
+      var i = idxs[k];
+      if (!items[i]) continue;
+      var was = ((state.bytes[i >> 3] >> (i & 7)) & 1) === 1;
+      if (was === !!value) continue;
+      X.setBit(state, i, value);
+      total += value ? 1 : -1;
+    }
+    if (!total) return 0;
+    var b64 = X.bitsB64(state);
+    var fields = LAYER_FIELD[layer];
+    Store.updateCraftData(projectId, function (cd) {
+      cd.progress[fields[0]] = b64;
+      cd.progress[fields[1]] = Math.max(0, (cd.progress[fields[1]] || 0) + total);
+      if (c) { cd.current.cx = c.x; cd.current.cy = c.y; }
+    });
+    view[LAYER_KEY[layer]] = b64;
+    view.stats = null;                 // several colours moved: recount properly
+    fb(total > 0 ? 'group' : 'undo');
+    var p = Store.project(projectId);
+    var data = dataOf(p);
+    syncModel(data);
+    syncScreen(p, data);
+    if (total > 0) noteMilestones(projectId, beforeByColor);
+    return total;
   }
 
   function markCell(projectId, c, value) {
@@ -1629,7 +2153,8 @@
     if (value) noteMilestones(projectId, beforeByColor);
   }
 
-  function markBlock(projectId, c, value) {
+  function markBlock(projectId, layer, c, value) {
+    if (layer && layer !== 'cross') { markLayerBlock(projectId, layer, c, value); return; }
     var beforeByColor = snapshotByColor();
     var bx = Math.floor(c.x / 10) * 10, by = Math.floor(c.y / 10) * 10;
     var changed = {};
@@ -1652,7 +2177,8 @@
     toast((value ? 'Marked ' : 'Cleared ') + Math.abs(total) + ' stitches in this 10×10 block');
   }
 
-  function markWholeColour(projectId, value) {
+  function markWholeColour(projectId, layer, value) {
+    if (layer && layer !== 'cross') { markLayerColour(projectId, layer, value); return; }
     var p = Store.project(projectId);
     if (!p) return;
     var data = dataOf(p);
@@ -1992,6 +2518,7 @@
           body.appendChild(el('p', 'muted',
             'No chart page images yet. Import a PDF from the ⋯ menu and the pages are ' +
             'rendered and kept on this device.'));
+          body.appendChild(storageFooter(projectId, data));
           return;
         }
         body.appendChild(el('p', 'muted',
@@ -2056,12 +2583,62 @@
             'Some chart PDFs draw every stitch as a coloured square. When they do, the whole ' +
             'grid can be read out of the file and you get stitch-by-stitch counting.'));
         }
+
+        body.appendChild(storageFooter(projectId, data));
       },
       footer: [{ text: 'Close', cls: 'btn primary', onClick: function (api) { api.close(); } }],
       onClose: function () {
         urls.forEach(function (u) { try { URL.revokeObjectURL(u); } catch (e) { /* ignore */ } });
       }
     });
+  }
+
+  /**
+   * What this project is actually using: the chart data in localStorage (which
+   * is what the 1 MB guard watches) and the page images in IndexedDB, which
+   * live under a far bigger quota but are device-only.
+   */
+  function storageFooter(projectId, data) {
+    var box = el('div', 'xs-storage');
+    var bytes = X.dataSize(data);
+    var line = el('p', 'muted xs-storage-line',
+      'Chart data: ' + fmtBytes(bytes) + ' of about ' + fmtBytes(X.SIZE_BUDGET_BYTES) +
+      ' shared by every project.');
+    box.appendChild(line);
+    var pics = el('p', 'muted xs-storage-line', 'Page images: counting…');
+    box.appendChild(pics);
+
+    if (window.BlobStore && window.BlobStore.available()) {
+      window.BlobStore.usage().then(function (u) {
+        if (!pics.isConnected) return;
+        pics.textContent = u
+          ? ('Page images: ' + fmtBytes(u.bytes) + ' in ' + plural(u.count, 'image') + ' on this device.')
+          : 'Page images: size unavailable on this device.';
+      }, function () { pics.textContent = 'Page images: size unavailable on this device.'; });
+    } else {
+      pics.textContent = 'Page images: this browser cannot store them.';
+    }
+
+    if (hasChart(data) && bytes > X.SIZE_WARN_BYTES) {
+      var drop = button('btn ghost block', 'Switch to image-only mode');
+      on(drop, 'click', function () {
+        C.confirmSheet({
+          title: 'Switch to image-only?',
+          message: 'The stitch grid goes, so counting becomes per colour rather than square ' +
+            'by square. Your colour key and everything counted so far are kept' +
+            (data.pages.length
+              ? ', and so are the chart pages.'
+              : '. This project has no chart pages, so keep the original file to stitch from.'),
+          confirmText: 'Switch'
+        }).then(function (ok) {
+          if (!ok) return;
+          C.closeAllSheets();
+          switchToCountsMode(projectId);
+        });
+      });
+      box.appendChild(drop);
+    }
+    return box;
   }
 
   function isPageDone(data, i) {
@@ -2384,8 +2961,11 @@
       bits.push(d.design.w + ' × ' + d.design.h);
       bits.push(plural(d.palette.length, 'colour'));
       bits.push(d.fabric.count + ' ct');
-      if (d.chart.back.length) bits.push(plural(d.chart.back.length, 'backstitch'));
-      if (d.chart.knots.length) bits.push(plural(d.chart.knots.length, 'knot or bead'));
+      if (d.chart.back.length) bits.push(plural(d.chart.back.length, 'backstitch segment'));
+      if (d.chart.knots.length) {
+        bits.push(d.chart.knots.length === 1 ? '1 knot or bead' : d.chart.knots.length + ' knots and beads');
+      }
+      if (d.chart.part.length) bits.push(plural(d.chart.part.length, 'fractional'));
       card.appendChild(el('h3', 'xs-h3', 'Ready to import'));
       card.appendChild(el('p', null, bits.join(' · ')));
       if (d.progress.doneCount) {
@@ -2417,18 +2997,104 @@
       cd.progress.mode = 'cells';
       cd.progress.done = d.progress.done;
       cd.progress.doneCount = d.progress.doneCount;
+      /* OXS has no "done" flag for backstitch, knots or fractionals, so a
+         fresh import always starts those layers empty (see toOXS). */
+      clearExtraProgress(cd);
       cd.progress.perColor = d.palette.map(function (e, i) { return { i: i, done: 0 }; });
       cd.current.paletteIndex = 0;
       cd.current.cx = 0;
       cd.current.cy = 0;
+      cd.sizeWarnedAt = 0;
       cd.source = { kind: 'oxs', fileName: fileName || '', importedAt: Date.now(), warnings: warnings.slice(0, 12) };
       return X.normalize(cd, null);
     });
-    if (view) { view.img = null; view.cellsKey = null; view.doneKey = null; view.paletteKey = null; }
+    forgetCaches();
     C.closeAllSheets();
     C.render();
     fb('done');
     toast('Imported ' + d.design.w + ' × ' + d.design.h + ' · ' + plural(d.palette.length, 'colour'));
+    checkSize(projectId);
+  }
+
+  /** Reset the backstitch / knot / fractional bitmaps on a fresh import. */
+  function clearExtraProgress(cd) {
+    cd.progress.doneBack = '';
+    cd.progress.doneBackCount = 0;
+    cd.progress.donePart = '';
+    cd.progress.donePartCount = 0;
+    cd.progress.doneKnots = '';
+    cd.progress.doneKnotsCount = 0;
+  }
+
+  /** Drop every decoded cache so the next render rebuilds from craftData. */
+  function forgetCaches() {
+    if (!view) return;
+    view.img = null;
+    view.cellsKey = null;
+    view.doneKey = null;
+    view.paletteKey = null;
+    view.backKey = null;
+    view.knotKey = null;
+    view.partKey = null;
+    view.backBits = null;
+    view.knotBits = null;
+    view.partBits = null;
+    view.stats = null;
+  }
+
+  /* ---- the craftData size guard (research doc B9 risk #4) ------------- */
+
+  function fmtBytes(n) {
+    n = num(n, 0);
+    if (n < 1024) return Math.round(n) + ' B';
+    if (n < 1048576) return Math.round(n / 1024) + ' KB';
+    return (Math.round(n / 1048576 * 10) / 10) + ' MB';
+  }
+
+  /**
+   * localStorage gives the whole app about 5 MB, and every project shares it.
+   * After an import or a grid read, check what this project now weighs and, if
+   * it is over 1 MB, offer the way out. Once per project per import — the flag
+   * lives in craftData so it survives a reload, and every import clears it.
+   */
+  function checkSize(projectId) {
+    var p = Store.project(projectId);
+    if (!p) return;
+    var data = dataOf(p);
+    var bytes = X.dataSize(data);
+    if (bytes <= X.SIZE_WARN_BYTES || data.sizeWarnedAt) return;
+    Store.updateCraftData(projectId, function (cd) { cd.sizeWarnedAt = Date.now(); });
+
+    C.openSheet({
+      title: 'This chart is large',
+      cls: 'sheet-xs-size',
+      build: function (body) {
+        body.appendChild(el('p', null,
+          'This chart is large (' + fmtBytes(bytes) + ' of ' + fmtBytes(X.SIZE_BUDGET_BYTES) +
+          ' available). Keep the stitch grid, or switch to image-only mode ' +
+          '(chart pages stay, per-stitch tracking is lost)?'));
+        body.appendChild(el('p', 'muted',
+          'Every project on this device shares that space. Image-only mode keeps the colour ' +
+          'key, the chart pages and everything you have already counted — as per-colour ' +
+          'totals rather than square by square — so no progress is lost.'));
+      },
+      footer: [
+        {
+          text: 'Switch to image-only',
+          cls: 'btn ghost',
+          onClick: function (api) { api.close(); switchToCountsMode(projectId); }
+        },
+        { text: 'Keep the stitch grid', cls: 'btn primary', onClick: function (api) { api.close(); } }
+      ]
+    });
+  }
+
+  function switchToCountsMode(projectId) {
+    Store.updateCraftData(projectId, function (cd) { return X.toCountsMode(cd); });
+    forgetCaches();
+    C.render();
+    fb('done');
+    toast('Image-only mode · your per-colour totals were kept', { ms: 4200 });
   }
 
   function warningList(title, warnings, muted) {
@@ -2806,21 +3472,24 @@
       cd.progress.mode = 'cells';
       cd.progress.done = '';
       cd.progress.doneCount = 0;
+      clearExtraProgress(cd);
       cd.progress.perColor = palette.map(function (e, i) { return { i: i, done: 0 }; });
       cd.current.paletteIndex = 0;
       cd.current.cx = 0;
       cd.current.cy = 0;
+      cd.sizeWarnedAt = 0;
       var warn = (cd.source.warnings || []).slice(0);
       cd.source.warnings = warn.concat(['grid read from the PDF by the beta reader'])
         .concat(res.warnings || []).slice(0, 12);
       return X.normalize(cd, null);
     });
-    if (view) { view.img = null; view.cellsKey = null; view.doneKey = null; view.paletteKey = null; }
+    forgetCaches();
     C.closeAllSheets();
     C.render();
     fb('done');
     toast('Grid read · ' + res.w + ' × ' + res.h + ' stitches · ' +
       plural(palette.length, 'colour'), { ms: 4200 });
+    checkSize(projectId);
   }
 
   /** "Try to read the grid (beta)" from the Pages sheet: re-pick the PDF. */
@@ -3428,15 +4097,17 @@
       next.pages = cd.pages;
       next.parking = [];
       next.stash = {};
+      next.sizeWarnedAt = 0;
       return next;
     });
-    if (view) { view.img = null; view.cellsKey = null; view.doneKey = null; view.paletteKey = null; }
+    forgetCaches();
     C.closeAllSheets();
     C.render();
     fb('done');
     var stats = result.stats || {};
     toast('Chart made from your photo · ' +
       plural(stats.colors || (d.palette ? d.palette.length : 0), 'colour'));
+    checkSize(projectId);
   }
 
   /* ================================================================== *
