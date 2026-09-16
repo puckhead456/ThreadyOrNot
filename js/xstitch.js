@@ -2286,10 +2286,45 @@
     return false;
   }
 
+  /**
+   * A page footer glued onto the row beneath it, which is what a generator
+   * that prints "38 / 38" in the margin produces when the two run together:
+   *   '38 / 383756 (905 ct)'  ->  '3756 (905 ct)'
+   * Only fires when the second number starts with the first one and leaves a
+   * plausible floss code behind, so a real '10 / 38' is left alone.
+   */
+  function stripFooterGlue(s) {
+    var m = /^\s*(\d{1,4})\s*\/\s*(\d{2,8})\b/.exec(s);
+    if (!m) return s;
+    var head = m[1], rest = m[2];
+    if (rest.indexOf(head) !== 0) return s;
+    var tail = rest.slice(head.length);
+    if (!/^\d{3,5}$/.test(tail)) return s;
+    return tail + s.slice(m[0].length);
+  }
+
+  /**
+   * '(56985 ct)', '(905 ct)', '(1,234)' are stitch counts in KG-Chart and
+   * friends. Rewritten to 'N sts' so the ordinary tail parser sees them.
+   * A bare '(2)' is left alone: that is far more likely to be strands.
+   */
+  function unwrapCounts(s) {
+    return s.replace(/\(\s*(\d[\d,]*)\s*(ct|cts|sts?|stitches)?\s*\)/ig, function (all, n, unit) {
+      var v = parseInt(String(n).replace(/,/g, ''), 10);
+      if (!isFinite(v)) return all;
+      if (!unit && v < 7) return all;
+      return ' ' + v + ' sts ';
+    });
+  }
+
   /** Normalise a raw line for tokenising: leader dots, pipes, digit groups. */
   function cleanKeyLine(line) {
     var s = String(line == null ? '' : line);
     s = s.replace(/ | | | /g, ' ');
+    s = stripFooterGlue(s);
+    s = unwrapCounts(s);
+    // Some generators lose a hyphen in a colour name to the font: 'Red?Copper'.
+    s = s.replace(/([A-Za-z])\s*\?\s*([A-Za-z])/g, '$1-$2');
     // leader dots / underscores: runs of 3 or more collapse to one separator
     s = s.replace(/(?:[.·_․…]\s*){3,}/g, ' ');
     // table pipes become plain separators when the line really is a table row
@@ -2367,6 +2402,119 @@
     return { extra: extra, strands: s, stitchCount: c, skeins: k };
   }
 
+  /* ---- grid furniture and key blocks -------------------------------- *
+   * Chart pages are full of lines that look numeric enough to fool a naive
+   * key parser: the column ruler down the top and bottom of every page
+   * ('107 110 120 130 140 150 159') and the row labels down both margins
+   * ('155 155'). Neither ever carries colour information, so they are
+   * rejected outright; any other all-numeric line is only accepted inside a
+   * block that a key header opened.
+   * ------------------------------------------------------------------- */
+
+  var INT_TOKEN_RE = /^\d{1,6}$/;
+
+  function allIntegers(toks) {
+    if (toks.length < 2) return false;
+    for (var i = 0; i < toks.length; i++) if (!INT_TOKEN_RE.test(toks[i])) return false;
+    return true;
+  }
+
+  /** A margin ruler (3+ ascending integers) or a row label ('155 155'). */
+  function looksLikeGridLine(toks) {
+    if (!allIntegers(toks)) return false;
+    if (toks.length === 2) return toks[0] === toks[1];
+    for (var k = 1; k < toks.length; k++) {
+      if (parseInt(toks[k], 10) <= parseInt(toks[k - 1], 10)) return false;
+    }
+    return true;
+  }
+
+  /** Lines that open a run of key rows. */
+  var KEY_BLOCK_HEADER_RE = new RegExp(
+    '^\\s*(?:' +
+    'colou?r\\s*table|colou?r\\s*key|colou?rs?\\s*used|' +
+    'dmc\\s*#?\\s*(?:and|&)\\s*name|' +
+    'floss(?:\\s*(?:list|key|chart))?|legend|key\\b|' +
+    'symbol(?:\\s*(?:key|list|chart|table))?|' +
+    'thread\\s*(?:list|key)|palette|dmc\\s*$' +
+    ')', 'i');
+
+  /** Lines that close one: the cover-block metadata around a key. */
+  var KEY_BLOCK_BREAK_RE =
+    /^\s*(?:stitch(?:es)?\s*count|finished\s*size|fabric\b|cloth['’ʼ]?s?\b|design\s*(?:area|size)|#\s*of\s*colou?rs)/i;
+
+  var DECLARED_COLORS_RES = [
+    /#\s*of\s*colou?rs?\s*:?\s*(\d{1,4})/i,
+    /\bcolou?rs?\s*:\s*(\d{1,4})\b/i,
+    /\b(\d{1,4})\s*colou?rs?\s+(?:used|in\s+this)/i
+  ];
+
+  /* Apostrophes come out of PDFs as ', ’ or ʼ depending on the font. */
+  var CLOTH_COLOR_RES = [
+    /\bcloth['’ʼ]?s?\s*colou?r\s*:\s*(.+)$/i,
+    /\bfabric\s*colou?r\s*:\s*(.+)$/i,
+    /\btoile\s*:\s*colou?r\s*:\s*(.+)$/i
+  ];
+
+  /* ---- DMC-library style legends ------------------------------------ *
+   * The DMC free patterns print a two-column legend whose symbol glyphs do
+   * not survive extraction, leaving rows like 'x 1 741 x 1' (the skeins of
+   * one column, then the next colour's number and its skeins) or a plain
+   * '946 x 1'. Some sheets drop the skeins entirely and print code pairs,
+   * '3808 3831', relying on a '* 1 skein in each colour' line instead.
+   * ------------------------------------------------------------------- */
+
+  var SKEIN_EACH_RE = /\*?\s*(\d{1,2})\s*skeins?\s+(?:in|of|per)\s+(?:each\s+)?colou?rs?/i;
+  var STRAND_RE = /(\d)\s*(?:strands?|brins?|hebras?|fils?)\b/i;
+  var PTS_PER_CM_RE = /(\d+(?:[.,]\d+)?)\s*p\s?ts?\s*\/\s*cm/i;
+  var EMBROIDERY_STITCH_RE = /(?:straight|stem|satin|buttonhole|chain|blanket|lazy\s*daisy)\s*stitch/i;
+
+  /** A token that could be a floss number in its own right. */
+  function isCodeToken(t) {
+    return /^\d{3,5}$/.test(t) || /^E\d{3,4}$/i.test(t) || NAMED_CODE_RE.test(t);
+  }
+
+  /**
+   * A legend row made only of floss numbers and 'x N' skein marks.
+   * Returns [{ code, skeins }] — one per number on the line — or null when
+   * the line is not that shape. Two-digit numbers are never codes here, so a
+   * stray '89 x 74' cannot masquerade as one.
+   */
+  function codeListRow(rawLine, allowBare) {
+    var toks = String(rawLine == null ? '' : rawLine)
+      .replace(/\bx(\d{1,3})\b/ig, 'x $1')
+      .trim().split(/\s+/);
+    if (toks.length < 1 || toks[0] === '') return null;
+    if (looksLikeGridLine(toks)) return null;
+
+    var codes = [], marks = [], i;
+    for (i = 0; i < toks.length; i++) {
+      var t = toks[i];
+      if (/^x$/i.test(t)) {
+        var next = toks[i + 1];
+        if (next && /^\d{1,3}$/.test(next)) { marks.push(parseInt(next, 10)); i++; continue; }
+        return null;
+      }
+      if (isCodeToken(t)) { codes.push(t); continue; }
+      if (/^\d{1,2}$/.test(t)) continue;          // a stray column number
+      return null;                                 // a word: not this shape
+    }
+    if (!codes.length) return [];
+
+    if (!marks.length) {
+      // No 'x N' anywhere: only trust a run of numbers when the sheet has
+      // told us how many skeins every colour takes, and every number is a
+      // floss we actually know.
+      if (!allowBare || codes.length < 2) return null;
+      for (i = 0; i < codes.length; i++) if (!hexFor('DMC', codes[i])) return null;
+    }
+
+    var skeins = marks.length ? marks[marks.length - 1] : null;
+    var out = [];
+    for (i = 0; i < codes.length; i++) out.push({ code: codes[i], skeins: skeins });
+    return out;
+  }
+
   var SECTION_TESTS = [
     { kind: 'back', re: /back\s*stitch|backstitch|^b\.?\s*s\.?$/i },
     { kind: 'knot', re: /french\s*knot/i },
@@ -2404,6 +2552,8 @@
       strandsDefault: defaultStrands,
       stitchesUsed: [],
       copyrightLines: [],
+      declaredColors: null,
+      bsStrands: null,
       confidence: 0,
       warnings: warnings
     };
@@ -2427,45 +2577,91 @@
     var anyUnreadable = false;
     var entries = [];
     var byKey = {};
+    var inBlock = false;
+
+    /* Document-level facts the row parser needs before it starts. */
+    var mEach = SKEIN_EACH_RE.exec(raw);
+    var defaultSkeins = mEach ? parseInt(mEach[1], 10) : null;
+
+    /** Add a row, merging it onto an earlier row for the same floss. */
+    function addEntry(entry) {
+      var mk = (entry.brand || '') + ' ' + entry.code.toLowerCase() + ' ' + entry.kind;
+      var prev = byKey[mk];
+      if (!prev) {
+        byKey[mk] = entry;
+        entries.push(entry);
+        return;
+      }
+      if (entry.stitchCount !== null) {
+        prev.stitchCount = prev.stitchCount === null
+          ? entry.stitchCount : Math.max(prev.stitchCount, entry.stitchCount);
+      }
+      if (entry.skeins !== null) {
+        prev.skeins = prev.skeins === null ? entry.skeins : Math.max(prev.skeins, entry.skeins);
+      }
+      if (!prev.symbol && entry.symbol) prev.symbol = entry.symbol;
+      if (!prev.name && entry.name) prev.name = entry.name;
+      if (prev.strands === null && entry.strands !== null) prev.strands = entry.strands;
+    }
 
     for (var li = 0; li < rawLines.length; li++) {
       var rawLine = rawLines[li];
-      if (/^\s*={2,}\s*PAGE\b/i.test(rawLine)) continue;         // PdfText page marker
+      if (/^\s*={2,}\s*PAGE\b/i.test(rawLine)) {                 // PdfText page marker
+        inBlock = false;
+        continue;
+      }
       // page furniture: '(c) 2026 A Stitcher' would otherwise read as code 2026
       if (/©|\(c\)|copyright|all rights reserved/i.test(rawLine)) continue;
       if (!rawLine.replace(/\s+/g, '')) {
         blankRun++;
-        if (blankRun >= 2) kind = 'cross';
+        if (blankRun >= 2) { kind = 'cross'; inBlock = false; }
         continue;
       }
       blankRun = 0;
 
-      var entry = parseKeyRow(rawLine, kind, brandRe, docBrand, defaultStrands);
+      if (KEY_BLOCK_BREAK_RE.test(rawLine)) inBlock = false;
+      else if (KEY_BLOCK_HEADER_RE.test(rawLine)) inBlock = true;
+
+      /* The bare-numbers legend shapes first: they never look like prose. */
+      var listed = codeListRow(rawLine, defaultSkeins !== null);
+      if (listed && listed.length) {
+        for (var ci = 0; ci < listed.length; ci++) {
+          var lc = listed[ci];
+          var lBrand = docBrand || 'DMC';
+          var lCode = lc.code;
+          if (NAMED_CODE_RE.test(lCode)) {
+            lCode = lCode.charAt(0).toUpperCase() + lCode.slice(1).toLowerCase();
+            if (/^b5200$/i.test(lCode)) lCode = 'B5200';
+          }
+          addEntry({
+            symbol: '', brand: lBrand, code: lCode, name: '',
+            strands: null, stitchCount: null,
+            skeins: lc.skeins === null ? defaultSkeins : lc.skeins,
+            kind: kind, blendCode: null,
+            hex: hexFor(lBrand, lCode), line: String(rawLine).trim()
+          });
+        }
+        continue;
+      }
+      if (listed) continue;   // recognised as a legend line, but no codes on it
+
+      var entry = parseKeyRow(rawLine, kind, brandRe, docBrand, defaultStrands, inBlock);
       if (entry) {
         if (entry.symbolUnreadable) anyUnreadable = true;
         delete entry.symbolUnreadable;
-        var mk = (entry.brand || '') + ' ' + entry.code.toLowerCase() + ' ' + entry.kind;
-        if (byKey[mk]) {
-          var prev = byKey[mk];
-          if (entry.stitchCount !== null) {
-            prev.stitchCount = prev.stitchCount === null
-              ? entry.stitchCount : Math.max(prev.stitchCount, entry.stitchCount);
-          }
-          if (entry.skeins !== null) {
-            prev.skeins = prev.skeins === null ? entry.skeins : Math.max(prev.skeins, entry.skeins);
-          }
-          if (!prev.symbol && entry.symbol) prev.symbol = entry.symbol;
-          if (!prev.name && entry.name) prev.name = entry.name;
-          if (prev.strands === null && entry.strands !== null) prev.strands = entry.strands;
-        } else {
-          byKey[mk] = entry;
-          entries.push(entry);
-        }
+        addEntry(entry);
         continue;
       }
 
       var sk = sectionKindFor(rawLine);
       if (sk) kind = sk;
+    }
+
+    /* '* 1 skein in each colour' fills in every row that had no number. */
+    if (defaultSkeins !== null) {
+      for (var de = 0; de < entries.length; de++) {
+        if (entries[de].skeins === null) entries[de].skeins = defaultSkeins;
+      }
     }
 
     for (var ei = 0; ei < entries.length; ei++) {
@@ -2495,6 +2691,28 @@
           result.fabric.color = fabricColorFrom(line) || result.fabric.color;
         }
       }
+      if (result.declaredColors === null) {
+        for (var dc = 0; dc < DECLARED_COLORS_RES.length; dc++) {
+          m = DECLARED_COLORS_RES[dc].exec(line);
+          if (m) {
+            var declared = parseInt(m[1], 10);
+            if (declared > 0 && declared < 2000) result.declaredColors = declared;
+            break;
+          }
+        }
+      }
+
+      /* An explicit 'Cloth's Color: White' beats anything guessed from the
+         words around the count, so it is allowed to overwrite. */
+      for (var cc = 0; cc < CLOTH_COLOR_RES.length; cc++) {
+        m = CLOTH_COLOR_RES[cc].exec(line);
+        if (m) {
+          var clothColor = m[1].replace(/[.;,]\s*$/, '').trim();
+          if (clothColor && clothColor.length <= 40) result.fabric.color = clothColor;
+          break;
+        }
+      }
+
       if (result.fabric.over === null && /over\s*(?:2|two)\b/i.test(line)) result.fabric.over = 2;
       if (result.fabric.kind === null) {
         if (/\baida\b/i.test(line)) result.fabric.kind = 'aida';
@@ -2525,18 +2743,43 @@
       }
     }
 
-    /* strandsDefault: a strand hint near "cross stitch" wins, else any hint */
+    /* '5,5 pts/cm' is the metric way of writing the fabric count. */
+    if (result.fabric.count === null) {
+      for (i = 0; i < rawLines.length; i++) {
+        m = PTS_PER_CM_RE.exec(rawLines[i]);
+        if (!m) continue;
+        var perCm = parseFloat(m[1].replace(',', '.'));
+        if (!(perCm > 0)) continue;
+        var asCount = Math.round(perCm * CM_PER_IN);
+        if (asCount >= 6 && asCount <= 40) {
+          result.fabric.count = asCount;
+          result.fabric.countY = asCount;
+        }
+        break;
+      }
+    }
+
+    /* strandsDefault: a strand hint near "cross stitch" wins, else any hint.
+       Backstitch lines are counted separately; when a sheet contradicts
+       itself (the DMC library ones do, because the FR and EN columns bleed
+       together) the smaller number is the safer one for backstitch. */
     var strandHint = null;
+    var bsHint = null;
     for (i = 0; i < rawLines.length; i++) {
       line = rawLines[i];
-      m = /(\d)\s*strands?\b/i.exec(line);
+      m = STRAND_RE.exec(line);
       if (!m) continue;
       var v = parseInt(m[1], 10);
       if (!(v >= 1 && v <= 6)) continue;
-      if (/cross\s*stitch/i.test(line)) { strandHint = v; break; }
+      if (/back\s*stitch|point\s*arri/i.test(line)) {
+        if (bsHint === null || v < bsHint) bsHint = v;
+        continue;
+      }
+      if (/cross\s*stitch|point\s*de\s*croix/i.test(line)) { strandHint = v; continue; }
       if (strandHint === null) strandHint = v;
     }
     if (strandHint !== null) result.strandsDefault = strandHint;
+    if (bsHint !== null) result.bsStrands = bsHint;
 
     /* stitchesUsed */
     result.stitchesUsed = stitchesUsedFrom(raw, rawLines);
@@ -2556,10 +2799,11 @@
 
     /* ---------------- confidence (B3.3 step 6) ---------------- */
     var nEntries = entries.length;
-    var withCount = 0, withSymbol = 0;
+    var withCount = 0, withSymbol = 0, withName = 0;
     for (i = 0; i < nEntries; i++) {
       if (entries[i].stitchCount !== null) withCount++;
       if (entries[i].symbol) withSymbol++;
+      if (entries[i].name) withName++;
     }
     var conf = 0;
     if (nEntries >= 3) conf += 0.4;
@@ -2567,20 +2811,58 @@
     if (result.fabric.count) conf += 0.2;
     if (nEntries && withCount / nEntries >= 0.6) conf += 0.1;
     if (nEntries && withSymbol / nEntries >= 0.6) conf += 0.1;
+    /* A key full of real colour names is worth as much as one full of
+       symbols: it is what makes a Spriter-style list usable. */
+    if (nEntries && withName / nEntries >= 0.6) conf += 0.1;
+
+    var declaredN = result.declaredColors;
+    if (declaredN && nEntries) {
+      if (Math.abs(nEntries - declaredN) <= Math.max(1, declaredN * 0.1)) conf += 0.1;
+      if (nEntries > declaredN * 1.5) {
+        conf = Math.min(conf, 0.4);
+        pushOnce(warnings, 'found ' + nEntries + ' rows but the pattern says ' + declaredN +
+          ' colours — check the list before importing');
+      }
+    }
+    if (conf > 1) conf = 1;
     result.confidence = nEntries ? Math.round(conf * 100) / 100 : 0;
+
+    /* Symbol fonts usually have no ToUnicode map, so a handful of glyphs
+       survive extraction and the rest do not. Say so rather than showing a
+       half-empty symbol column. */
+    if (nEntries && withSymbol > 0 && withSymbol / nEntries < 0.6) {
+      pushOnce(warnings, 'most chart symbols could not be read; the app assigns its own');
+    }
+    if (nEntries && !(result.design.w && result.design.h)) {
+      pushOnce(warnings, 'design size not stated');
+    }
+
+    /* Surface embroidery sheets rather than half-parsing them: they use
+       straight, stem, satin and buttonhole stitch on plain fabric, so there
+       is no grid, no count and nothing for a stitch counter to count. */
+    if (EMBROIDERY_STITCH_RE.test(raw) && !/cross\s*stitch|point\s*de\s*croix/i.test(raw) &&
+        !/\baida\b/i.test(raw) && !result.fabric.count) {
+      pushOnce(warnings, 'this looks like an embroidery pattern, not a counted chart');
+      if (result.confidence > 0.2) result.confidence = 0.2;
+    }
 
     if (!nEntries) pushOnce(warnings, 'no colour key found');
     return result;
   }
 
   /* One key row, or null when the line is not a key row. */
-  function parseKeyRow(rawLine, kind, brandRe, docBrand, defaultStrands) {
+  function parseKeyRow(rawLine, kind, brandRe, docBrand, defaultStrands, inBlock) {
     var cleaned = cleanKeyLine(rawLine);
     if (!cleaned) return null;
     if (cleaned.length > 160) return null;
 
     var toks = tokenizeKeyLine(cleaned);
     if (!toks.length) return null;
+
+    // Chart furniture, whatever the surrounding context.
+    if (looksLikeGridLine(toks)) return null;
+    // Any other bare run of numbers needs a key header to vouch for it.
+    if (!inBlock && allIntegers(toks)) return null;
 
     /* blend, spotted before tokens are consumed */
     var blendCode = null;
@@ -2653,8 +2935,10 @@
 
     var have = { strands: null, stitchCount: null, skeins: null };
     var unlabelled = [];
+    var hadUnit = false;
     for (k = 0; k < labelled.length; k++) {
       var L = labelled[k];
+      if (L.unit) hadUnit = true;
       if (L.unit === 'strands' && have.strands === null) have.strands = L.v;
       else if (L.unit === 'stitches' && have.stitchCount === null) have.stitchCount = L.v;
       else if (L.unit === 'skeins' && have.skeins === null) have.skeins = L.v;
@@ -2669,6 +2953,11 @@
     var nameWords = name ? name.split(/\s+/).length : 0;
     if (nameWords > 8) return null;
     if (!name && fit.strands === null && fit.stitchCount === null && fit.skeins === null) return null;
+
+    /* A key row has to look like one: a counted quantity, a colour name, a
+       symbol glyph, a brand word, or a key header vouching for the block. */
+    var hasName = /[A-Za-z]{3,}/.test(name);
+    if (!inBlock && !hadUnit && !hasName && !symbol && !brand) return null;
 
     var unreadable = hasUnreadableGlyph(symbol);
     if (unreadable) symbol = '';
@@ -2705,24 +2994,30 @@
   /* 'in', 'inch', 'inches' or a double-quote mark */
   var IN = '(?:in\\b|inch(?:es)?\\b|")';
 
-  function sizeRowFrom(line) {
+  /* Built once: parseKey runs these over every line of a 100 kB extraction,
+     and `new RegExp` per line was the single most expensive thing it did. */
+  var SIZE_RES = [
     /* '5.1" x 5.1" on 14 ct' — the unit after the first number */
-    var m = new RegExp('(\\d+(?:\\.\\d+)?)\\s*' + IN + '\\s*(?:x|\u00D7)\\s*(\\d+(?:\\.\\d+)?)\\s*' + IN + '?[^\\n]*?(\\d{2})\\s*(?:ct\\b|count\\b)', 'i').exec(line);
-    if (m) return { count: parseInt(m[3], 10), wIn: round2(parseFloat(m[1])), hIn: round2(parseFloat(m[2])) };
-
+    { re: new RegExp('(\\d+(?:\\.\\d+)?)\\s*' + IN + '\\s*(?:x|\u00D7)\\s*(\\d+(?:\\.\\d+)?)\\s*' + IN + '?[^\\n]*?(\\d{2})\\s*(?:ct\\b|count\\b)', 'i'), c: 3, w: 1, h: 2, cm: false },
     /* '6.36 x 5.29 in on 14 ct' — the unit only after the second number */
-    m = new RegExp('(\\d+(?:\\.\\d+)?)\\s*(?:x|\u00D7)\\s*(\\d+(?:\\.\\d+)?)\\s*' + IN + '[^\\n]*?(\\d{2})\\s*(?:ct\\b|count\\b)', 'i').exec(line);
-    if (m) return { count: parseInt(m[3], 10), wIn: round2(parseFloat(m[1])), hIn: round2(parseFloat(m[2])) };
+    { re: new RegExp('(\\d+(?:\\.\\d+)?)\\s*(?:x|\u00D7)\\s*(\\d+(?:\\.\\d+)?)\\s*' + IN + '[^\\n]*?(\\d{2})\\s*(?:ct\\b|count\\b)', 'i'), c: 3, w: 1, h: 2, cm: false },
+    /* '14 ct: 6.36 x 5.29 inches' */
+    { re: new RegExp('(\\d{2})\\s*(?:ct\\b|count\\b)[^\\n]*?(\\d+(?:\\.\\d+)?)\\s*' + IN + '?\\s*(?:x|\u00D7)\\s*(\\d+(?:\\.\\d+)?)\\s*' + IN, 'i'), c: 1, w: 2, h: 3, cm: false },
+    /* '71.12 cm x 91.44 cm (16 ct./inch)' */
+    { re: new RegExp('(\\d+(?:\\.\\d+)?)\\s*cm\\s*(?:x|\u00D7)\\s*(\\d+(?:\\.\\d+)?)\\s*cm[^\\n]*?(\\d{2})\\s*(?:ct\\b|count\\b)', 'i'), c: 3, w: 1, h: 2, cm: true },
+    { re: new RegExp('(\\d{2})\\s*(?:ct\\b|count\\b)[^\\n]*?(\\d+(?:\\.\\d+)?)\\s*(?:cm)?\\s*(?:x|\u00D7)\\s*(\\d+(?:\\.\\d+)?)\\s*cm', 'i'), c: 1, w: 2, h: 3, cm: true }
+  ];
 
-    m = new RegExp('(\\d{2})\\s*(?:ct\\b|count\\b)[^\\n]*?(\\d+(?:\\.\\d+)?)\\s*' + IN + '?\\s*(?:x|\u00D7)\\s*(\\d+(?:\\.\\d+)?)\\s*' + IN, 'i').exec(line);
-    if (m) return { count: parseInt(m[1], 10), wIn: round2(parseFloat(m[2])), hIn: round2(parseFloat(m[3])) };
-
-    m = /(\d+(?:\.\d+)?)\s*cm\s*(?:x|×)\s*(\d+(?:\.\d+)?)\s*cm[^\n]*?(\d{2})\s*(?:ct\b|count\b)/i.exec(line);
-    if (m) return { count: parseInt(m[3], 10), wIn: round2(parseFloat(m[1]) / CM_PER_IN), hIn: round2(parseFloat(m[2]) / CM_PER_IN) };
-
-    m = /(\d{2})\s*(?:ct\b|count\b)[^\n]*?(\d+(?:\.\d+)?)\s*(?:cm)?\s*(?:x|×)\s*(\d+(?:\.\d+)?)\s*cm/i.exec(line);
-    if (m) return { count: parseInt(m[1], 10), wIn: round2(parseFloat(m[2]) / CM_PER_IN), hIn: round2(parseFloat(m[3]) / CM_PER_IN) };
-
+  function sizeRowFrom(line) {
+    for (var i = 0; i < SIZE_RES.length; i++) {
+      var spec = SIZE_RES[i];
+      var m = spec.re.exec(line);
+      if (!m) continue;
+      var w = parseFloat(m[spec.w]);
+      var h = parseFloat(m[spec.h]);
+      if (spec.cm) { w /= CM_PER_IN; h /= CM_PER_IN; }
+      return { count: parseInt(m[spec.c], 10), wIn: round2(w), hIn: round2(h) };
+    }
     return null;
   }
 

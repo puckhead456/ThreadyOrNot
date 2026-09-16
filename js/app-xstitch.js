@@ -1996,7 +1996,9 @@
         }
         body.appendChild(el('p', 'muted',
           'Chart images are stored on this device only — they are not in your backup file. ' +
-          'Keep the PDF and you can always re-import.'));
+          'Keep the PDF and you can always re-import.' +
+          (data.pages.length >= MAX_PAGES
+            ? ' Only the first ' + MAX_PAGES + ' pages of a chart are saved.' : '')));
 
         var grid = el('div', 'xs-page-grid');
         data.pages.forEach(function (page, i) {
@@ -2575,12 +2577,23 @@
       toast('Imported ' + plural(palette.length, 'colour'));
       return Promise.resolve();
     }
+    var totalPages = handle.numPages || 0;
     return renderPages(projectId, handle, key, progressLine).then(function (pages) {
       C.closeAllSheets();
       C.render();
       fb('done');
-      toast('Read ' + plural(pages, 'page') + ' · ' + plural(palette.length, 'colour') +
-        (key.design.w ? ' · ' + key.design.w + ' × ' + key.design.h + ' stitches' : ''));
+      var bits = ['Read ' + plural(pages, 'page')];
+      if (palette.length) bits.push(plural(palette.length, 'colour'));
+      if (key.design.w) bits.push(key.design.w + ' × ' + key.design.h + ' stitches');
+      toast(bits.join(' · '), { ms: totalPages > MAX_PAGES ? 5200 : 3200 });
+      if (totalPages > MAX_PAGES) {
+        // A 72-page chart would be ~20 MB of images, so only the first 40 are
+        // kept. Say so plainly rather than quietly losing the rest.
+        window.setTimeout(function () {
+          toast('This chart has ' + totalPages + ' pages; the first ' + MAX_PAGES +
+            ' are saved on this device. Keep the PDF for the rest.', { ms: 6000 });
+        }, 900);
+      }
     });
   }
 
@@ -2595,9 +2608,16 @@
     var chain = Promise.resolve();
     progressLine.hidden = false;
 
+    var allPages = handle.numPages || 0;
+    if (allPages > total) {
+      progressLine.textContent = 'This chart has ' + allPages + ' pages; saving the first ' +
+        total + '…';
+    }
+
     function step(n) {
       return function () {
-        progressLine.textContent = 'Rendering page ' + n + ' of ' + total + '…';
+        progressLine.textContent = 'Rendering page ' + n + ' of ' + total +
+          (allPages > total ? ' (of ' + allPages + ')' : '') + '…';
         return handle.renderPage(n, { maxWidth: 1400 }).then(function (canvas) {
           return new Promise(function (resolve) {
             var key2 = 'p:' + projectId + ':chartpage:' + (n - 1);

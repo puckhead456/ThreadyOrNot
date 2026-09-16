@@ -20,7 +20,12 @@
 <div id="out"></div>
 <div id="summary"></div>
 
-<script src="../js/xstitch.js"></script>
+<script>
+// The Browser pane caches ../js/xstitch.js hard, so the suite always tests the
+// file that is actually on disk. Dev-only page; document.write keeps script
+// order, so the assertions below still run after the module has evaluated.
+document.write('<scr' + 'ipt src="../js/xstitch.js?v=' + Date.now() + '"><\/scr' + 'ipt>');
+</script>
 <script>
 'use strict';
 
@@ -1021,9 +1026,283 @@ assertEqual(X.parseKey('This design uses cross stitch only.').stitchesUsed, ['cr
   assertEqual(r.stitchesUsed, ['cross stitch', 'backstitch'], 'the worked example reads the stitch types');
 
   var noMeta = X.parseKey('▲ 310 Black\n■ 666 Red\n● 3799 Pewter');
-  assertEqual(noMeta.confidence, 0.5, 'entries with symbols but no counts or metadata score 0.5');
+  assertEqual(noMeta.confidence, 0.6, 'entries with symbols and names but no metadata score 0.6');
   var tiny = X.parseKey('▲ 310 Black 2 100');
-  assertClose(tiny.confidence, 0.2, 0.001, 'a single row scores only the stitchCount and symbol weights');
+  assertClose(tiny.confidence, 0.3, 0.001, 'a single row scores only the count, symbol and name weights');
+})();
+
+/* =====================================================================
+ * 13b. parseKey: what real generators actually emit
+ *
+ * Shapes taken from charts produced by KG-Chart LE and Spriter. The text
+ * here is synthetic — codes and counts only, never anyone's chart.
+ * ===================================================================== */
+group('parseKey: chart-page furniture is never a key row');
+
+(function () {
+  var rulers =
+    '1 10 20 30 40 50 53\n' +
+    '107 110 120 130 140 150 159\n' +
+    '160 170 180 190 200 210 212\n' +
+    '10 10\n155 155\n288 288\n' +
+    '10 20\n30 40 50 60\n';
+  var r = X.parseKey(rulers);
+  assertEqual(r.entries, [], 'column rulers and row labels produce no entries at all');
+  assertEqual(r.confidence, 0, 'a page of chart furniture scores 0');
+})();
+
+assertEqual(X.parseKey('107 110 120 130 140 150 159').entries.length, 0,
+  'an ascending run of integers is a margin ruler, not a key row');
+assertEqual(X.parseKey('155 155').entries.length, 0, 'a repeated integer is a row label');
+assertEqual(X.parseKey('3756 905').entries.length, 0,
+  'even a plausible code + count needs key context when it stands alone');
+
+(function () {
+  var r = X.parseKey('Color Table (DMC)\n3756 905\n310 12711\n666 2901');
+  assertEqual(r.entries.length, 3, 'the same bare rows are accepted inside a key block');
+  assertEqual(r.entries[0].code, '3756', 'a key header vouches for bare numeric rows');
+  assertEqual(r.entries[0].stitchCount, 905, 'the trailing number is the stitch count');
+})();
+
+(function () {
+  var r = X.parseKey('Color Table (DMC)\n\n\n107 110 120 130 140 150 159');
+  assertEqual(r.entries.length, 0, 'a blank run closes the key block again');
+  var r2 = X.parseKey('Color Table (DMC)\n=== PAGE 3 ===\n107 110 120 130');
+  assertEqual(r2.entries.length, 0, 'a page break closes the key block too');
+  var r3 = X.parseKey('Color Table (DMC)\nStitch Count: 224w x 288h\n120 130 140');
+  assertEqual(r3.entries.length, 0, 'cover-block metadata closes the key block');
+})();
+
+group('parseKey: KG-Chart style key block');
+
+var KG_TEXT =
+  'Pacman-screen2\n' +
+  '1 10 20 30 40 50 53\n' +
+  '10 10\n' +
+  '77 77\n' +
+  '1 10 20 30 40 50 53\n' +
+  '(This chart is printed using KG-Chart LE for Cross Stitch.)\n' +
+  '\n' +
+  '=== PAGE 22 ===\n' +
+  'Pacman-screen2\n' +
+  'Stitch Count: 224w x 288h\n' +
+  'Finished Size: 71.12 cm x 91.44 cm (16 ct./inch)\n' +
+  'Cloth: Linen\n' +
+  'Cloth’s Color: White\n' +
+  '# of colors: 10 Colors\n' +
+  'Color Table (DMC)\n' +
+  'Cross Stitch\n' +
+  '310 (56985 ct)\n349 (176 ct)\n972 (412 ct)\n3843 (4824 ct)\n3846 (126 ct)\n' +
+  '3820 (17 ct)\n728 (126 ct)\n3856 (1168 ct)\n3716 (158 ct)\n3072 (520 ct)';
+
+(function () {
+  var r = X.parseKey(KG_TEXT);
+  assertEqual(r.entries.length, 10, 'the KG-Chart block gives exactly its ten colours');
+  assertEqual(r.entries.map(function (e) { return e.code; }),
+    ['310', '349', '972', '3843', '3846', '3820', '728', '3856', '3716', '3072'],
+    'every code in key order');
+  assertEqual(r.entries.map(function (e) { return e.stitchCount; }),
+    [56985, 176, 412, 4824, 126, 17, 126, 1168, 158, 520],
+    '"(N ct)" is read as the stitch count');
+  assertEqual(r.declaredColors, 10, '"# of colors: 10 Colors" is captured as declaredColors');
+  assertSubset(r.design, { w: 224, h: 288 }, '"Stitch Count: 224w x 288h" gives the design size');
+  assertEqual(r.fabric.count, 16, '"(16 ct./inch)" gives the fabric count');
+  assertEqual(r.fabric.kind, 'linen', '"Cloth: Linen" gives the fabric kind');
+  assertEqual(r.fabric.color, 'White', '"Cloth’s Color: White" gives the fabric colour');
+  assertEqual(r.sizes, [{ count: 16, wIn: 28, hIn: 36 }],
+    'a centimetre finished size converts to 28 x 36 in at 16 ct');
+  assertEqual(r.strandsDefault, 2, 'no strand line leaves the default of 2');
+  assertTrue(r.confidence >= 0.85, 'a complete KG-Chart key scores at least 0.85', 'got ' + r.confidence);
+  var gridRows = r.entries.filter(function (e) { return /^[\d\s]+$/.test(e.line); });
+  assertEqual(gridRows.length, 0, 'no entry came from a chart-page line');
+})();
+
+assertEqual(X.parseKey('Color Table (DMC)\n310 (56985 ct)').entries[0].name, '',
+  'a code-only key row has no name, and that is fine');
+assertEqual(X.parseKey('Colors: 24').declaredColors, 24, '"Colors: 24" is read as declaredColors');
+assertEqual(X.parseKey('36 colours used in this design').declaredColors, 36,
+  '"36 colours used" is read as declaredColors');
+assertEqual(X.parseKey('Fabric colour: Antique White').fabric.color, 'Antique White',
+  '"Fabric colour:" gives the fabric colour');
+
+(function () {
+  /* Six rows against a declared four: the key was not read properly. */
+  var text = '# of colors: 4 Colors\nColor Table (DMC)\n' +
+    '310 (10 ct)\n349 (10 ct)\n972 (10 ct)\n3843 (10 ct)\n3846 (10 ct)\n3820 (10 ct)\n' +
+    '728 (10 ct)\n3856 (10 ct)';
+  var r = X.parseKey(text);
+  assertEqual(r.declaredColors, 4, 'the declared count is still captured');
+  assertTrue(r.confidence <= 0.4, 'finding far more rows than declared caps confidence at 0.4',
+    'got ' + r.confidence);
+  assertTrue(r.warnings.join('|').indexOf('says 4 colours') >= 0,
+    'and says so in a warning');
+})();
+
+group('parseKey: symbol prefixes, footer glue and parenthesised counts');
+
+(function () {
+  var r = X.parseKey('Color Table (DMC)\n♪ 3779 (194 ct)\n♫ 3326 (415 ct)\n' +
+    '※ 3078 (294 ct)\nf BLANC (134 ct)\ng B5200 (3555 ct)');
+  assertEqual(r.entries.map(function (e) { return e.symbol; }),
+    ['♪', '♫', '※', 'f', 'g'], 'surviving symbol glyphs land in entry.symbol');
+  assertEqual(r.entries.map(function (e) { return e.code; }),
+    ['3779', '3326', '3078', 'Blanc', 'B5200'], 'the code follows the symbol');
+  assertEqual(r.entries[3].hex, 'fcfbf8', 'BLANC resolves to the DMC white');
+  assertEqual(r.entries[4].stitchCount, 3555, 'and keeps its count');
+})();
+
+assertEqual(oneRow('38 / 383756 (905 ct)').code, '3756',
+  'a page footer glued onto a row is stripped off the front');
+assertEqual(oneRow('38 / 383756 (905 ct)').stitchCount, 905,
+  'and the row behind it keeps its count');
+assertEqual(X.parseKey('10 / 38').entries.length, 0,
+  'an ordinary "10 / 38" footer is left alone and produces nothing');
+assertEqual(X.parseKey('38 / 38').entries.length, 0, 'so is a last-page footer');
+
+(function () {
+  var r = X.parseKey('Color Table (DMC)\n♪ 3779 (194 ct)\n310 (12711 ct)\n666 (400 ct)\n' +
+    '3799 (120 ct)\n972 (90 ct)\n349 (60 ct)');
+  assertTrue(r.warnings.indexOf('most chart symbols could not be read; the app assigns its own') >= 0,
+    'a key where only a few symbols survived says so');
+  var all = X.parseKey('▲ 310 Black 2 100\n■ 666 Red 2 100\n● 972 Yellow 2 100');
+  assertTrue(all.warnings.indexOf('most chart symbols could not be read; the app assigns its own') < 0,
+    'a key where every symbol survived does not');
+})();
+
+assertSubset(oneRow('DMC 310  Black  (2 strands)  1234 stitches'),
+  { strands: 2, stitchCount: 1234 },
+  '"(2 strands)" is still strands, not a stitch count');
+assertEqual(oneRow('Color Table (DMC)\n310 (1234)') === null ? 'null' : 'row', 'row',
+  'a bare "(1234)" is read as a stitch count');
+
+group('parseKey: Spriter style per-page lists');
+
+var SPRITER_TEXT =
+  '=== PAGE 1 ===\n' +
+  '10 20\n30 40 50 60\n' +
+  'Created by Spriter v0.3.3 beta\n' +
+  'DMC # and Name\n' +
+  'B5200 Snow White\n310 Black\n762 Pearl Gray Vy Lt\n919 Red?Copper\n' +
+  '\n' +
+  '=== PAGE 2 ===\n' +
+  '10 20 30 40 50 60\n' +
+  'Created by Spriter v0.3.3 beta\n' +
+  'DMC # and Name\n' +
+  'B5200 Snow White\n310 Black\n' +
+  '\n' +
+  '=== PAGE 3 ===\n' +
+  'DMC # and Name Count\n' +
+  '310 Black 3025\n762 Pearl Gray Vy Lt 1501\n919 Red?Copper 84\n' +
+  '333 Blue Violet Very Dark 368\nB5200 Snow White 6895\n' +
+  'Spriter is written in Python and uses the open source library pypng, http://code.google.com/p/pypng/\n' +
+  'DMC to RGB colour space values were obtained from http://www.example.com/values.html';
+
+(function () {
+  var r = X.parseKey(SPRITER_TEXT);
+  assertEqual(r.entries.length, 5, 'per-page lists merge into the counted list, they do not duplicate');
+  assertEqual(r.entries.map(function (e) { return e.code; }),
+    ['B5200', '310', '762', '919', '333'], 'first-seen order, plus the code only the count page has');
+  assertEqual(r.entries.map(function (e) { return e.stitchCount; }),
+    [6895, 3025, 1501, 84, 368], 'counts come from the page that has them');
+  assertEqual(r.entries[3].name, 'Red-Copper', 'a "?" between letters is repaired to a hyphen');
+  assertEqual(r.entries[0].name, 'Snow White', 'colour names survive the merge');
+  assertEqual(r.design.w, null, 'grid margins are never mistaken for a design size');
+  assertTrue(r.confidence >= 0.6, 'names plus counts are worth 0.6 even with no fabric block',
+    'got ' + r.confidence);
+  assertTrue(r.warnings.indexOf('design size not stated') >= 0,
+    'and the missing design size is called out');
+  var junk = r.entries.filter(function (e) { return /http|python|spriter/i.test(e.line); });
+  assertEqual(junk.length, 0, 'the credits and URLs at the end produce no entries');
+})();
+
+assertEqual(X.parseKey('Created by Spriter v0.3.3 beta').entries.length, 0,
+  'a generator credit line is not a key row');
+assertEqual(X.parseKey('DMC to RGB colour space values were obtained from http://example.com/x.html').entries.length, 0,
+  'a sentence starting with a brand name is not a key row');
+
+group('parseKey: DMC-library style legends');
+
+var DMC_LEGEND =
+  'symbol colour nº skeins* symbol colour nº skeins*\n' +
+  'symbole couleur no d’échevettes* symbole couleur no d’échevettes*\n' +
+  'Use 2 strands - Utiliser 2 brins\n' +
+  'x 1 x 1\n' +
+  'x 1 741 x 1\n' +
+  'x 1 742 x 1\n' +
+  'x 1 803 x 1\n' +
+  '946 x 1\n947 x 1\n3052 x 1\n' +
+  '* Based on stitching with the number of strands shown above, onto 14 count Aida. ' +
+  '/ * Basé sur le nombre de brins préconisé au-dessus, sur une toile Aida 5,5 pts/cm.\n' +
+  'More free patterns and tutorials / Diagrammes, motifs et tutoriels /\n' +
+  'Share your creations / Partagez vos créations / #dmcthreads / #dmcembroidery\n' +
+  'dmc library - bibliothèque dmc\n' +
+  'www.dmc.com\n' +
+  '/ #dmcfreepatterns 4/4';
+
+(function () {
+  var r = X.parseKey(DMC_LEGEND);
+  assertEqual(r.entries.map(function (e) { return e.code; }),
+    ['741', '742', '803', '946', '947', '3052'],
+    'a two-column DMC legend gives one entry per floss number');
+  assertEqual(r.entries.map(function (e) { return e.skeins; }), [1, 1, 1, 1, 1, 1],
+    '"x 1" beside a code means one skein, not one strand');
+  assertEqual(r.entries.map(function (e) { return e.stitchCount; }),
+    [null, null, null, null, null, null], 'a DMC legend states no stitch counts');
+  assertEqual(r.strandsDefault, 2, '"Use 2 strands - Utiliser 2 brins" gives the strand count');
+  assertEqual(r.fabric.count, 14, '"onto 14 count Aida" gives the fabric count');
+  assertEqual(r.fabric.kind, 'aida', 'and the fabric kind');
+  var junk = r.entries.filter(function (e) { return /dmc\.com|#dmc|library/i.test(e.line); });
+  assertEqual(junk.length, 0, 'the bilingual page furniture produces no entries');
+})();
+
+assertEqual(X.parseKey('x 1 x 1').entries.length, 0,
+  'a legend row whose codes did not survive gives nothing, not a phantom entry');
+assertEqual(X.parseKey('symbol colour\n105 x1').entries[0].skeins, 1, '"x1" works unspaced too');
+assertEqual(X.parseKey('Aida 5,5 pts/cm').fabric.count, 14,
+  '"5,5 pts/cm" converts to a 14 count');
+assertEqual(X.parseKey('aida 7 pts/cm - aida 18 ct').fabric.count, 18,
+  'an explicit "18 ct" beats the metric form on the same line');
+
+(function () {
+  /* A sheet that prints code pairs and states the skeins once. */
+  var text =
+    'Use 2 strands\n' +
+    'backstitch Use 1 strand\n' +
+    '3808 3831\n' +
+    '3808 3831\n' +
+    '501 3832\n' +
+    '* 1 skein in each colour / 1 écheveau de chaque couleur';
+  var r = X.parseKey(text);
+  assertEqual(r.entries.map(function (e) { return e.code; }), ['3808', '3831', '501', '3832'],
+    'code pairs on one line become one entry each, and repeats merge');
+  assertEqual(r.entries.map(function (e) { return e.skeins; }), [1, 1, 1, 1],
+    '"1 skein in each colour" fills in every row');
+  assertEqual(r.strandsDefault, 2, 'the cross-stitch strand count');
+  assertEqual(r.bsStrands, 1, 'and the backstitch strand count separately');
+})();
+
+assertEqual(X.parseKey('3808 3831').entries.length, 0,
+  'without a "skeins in each colour" line a bare pair of numbers is not trusted');
+assertEqual(X.parseKey('* 1 skein in each colour\n107 110 120 130').entries.length, 0,
+  'and a margin ruler is still rejected even when bare pairs are allowed');
+
+(function () {
+  var text =
+    'dmc eco vita 360\n' +
+    'Straight stitch / Point lancé\n' +
+    'Stem stitch / Point de tige\n' +
+    'Buttonhole stitch / Point de feston\n' +
+    'Satin stitch / Passé plat\n' +
+    'colour nº skeins*\n' +
+    '105 x1\n' +
+    '*Number of strands and skeins calculated for design size 10cm x 6cm';
+  var r = X.parseKey(text);
+  assertTrue(r.confidence <= 0.2, 'an embroidery sheet scores at most 0.2', 'got ' + r.confidence);
+  assertTrue(r.warnings.indexOf('this looks like an embroidery pattern, not a counted chart') >= 0,
+    'and says what it thinks it is');
+  var cross = X.parseKey('cross stitch\nStem stitch / Point de tige\n▲ 310 Black 2 100');
+  assertTrue(cross.warnings.indexOf('this looks like an embroidery pattern, not a counted chart') < 0,
+    'a counted chart that also uses stem stitch is not mistaken for one');
 })();
 
 /* =====================================================================
