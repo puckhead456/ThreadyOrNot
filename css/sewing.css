@@ -1,4 +1,384 @@
 /* Thready or Not — css/sewing.css
    Sewing screens. Theme variables only (SPEC.md "Themes contract") plus this
    module's own layout numbers. Loaded after css/themes.css.
-   Stub: empty until js/app-sewing.js renders something. */
+
+   Every class is prefixed `sw-` so nothing here can reach the crochet screens.
+   Shared pieces (.card, .list, .list-item, .check, .chip, .pill, .btn, .bar,
+   .stitch-btn, .bottombar, .bar-btn) come from css/app.css and are only
+   *extended* here, never redefined. */
+
+/* --------------------------------------------------------------------------
+   1. Progress strip
+   -------------------------------------------------------------------------- */
+
+.sw-progress {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow);
+}
+.sw-progress .bar { margin: 0; }
+.sw-progress-label {
+  margin-top: 6px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* --------------------------------------------------------------------------
+   2. The step card
+   -------------------------------------------------------------------------- */
+
+.sw-step-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 34vh;
+  overflow: hidden;
+}
+.sw-step-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+.sw-step-n {
+  font-family: var(--font-display);
+  font-size: 15px;
+  letter-spacing: 2px;
+  color: var(--accent-2);
+}
+.sw-step-section {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-muted);
+  text-align: right;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sw-step-text {
+  font-size: 17px;
+  line-height: 1.45;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+}
+.sw-step-card.sw-empty .sw-step-text { color: var(--text-muted); font-size: 15px; }
+
+.sw-step-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 24px;
+  margin-top: -4px;
+}
+.sw-sa {
+  background: none;
+  border: none;
+  padding: 0 4px;
+  min-height: 32px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-muted);
+  text-decoration: underline;
+  font-variant-numeric: tabular-nums;
+}
+.sw-page-chip { font-variant-numeric: tabular-nums; }
+
+/* --------------------------------------------------------------------------
+   3. The Step done button
+   -------------------------------------------------------------------------- */
+
+.sw-step-btn {
+  /* The step text needs the room the crochet number does not. */
+  min-height: max(26vh, 150px);
+  gap: 6px;
+}
+.sw-step-mark {
+  font-family: var(--font-display);
+  font-size: min(18vw, 84px);
+  line-height: 1;
+}
+.sw-step-btn .stitch-hint { font-size: 12px; opacity: 0.8; }
+.sw-step-btn[disabled] { opacity: 0.5; box-shadow: var(--shadow); }
+
+.sw-back {
+  align-self: center;
+  margin-top: -4px;
+}
+
+/* --------------------------------------------------------------------------
+   4. Quilt block counters
+   -------------------------------------------------------------------------- */
+
+.sw-units { display: flex; flex-direction: column; gap: var(--gap); }
+.sw-units:empty { display: none; }
+
+.sw-unit {
+  display: block;
+  width: 100%;
+  text-align: center;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow);
+  touch-action: manipulation;
+}
+.sw-unit:active { transform: translateY(1px); }
+.sw-unit-name {
+  font-family: var(--font-display);
+  font-size: 12px;
+  letter-spacing: 2px;
+  color: var(--text-muted);
+}
+.sw-unit-count {
+  font-family: var(--font-display);
+  font-size: 34px;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+  color: var(--accent-2);
+}
+.sw-unit .bar { margin-top: 4px; }
+.sw-unit-pct {
+  margin-top: 4px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-muted);
+}
+
+/* --------------------------------------------------------------------------
+   5. The mini rows
+   -------------------------------------------------------------------------- */
+
+.sw-mini { padding: 4px 8px; }
+.sw-mini-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 46px;
+  padding: 4px 4px;
+  text-align: left;
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+}
+.sw-mini-row:last-child { border-bottom: none; }
+.sw-mini-icon { flex: 0 0 auto; font-size: 18px; }
+.sw-mini-text { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sw-mini-go { flex: 0 0 auto; color: var(--text-muted); font-size: 18px; }
+
+/* --------------------------------------------------------------------------
+   6. Sheets
+   -------------------------------------------------------------------------- */
+
+.sw-sheet-head { margin: 0 0 8px; font-weight: 700; }
+
+.sw-group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 14px 0 2px;
+  font-family: var(--font-display);
+  font-size: 13px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.sw-cut-all { min-height: 36px; font-size: 13px; }
+
+.sw-section-head {
+  margin: 12px 0 2px;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--accent-2);
+}
+
+/* Steps sheet */
+.sw-step-jump {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  background: none;
+  border: none;
+  text-align: left;
+  color: inherit;
+  font: inherit;
+  min-height: 40px;
+  padding: 2px 0;
+}
+.sw-step-row-n {
+  flex: 0 0 auto;
+  font-variant-numeric: tabular-nums;
+  font-weight: 800;
+  color: var(--text-muted);
+  min-width: 26px;
+}
+.sw-step-row-text { flex: 1 1 auto; min-width: 0; word-break: break-word; }
+.sw-step-row.current { background: var(--surface-2); border-radius: var(--radius-sm); }
+.sw-step-row.current .sw-step-row-n { color: var(--accent-2); }
+
+/* Cutting sheet */
+.sw-count-chip {
+  flex: 0 0 auto;
+  min-width: 56px;
+  justify-content: center;
+  font-variant-numeric: tabular-nums;
+  font-weight: 800;
+}
+.sw-cut-row.done .sw-count-chip {
+  background: var(--success);
+  border-color: var(--success);
+  color: var(--primary-text);
+}
+.sw-cut-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background: none;
+  border: none;
+  text-align: left;
+  color: inherit;
+  font: inherit;
+  min-height: 40px;
+}
+.sw-cut-name { font-weight: 700; }
+.sw-cut-sub { font-size: 12px; color: var(--text-muted); }
+.sw-fold, .sw-kind { flex: 0 0 auto; font-size: 11px; }
+
+/* Notions sheet */
+.sw-add-row { display: flex; gap: 8px; margin-top: 10px; }
+.sw-add-row input { flex: 1 1 auto; min-width: 0; }
+.sw-copy-area { min-height: 160px; width: 100%; }
+
+/* Seam allowance sheet */
+.sw-sa-big {
+  font-family: var(--font-display);
+  font-size: 30px;
+  margin: 0 0 6px;
+  color: var(--accent-2);
+}
+
+/* Size sheet */
+.sw-size-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.sw-size-chip { cursor: pointer; }
+.sw-size-chip.on {
+  background: var(--accent-2);
+  border-color: var(--accent-2);
+  color: var(--primary-text);
+}
+.sw-table-wrap {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  margin: 8px 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.sw-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+.sw-table th, .sw-table td {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+  text-align: right;
+}
+.sw-table thead th { color: var(--text-muted); font-weight: 800; }
+.sw-table tbody th { text-align: left; font-weight: 700; }
+.sw-table tr:last-child th, .sw-table tr:last-child td { border-bottom: none; }
+.sw-table th.on, .sw-table td.on {
+  background: var(--surface-2);
+  color: var(--accent-2);
+  font-weight: 800;
+}
+.sw-alt { min-height: 90px; width: 100%; }
+
+/* Fabric sheet */
+.sw-fabric-row { padding: 10px 12px; }
+.sw-fabric-name { font-weight: 800; margin-bottom: 6px; }
+.sw-fabric-amounts { display: flex; flex-wrap: wrap; gap: 6px; }
+.sw-fabric-amounts .chip.on {
+  background: var(--accent-2);
+  border-color: var(--accent-2);
+  color: var(--primary-text);
+}
+.sw-fabric-raw { font-size: 13px; }
+
+/* Machine sheet */
+.sw-preset {
+  background: none;
+  border: none;
+  text-align: left;
+  color: inherit;
+  font: inherit;
+  font-weight: 700;
+  min-height: 40px;
+}
+
+/* --------------------------------------------------------------------------
+   7. Import sheet
+   -------------------------------------------------------------------------- */
+
+.sw-paste { margin-top: 12px; }
+.sw-paste > summary {
+  cursor: pointer;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  font-weight: 700;
+  color: var(--text-muted);
+}
+.sw-paste-area { width: 100%; min-height: 140px; margin-bottom: 8px; }
+
+.sw-review { margin-top: 12px; }
+.sw-review-row .item-text { display: flex; flex-direction: column; gap: 2px; }
+.sw-review-label { font-weight: 800; }
+.sw-review-count { font-size: 12px; color: var(--text-muted); }
+.sw-review-row.sw-empty-row { opacity: 0.5; }
+
+.sw-warnings { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; }
+.sw-warning {
+  font-size: 13px;
+  line-height: 1.4;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text-muted);
+}
+
+/* --------------------------------------------------------------------------
+   8. Wider screens and reduced motion
+   -------------------------------------------------------------------------- */
+
+@media (min-width: 700px) {
+  .sw-step-card { max-height: none; }
+  .sw-step-btn { min-height: 200px; }
+  .sw-step-mark { font-size: 72px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sw-unit:active { transform: none; }
+  .sw-step-btn { transition: none; }
+  .sw-step-btn.pressed { transform: none; }
+}
