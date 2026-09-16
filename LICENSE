@@ -1,0 +1,11 @@
+Copyright (c) 2026 puckhead456. All rights reserved.
+
+This software and its source code are proprietary and confidential.
+No part of this repository may be copied, modified, distributed,
+published, sublicensed, or used to create derivative works without
+prior written permission from the copyright holder.
+
+Third-party components remain under their own licenses:
+- pdf.js (js/vendor/pdf.min.js, js/vendor/pdf.worker.min.js): Apache License 2.0,
+  Copyright Mozilla Foundation.
+- Google Fonts loaded at runtime: SIL Open Font License / Apache License 2.0.
