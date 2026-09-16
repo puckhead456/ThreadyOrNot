@@ -1,0 +1,872 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>XStitchPhoto tests</title>
+<style>
+  body { font: 14px/1.4 Menlo, Consolas, monospace; background:#111; color:#eee; padding:16px; }
+  .pass { color:#7bd389; }
+  .fail { color:#ff6b6b; background:#2a1414; }
+  .note { color:#c9a227; }
+  .group { margin-top:18px; font-weight:bold; color:#9cf; border-bottom:1px solid #333; padding-bottom:4px; }
+  #summary { margin-top:20px; font-size:18px; font-weight:bold; }
+  #summary.ok { color:#7bd389; }
+  #summary.bad { color:#ff6b6b; }
+  #summary.run { color:#9cf; }
+  pre { white-space:pre-wrap; }
+
+  /* ---- visual QA panel ---- */
+  .panel { border:1px solid #333; border-radius:8px; padding:12px; margin:12px 0 22px; background:#161616; }
+  .panel h2 { margin:0 0 8px; font-size:15px; color:#9cf; }
+  .panel .row { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-bottom:8px; }
+  .panel button { font:inherit; background:#2a2a2a; color:#eee; border:1px solid #444; border-radius:6px; padding:5px 9px; cursor:pointer; }
+  .panel button:hover { background:#383838; }
+  .panel label { color:#aaa; }
+  .panel input[type=number] { width:64px; font:inherit; background:#222; color:#eee; border:1px solid #444; border-radius:4px; padding:3px 5px; }
+  .panel select { font:inherit; background:#222; color:#eee; border:1px solid #444; border-radius:4px; padding:3px 5px; }
+  .shots { display:flex; gap:16px; flex-wrap:wrap; align-items:flex-start; }
+  .shot { text-align:center; }
+  .shot canvas { image-rendering: pixelated; image-rendering: crisp-edges; border:1px solid #333; background:#fff; display:block; }
+  .shot .cap { color:#888; font-size:12px; margin-top:4px; }
+  #vstats { margin:10px 0; color:#ddd; }
+  #vkey { display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; }
+  .sw { display:flex; align-items:center; gap:5px; border:1px solid #333; border-radius:5px; padding:3px 6px; background:#1d1d1d; font-size:12px; }
+  .sw i { width:16px; height:16px; border-radius:3px; display:inline-block; border:1px solid #0006;
+          font-style:normal; font-size:11px; line-height:16px; text-align:center; }
+</style>
+</head>
+<body>
+<h1>XStitchPhoto test suite</h1>
+
+<div class="panel">
+  <h2>Visual QA — photo &rarr; chart</h2>
+  <div class="row">
+    <button id="b-flag">4-colour flag</button>
+    <button id="b-grad">Gradient</button>
+    <button id="b-noise">Noisy photo-like</button>
+    <button id="b-scene">Synthetic scene</button>
+    <label>or a file <input type="file" id="b-file" accept="image/*"></label>
+  </div>
+  <div class="row">
+    <label>width <input type="number" id="o-w" value="100" min="20" max="500"></label>
+    <label>colours <input type="number" id="o-c" value="24" min="2" max="64"></label>
+    <label>cleanup
+      <select id="o-clean"><option value="0">0 none</option><option value="1" selected>1 majority</option><option value="2">2 strong</option></select>
+    </label>
+    <label>minRun <input type="number" id="o-min" value="1" min="1" max="16"></label>
+    <label><input type="checkbox" id="o-dither"> dither</label>
+    <label><input type="checkbox" id="o-nw"> no worker</label>
+    <button id="b-cancel">Cancel</button>
+  </div>
+  <div id="vstats">Pick a source above.</div>
+  <div class="shots">
+    <div class="shot"><canvas id="v-src"></canvas><div class="cap">source</div></div>
+    <div class="shot"><canvas id="v-out"></canvas><div class="cap">chart preview</div></div>
+  </div>
+  <div id="vkey"></div>
+</div>
+
+<div id="out"></div>
+<div id="summary" class="run">running…</div>
+
+<script src="../js/xstitch.js"></script>
+<script src="../js/xstitch-photo.js"></script>
+<script>
+'use strict';
+
+/* ---------------------------------------------------------------- *
+ * harness (same style as test/patterns.test.html)
+ * ---------------------------------------------------------------- */
+
+var out = document.getElementById('out');
+var passed = 0;
+var failed = 0;
+
+function log(ok, label, detail) {
+  if (ok) { passed++; } else { failed++; }
+  var line = (ok ? 'PASS' : 'FAIL') + ' - ' + label + (detail ? '  (' + detail + ')' : '');
+  var div = document.createElement('div');
+  div.className = ok ? 'pass' : 'fail';
+  div.textContent = line;
+  out.appendChild(div);
+  if (ok) { console.log(line); } else { console.error(line); }
+}
+
+function note(text) {
+  var div = document.createElement('div');
+  div.className = 'note';
+  div.textContent = '·   ' + text;
+  out.appendChild(div);
+  console.log('·   ' + text);
+}
+
+function group(title) {
+  var div = document.createElement('div');
+  div.className = 'group';
+  div.textContent = title;
+  out.appendChild(div);
+  console.log('== ' + title + ' ==');
+}
+
+function deepEqual(a, b) {
+  if (a === b) return true;
+  if (a === null || b === null) return a === b;
+  if (typeof a !== typeof b) return false;
+  if (typeof a !== 'object') return a === b;
+  var ak = Object.keys(a), bk = Object.keys(b);
+  if (ak.length !== bk.length) return false;
+  for (var i = 0; i < ak.length; i++) {
+    var k = ak[i];
+    if (!deepEqual(a[k], b[k])) return false;
+  }
+  return true;
+}
+
+function assertEqual(actual, expected, label) {
+  var ok = deepEqual(actual, expected);
+  log(ok, label, ok ? '' : ('expected ' + JSON.stringify(expected) + ' got ' + JSON.stringify(actual)));
+}
+
+function assertTrue(cond, label, detail) {
+  log(!!cond, label, cond ? '' : (detail || ''));
+}
+
+/* sequential async runner: each entry returns a promise (or nothing) */
+function runAll(steps) {
+  var i = 0;
+  function next() {
+    if (i >= steps.length) return Promise.resolve();
+    var fn = steps[i++];
+    return Promise.resolve().then(fn).then(next, function (err) {
+      log(false, 'unexpected exception in a test step', err && err.message ? err.message : String(err));
+      console.error(err);
+      return next();
+    });
+  }
+  return next();
+}
+
+/* ---------------------------------------------------------------- *
+ * synthetic sources
+ * ---------------------------------------------------------------- */
+
+function mkCanvas(w, h) {
+  var c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  return c;
+}
+
+/* deterministic RNG so the "noisy" fixture is the same every run */
+function rng(seed) {
+  var a = seed >>> 0 || 1;
+  return function () {
+    a = (a + 0x6D2B79F5) >>> 0;
+    var t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+var FLAG_COLORS = ['#c81e35', '#ffffff', '#1d3f94', '#f2c200'];
+
+/** Four hard vertical bands — the easiest possible quantization. */
+function flagCanvas(w, h) {
+  w = w || 400; h = h || 300;
+  var c = mkCanvas(w, h), g = c.getContext('2d');
+  for (var i = 0; i < 4; i++) {
+    g.fillStyle = FLAG_COLORS[i];
+    g.fillRect(Math.round(i * w / 4), 0, Math.ceil(w / 4), h);
+  }
+  return c;
+}
+
+/** Smooth two-axis gradient: the hard case for banding and confetti. */
+function gradientCanvas(w, h) {
+  w = w || 400; h = h || 300;
+  var c = mkCanvas(w, h), g = c.getContext('2d');
+  var id = g.createImageData(w, h);
+  for (var y = 0; y < h; y++) {
+    for (var x = 0; x < w; x++) {
+      var o = (y * w + x) * 4;
+      id.data[o] = Math.round(255 * x / (w - 1));
+      id.data[o + 1] = Math.round(255 * y / (h - 1));
+      id.data[o + 2] = Math.round(255 * (1 - x / (w - 1)) * (1 - y / (h - 1)));
+      id.data[o + 3] = 255;
+    }
+  }
+  g.putImageData(id, 0, 0);
+  return c;
+}
+
+/** Smooth base + heavy speckle: stands in for a grainy phone photo. */
+function noiseCanvas(w, h, seed) {
+  w = w || 400; h = h || 300;
+  var c = gradientCanvas(w, h), g = c.getContext('2d');
+  var id = g.getImageData(0, 0, w, h);
+  var r = rng(seed || 99);
+  for (var i = 0; i < id.data.length; i += 4) {
+    var n = (r() - 0.5) * 120;
+    id.data[i] = Math.max(0, Math.min(255, id.data[i] + n));
+    id.data[i + 1] = Math.max(0, Math.min(255, id.data[i + 1] + n * 0.7));
+    id.data[i + 2] = Math.max(0, Math.min(255, id.data[i + 2] + n * 1.3));
+  }
+  g.putImageData(id, 0, 0);
+  return c;
+}
+
+/** Something photo-shaped for the timing test and the visual panel. */
+function sceneCanvas(w, h, seed) {
+  w = w || 2000; h = h || 1500;
+  var c = mkCanvas(w, h), g = c.getContext('2d');
+  var sky = g.createLinearGradient(0, 0, 0, h);
+  sky.addColorStop(0, '#2b4a8c');
+  sky.addColorStop(0.55, '#8fb6d9');
+  sky.addColorStop(1, '#e8d6a8');
+  g.fillStyle = sky;
+  g.fillRect(0, 0, w, h);
+
+  g.fillStyle = '#f7e9a0';
+  g.beginPath(); g.arc(w * 0.72, h * 0.22, Math.min(w, h) * 0.09, 0, Math.PI * 2); g.fill();
+
+  g.fillStyle = '#3d6b4a';
+  g.beginPath();
+  g.moveTo(0, h * 0.72);
+  g.lineTo(w * 0.28, h * 0.45);
+  g.lineTo(w * 0.52, h * 0.74);
+  g.lineTo(w * 0.78, h * 0.5);
+  g.lineTo(w, h * 0.78);
+  g.lineTo(w, h); g.lineTo(0, h);
+  g.closePath(); g.fill();
+
+  g.fillStyle = '#8a5a3b';
+  g.fillRect(w * 0.12, h * 0.62, w * 0.03, h * 0.3);
+  g.fillStyle = '#c94f3d';
+  g.beginPath(); g.arc(w * 0.135, h * 0.58, Math.min(w, h) * 0.07, 0, Math.PI * 2); g.fill();
+
+  g.fillStyle = '#d9cdb5';
+  g.fillRect(w * 0.6, h * 0.66, w * 0.16, h * 0.22);
+  g.fillStyle = '#6b3f2e';
+  g.fillRect(w * 0.66, h * 0.76, w * 0.04, h * 0.12);
+
+  /* film grain, so the cleanup path has something to do */
+  var id = g.getImageData(0, 0, w, h);
+  var r = rng(seed || 7);
+  for (var i = 0; i < id.data.length; i += 4) {
+    var n = (r() - 0.5) * 34;
+    id.data[i] += n; id.data[i + 1] += n; id.data[i + 2] += n;
+  }
+  g.putImageData(id, 0, 0);
+  return c;
+}
+
+function canvasToJpegBlob(c, q) {
+  return new Promise(function (resolve, reject) {
+    if (!c.toBlob) { reject(new Error('toBlob unsupported')); return; }
+    c.toBlob(function (b) { b ? resolve(b) : reject(new Error('toBlob gave null')); }, 'image/jpeg', q || 0.9);
+  });
+}
+
+/* ---------------------------------------------------------------- *
+ * shared assertions
+ * ---------------------------------------------------------------- */
+
+var XS = window.XStitch;
+var XP = window.XStitchPhoto;
+
+var DMC_CODES = (function () {
+  var m = {};
+  for (var i = 0; i < XS.FLOSS.dmc.length; i++) m[XS.FLOSS.dmc[i].code] = XS.FLOSS.dmc[i];
+  return m;
+})();
+
+function cellsOf(res) {
+  return XS.unpackCells(res.data.chart.cells);
+}
+
+/** Every structural invariant a Result must satisfy, as one assertion. */
+function checkShape(res, label, opts) {
+  opts = opts || {};
+  var d = res.data, bad = '';
+  var cells = cellsOf(res);
+  var n = d.design.w * d.design.h;
+  if (!d || !d.chart) bad = 'no chart';
+  else if (d.chart.w !== d.design.w || d.chart.h !== d.design.h) bad = 'chart/design size mismatch';
+  else if (cells.length !== n) bad = 'cells length ' + cells.length + ' != ' + n;
+  else if (d.progress.mode !== 'cells') bad = 'progress mode ' + d.progress.mode;
+  else if (d.progress.doneCount !== 0) bad = 'doneCount ' + d.progress.doneCount;
+  else if (d.source.kind !== 'photo') bad = 'source.kind ' + d.source.kind;
+  else if (res.stats.cells !== n) bad = 'stats.cells ' + res.stats.cells;
+  else if (res.stats.colors !== d.palette.length) bad = 'stats.colors mismatch';
+  if (!bad) {
+    for (var i = 0; i < d.palette.length; i++) {
+      var p = d.palette[i];
+      if (p.i !== i) { bad = 'palette[' + i + '].i = ' + p.i; break; }
+      if (!DMC_CODES[p.code]) { bad = 'unknown DMC code ' + JSON.stringify(p.code); break; }
+      if (DMC_CODES[p.code].hex !== p.hex) { bad = 'hex mismatch for ' + p.code; break; }
+      if (!p.symbol) { bad = 'no symbol on palette[' + i + ']'; break; }
+      if (p.brand !== 'DMC') { bad = 'brand ' + p.brand; break; }
+    }
+  }
+  if (!bad) {
+    for (var c = 0; c < cells.length; c++) {
+      if (cells[c] < 0 || cells[c] >= d.palette.length) { bad = 'cell ' + c + ' = ' + cells[c]; break; }
+    }
+  }
+  if (!bad && opts.maxColors && d.palette.length > opts.maxColors) bad = 'palette > maxColors';
+  if (!bad && d.palette.length < 2) bad = 'palette < 2';
+  assertTrue(!bad, label, bad);
+}
+
+function symbolsUnique(res) {
+  var seen = {}, p = res.data.palette;
+  for (var i = 0; i < p.length; i++) {
+    if (seen[p[i].symbol]) return false;
+    seen[p[i].symbol] = 1;
+  }
+  return true;
+}
+
+function stripVolatile(res) {
+  var d = JSON.parse(JSON.stringify(res.data));
+  d.source.importedAt = 0;
+  return d;
+}
+
+/* ---------------------------------------------------------------- *
+ * the tests
+ * ---------------------------------------------------------------- */
+
+var flag400 = null, grad400 = null, noise400 = null, scene = null;
+var timingMs = null;
+
+runAll([
+
+  function () {
+    group('Module surface and defaults');
+    assertTrue(!!XP, 'window.XStitchPhoto exists');
+    assertTrue(typeof XP.convert === 'function', 'convert() is a function');
+    assertTrue(typeof XP.cancel === 'function', 'cancel() is a function');
+    assertTrue(typeof XP.isAvailable === 'function', 'isAvailable() is a function');
+    assertTrue(typeof XP.defaults === 'function', 'defaults() is a function');
+    assertTrue(typeof XP.isAvailable() === 'boolean', 'isAvailable() returns a boolean');
+    note('isAvailable() = ' + XP.isAvailable() + ' (Worker + createImageBitmap + Blob URL)');
+
+    var d = XP.defaults();
+    assertEqual(
+      { stitchWidth: d.stitchWidth, maxColors: d.maxColors, count: d.count, over: d.over, dither: d.dither, cleanup: d.cleanup, minRun: d.minRun, metric: d.metric, strands: d.strands, waste: d.waste, seed: d.seed, crop: d.crop, brand: d.brand },
+      { stitchWidth: 100, maxColors: 24, count: 14, over: 1, dither: false, cleanup: 1, minRun: 1, metric: 'de2000', strands: 2, waste: 0.2, seed: 1234, crop: null, brand: 'DMC' },
+      'defaults() matches the B6 table'
+    );
+    d.maxColors = 99;
+    assertEqual(XP.defaults().maxColors, 24, 'defaults() hands back a fresh copy each call');
+
+    var n = XP._normOpts({ stitchWidth: 5, maxColors: 999, cleanup: 7, metric: 'nope', seed: -4 });
+    assertEqual(
+      { w: n.stitchWidth, c: n.maxColors, cl: n.cleanup, m: n.metric, s: n.seed },
+      { w: 20, c: 64, cl: 2, m: 'de2000', s: 0 },
+      'opts are clamped into range (20..500, 2..64, 0..2, de76|de2000)'
+    );
+    assertEqual(XP._normOpts({ metric: 'de76' }).metric, 'de76', 'metric de76 is honoured');
+    assertEqual(XP._gridFor(400, 300, 100), { gw: 100, gh: 75 }, 'gridFor keeps the aspect ratio');
+    assertEqual(XP._gridFor(100, 900, 500), { gw: 56, gh: 500 }, 'gridFor caps the long side at 500 cells');
+    assertTrue(XP._workerSrc().indexOf('XSPhotoCore') > 0, 'the worker source string builds');
+  },
+
+  /* ---------------------------------------------------------------- */
+
+  function () {
+    group('Four-colour flag (400x300)');
+    flag400 = flagCanvas(400, 300);
+    return XP.convert(flag400, { stitchWidth: 80, maxColors: 8, seed: 1234 }).then(function (res) {
+      assertTrue(res.ok === true, 'flag converts ok', res.error);
+      checkShape(res, 'flag: result is structurally valid', { maxColors: 8 });
+      assertEqual(res.data.design.w, 80, 'design.w === stitchWidth');
+      assertEqual(res.data.design.h, 60, 'design.h === round(80 * 300/400)');
+      assertTrue(res.preview && res.preview.width === 80 && res.preview.height === 60,
+        'preview ImageData is 80 x 60',
+        res.preview ? (res.preview.width + 'x' + res.preview.height) : 'no preview');
+      assertTrue(res.data.palette.length >= 2 && res.data.palette.length <= 8,
+        'palette size within 2..maxColors', 'got ' + res.data.palette.length);
+      assertTrue(symbolsUnique(res), 'symbols are unique across the palette');
+      assertTrue(res.stats.skeinsTotal >= res.data.palette.length,
+        'skeinsTotal is at least one skein per colour', 'got ' + res.stats.skeinsTotal);
+      assertTrue(res.stats.ms > 0 && res.stats.ms < 2000, 'flag: stats.ms is sane', String(res.stats.ms));
+      assertTrue(res.data.fabric.count === 14 && res.data.fabric.over === 1, 'fabric defaults land in the data');
+      assertEqual(res.data.strandsDefault, 2, 'strandsDefault is 2');
+      assertTrue(res.stats.confetti.after <= res.stats.confetti.before,
+        'flag: confetti.after <= confetti.before');
+
+      /* the flag has exactly four flat colours: each band should be one
+         palette entry, so the four bands must differ */
+      var cells = cellsOf(res);
+      var w = res.data.design.w;
+      var band = [cells[30 * w + 10], cells[30 * w + 30], cells[30 * w + 50], cells[30 * w + 70]];
+      var uniq = {}; var nUniq = 0;
+      for (var i = 0; i < 4; i++) { if (!uniq[band[i]]) { uniq[band[i]] = 1; nUniq++; } }
+      assertEqual(nUniq, 4, 'flag: the four bands quantize to four different palette entries');
+      note('flag palette: ' + res.data.palette.map(function (p) {
+        return p.symbol + ' DMC ' + p.code + ' ' + p.name + ' x' + p.stitchCount;
+      }).join(' | '));
+    });
+  },
+
+  function () {
+    group('Determinism with a fixed seed');
+    var a = null;
+    return XP.convert(flag400, { stitchWidth: 60, maxColors: 6, seed: 4242 }).then(function (r1) {
+      a = r1;
+      return XP.convert(flag400, { stitchWidth: 60, maxColors: 6, seed: 4242 });
+    }).then(function (b) {
+      assertTrue(a.ok && b.ok, 'both runs succeeded');
+      assertEqual(JSON.stringify(stripVolatile(b)), JSON.stringify(stripVolatile(a)),
+        'two runs with the same seed produce byte-identical XSData');
+      assertEqual(b.data.chart.cells.data, a.data.chart.cells.data, 'packed cells are identical');
+      assertEqual(b.stats.colors, a.stats.colors, 'stats.colors is identical');
+      assertEqual(b.stats.confetti.after, a.stats.confetti.after, 'confetti count is identical');
+      return XP.convert(flag400, { stitchWidth: 60, maxColors: 6, seed: 777 });
+    }).then(function (c) {
+      assertTrue(c.ok, 'a different seed still converts ok');
+      checkShape(c, 'a different seed still gives a valid chart', { maxColors: 6 });
+    });
+  },
+
+  function () {
+    group('Worker path vs main-thread fallback');
+    var a = null;
+    return XP.convert(flag400, { stitchWidth: 50, maxColors: 6, seed: 99 }).then(function (r) {
+      a = r;
+      return XP.convert(flag400, { stitchWidth: 50, maxColors: 6, seed: 99, noWorker: true });
+    }).then(function (b) {
+      assertTrue(b.ok === true, 'the setTimeout-chunked fallback converts ok', b.error);
+      checkShape(b, 'fallback result is structurally valid', { maxColors: 6 });
+      assertEqual(JSON.stringify(stripVolatile(b)), JSON.stringify(stripVolatile(a)),
+        'worker and main-thread paths agree exactly');
+      note('worker used: first run ' + a.stats.worker + ', second run ' + b.stats.worker);
+    });
+  },
+
+  /* ---------------------------------------------------------------- */
+
+  function () {
+    group('Smooth gradient (400x300)');
+    grad400 = gradientCanvas(400, 300);
+    return XP.convert(grad400, { stitchWidth: 100, maxColors: 16, seed: 1234 }).then(function (res) {
+      assertTrue(res.ok === true, 'gradient converts ok', res.error);
+      checkShape(res, 'gradient: result is structurally valid', { maxColors: 16 });
+      assertTrue(res.data.palette.length >= 8,
+        'gradient uses most of its colour budget', 'got ' + res.data.palette.length);
+      var cells = cellsOf(res);
+      var w = res.data.design.w, h = res.data.design.h;
+      assertTrue(cells[0] !== cells[w - 1], 'gradient: top-left and top-right differ');
+      assertTrue(cells[0] !== cells[(h - 1) * w], 'gradient: top-left and bottom-left differ');
+      /* a smooth ramp should come out as bands, not noise */
+      var runs = 1;
+      for (var x = 1; x < w; x++) if (cells[x] !== cells[x - 1]) runs++;
+      assertTrue(runs <= res.data.palette.length + 2,
+        'gradient: the top row is banded, not speckled', runs + ' runs for ' + res.data.palette.length + ' colours');
+      note('gradient palette: ' + res.data.palette.map(function (p) { return p.code; }).join(', '));
+      note('gradient confetti: ' + res.stats.confetti.before + ' -> ' + res.stats.confetti.after);
+      /* this ramp sweeps the whole sRGB cube, including neon corners no
+         floss can reach, so the mean error is honestly large here */
+      assertTrue(res.stats.meanDE > 0 && res.stats.meanDE < 40,
+        'stats.meanDE is a sane colour-error number', String(res.stats.meanDE));
+      /* more colours must mean less colour error, measured without cleanup */
+      var few = null;
+      return XP.convert(grad400, { stitchWidth: 100, maxColors: 6, cleanup: 0, seed: 1234 }).then(function (a) {
+        few = a;
+        return XP.convert(grad400, { stitchWidth: 100, maxColors: 24, cleanup: 0, seed: 1234 });
+      }).then(function (b) {
+        assertTrue(b.stats.meanDE < few.stats.meanDE,
+          'more colours lowers the mean colour error',
+          '6 colours ' + few.stats.meanDE + ' vs 24 colours ' + b.stats.meanDE);
+        assertTrue(b.stats.colors > few.stats.colors, 'and uses more of the palette budget');
+        note('gradient mean dE76: 6 colours ' + few.stats.meanDE + ' -> 24 colours ' + b.stats.meanDE);
+      });
+    });
+  },
+
+  function () {
+    group('Noisy photo-like canvas: cleanup levels');
+    noise400 = noiseCanvas(300, 240, 99);
+    var c0 = null, c1 = null;
+    return XP.convert(noise400, { stitchWidth: 120, maxColors: 20, cleanup: 0, seed: 1234 }).then(function (r) {
+      c0 = r;
+      assertTrue(r.ok === true, 'cleanup 0 converts ok', r.error);
+      checkShape(r, 'cleanup 0: result is structurally valid', { maxColors: 20 });
+      assertEqual(r.stats.confetti.after, r.stats.confetti.before,
+        'cleanup 0 leaves the confetti count untouched');
+      return XP.convert(noise400, { stitchWidth: 120, maxColors: 20, cleanup: 1, seed: 1234 });
+    }).then(function (r) {
+      c1 = r;
+      assertTrue(r.ok === true, 'cleanup 1 converts ok', r.error);
+      checkShape(r, 'cleanup 1: result is structurally valid', { maxColors: 20 });
+      assertTrue(r.stats.confetti.after <= r.stats.confetti.before,
+        'cleanup 1: confetti.after <= confetti.before',
+        r.stats.confetti.before + ' -> ' + r.stats.confetti.after);
+      assertTrue(r.stats.confetti.after < r.stats.confetti.before,
+        'cleanup 1 actually removes confetti on a noisy source',
+        r.stats.confetti.before + ' -> ' + r.stats.confetti.after);
+      note('noise cleanup 1: ' + r.stats.confetti.before + ' -> ' + r.stats.confetti.after + ' confetti stitches');
+      return XP.convert(noise400, { stitchWidth: 120, maxColors: 20, cleanup: 2, minRun: 4, seed: 1234 });
+    }).then(function (r) {
+      assertTrue(r.ok === true, 'cleanup 2 converts ok', r.error);
+      checkShape(r, 'cleanup 2: result is structurally valid', { maxColors: 20 });
+      assertTrue(r.stats.confetti.after <= r.stats.confetti.before,
+        'cleanup 2: confetti.after <= confetti.before',
+        r.stats.confetti.before + ' -> ' + r.stats.confetti.after);
+      assertTrue(r.stats.confetti.after <= c1.stats.confetti.after,
+        'cleanup 2 (minRun 4) is at least as strong as cleanup 1',
+        c1.stats.confetti.after + ' vs ' + r.stats.confetti.after);
+      note('noise cleanup 2 minRun 4: ' + r.stats.confetti.before + ' -> ' + r.stats.confetti.after);
+    });
+  },
+
+  function () {
+    group('Dithering and metric');
+    return XP.convert(grad400, { stitchWidth: 80, maxColors: 8, dither: false, seed: 1234 }).then(function (off) {
+      assertTrue(off.ok === true, 'dither off converts ok', off.error);
+      return XP.convert(grad400, { stitchWidth: 80, maxColors: 8, dither: true, seed: 1234 }).then(function (on) {
+        assertTrue(on.ok === true, 'dither on converts ok', on.error);
+        checkShape(on, 'dither on: result is structurally valid', { maxColors: 8 });
+        assertTrue(on.data.chart.cells.data !== off.data.chart.cells.data,
+          'dithering changes the chart');
+        assertTrue(on.stats.confetti.before >= off.stats.confetti.before,
+          'dithering manufactures confetti, as A3.2 warns',
+          off.stats.confetti.before + ' -> ' + on.stats.confetti.before);
+        note('dither off/on confetti (pre-cleanup): ' + off.stats.confetti.before + ' / ' + on.stats.confetti.before);
+      });
+    }).then(function () {
+      return XP.convert(grad400, { stitchWidth: 80, maxColors: 8, metric: 'de76', seed: 1234 });
+    }).then(function (r) {
+      assertTrue(r.ok === true, 'metric de76 converts ok', r.error);
+      checkShape(r, 'de76 mapping: result is structurally valid', { maxColors: 8 });
+    });
+  },
+
+  function () {
+    group('Sizes, crop and other sources');
+    return XP.convert(flag400, { stitchWidth: 500, maxColors: 4, seed: 1 }).then(function (r) {
+      assertTrue(r.ok === true, 'stitchWidth 500 converts ok', r.error);
+      assertEqual([r.data.design.w, r.data.design.h], [500, 375], 'stitchWidth 500 -> 500 x 375 cells');
+      assertEqual(r.stats.cells, 500 * 375, 'stats.cells matches w*h');
+      return XP.convert(flag400, { stitchWidth: 2, maxColors: 4, seed: 1 });
+    }).then(function (r) {
+      assertEqual(r.data.design.w, 20, 'stitchWidth below 20 is clamped to 20');
+      return XP.convert(flag400, { stitchWidth: 40, maxColors: 8, crop: { x: 0, y: 0, w: 100, h: 300 }, seed: 1 });
+    }).then(function (r) {
+      assertTrue(r.ok === true, 'crop converts ok', r.error);
+      assertEqual([r.data.design.w, r.data.design.h], [40, 120], 'crop 100x300 -> 40 x 120 cells');
+      assertTrue(r.data.palette.length <= 2,
+        'cropping to one flag band leaves one or two colours', 'got ' + r.data.palette.length);
+      note('cropped palette: ' + r.data.palette.map(function (p) { return p.code + ' ' + p.name; }).join(', '));
+      var id = flag400.getContext('2d').getImageData(0, 0, 400, 300);
+      return XP.convert(id, { stitchWidth: 40, maxColors: 6, seed: 1 });
+    }).then(function (r) {
+      assertTrue(r.ok === true, 'an ImageData source converts ok', r.error);
+      checkShape(r, 'ImageData source: result is structurally valid', { maxColors: 6 });
+      return XP.convert(flag400, { stitchWidth: 40, maxColors: 2, seed: 1 });
+    }).then(function (r) {
+      assertEqual(r.data.palette.length, 2, 'maxColors 2 gives exactly two colours');
+      assertTrue(r.stats.colors === 2, 'stats.colors agrees');
+    });
+  },
+
+  function () {
+    group('Preview pixels match the palette');
+    return XP.convert(flag400, { stitchWidth: 40, maxColors: 6, seed: 1234 }).then(function (r) {
+      var cells = cellsOf(r);
+      var px = r.preview.data;
+      var bad = '';
+      for (var i = 0; i < cells.length && !bad; i += 37) {
+        var p = r.data.palette[cells[i]];
+        var o = i * 4;
+        var hex = ((px[o] << 16) | (px[o + 1] << 8) | px[o + 2]).toString(16);
+        while (hex.length < 6) hex = '0' + hex;
+        if (hex !== p.hex) bad = 'cell ' + i + ' preview ' + hex + ' != palette ' + p.hex;
+        if (px[o + 3] !== 255) bad = 'cell ' + i + ' alpha ' + px[o + 3];
+      }
+      assertTrue(!bad, 'every sampled preview pixel is its palette colour at full alpha', bad);
+    });
+  },
+
+  /* ---------------------------------------------------------------- */
+
+  function () {
+    group('Cancellation');
+    var big = sceneCanvas(1600, 1200, 3);
+    var t0 = performance.now();
+    var p = XP.convert(big, { stitchWidth: 400, maxColors: 48, seed: 1234 });
+    assertTrue(typeof p.token === 'string' && p.token.length > 0,
+      'convert() returns a promise carrying a .token string', String(p.token));
+    var cancelled = XP.cancel(p.token);
+    assertTrue(cancelled === true, 'cancel(token) reports that it cancelled something');
+    return p.then(function (res) {
+      var dt = performance.now() - t0;
+      assertTrue(res.ok === false, 'a cancelled convert resolves ok:false', JSON.stringify(res.error));
+      assertEqual(res.error, 'cancelled', 'the error is "cancelled"');
+      assertTrue(res.cancelled === true, 'the result is flagged cancelled');
+      assertTrue(dt < 1500, 'cancellation resolves promptly', Math.round(dt) + ' ms');
+      note('cancel resolved in ' + Math.round(dt) + ' ms');
+      assertEqual(XP.cancel('no-such-token'), false, 'cancel() on an unknown token returns false');
+    }).then(function () {
+      /* a caller-supplied token works too */
+      var p2 = XP.convert(flagCanvas(200, 200), { stitchWidth: 200, maxColors: 32, seed: 1, token: 'my-token' });
+      assertEqual(p2.token, 'my-token', 'opts.token is used as the token when given');
+      XP.cancel('my-token');
+      return p2.then(function (r) {
+        assertTrue(r.ok === false && r.cancelled === true, 'a caller-supplied token cancels too');
+      });
+    }).then(function () {
+      /* the module must still work after a worker was terminated */
+      return XP.convert(flag400, { stitchWidth: 40, maxColors: 6, seed: 1234 }).then(function (r) {
+        assertTrue(r.ok === true, 'conversion still works after a cancel killed the worker', r.error);
+        checkShape(r, 'post-cancel result is structurally valid', { maxColors: 6 });
+      });
+    });
+  },
+
+  function () {
+    group('Bad input never throws');
+    var cases = [
+      [null, 'null'],
+      [undefined, 'undefined'],
+      ['not an image', 'a string'],
+      [{}, 'a plain object'],
+      [42, 'a number'],
+      [document.createElement('div'), 'a <div>']
+    ];
+    return runAll(cases.map(function (c) {
+      return function () {
+        return XP.convert(c[0], { stitchWidth: 40 }).then(function (r) {
+          assertTrue(r.ok === false && typeof r.error === 'string' && r.error.length > 0,
+            'convert(' + c[1] + ') resolves ok:false with an error string', JSON.stringify(r));
+        });
+      };
+    })).then(function () {
+      var blob = new Blob(['hello, not a picture'], { type: 'text/plain' });
+      return XP.convert(blob, { stitchWidth: 40 }).then(function (r) {
+        assertTrue(r.ok === false, 'convert(a text Blob) resolves ok:false', JSON.stringify(r));
+      });
+    }).then(function () {
+      var broken = new Blob([new Uint8Array([1, 2, 3, 4, 5])], { type: 'image/png' });
+      return XP.convert(broken, { stitchWidth: 40 }).then(function (r) {
+        assertTrue(r.ok === false, 'convert(a corrupt PNG Blob) resolves ok:false', JSON.stringify(r));
+      });
+    });
+  },
+
+  /* ---------------------------------------------------------------- */
+
+  function () {
+    group('Progress events');
+    var seen = [], lastPct = -1, monotonic = true, pctInRange = true;
+    return XP.convert(gradientCanvas(600, 450), { stitchWidth: 120, maxColors: 20, cleanup: 2, minRun: 3, seed: 1234 },
+      function (p) {
+        if (seen.indexOf(p.phase) < 0) seen.push(p.phase);
+        if (p.pct < lastPct) monotonic = false;
+        if (!(p.pct >= 0 && p.pct <= 100)) pctInRange = false;
+        lastPct = p.pct;
+      }).then(function (r) {
+        assertTrue(r.ok === true, 'the progress run converts ok', r.error);
+        assertTrue(seen.length >= 4, 'onProgress fires for several phases', seen.join(','));
+        assertTrue(seen.indexOf('decode') === 0, 'the first phase is "decode"', seen.join(','));
+        assertTrue(seen[seen.length - 1] === 'symbols', 'the last phase is "symbols"', seen.join(','));
+        assertTrue(monotonic, 'pct never goes backwards');
+        var allowed = ['decode', 'resample', 'quantize', 'match', 'cleanup', 'symbols'];
+        var stray = seen.filter(function (p) { return allowed.indexOf(p) < 0; });
+        assertEqual(stray, [], 'every phase name is one of the six in B6');
+        assertTrue(pctInRange, 'pct stays within 0..100');
+        assertEqual(lastPct, 100, 'the final progress event is 100');
+        note('phases seen: ' + seen.join(' -> '));
+      });
+  },
+
+  function () {
+    group('Performance: 200 x 250 stitches, 24 colours, from a 2000x1500 JPEG');
+    scene = sceneCanvas(2000, 1500, 7);
+    return canvasToJpegBlob(scene, 0.9).then(function (blob) {
+      note('JPEG source: ' + Math.round(blob.size / 1024) + ' kB');
+      /* crop 1200x1500 out of the 2000x1500 frame so the grid is 200 x 250 */
+      return XP.convert(blob, {
+        stitchWidth: 200, maxColors: 24, cleanup: 1,
+        crop: { x: 400, y: 0, w: 1200, h: 1500 }, seed: 1234
+      });
+    }).then(function (r) {
+      assertTrue(r.ok === true, 'the 2000x1500 JPEG converts ok', r.error);
+      checkShape(r, '200x250: result is structurally valid', { maxColors: 24 });
+      assertEqual([r.data.design.w, r.data.design.h], [200, 250], 'grid is 200 x 250 stitches');
+      assertEqual(r.stats.cells, 50000, 'stats.cells === 50000');
+      timingMs = r.stats.ms;
+      var ph = r.stats.phases;
+      note('TIMING total ' + r.stats.ms + ' ms  |  decode ' + ph.decode +
+        '  resample ' + ph.resample + '  quantize ' + ph.quantize + ' (' + r.stats.iterations + ' Lloyd iters)' +
+        '  match ' + ph.match + '  cleanup ' + ph.cleanup + '  count ' + ph.count +
+        '  assemble ' + ph.assemble + '  [worker ' + r.stats.worker + ']');
+      assertTrue(r.stats.ms < 1500, '200x250 / 24 colours completes in under 1500 ms', r.stats.ms + ' ms');
+      assertTrue(r.stats.colors >= 12, 'a photo-like source uses a real palette', 'got ' + r.stats.colors);
+      assertTrue(r.stats.skeinsTotal > 0, 'skeinsTotal is reported', String(r.stats.skeinsTotal));
+      assertTrue(r.data.source.fileName === '', 'a Blob with no name leaves fileName empty');
+      note('200x250 palette (' + r.stats.colors + ' of 24 asked, ' + r.stats.mergedColors + ' centroids merged): ' +
+        r.data.palette.map(function (p) { return p.code; }).join(', '));
+      note('200x250 confetti: ' + r.stats.confetti.before + ' -> ' + r.stats.confetti.after +
+        ', skeins ' + r.stats.skeinsTotal + ', mean dE76 ' + r.stats.meanDE + ', max ' + r.stats.maxDE);
+      /* the synthetic scene carries deliberate film grain, which is
+         irreducible error; a clean photo lands nearer 3 */
+      assertTrue(r.stats.meanDE < 8, 'mean colour error stays under 8 dE76', String(r.stats.meanDE));
+      return XP.convert(scene, { stitchWidth: 200, maxColors: 12, cleanup: 1, crop: { x: 400, y: 0, w: 1200, h: 1500 }, seed: 1234 })
+        .then(function (r12) {
+          assertTrue(r12.stats.colors <= 12, '12-colour run respects its budget', String(r12.stats.colors));
+          assertTrue(r12.stats.ms < 1500, '12-colour run is also under 1500 ms', String(r12.stats.ms));
+          note('12-colour run: ' + r12.stats.colors + ' colours, mean dE76 ' + r12.stats.meanDE +
+            ', confetti ' + r12.stats.confetti.before + ' -> ' + r12.stats.confetti.after +
+            ', ' + r12.stats.ms + ' ms');
+        });
+      showResult(scene, r, '200 x 250 benchmark');
+    });
+  },
+
+  function () {
+    group('The data survives XStitch.normalize untouched');
+    return XP.convert(flag400, { stitchWidth: 40, maxColors: 6, count: 16, over: 2, strands: 3, seed: 1234 })
+      .then(function (r) {
+        var again = XS.normalize(JSON.parse(JSON.stringify(r.data)));
+        assertEqual(JSON.stringify(again), JSON.stringify(r.data),
+          'normalize() is a fixed point on the returned data');
+        assertEqual(again.fabric.count, 16, 'opts.count lands in fabric.count');
+        assertEqual(again.fabric.over, 2, 'opts.over lands in fabric.over');
+        assertEqual(again.fabric.kind, 'evenweave', 'over 2 means evenweave');
+        assertEqual(again.strandsDefault, 3, 'opts.strands lands in strandsDefault');
+        assertEqual(again.palette[0].strands, 3, 'palette entries carry the strand count');
+        var st = XS.progressStats(again);
+        assertEqual(st.done, 0, 'progressStats sees nothing done yet');
+        assertEqual(st.total, 40 * 30, 'progressStats total === every cell');
+        assertTrue(XS.summary({ craft: 'crossstitch', craftData: again }).length > 0,
+          'Store summary() renders for a photo project');
+      });
+  }
+
+]).then(function () {
+  var summaryEl = document.getElementById('summary');
+  var finalLine = passed + ' passed, ' + failed + ' failed' +
+    (timingMs !== null ? '  |  200x250 benchmark: ' + timingMs + ' ms' : '');
+  summaryEl.textContent = finalLine;
+  summaryEl.className = failed === 0 ? 'ok' : 'bad';
+  console.log(finalLine);
+  window.__testsDone = true;
+  window.__testResults = { passed: passed, failed: failed, ms: timingMs };
+});
+
+/* ---------------------------------------------------------------- *
+ * visual QA panel
+ * ---------------------------------------------------------------- */
+
+var vSrc = document.getElementById('v-src');
+var vOut = document.getElementById('v-out');
+var vStats = document.getElementById('vstats');
+var vKey = document.getElementById('vkey');
+var vToken = null;
+
+function drawSource(node, w, h) {
+  var maxW = 320;
+  var s = Math.min(1, maxW / w);
+  vSrc.width = Math.round(w * s);
+  vSrc.height = Math.round(h * s);
+  vSrc.style.width = vSrc.width + 'px';
+  vSrc.getContext('2d').drawImage(node, 0, 0, vSrc.width, vSrc.height);
+}
+
+function showResult(sourceNode, res, label) {
+  if (sourceNode) {
+    var w = sourceNode.naturalWidth || sourceNode.width;
+    var h = sourceNode.naturalHeight || sourceNode.height;
+    drawSource(sourceNode, w, h);
+  }
+  if (!res || !res.ok) {
+    vStats.textContent = (label ? label + ' — ' : '') + 'failed: ' + (res ? res.error : 'no result');
+    return;
+  }
+  var d = res.data;
+  vOut.width = d.design.w;
+  vOut.height = d.design.h;
+  var scale = Math.max(1, Math.min(8, Math.round(320 / d.design.w)));
+  vOut.style.width = (d.design.w * scale) + 'px';
+  vOut.getContext('2d').putImageData(res.preview, 0, 0);
+
+  var size = XS.finishedSize({ w: d.design.w, h: d.design.h, count: d.fabric.count, over: d.fabric.over });
+  vStats.textContent = (label ? label + ' — ' : '') +
+    d.design.w + ' x ' + d.design.h + ' stitches · ' +
+    size.wIn + ' x ' + size.hIn + ' in on ' + d.fabric.count + ' ct · ' +
+    res.stats.colors + ' colours · ' + res.stats.skeinsTotal + ' skeins · ' +
+    res.stats.confetti.after + ' confetti (was ' + res.stats.confetti.before + ') · ' +
+    res.stats.ms + ' ms [decode ' + res.stats.phases.decode +
+    ' resample ' + res.stats.phases.resample +
+    ' quantize ' + res.stats.phases.quantize +
+    ' match ' + res.stats.phases.match +
+    ' cleanup ' + res.stats.phases.cleanup +
+    ' assemble ' + res.stats.phases.assemble + ']' +
+    (res.stats.worker ? ' [worker]' : ' [main thread]');
+
+  vKey.innerHTML = '';
+  for (var i = 0; i < d.palette.length; i++) {
+    var p = d.palette[i];
+    var sw = document.createElement('div');
+    sw.className = 'sw';
+    var ink = XS.symbolInk(p.hex) === 'light' ? '#fff' : '#000';
+    sw.innerHTML = '<i style="background:#' + p.hex + ';color:' + ink + '">' + p.symbol + '</i>' +
+      '<span>' + p.code + ' · ' + p.stitchCount + ' · ' + p.skeins + 'sk</span>';
+    sw.title = p.name;
+    vKey.appendChild(sw);
+  }
+}
+
+function panelOpts() {
+  return {
+    stitchWidth: parseInt(document.getElementById('o-w').value, 10) || 100,
+    maxColors: parseInt(document.getElementById('o-c').value, 10) || 24,
+    cleanup: parseInt(document.getElementById('o-clean').value, 10) || 0,
+    minRun: parseInt(document.getElementById('o-min').value, 10) || 1,
+    dither: document.getElementById('o-dither').checked,
+    noWorker: document.getElementById('o-nw').checked,
+    seed: 1234
+  };
+}
+
+function runPanel(node, label) {
+  vStats.textContent = 'converting…';
+  vKey.innerHTML = '';
+  var p = window.XStitchPhoto.convert(node, panelOpts(), function (ev) {
+    vStats.textContent = 'converting… ' + ev.phase + ' ' + ev.pct + '%';
+  });
+  vToken = p.token;
+  p.then(function (res) { showResult(node, res, label); });
+}
+
+document.getElementById('b-flag').onclick = function () { runPanel(flagCanvas(400, 300), '4-colour flag'); };
+document.getElementById('b-grad').onclick = function () { runPanel(gradientCanvas(400, 300), 'gradient'); };
+document.getElementById('b-noise').onclick = function () { runPanel(noiseCanvas(400, 300, 99), 'noisy'); };
+document.getElementById('b-scene').onclick = function () { runPanel(sceneCanvas(2000, 1500, 7), 'synthetic scene'); };
+document.getElementById('b-cancel').onclick = function () { window.XStitchPhoto.cancel(vToken); };
+document.getElementById('b-file').onchange = function (e) {
+  var f = e.target.files && e.target.files[0];
+  if (!f) return;
+  vStats.textContent = 'converting ' + f.name + '…';
+  vKey.innerHTML = '';
+  /* draw the source from the same file, independently of the converter */
+  var url = URL.createObjectURL(f);
+  var img = new Image();
+  img.onload = function () {
+    drawSource(img, img.naturalWidth, img.naturalHeight);
+    URL.revokeObjectURL(url);
+  };
+  img.src = url;
+  var p = window.XStitchPhoto.convert(f, panelOpts(), function (ev) {
+    vStats.textContent = 'converting… ' + ev.phase + ' ' + ev.pct + '%';
+  });
+  vToken = p.token;
+  p.then(function (res) { showResult(null, res, f.name); });
+};
+</script>
+</body>
+</html>
