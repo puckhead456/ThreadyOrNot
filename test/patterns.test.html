@@ -431,7 +431,7 @@ assertTrue(beeSecs[1].text.indexOf('1. 6sc in mr') >= 0, 'splitSections slices t
 assertEqual(P.splitSections('Legs x4\n1. 6 sc in mr\n2. inc around (12)')[0].makeCount, 4, '"Legs x4" -> makeCount 4');
 assertEqual(P.splitSections('Ears - make 2\n1. 6 sc in mr\n2. inc around (12)')[0].makeCount, 2, '"Ears - make 2" -> makeCount 2');
 assertEqual(P.splitSections('Leg (x4)\n1. 6 sc in mr\n2. inc around (12)')[0].name, 'Leg', '"Leg (x4)" -> name Leg');
-assertEqual(P.splitSections('some notes with no headers at all'), [{ name: '', makeCount: 1, text: 'some notes with no headers at all' }], 'splitSections with no headers -> one unnamed section');
+assertEqual(P.splitSections('some notes with no headers at all'), [{ name: '', makeCount: 1, text: 'some notes with no headers at all', placement: '' }], 'splitSections with no headers -> one unnamed section');
 
 // EYES / ASSEMBLY blocks are notes, not sections
 var eyesText = 'BODY EYES\nIn yellow\n1. 6sc in mr\n2. Inc in each st\nASSEMBLY\nSew the wings on';
@@ -974,6 +974,174 @@ var wrap4 = P.parse('R1:Ch12, start 2nd chain from hook\n10sc, 3scinc (3sc into 
   'R2-R5: 24sc around (4 rounds)');
 assertEqual(countOf(wrap4, 1), 24, 'a chain round that wraps over four lines takes the "[24]" on the last');
 assertEqual(P.summary(wrap4).rows, 5, '...and the three leftover lines add no rows');
+
+// -----------------------------------------------------------------------
+group('v2.4: placing notes - assembly blocks and in-section cues');
+// -----------------------------------------------------------------------
+
+// A two-part pattern to hang the assembly block off.
+var PARTS =
+  'Body\n1. 6 sc in mr\n2. inc around (12)\n3. sc around (12)\n' +
+  'Ears\n1. 5 sc in mr\n2. inc around (10)\n';
+
+function placeOf(text, name) {
+  var secs = P.splitSections(text);
+  for (var i = 0; i < secs.length; i++) if (secs[i].name === name) return secs[i].placement;
+  return null;
+}
+function placeAll(text) {
+  return P.splitSections(text).map(function (s) { return s.placement; });
+}
+
+// --- every heading word opens an assembly block -------------------------
+['Assembly', 'Assembling', 'Assemble', 'Finishing', 'Finish', 'Making up',
+ 'Putting it together', 'Sewing up', 'Construction', 'Face', 'Embroidery',
+ 'Details', 'Eyes deepen'].forEach(function (word) {
+  var t = PARTS + word + ':\nSew the ears onto the top of the body.\n';
+  assertEqual(placeOf(t, 'Ears'), 'Sew the ears onto the top of the body.',
+    '"' + word + ':" opens an assembly block');
+  var secs = P.splitSections(t);
+  assertEqual(secs.map(function (s) { return s.name; }), ['Body', 'Ears'],
+    '"' + word + '" is not a section of its own');
+  assertEqual(secs.filter(function (s) { return s.text.indexOf(word) >= 0; }).length, 0,
+    '"' + word + '" never reaches a section\'s text');
+});
+
+// ...but a heading with rows under it is a real part, not an assembly block.
+var finishPart = P.splitSections(PARTS + 'Finish\n1. 4 sc in mr\n2. inc around (8)\n');
+assertEqual(finishPart.map(function (s) { return s.name; }), ['Body', 'Ears', 'Finish'],
+  '"Finish" with rounds under it is still a part');
+// and a prose line that merely ends in the word is not a heading
+assertEqual(placeOf(PARTS + 'Fasten off and leave a long tail for\nsewing.\n', 'Ears'), '',
+  'the wrapped word "sewing." is prose, not an assembly heading');
+
+// --- assembly prose never attaches to the part above it -----------------
+var attached = PARTS + 'Assembly:\nSew the ears onto the top of the body.\n';
+var attachedLines = P.parse(P.splitSections(attached)[1].text);
+assertEqual(attachedLines.filter(function (l) { return l.notes.length; }).length, 0,
+  'assembly prose does not become a note on the last part\'s rows');
+
+// --- sub-label distribution ---------------------------------------------
+var labelled = PARTS +
+  'Assembly:\n' +
+  'Ears -\n' +
+  'Sew onto the top of the body, three rounds apart.\n' +
+  'Body -\n' +
+  'Attach the safety eyes between rounds 2 and 3.\n';
+assertEqual(placeOf(labelled, 'Ears'), 'Ears: Sew onto the top of the body, three rounds apart.',
+  'a "Ears -" sub-label sends its paragraph to the Ears, folded in as "Ears: ..."');
+assertEqual(placeOf(labelled, 'Body'), 'Body: Attach the safety eyes between rounds 2 and 3.',
+  'the next sub-label starts a new paragraph for its own part');
+assertEqual(placeOf(PARTS + 'Assembly:\nEars:\nSew onto the top of the body.\n', 'Ears'),
+  'Ears: Sew onto the top of the body.', 'a "Ears:" sub-label works the same way');
+
+// a label wins over the part names inside the sentence
+assertEqual(placeOf(PARTS + 'Assembly:\nEars -\nSew onto the body between rounds 2 and 3.\n', 'Body'), '',
+  'the sub-label wins: the Body is only where the ears go');
+
+// --- part-name matching --------------------------------------------------
+assertEqual(placeOf(PARTS + 'Assembly:\nSew the ears to the body on round 3.\n', 'Ears'),
+  'Sew the ears to the body on round 3.',
+  'with no label the first part named in the sentence wins ("ears" before "body")');
+assertEqual(placeOf(PARTS + 'Assembly:\nSew the ear to the body on round 3.\n', 'Ears'),
+  'Sew the ear to the body on round 3.', 'the singular "ear" matches the part "Ears"');
+
+var slash = 'Body/Head\n1. 6 sc in mr\n2. inc around (12)\nLegs\n1. 5 sc in mr\n2. inc around (10)\n' +
+  'Assembly:\nSew the legs to the head on round 2.\n';
+assertEqual(placeOf(slash, 'Legs'), 'Sew the legs to the head on round 2.',
+  'the plural "legs" matches the part "Legs"');
+assertEqual(placeOf('Body/Head\n1. 6 sc in mr\n2. inc around (12)\nLegs\n1. 5 sc in mr\n2. inc around (10)\n' +
+  'Assembly:\nSew the head straight onto the stand.\n', 'Body/Head'),
+  'Sew the head straight onto the stand.', 'the slash name "Body/Head" answers to "head"');
+
+// --- fallback to the body/head/main part ---------------------------------
+assertEqual(placeOf(PARTS + 'Assembly:\nEmbroider a star on the forehead.\n', 'Body'),
+  'Embroider a star on the forehead.',
+  'a sentence naming no part goes to the body/head/main part');
+assertEqual(placeOf(PARTS + 'Assembly:\nStar -\nEmbroider a star on the forehead.\n', 'Body'),
+  'Star: Embroider a star on the forehead.',
+  'a sub-label that is not a part falls back to the body/main part too');
+var noBody = 'Wing\n1. 6 sc in mr\n2. inc around (12)\nAssembly:\nEmbroider a star on the front.\n';
+assertEqual(placeOf(noBody, 'Wing'), 'Embroider a star on the front.',
+  'with no body/head/main part the first section takes it');
+// prose with nothing to place is dropped
+assertEqual(placeAll(PARTS + 'Assembly:\nYour bear is ready! I hope you had fun.\n'), ['', ''],
+  'assembly prose with no placing verb is dropped');
+
+// --- in-section cue sentences -------------------------------------------
+var inSec = 'Body\n1. 6 sc in mr\n2. inc around (12)\n' +
+  'Attach safety eyes between R21&R22 leaving about 8 visible stitches between.\n' +
+  '3. sc around (12)\n';
+assertEqual(placeOf(inSec, 'Body'),
+  'Attach safety eyes between R21&R22 leaving about 8 visible stitches between.',
+  'an in-section "Attach ... between R21&R22" sentence is copied into placement');
+var inSecLines = P.parse(P.splitSections(inSec)[0].text);
+assertEqual(rowOf(inSecLines, 3).notes.join(' | '),
+  'Attach safety eyes between R21&R22 leaving about 8 visible stitches between.',
+  '...and it still attaches to the row as a note');
+
+[
+  ['Place arms so that tail is centered between arms, making sure there are 4sc between arms.', 'Place ... centered between arms'],
+  ['Insert the safety eyes between rounds 8 and 9, approximately 6 visible stitches apart.', 'Insert ... between rounds'],
+  ['Sew the nose in the center, approximately 1-2 rows below the eyes.', 'Sew ... below the eyes'],
+  ['Now you can attach 2 safety eyes (22mm) as the buttons on the lower part.', 'Now you can attach ...'],
+  ['Sew eyes 6 sts apart on rnds 10-14.', 'Sew eyes ... apart on rnds'],
+  ['Sew arms to body on rnd 19.', 'Sew arms to body on rnd'],
+  ['Sew ears on rnds 5-10 of head.', 'Sew ears on rnds'],
+  ['Now sew the legs, head and tail onto the underside of the body.', 'Now sew ... onto the underside'],
+  ['Attach the keyring and button - done.', 'Attach the keyring and button'],
+  ['Attach the eyes, stuff and close by crocheting/sewing.', 'Attach the eyes ...'],
+  ['Using black yarn, embroider eyebrows on your fish (1-2 rounds above the eyes).', 'Using ... embroider eyebrows'],
+  ['Note: you may need to adjust arm placement based on tension.', 'Note: ... placement ...']
+].forEach(function (pair) {
+  assertEqual(placeOf('Body\n1. 6 sc in mr\n2. inc around (12)\n' + pair[0] + '\n', 'Body'), pair[0],
+    'cue kept: ' + pair[1]);
+});
+
+[
+  'Stuff firmly',
+  'Fasten off, leave a long tail for sewing',
+  'Fold in half and 3sc through both sides',
+  'Sl st, join with sl st in first st and fasten off.',
+  'Colour change to black yarn',
+  'Do not stuff, close at the bottom by crocheting/sewing.',
+  'FO and leave a long tail to sew to head.',
+  'Then you will sew the wing closed along the line where it starts.',
+  'Sew the end.'
+].forEach(function (line) {
+  assertEqual(placeOf('Body\n1. 6 sc in mr\n2. inc around (12)\n' + line + '\n', 'Body'), '',
+    'not a placing note: ' + line);
+});
+
+// a row line's own instructions never become a placing note
+assertEqual(placeOf('Body\n1. 6 sc in mr\n2. 12sc, attach tail (3sc through both sides), 21sc (36)\n', 'Body'), '',
+  'an "attach" inside a numbered row is an instruction, not a placing note');
+
+// --- a wrapped sentence is one item --------------------------------------
+var wrapped = 'Body\n1. 6 sc in mr\n2. inc around (12)\n' +
+  'Sew the nose in the center, approximately 1-2 rows\nbelow the eyes.\n';
+assertEqual(placeOf(wrapped, 'Body'), 'Sew the nose in the center, approximately 1-2 rows below the eyes.',
+  'a sentence wrapped over two lines is rejoined into one placing note');
+var wrapped3 = 'Body\n1. 6 sc in mr\n2. inc around (12)\n' +
+  'Note: you may need to adjust arm\nplacement based on yarn type and\ntension. Place arms so that tail is\ncentered between arms.\n';
+assertEqual(placeOf(wrapped3, 'Body'),
+  'Note: you may need to adjust arm placement based on yarn type and tension.\n' +
+  'Place arms so that tail is centered between arms.',
+  'a note wrapped over four lines is rejoined, then split back into its two sentences');
+
+// --- page markers and the photo appendix ---------------------------------
+var marked = '=== PAGE 1 ===\nBody\n1. 6 sc in mr\n=== PAGE 2 ===\n2. inc around (12)\n' +
+  'ADDITIONAL PHOTOS:\n';
+var markedSecs = P.splitSections(marked);
+assertEqual(markedSecs[0].text.indexOf('=== PAGE'), -1, '"=== PAGE n ===" never reaches a section\'s text');
+assertEqual(markedSecs[0].text.indexOf('ADDITIONAL PHOTOS'), -1, '"ADDITIONAL PHOTOS:" never reaches a section\'s text');
+assertEqual(P.summary(P.parse(marked)).rows, 2, 'page markers change no row count');
+assertEqual(P.splitSections('=== PAGE 7 ===\nAssembly:\nSew the ears on.\nAdditional Photos:\n' + PARTS)[0].text.indexOf('Additional Photos'), -1,
+  '"Additional Photos:" in either case is dropped');
+
+// --- the standalone helper -----------------------------------------------
+assertEqual(P.placement(PARTS + 'Assembly:\nSew the ears to the body on round 3.\n'),
+  ['', 'Sew the ears to the body on round 3.'], 'Patterns.placement(text) returns one string per section');
 
 // -----------------------------------------------------------------------
 group('v2.3: PdfText - callouts drawn over artwork');

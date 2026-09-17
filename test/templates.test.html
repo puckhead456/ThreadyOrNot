@@ -394,6 +394,108 @@ assertEqual(Store.template(exportMe.id).parts.length, 2, 'and its full part list
 /* Built-ins the backup does not know about are left alone. */
 assertTrue(!!Store.template('sheep'), 'the sheep built-in is still there after an import');
 
+/* ====================================================================== *
+ * Placing notes: importPatternSections writes them, templates carry them
+ * ====================================================================== */
+
+group('importPatternSections -> Part.placementNotes');
+
+seed(null);
+
+var PLACE_BODY = 'Attach safety eyes between R21&R22, 8 stitches apart.';
+var PLACE_EARS = 'Ears: Sew onto the top of the head, three rounds apart.';
+
+var impProj = Store.createProject({ name: 'Placing', templateId: 'blank' });
+var impRes = Store.importPatternSections(impProj.id, [
+  { name: 'Body', makeCount: 1, text: BODY_TEXT, placement: PLACE_BODY },
+  { name: 'Ears', makeCount: 2, text: HEAD_TEXT, placement: PLACE_EARS },
+  { name: 'Tail', makeCount: 1, text: HEAD_TEXT, placement: '' }
+], { mode: 'parts', text: BODY_TEXT });
+
+var impNow = Store.project(impProj.id);
+assertEqual(impRes.created, 3, 'three parts created');
+assertEqual(impRes.placed, 2, 'two of them got placing notes');
+assertEqual(partNamed(impNow, 'Body').placementNotes, PLACE_BODY, 'a new part takes the section placement as-is');
+assertEqual(partNamed(impNow, 'Ears').placementNotes, PLACE_EARS, 'the sub-labelled line lands on the Ears');
+assertEqual(partNamed(impNow, 'Tail').placementNotes, '', 'a section with no placement leaves the part empty');
+
+/* Re-importing the same PDF adds nothing twice. */
+var again = Store.importPatternSections(impProj.id, [
+  { name: 'Body', makeCount: 1, text: BODY_TEXT, placement: PLACE_BODY }
+], { mode: 'parts', text: BODY_TEXT });
+assertEqual(again.updated, 1, 'the second import updates the Body');
+assertEqual(again.placed, 0, '...and reports no new placing notes');
+assertEqual(partNamed(Store.project(impProj.id), 'Body').placementNotes, PLACE_BODY,
+  're-importing the same placement does not double it up');
+
+/* Case and surrounding space do not make a line "new" either. */
+Store.importPatternSections(impProj.id, [
+  { name: 'Body', makeCount: 1, text: BODY_TEXT, placement: '  attach SAFETY eyes between R21&R22, 8 stitches apart.  ' }
+], { mode: 'parts', text: BODY_TEXT });
+assertEqual(partNamed(Store.project(impProj.id), 'Body').placementNotes, PLACE_BODY,
+  'the dedupe compares trimmed and case-insensitively');
+
+/* A genuinely new line is appended under what is already there. */
+var extraRes = Store.importPatternSections(impProj.id, [
+  { name: 'Body', makeCount: 1, text: BODY_TEXT, placement: PLACE_BODY + '\nSew the arms on at round 19.' }
+], { mode: 'parts', text: BODY_TEXT });
+assertEqual(extraRes.placed, 1, 'a new line counts as placed');
+assertEqual(partNamed(Store.project(impProj.id), 'Body').placementNotes,
+  PLACE_BODY + '\nSew the arms on at round 19.',
+  'only the line that is new gets appended, joined with a newline');
+
+/* Notes the owner typed by hand are kept. */
+var handProj = Store.createProject({ name: 'Hand typed', templateId: 'blank' });
+var handPart = Store.project(handProj.id).parts[0];
+Store.updatePart(handProj.id, handPart.id, { name: 'Body', placementNotes: 'Eyes go low, I like them low.' });
+Store.importPatternSections(handProj.id, [
+  { name: 'Body', makeCount: 1, text: BODY_TEXT, placement: PLACE_BODY }
+], { mode: 'parts', text: BODY_TEXT });
+assertEqual(partNamed(Store.project(handProj.id), 'Body').placementNotes,
+  'Eyes go low, I like them low.\n' + PLACE_BODY,
+  'the owner’s own placing note stays, the imported one is added under it');
+
+group('templates round-trip Part.placementNotes');
+
+var tplProj = Store.project(impProj.id);
+var draft = Store.templateFromProject(tplProj.id);
+assertEqual(tplPartNamed(draft, 'Ears').placementNotes, PLACE_EARS,
+  'templateFromProject copies each part’s placing notes');
+assertEqual(tplPartNamed(draft, 'Tail').placementNotes, '', '...and an empty one stays empty');
+
+var savedTpl = Store.saveTemplate({
+  name: 'Placing template',
+  parts: draft.parts,
+  checklist: []
+});
+assertEqual(tplPartNamed(savedTpl, 'Ears').placementNotes, PLACE_EARS,
+  'saveTemplate (validate + normalize) keeps the placing notes');
+
+var fromTpl = Store.createProject({ name: 'From placing template', templateId: savedTpl.id });
+assertEqual(partNamed(fromTpl, 'Ears').placementNotes, PLACE_EARS,
+  'createProject copies them onto the new part');
+assertEqual(partNamed(fromTpl, 'Body').placementNotes,
+  PLACE_BODY + '\nSew the arms on at round 19.', 'both lines survive the round trip');
+
+/* Anything that is not a string normalises to ''. */
+var junkTpl = Store.saveTemplate({
+  name: 'Junk placing',
+  parts: [{ name: 'Body', makeCount: 1, patternText: BODY_TEXT, placementNotes: { nope: 1 } }],
+  checklist: []
+});
+assertEqual(junkTpl.parts[0].placementNotes, '', 'a non-string placementNotes normalises to ""');
+
+/* ...and through a backup. */
+var placeBackup = Store.exportJSON();
+seed(null);
+Store.importJSON(placeBackup);
+var tplBack = Store.template(savedTpl.id);
+assertTrue(!!tplBack, 'the placing template comes back from the backup');
+assertEqual(tplPartNamed(tplBack, 'Ears').placementNotes, PLACE_EARS,
+  'export/import keeps the template part’s placing notes');
+assertEqual(partNamed(Store.project(impProj.id), 'Ears').placementNotes, PLACE_EARS,
+  'and the project part’s too');
+
 /* ---------------------------------------------------------------------- */
 restore();
 

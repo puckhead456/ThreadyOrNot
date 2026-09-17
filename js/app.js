@@ -2097,10 +2097,11 @@
 
             var bits = [];
             if (secs.length) {
-              Store.importPatternSections(created.id, secs, { mode: 'parts', text: pdf.text() });
+              var res = Store.importPatternSections(created.id, secs, { mode: 'parts', text: pdf.text() });
               var extra = addChecklistItems(created.id, pdf.checkedChecklist());
               var fresh = Store.project(created.id);
               bits.push(plural(fresh ? fresh.parts.length : secs.length, 'part'));
+              if (res && res.placed) bits.push('placing notes');
               if (extra) bits.push(plural(extra, 'checklist item'));
               if (pdf.wantsTemplate()) {
                 try {
@@ -2111,7 +2112,12 @@
                     groupSize: patch.groupSize,
                     craft: 'crochet',
                     parts: secs.map(function (s) {
-                      return { name: s.name || 'Part', makeCount: s.makeCount, patternText: s.text };
+                      return {
+                        name: s.name || 'Part',
+                        makeCount: s.makeCount,
+                        patternText: s.text,
+                        placementNotes: s.placement || ''
+                      };
                     }),
                     checklist: pdf.checkedChecklist()
                   });
@@ -3332,6 +3338,7 @@
           checked: keep ? old.checked : info.rows > 0,
           makeCount: sec.makeCount,
           text: sec.text,
+          placement: sec.placement || '',
           rows: info.rows,
           computedOnly: info.computedOnly,
           hasTargets: info.hasTargets
@@ -3375,6 +3382,9 @@
         meta.push(r.rows ? r.rows + ' ' + word() + (r.rows === 1 ? '' : 's') : 'no rows');
         if (r.rows && r.computedOnly) meta.push('counts computed ≈');
         else if (r.rows && r.hasTargets) meta.push('counts found');
+        // The parser found assembly prose for this piece - it lands in the
+        // part's Placing button, not in its rounds.
+        if (r.placement) meta.push('placing notes');
         main.appendChild(el('div', 'imp-meta', meta.join(' · ')));
 
         item.appendChild(chk);
@@ -3431,7 +3441,14 @@
     function checkedSections() {
       var out = [];
       rows.forEach(function (r) {
-        if (r.checked) out.push({ name: (r.name || '').trim(), makeCount: r.makeCount, text: r.text });
+        if (r.checked) {
+          out.push({
+            name: (r.name || '').trim(),
+            makeCount: r.makeCount,
+            text: r.text,
+            placement: r.placement || ''
+          });
+        }
       });
       return out;
     }
@@ -3593,7 +3610,7 @@
             } else {
               msg = 'Nothing imported';
             }
-            toast(msg + checklistSuffix(extra), { ms: 3600 });
+            toast(msg + placingSuffix(res.placed) + checklistSuffix(extra), { ms: 3600 });
           }
         }
       ]
@@ -3602,6 +3619,11 @@
 
   function checklistSuffix(n) {
     return n ? ' · + ' + plural(n, 'checklist item') : '';
+  }
+
+  /** Said once, however many parts got assembly prose out of the PDF. */
+  function placingSuffix(n) {
+    return n ? ' · placing notes' : '';
   }
 
   /* ================================================================== *

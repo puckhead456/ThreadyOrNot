@@ -175,6 +175,7 @@ Row → section assignment uses **expected-next-row matching**: each section rem
 - `Part.sizeIndex: number` (default 0). `Store.linesFor(part)` calls `Patterns.parse(part.patternText, { size: part.sizeIndex })`; cache key includes sizeIndex.
 - Part editor: under the pattern textarea show the summary line, e.g. `24 rounds · counts computed ≈ · 3 sections detected`. If `summary.sizes` or `summary.multiSize`: a **Size** select (names from `sizes`, else "Size 1..N" up to the longest list seen) bound to `part.sizeIndex`. If `summary.suggestions` has anything: an **"Apply detected settings"** button that sets targetRows / repeat (confirm shows what it will set). If `summary.sections.length > 1`: a hint "This text has N sections — use Import pattern to split into parts."
 - New project-level sheet **Import pattern** (overflow menu + a link in the part editor): big textarea "Paste the instructions from your PDF", live list of detected sections from `Patterns.splitSections` with name (editable), make-count, row count and computed/explicit indicator, each with a checkbox (default on for sections that have rows). Buttons: **Create parts** (for each checked section: if a part with the same name exists (case-insensitive) → set its patternText and makeCount; else add a new part) and **Put it all in <active part>** (whole text into the active part). Toast with what happened.
+- Each section from `Patterns.splitSections` also carries **`placement: string`** (`''` when there is none): the assembly prose the parser took off an "Assembly / Finishing / Eyes deepen" block and handed to the part it names, plus that part's own "Attach safety eyes between R21&R22…" sentences (those stay row notes as well). Assembly blocks and `=== PAGE n ===` / `ADDITIONAL PHOTOS:` furniture never reach a section's `text` or its row notes. `importPatternSections` writes `placement` into `Part.placementNotes` — replacing it on a new part, adding only the lines it does not already hold (case-insensitive) on an existing one — and returns `placed` alongside `created`/`updated`; the section row and the toast say "· placing notes".
 - Counter screen: the pattern line shows `notes` beneath it in a smaller muted line (joined with ' · '). A computed target renders as `≈ 24` (tilde-approx) in the stitch readout; explicit as `24`. When the working row is 1 and a setup line (row 0) exists, show it above the pattern line labelled "Setup".
 - Pattern sheet: render section headers as headers, setup lines labelled, `notes` inline under their row, computed counts as `≈N` at the end of the line.
 
@@ -183,12 +184,15 @@ Row → section assignment uses **expected-next-row matching**: each section rem
 Templates are DATA in state, not a constant. `State.templates: Template[]`.
 ```js
 Template = { id, name, emoji, countMode: 'rows'|'rounds', groupSize: number (default 10, 0 = grouping off),
-             parts: [{ name, makeCount, patternText }], checklist: string[], builtIn: boolean, updatedAt }
+             parts: [{ name, makeCount, patternText, placementNotes }], checklist: string[], builtIn: boolean, updatedAt }
 ```
 `patternText` is a string, default `''`, no length limit: a template drafted from a PDF import (or
 from a project) carries each part's instructions, so a project made from it starts with its rounds
 already in place. Built-ins have none. `validateTemplate` and `normalizeTemplate` both keep it;
 anything that is not a string normalises to `''`.
+`placementNotes` is a string handled exactly the same way (default `''`, kept by `validateTemplate`,
+`normalizeTemplate`, `templateFromProject` and `createProject`), so a template made from an imported
+project carries each part's placing notes too.
 Shipped defaults (seeded into `state.templates` on first load, and any missing built-in id is re-seeded on load so old saves get them):
 - `blank` "Single piece" 🧶 rows, group 10, parts [Main], checklist []
 - `sheep` "Sheep" 🐑 rounds, group 10, parts [Body, Head, Ears x2, Legs x4, Tail], checklist [Stuff body, Stuff head, Sew head to body, Attach safety eyes, Sew ears, Sew legs, Sew tail, Embroider face]

@@ -765,6 +765,322 @@
   }
 
   // =====================================================================
+  // 7b. Placing notes - "where things go"
+  //
+  // Two sources feed a section's `placement` string:
+  //   a. an ASSEMBLY BLOCK - a heading such as "Assembly:" / "Finishing" /
+  //      "Eyes deepen:" followed by prose with no row markers. It is not a
+  //      part, it must not attach as notes to the part above it, and it never
+  //      reaches a section's text. Its paragraphs are handed out to the parts
+  //      they talk about (sub-label first, then a part name in the sentence,
+  //      else the body/head/main part).
+  //   b. IN-SECTION SENTENCES - "Attach safety eyes between R21&R22..." stays
+  //      a row note (it is useful while counting) and is copied into its own
+  //      part's placement as well.
+  // =====================================================================
+
+  // Page scaffolding and end-of-document furniture: never a line, a note or a
+  // placing note.
+  var PAGE_LINE_RE = /^===\s*page\b/i;
+  var END_FURNITURE_RE = /^additional\s+photos?\s*:?\s*$/i;
+
+  function isFurniture(t) {
+    return !!t && (PAGE_LINE_RE.test(t) || END_FURNITURE_RE.test(t));
+  }
+
+  // A heading that opens a block of assembly prose. The line has to be nothing
+  // but one of these words (a trailing colon is fine), so the "Finishing" that
+  // bleeds off the next column into "Ear Finishing" still names the Ear, and
+  // the prose line "sewing." is not mistaken for a heading.
+  var ASSEMBLY_HEAD_RE = new RegExp('^(?:final\\s+)?(?:' + [
+    'assembly', 'assembling', 'assemble',
+    'finishing(?:\\s+(?:up|touches))?', 'finish',
+    'making\\s+up', 'putting\\s+(?:it\\s+)?(?:all\\s+)?together',
+    'sewing\\s+up', 'construction',
+    'face(?:\\s+details?)?', 'embroidery', 'embroidering',
+    'details?', 'eyes?\\s+deepen(?:ing)?'
+  ].join('|') + ')$', 'i');
+
+  function isAssemblyHead(t) {
+    if (!t || t.length > 40) return false;
+    if (/[.!?]$/.test(t)) return false;
+    return ASSEMBLY_HEAD_RE.test(t.replace(/\s*:\s*$/, '').trim());
+  }
+
+  // "Muzzle -", "Horns -", "Muzzle:" - the label of one paragraph of assembly.
+  var SUB_LABEL_RE = /^([A-Za-z][A-Za-z'&\/ -]{0,28}?)\s*[-:]\s*$/;
+
+  // Verbs that put one piece on another. Gerunds are deliberately absent:
+  // "leave a long tail for sewing" is not a placing note.
+  var PLACE_VERBS = {
+    sew: 1, sews: 1, attach: 1, attaches: 1, insert: 1, inserts: 1,
+    place: 1, places: 1, position: 1, positions: 1, pin: 1, pins: 1,
+    glue: 1, glues: 1, embroider: 1, embroiders: 1, mount: 1, mounts: 1
+  };
+  // The verb has to be one of the first few words, so the sentence reads as an
+  // instruction ("Sew the nose in the center") and not as an aside that
+  // happens to mention it ("FO and leave a long tail to sew to head").
+  var PLACE_LEAD = 4;
+  var STITCH_VERB_NEXT_RE = /^(?:the|it|them|on|onto|in|into|around|to)$/i;
+
+  // Where it goes: a preposition, a landmark or a round/row/stitch reference.
+  var PLACE_CUE_RE = /\b(?:between|onto|on|to|at|around|below|above|under|over|apart|centered|centred|center|centre|middle|underside|top|bottom|front|back|side|sides|next|rnds?|rounds?|rows?|sts?|stitches?)\b|\bR\s?\d/i;
+  // ...or the thing being placed.
+  var PLACE_NOUN_RE = /\b(?:eyes?|nose|noses|mouth|muzzles?|snouts?|beaks?|ears?|arms?|legs?|feet|foot|hands?|paws?|tails?|horns?|wings?|fins?|heads?|body|bodies|buttons?|key\s*rings?|keyrings?|eyebrows?|eyelids?|cheeks?|whiskers?|antennae?|pupils?|hats?|scarf|scarves|bows?|stars?|hearts?|petals?|leaf|leaves|spots?|stripes?|patch(?:es)?|pieces?|limbs?)\b/i;
+
+  // "Note: ... placement ..." is a placing note however it is phrased.
+  var NOTE_PLACE_RE = /^note\b[\s\S]*\bplacement\b/i;
+  // A promise about a later step, not an instruction about this one.
+  var FUTURE_RE = /^(?:(?:now|then|next|finally|first|also|and|so)\b[\s,]*)*(?:we|you|i|they)\s*(?:'ll|will|are\s+going\s+to|shall)\b/i;
+
+  var SENTENCE_STOP_RE = /[.!?]["')\]]?$/;
+  // Tokens whose full stop does not end a sentence. A bare number is the big
+  // one: "2. 12sc, attach tail..." is one row, not a row marker plus a
+  // sentence that reads like a placing note.
+  var ABBREV_TOKEN_RE = /^(?:\d+(?:-\d+)?|[A-Za-z]|no|fig|approx|etc|vs|ca|rnd|rnds|st|sts)\.$/i;
+
+  function placeWords(s) {
+    return String(s).replace(/[^A-Za-z0-9'&()\[\]\/,.;:+-]+/g, ' ').trim().split(/\s+/);
+  }
+
+  function bareWord(w) { return String(w == null ? '' : w).toLowerCase().replace(/[^a-z]/g, ''); }
+
+  /** A placing verb inside the first PLACE_LEAD words. */
+  function placeVerbEarly(sentence) {
+    var w = placeWords(sentence), n = Math.min(w.length, PLACE_LEAD), i, b;
+    for (i = 0; i < n; i++) {
+      b = bareWord(w[i]);
+      if (PLACE_VERBS[b] === 1) return true;
+      // "stitch" is a noun nine times out of ten; only "stitch it onto..."
+      // style forms count.
+      if (b === 'stitch' && STITCH_VERB_NEXT_RE.test(bareWord(w[i + 1]))) return true;
+    }
+    return false;
+  }
+
+  /** A placing verb anywhere - the looser test used inside assembly blocks. */
+  function hasPlaceVerb(text) {
+    var w = placeWords(text), i;
+    for (i = 0; i < w.length; i++) if (PLACE_VERBS[bareWord(w[i])] === 1) return true;
+    return false;
+  }
+
+  function splitSentences(s) {
+    var toks = String(s).trim().split(/\s+/);
+    var out = [], buf = [], i;
+    for (i = 0; i < toks.length; i++) {
+      if (!toks[i]) continue;
+      buf.push(toks[i]);
+      if (SENTENCE_STOP_RE.test(toks[i]) && !ABBREV_TOKEN_RE.test(toks[i])) {
+        out.push(buf.join(' '));
+        buf = [];
+      }
+    }
+    if (buf.length) out.push(buf.join(' '));
+    return out;
+  }
+
+  /** Does this sentence say where something goes? */
+  function isPlacementSentence(s) {
+    var t = String(s).replace(/\s+/g, ' ').trim();
+    if (t.length < 12) return false;
+    if (isFurniture(t)) return false;
+    if (detectMarker(t) || detectSetup(t) || detectNextRow(t)) return false;
+    if (NOTE_PLACE_RE.test(t)) return true;
+    if (FUTURE_RE.test(t)) return false;
+    if (!placeVerbEarly(t)) return false;
+    return PLACE_CUE_RE.test(t) || PLACE_NOUN_RE.test(t);
+  }
+
+  /** A line that has come to a stop, so the next one starts a new thought. */
+  function terminated(t) {
+    return /[.!?:][)"'\]]?$/.test(String(t).replace(/\s+$/, ''));
+  }
+
+  /**
+   * Blocks of assembly prose, and the page furniture, found up front so the
+   * main loop can skip both.
+   * @returns {{furniture:boolean[], assembly:boolean[], blocks:Array}}
+   */
+  function findSpecial(raws, size, heads) {
+    var furniture = [], assembly = [], blocks = [];
+    var i, j, k, t, u, cls, prose;
+    for (i = 0; i < raws.length; i++) furniture[i] = isFurniture(trimLine(raws[i]));
+
+    for (i = 0; i < raws.length; i++) {
+      if (furniture[i]) continue;
+      t = trimLine(raws[i]);
+      if (!isAssemblyHead(t)) continue;
+      prose = 0;
+      for (j = i + 1; j < raws.length; j++) {
+        u = trimLine(raws[j]);
+        if (furniture[j]) {
+          if (END_FURNITURE_RE.test(u)) break;   // the photo appendix ends it
+          continue;                              // a page break does not
+        }
+        if (!u) continue;
+        // "Muzzle -" / "Ears:" inside a block is a sub-label, and reads as a
+        // header on its own. It is only a real part when its rounds start
+        // right below it.
+        if (SUB_LABEL_RE.test(u)) {
+          var below = nextLine(raws, j);
+          if (detectMarker(below) || detectSetup(below) || detectNextRow(below)) break;
+          continue;
+        }
+        cls = classify(u, size, heads, nextLine(raws, j));
+        if (cls.marker || cls.repeat || cls.nextRow || cls.setup || cls.nameRow || cls.header) break;
+        if (FRONT_MATTER_RE.test(u)) break;
+        prose++;
+      }
+      // A heading with rows straight under it is a part called "Finish", not
+      // an assembly block.
+      if (!prose) continue;
+      assembly[i] = true;
+      for (k = i + 1; k < j; k++) if (!furniture[k]) assembly[k] = true;
+      blocks.push({ head: i, from: i + 1, to: j });
+      i = j - 1;
+    }
+    return { furniture: furniture, assembly: assembly, blocks: blocks };
+  }
+
+  /** Paragraphs of one assembly block, each with the sub-label above it. */
+  function assemblyItems(lines, blk, heads) {
+    var out = [], cur = null, label = '', i, l, t, m;
+    for (i = blk.from; i < blk.to && i < lines.length; i++) {
+      l = lines[i];
+      if (!l || l.furniture) continue;
+      t = trimLine(l.text);
+      if (!t) { cur = null; continue; }
+      if (isPhotoLabel(t)) { cur = null; continue; }
+      if (heads && heads[headKey(t)]) { cur = null; continue; }
+      m = SUB_LABEL_RE.exec(t);
+      if (m) { label = m[1].trim(); cur = null; continue; }
+      if (cur && !terminated(cur.text)) { cur.text += ' ' + t; continue; }
+      cur = { label: label, text: t };
+      out.push(cur);
+    }
+    return out;
+  }
+
+  /** One item per thought inside a part: wrapped note lines are rejoined. */
+  function sectionItems(ls) {
+    var out = [], cur = null, i, l, t, isNote;
+    for (i = 0; i < ls.length; i++) {
+      l = ls[i];
+      t = trimLine(l.text);
+      if (!t) { cur = null; continue; }
+      isNote = l.kind === 'note';
+      if (cur && cur.note && isNote && l.index === cur.last + 1 && !terminated(cur.text)) {
+        cur.text += ' ' + t;
+        cur.last = l.index;
+        continue;
+      }
+      cur = { text: t, note: isNote, last: l.index };
+      out.push(cur);
+    }
+    return out;
+  }
+
+  // "Body/Head" answers to "body" and to "head"; "Ears" answers to "ear".
+  function nameKeys(name) {
+    var out = [];
+    String(name || '').split(/\s*[\/&,]\s*|\s+and\s+/i).forEach(function (piece) {
+      var p = piece.trim().toLowerCase().replace(/[^a-z' ]/g, '').trim();
+      if (p.length < 3) return;
+      out.push(p);
+      if (/(?:ch|sh|s|x|z)$/.test(p)) out.push(p + 'es'); else out.push(p + 's');
+      if (/ies$/.test(p)) out.push(p.replace(/ies$/, 'y'));
+      if (/es$/.test(p)) out.push(p.replace(/es$/, ''));
+      if (/s$/.test(p)) out.push(p.replace(/s$/, ''));
+    });
+    return out;
+  }
+
+  function escapeRe(s) { return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+
+  /** The body/head/main piece an unaddressed assembly line belongs to. */
+  function mainSectionIndex(secs) {
+    for (var i = 0; i < secs.length; i++) {
+      if (/\b(?:body|head|main)\b/i.test(secs[i].name || '')) return i;
+    }
+    return 0;
+  }
+
+  /**
+   * The section a line of assembly talks about: the part name that comes
+   * first in the text wins, and when a pattern has that part more than once
+   * (three sizes of the same bee) the nearest one above the block does.
+   */
+  function matchPart(text, keyMap, keys, atLine, secs) {
+    var bestAt = -1, bestKey = null, i, m;
+    for (i = 0; i < keys.length; i++) {
+      m = new RegExp('\\b' + escapeRe(keys[i]) + '\\b', 'i').exec(text);
+      if (!m) continue;
+      if (bestAt < 0 || m.index < bestAt || (m.index === bestAt && keys[i].length > bestKey.length)) {
+        bestAt = m.index;
+        bestKey = keys[i];
+      }
+    }
+    if (bestKey === null) return -1;
+    var cands = keyMap[bestKey], pick = -1;
+    for (i = 0; i < cands.length; i++) {
+      if (secs[cands[i]].startLine <= atLine) pick = cands[i];
+    }
+    return pick >= 0 ? pick : cands[0];
+  }
+
+  /**
+   * Fill in each section's `placement`. `secs` are the real sections, each
+   * carrying `startLine` and the `lines` that belong to it.
+   */
+  function distributePlacement(secs, lines, meta) {
+    var buckets = secs.map(function () { return []; });
+    var seen = secs.map(function () { return {}; });
+    var keyMap = {}, keys = [];
+    secs.forEach(function (s, ix) {
+      nameKeys(s.name).forEach(function (k) {
+        if (!keyMap[k]) { keyMap[k] = []; keys.push(k); }
+        if (keyMap[k].indexOf(ix) < 0) keyMap[k].push(ix);
+      });
+    });
+    var mainIx = mainSectionIndex(secs);
+
+    function add(ix, text) {
+      if (ix < 0 || ix >= buckets.length) return;
+      var t = String(text).replace(/\s+/g, ' ').trim();
+      if (!t) return;
+      var key = t.toLowerCase();
+      if (seen[ix][key]) return;
+      seen[ix][key] = true;
+      buckets[ix].push(t);
+    }
+
+    // (a) sentences inside a part
+    secs.forEach(function (s, ix) {
+      sectionItems(s.lines).forEach(function (item) {
+        splitSentences(item.text).forEach(function (sent) {
+          if (isPlacementSentence(sent)) add(ix, sent);
+        });
+      });
+    });
+
+    // (b) assembly blocks, handed out by name
+    var blocks = (meta && meta.assemblyBlocks) || [];
+    var heads = (meta && meta.heads) || null;
+    blocks.forEach(function (blk) {
+      assemblyItems(lines, blk, heads).forEach(function (item) {
+        if (!hasPlaceVerb(item.text)) return;    // "Your fish is ready!" is not
+        var ix = item.label ? matchPart(item.label, keyMap, keys, blk.head, secs) : -1;
+        if (ix < 0) ix = matchPart(item.text, keyMap, keys, blk.head, secs);
+        if (ix < 0) ix = mainIx;
+        add(ix, item.label ? item.label + ': ' + item.text : item.text);
+      });
+    });
+
+    secs.forEach(function (s, ix) { s.placement = buckets[ix].join('\n'); });
+  }
+
+  // =====================================================================
   // 8. parse() and friends
   // =====================================================================
 
@@ -908,6 +1224,7 @@
     var size = (opts && typeof opts.size === 'number') ? opts.size : 0;
     var raws = prepareLines(text);
     var heads = findRunningHeads(raws);
+    var special = findSpecial(raws, size, heads);
     var lines = [];
     var sections = [];
     var consumed = [];
@@ -993,6 +1310,12 @@
 
       if (consumed[i]) { L.consumed = true; continue; }
       if (!t) continue;
+
+      // Page scaffolding and assembly prose: they belong to no part, so they
+      // never become a line, a header or a note on somebody's last row. The
+      // placement pass reads their text straight off `lines`.
+      if (special.furniture[i]) { L.furniture = true; L.omit = true; continue; }
+      if (special.assembly[i]) { L.assembly = true; L.omit = true; continue; }
 
       // Front matter closes the cover page: whatever title the not-yet-started
       // first section is carrying is a document title, not a part name.
@@ -1178,7 +1501,7 @@
     for (var j = 0; j < lines.length; j++) {
       var n = lines[j];
       var tx = trimLine(n.text);
-      if (n.kind !== 'note' || n.consumed || n.photo || !tx) { para = null; continue; }
+      if (n.kind !== 'note' || n.consumed || n.photo || n.omit || !tx) { para = null; continue; }
       // a connector continues the paragraph - unless the next line is itself
       // a fresh instruction ("Colour change to yellow")
       if (para && para.section === n.section && para.lastIdx === j - 1 &&
@@ -1217,7 +1540,9 @@
       sizes: detectSizes(text),
       multiSize: multiSize,
       suggestion: (suggestionSection === 0 || suggestionSection === null) ? suggestion : null,
-      anySuggestion: suggestion
+      anySuggestion: suggestion,
+      assemblyBlocks: special.blocks,
+      heads: heads
     };
     return lines;
   }
@@ -1299,24 +1624,48 @@
   function splitSections(text) {
     if (text === null || text === undefined) return [];
     var lines = parse(text);
-    var secs = lines.meta ? lines.meta.sections : [];
+    var meta = lines.meta || {};
+    var secs = meta.sections || [];
     // Build each section's text from the lines that belong to it: with
     // two-column bleed the sections interleave, so a raw slice would not do.
+    // `omit` drops the page scaffolding and the assembly prose - the latter is
+    // handed to the parts it names by distributePlacement() instead.
     var out = secs.filter(isRealSection).map(function (s) {
-      var body = [];
+      var body = [], own = [];
       for (var i = 0; i < lines.length; i++) {
         var l = lines[i];
-        if (l.section !== s.index || l.consumed || l.photo) continue;
+        if (l.section !== s.index || l.consumed || l.photo || l.omit) continue;
         if (l.index < s.startLine) continue;
         if (!trimLine(l.text)) continue;
         body.push(trimLine(l.text));
+        own.push(l);
       }
-      return { name: s.name, makeCount: s.makeCount, text: body.join('\n') };
+      return {
+        name: s.name, makeCount: s.makeCount, text: body.join('\n'),
+        placement: '', startLine: s.startLine, lines: own
+      };
     });
     if (!out.length) {
-      return [{ name: '', makeCount: 1, text: String(text) }];
+      var all = [], raw = [];
+      for (var j = 0; j < lines.length; j++) {
+        if (lines[j].furniture) continue;
+        raw.push(String(lines[j].text));
+        if (!lines[j].consumed && !lines[j].photo && !lines[j].omit && trimLine(lines[j].text)) all.push(lines[j]);
+      }
+      out = [{
+        name: '', makeCount: 1, text: raw.join('\n'),
+        placement: '', startLine: 0, lines: all
+      }];
     }
-    return out;
+    distributePlacement(out, lines, meta);
+    return out.map(function (s) {
+      return { name: s.name, makeCount: s.makeCount, text: s.text, placement: s.placement };
+    });
+  }
+
+  /** The placing notes splitSections() would hand each section, on their own. */
+  function placement(text) {
+    return splitSections(text).map(function (s) { return s.placement; });
   }
 
   // =====================================================================
@@ -1978,6 +2327,7 @@
     lineFor: lineFor,
     summary: summary,
     splitSections: splitSections,
+    placement: placement,
     detectSizes: detectSizes,
     evaluate: evaluate,
     colors: colors,

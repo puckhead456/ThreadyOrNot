@@ -271,15 +271,17 @@
         if (!pname) continue;
         // Templates carry the pattern text of the part they were drafted from
         // (a PDF import saved as a template), so a project made from one comes
-        // out with its rounds already in place. Built-ins have none.
+        // out with its rounds already in place. The placing notes ride along
+        // the same way. Built-ins have neither.
         parts.push({
           name: pname,
           makeCount: clampInt(p.makeCount, 1, 99, 1),
-          patternText: str(p.patternText, '')
+          patternText: str(p.patternText, ''),
+          placementNotes: str(p.placementNotes, '')
         });
       }
     }
-    if (!parts.length) parts = [{ name: 'Main', makeCount: 1, patternText: '' }];
+    if (!parts.length) parts = [{ name: 'Main', makeCount: 1, patternText: '', placementNotes: '' }];
 
     var checklist = [];
     if (Array.isArray(t.checklist)) {
@@ -421,7 +423,12 @@
         throw new Error('Make counts must be between 1 and 99.');
       }
       // No length limit on the pattern text — a whole part's instructions fit.
-      parts.push({ name: pname, makeCount: Math.floor(mc), patternText: str(p.patternText, '') });
+      parts.push({
+        name: pname,
+        makeCount: Math.floor(mc),
+        patternText: str(p.patternText, ''),
+        placementNotes: str(p.placementNotes, '')
+      });
     }
     if (!parts.length) throw new Error('Add at least one part.');
     var checklist = [];
@@ -490,7 +497,12 @@
       countMode: proj.countMode,
       groupSize: proj.groupSize,
       parts: proj.parts.map(function (p) {
-        return { name: p.name, makeCount: p.makeCount, patternText: str(p.patternText, '') };
+        return {
+          name: p.name,
+          makeCount: p.makeCount,
+          patternText: str(p.patternText, ''),
+          placementNotes: str(p.placementNotes, '')
+        };
       }),
       checklist: proj.checklist
         .map(function (c) { return str(c.text, '').trim(); })
@@ -1070,7 +1082,11 @@
             return {
               name: str(s && s.name, ''),
               makeCount: clampInt(s && s.makeCount, 1, 99, 1),
-              text: str(s && s.text, '')
+              text: str(s && s.text, ''),
+              // "Where things go": the assembly prose the parser handed to
+              // this part, plus its own placing sentences. '' when there is
+              // none.
+              placement: str(s && s.placement, '')
             };
           });
         }
@@ -1079,7 +1095,7 @@
       }
     }
     // v1 parser (or a failure): one nameless section with everything in it.
-    return [{ name: '', makeCount: 1, text: String(text) }];
+    return [{ name: '', makeCount: 1, text: String(text), placement: '' }];
   }
 
   /* ------------------------------------------------------------------ *
@@ -1454,11 +1470,13 @@
       timer: { totalMs: 0, runningSince: null },
       // Non-crochet crafts get the one `Main` part too, so everything in the
       // shell that assumes parts.length >= 1 keeps working.
-      // A template part may carry the pattern text it was saved with; the new
-      // part gets a fresh id, so there is no stale lineCache entry to clear.
+      // A template part may carry the pattern text and the placing notes it
+      // was saved with; the new part gets a fresh id, so there is no stale
+      // lineCache entry to clear.
       parts: tpl.parts.map(function (p) {
         var made = makePart(p.name, p.makeCount);
         made.patternText = str(p.patternText, '');
+        made.placementNotes = str(p.placementNotes, '');
         return made;
       }),
       checklist: tpl.checklist.map(function (t) { return { id: uid(), text: t, done: false }; }),
@@ -1640,15 +1658,46 @@
   }
 
   /**
+   * Add the placing lines of `incoming` that `have` does not carry yet.
+   * Compared case-insensitively on the trimmed line, so re-importing the same
+   * PDF twice does not double the notes up.
+   */
+  function mergePlacement(have, incoming) {
+    var kept = str(have, '').split(/\r\n|\r|\n/);
+    var seen = {};
+    var out = [];
+    var i, t;
+    for (i = 0; i < kept.length; i++) {
+      t = kept[i];
+      out.push(t);
+      if (t.trim()) seen[t.trim().toLowerCase()] = true;
+    }
+    var add = str(incoming, '').split(/\r\n|\r|\n/);
+    for (i = 0; i < add.length; i++) {
+      t = add[i];
+      if (!t.trim() || seen[t.trim().toLowerCase()]) continue;
+      seen[t.trim().toLowerCase()] = true;
+      out.push(t);
+    }
+    // Drop the empty lines an empty starting value would leave behind.
+    while (out.length && !out[0].trim()) out.shift();
+    while (out.length && !out[out.length - 1].trim()) out.pop();
+    return out.join('\n');
+  }
+
+  /**
    * Import parsed pattern sections into a project.
    * mode 'parts'  → one part per section: a part with the same name (case
    *                 insensitive) is updated, otherwise a new part is added.
+   *                 A section's `placement` lands in the part's
+   *                 `placementNotes` — replacing it on a new part, and adding
+   *                 only the lines it does not have yet on an existing one.
    * mode 'active' → every section's text lands in the active part.
-   * @returns {{created:number, updated:number}}
+   * @returns {{created:number, updated:number, placed:number}}
    */
   function importPatternSections(projectId, sections, opts) {
     var proj = project(projectId);
-    var out = { created: 0, updated: 0 };
+    var out = { created: 0, updated: 0, placed: 0 };
     if (!proj || !Array.isArray(sections) || !sections.length) return out;
     var mode = opts && opts.mode === 'active' ? 'active' : 'parts';
     snapshot(proj);
@@ -1671,6 +1720,14 @@
         .filter(function (t) { return t.replace(/\s/g, ''); })
         .join('\n\n');
       prt.patternText = joined;
+      var place = sections
+        .map(function (s) { return str(s && s.placement, ''); })
+        .filter(function (t) { return !!t.trim(); })
+        .join('\n');
+      if (place) {
+        var merged = mergePlacement(prt.placementNotes, place);
+        if (merged !== str(prt.placementNotes, '')) { prt.placementNotes = merged; out.placed = 1; }
+      }
       delete lineCache[prt.id];
       out.updated = 1;
       touch(proj);
@@ -1691,15 +1748,26 @@
           }
         }
       }
+      var place = str(sec.placement, '');
       if (existing) {
         existing.patternText = text;
         existing.makeCount = makeCount;
         if (existing.piecesDone > existing.makeCount) existing.piecesDone = existing.makeCount;
+        // The part is already there and may carry notes the owner typed, so
+        // only the lines that are not in it yet are added.
+        if (place) {
+          var merged = mergePlacement(existing.placementNotes, place);
+          if (merged !== str(existing.placementNotes, '')) {
+            existing.placementNotes = merged;
+            out.placed++;
+          }
+        }
         delete lineCache[existing.id];
         out.updated++;
       } else {
         var added = makePart(name || 'Part ' + (proj.parts.length + 1), makeCount);
         added.patternText = text;
+        if (place) { added.placementNotes = place; out.placed++; }
         proj.parts.push(added);
         out.created++;
       }

@@ -105,6 +105,19 @@ function sectionNamed(secs, name) {
   for (var i = 0; i < secs.length; i++) if (secs[i].name === name) return secs[i];
   return null;
 }
+/** The placing notes of the section called `name` ('' when it has none). */
+function placeOf(secs, name) {
+  var s = sectionNamed(secs, name);
+  return s ? String(s.placement || '') : null;
+}
+/** Every placing note in the document, joined - for "nothing anywhere" checks. */
+function allPlace(secs) {
+  return secs.map(function (s) { return String(s.placement || ''); }).join('\n');
+}
+function hasPlace(secs, name, sub, label) {
+  var p = placeOf(secs, name);
+  log(p !== null && p.indexOf(sub) >= 0, label, p === null ? 'no section "' + name + '"' : p.slice(0, 160));
+}
 function names(secs) { return secs.map(function (s) { return s.name; }); }
 
 var uncomputed = [];
@@ -343,6 +356,110 @@ function checkPdf(name, res) {
   }
   // every section the parser offers as a part should have real rows
   log(secs.every(function (s) { return P.summary(P.parse(s.text)).rows > 0; }), name + ': every section has rows');
+
+  // ------------------------------------------------- placing notes (v2.4)
+  // The page scaffolding never reaches a section's text, its notes or its
+  // placing notes - in ANY of the fixtures.
+  var scaffold = ['=== PAGE', 'ADDITIONAL PHOTOS', 'Additional Photos'];
+  var leakedText = [], leakedNote = [], leakedPlace = [];
+  secs.forEach(function (s) {
+    scaffold.forEach(function (k) {
+      if (s.text.indexOf(k) >= 0) leakedText.push(s.name + ': ' + k);
+      if (String(s.placement || '').indexOf(k) >= 0) leakedPlace.push(s.name + ': ' + k);
+    });
+    P.parse(s.text).forEach(function (l) {
+      scaffold.forEach(function (k) { if (l.notes.join(' ').indexOf(k) >= 0) leakedNote.push(s.name + ': ' + k); });
+    });
+  });
+  eq(leakedText, [], name + ': no page scaffolding in any section text');
+  eq(leakedNote, [], name + ': no page scaffolding in any row note');
+  eq(leakedPlace, [], name + ': no page scaffolding in any placing note');
+
+  if (name === 'crochet-baphomet.pdf') {
+    var assemblyWords = ['=== PAGE', 'Assembly', 'ADDITIONAL PHOTOS', 'Sew muzzle'];
+    var inText = [];
+    secs.forEach(function (s) {
+      assemblyWords.forEach(function (k) { if (s.text.indexOf(k) >= 0) inText.push(s.name + ': ' + k); });
+    });
+    eq(inText, [], 'crochet-baphomet.pdf: the assembly page is out of every section text');
+    var feetNotes = P.parse(sectionNamed(secs, 'Feet').text)
+      .map(function (l) { return l.notes.join(' | '); }).join(' | ');
+    log(feetNotes.indexOf('Sew muzzle') < 0,
+      'crochet-baphomet.pdf: the assembly page no longer hangs off the last Feet row', feetNotes.slice(0, 120));
+    log(feetNotes.indexOf('Fasten off, leave a long tail for sewing') >= 0,
+      'crochet-baphomet.pdf: ...while the Feet\'s own trailer notes stay put', feetNotes.slice(0, 120));
+
+    hasPlace(secs, 'Muzzle', 'Sew muzzle onto front of head', 'crochet-baphomet.pdf: Muzzle placing - sewn onto the head');
+    hasPlace(secs, 'Muzzle', 'Embroider muzzle', 'crochet-baphomet.pdf: Muzzle placing - the second, unaddressed line under the same label');
+    hasPlace(secs, 'Horns', 'between R27&R31', 'crochet-baphomet.pdf: Horns placing');
+    hasPlace(secs, 'Ears', 'row below horns', 'crochet-baphomet.pdf: Ears placing');
+    hasPlace(secs, 'Feet', 'between R5&R9', 'crochet-baphomet.pdf: Feet placing');
+    hasPlace(secs, 'Body/Head', 'Embroider star on forehead',
+      'crochet-baphomet.pdf: the "Star -" label names no part, so it goes to Body/Head');
+    hasPlace(secs, 'Body/Head', 'Attach safety eyes between R21&R22',
+      'crochet-baphomet.pdf: Body/Head placing - the in-section eye sentence');
+    hasPlace(secs, 'Body/Head', '4sc between arms',
+      'crochet-baphomet.pdf: Body/Head placing - the wrapped "Note: ... arm placement ..." paragraph');
+    // the Arms' trailer is construction, not placement
+    eq(placeOf(secs, 'Arms'), '', 'crochet-baphomet.pdf: Arms has no placing notes (its trailer is "Stuff lightly" / "Fold in half")');
+    eq(placeOf(secs, 'Tail'), '', 'crochet-baphomet.pdf: Tail has no placing notes ("Do not stuff" / "Fasten off" are not placement)');
+  }
+  if (name === 'crochet-panda.pdf') {
+    hasPlace(secs, 'Eye', '6 sts apart on rnds 10-14', 'crochet-panda.pdf: Eye placing');
+    hasPlace(secs, 'Ear', 'rnds 5-10 of head',
+      'crochet-panda.pdf: Ear placing (the sentence shares a line with "Rnd 1:" through column bleed)');
+    hasPlace(secs, 'Arm', 'rnd 19', 'crochet-panda.pdf: Arm placing');
+    // "Use pins to position legs and tail as in pictures." is printed inside
+    // the Tail, and an in-section sentence stays with its own part.
+    hasPlace(secs, 'Tail', 'position legs and tail',
+      'crochet-panda.pdf: "Use pins to position legs and tail" goes to the Tail it is printed in');
+  }
+  if (name === 'crochet-fish.pdf') {
+    hasPlace(secs, 'Body', 'between rounds 8 and 9', 'crochet-fish.pdf: Body placing - the safety eyes');
+    hasPlace(secs, 'Body', 'embroider eyebrows', 'crochet-fish.pdf: Body placing - the "Finish:" block');
+    // the "Eyes deepen" block: the heading and its prose are dropped (the
+    // numbered steps below it are needlework, not placement, and still make
+    // no rows)
+    eq(secs.filter(function (s) { return s.text.indexOf('Eyes deepen') >= 0; }).length, 0,
+      'crochet-fish.pdf: the "Eyes deepen" heading reaches no section text');
+    log(allPlace(secs).indexOf('deepen') < 0 && allPlace(secs).indexOf('insert the needle') < 0,
+      'crochet-fish.pdf: the "Eyes deepen" steps are dropped, not turned into placing notes',
+      allPlace(secs).slice(0, 120));
+  }
+  if (name === 'crochet-snowman.pdf') {
+    hasPlace(secs, 'Nose', '1-2 rows below the eyes', 'crochet-snowman.pdf: Nose placing');
+    var first = String(secs[0].placement || '');
+    log(first.indexOf('safety eyes (22mm)') >= 0 && first.indexOf('buttons') >= 0,
+      'crochet-snowman.pdf: the unnamed body section keeps the 22mm buttons note', first.slice(0, 140));
+  }
+  if (name === 'crochet-turtle.pdf') {
+    hasPlace(secs, 'Head', 'Attach the eyes', 'crochet-turtle.pdf: Head placing');
+    hasPlace(secs, 'Tail', 'sew the legs, head and tail',
+      'crochet-turtle.pdf: the final assembly line is printed in the Tail and stays there');
+    log(allPlace(secs).indexOf('Do not stuff') < 0,
+      'crochet-turtle.pdf: "Do not stuff" is an instruction, never a placing note', allPlace(secs).slice(0, 140));
+  }
+  if (name === 'bear.pdf') {
+    hasPlace(secs, 'Head', 'Embroider eyes between Rounds 7 & 8', 'bear.pdf: Head placing - the embroidered eyes');
+    hasPlace(secs, 'Arms', 'Sew arms onto Round 2 of the body', 'bear.pdf: Arms placing');
+  }
+  if (name === 'bee.pdf') {
+    var wings = secs.filter(function (s) { return s.name === 'Wings'; })
+      .map(function (s) { return String(s.placement || ''); }).join('\n');
+    log(wings.indexOf('sew the wings onto the middle yellow stripe') >= 0,
+      'bee.pdf: the "ASSEMBLY" block goes to the Wings above it', wings.slice(0, 160));
+    log(names(secs).indexOf('Assembly') < 0, 'bee.pdf: "ASSEMBLY" is still not a section');
+  }
+  if (name === 'cato.pdf') {
+    hasPlace(secs, 'Head', 'Place eyes now', 'cato.pdf: Head placing - "Place eyes now"');
+    hasPlace(secs, 'Head', 'head to its body at round 11', 'cato.pdf: the assembly paragraph goes to the Head it names first');
+    hasPlace(secs, 'Wings', 'Sew the wings on', 'cato.pdf: Wings placing');
+  }
+  if (name === 'cardigan.pdf') {
+    // a garment: nothing is sewn onto anything, so nothing should be offered
+    eq(secs.map(function (s) { return String(s.placement || ''); }).filter(function (p) { return !!p; }), [],
+      'cardigan.pdf: a garment has no placing notes at all');
+  }
 }
 
 // strip the "=== PAGE n ===" scaffolding lines the fixture files carry
