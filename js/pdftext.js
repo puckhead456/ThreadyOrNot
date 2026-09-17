@@ -44,6 +44,20 @@
 
   var LIGATURES = /^(?:fi|fl|ff|ffi|ffl)$/;
 
+  /* Letter-spaced pages. Some generators draw every glyph with its own
+   * kerning step, wide enough that pdf.js turns each step into a space, so a
+   * whole line arrives as "R 2 : s c i n c x 6 ( 1 2 )". The *word* breaks
+   * survive that treatment as items of their own (a whitespace-only item, or
+   * simply a new item), so the repair is to drop the spaces INSIDE an item
+   * and keep the ones BETWEEN items: "R2: sc inc x6 (12)".
+   * An item is only rewritten when it is nothing but single glyphs separated
+   * by single spaces, and only on a page that looks letter-spaced as a whole
+   * (see pageLooksSpaced) - a lone "A B C" photo label in an ordinary PDF
+   * keeps its spaces. */
+  var SPACED_ITEM_RE = /^\S(?: \S)+$/;
+  var MIN_SPACED_ROWS = 3;      // a page needs this many letter-spaced lines
+  var MIN_SPACED_SHARE = 0.4;   // ...and they must be this share of its lines
+
   var libPromise = null;
   var libFailed = false;
 
@@ -167,24 +181,60 @@
     return rows.filter(function (row) { return row.items.length > 0; });
   }
 
-  /** Join one row's items into a single line of text. */
-  function rowText(row) {
+  /** How many of a row's items carry ink, and how many are spaced-out glyphs? */
+  function spacedTally(row) {
+    var solid = 0, spaced = 0;
+    for (var i = 0; i < row.items.length; i++) {
+      var s = row.items[i].str;
+      if (!s || !s.replace(/\s/g, '')) continue;    // a word-gap item, no ink
+      solid++;
+      if (SPACED_ITEM_RE.test(s)) spaced++;
+    }
+    return { solid: solid, spaced: spaced };
+  }
+
+  /**
+   * Letter spacing is a property of a page's typesetting, not of one line, so
+   * the decision is made per page: several lines have to look spaced out AND
+   * be a decent share of the page before any item is rewritten. That keeps a
+   * stray "A B C" label or a spaced-out colour code in an ordinary PDF (the
+   * cross-stitch and sewing importers read the same output) untouched.
+   */
+  function pageLooksSpaced(rows) {
+    var candidates = 0, spaced = 0;
+    for (var i = 0; i < rows.length; i++) {
+      var t = spacedTally(rows[i]);
+      if (t.solid < 2) continue;                    // one-word lines say nothing
+      candidates++;
+      if (t.spaced >= 2 && t.spaced * 2 >= t.solid) spaced++;
+    }
+    return spaced >= MIN_SPACED_ROWS && spaced >= candidates * MIN_SPACED_SHARE;
+  }
+
+  /**
+   * Join one row's items into a single line of text.
+   * @param {boolean} [deglyph] true on a letter-spaced page: strip the spaces
+   *   that sit between the single glyphs of one item (see SPACED_ITEM_RE).
+   */
+  function rowText(row, deglyph) {
     var out = '';
     var prev = null;
     for (var i = 0; i < row.items.length; i++) {
       var it = row.items[i];
-      var lig = LIGATURES.test(it.str.trim());
+      var str = it.str;
+      if (deglyph && SPACED_ITEM_RE.test(str)) str = str.replace(/ /g, '');
+      var lig = LIGATURES.test(str.trim());
       if (prev) {
         var glued =
           lig ||                                    // ligature glyph: part of a word
           LIGATURES.test(prev.str.trim()) ||
           /\s$/.test(prev.str) ||                   // the space is already in the text
-          /^\s/.test(it.str) ||
+          /^\s/.test(str) ||
           it.x - prev.end < 0.15 * Math.max(prev.h, it.h);  // glyphs are touching
         if (!glued) out += ' ';
       }
-      out += it.str;
-      prev = it;
+      out += str;
+      prev = { str: str, end: it.end, h: it.h };
     }
     return fixLigatures(collapse(out));
   }
@@ -295,13 +345,15 @@
 
   function pageLines(items, pageWidth, pageHeight) {
     var rows = buildRows(items);
+    // Judge letter spacing on the whole page, before it is cut into columns.
+    var deglyph = pageLooksSpaced(rows);
     var budget = { left: MAX_COLUMNS - 1 };
     var res = columnize(rows, 0, pageWidth, budget);
     var h = pageHeight > 0 ? pageHeight : 792;
     var lines = [];
     res.columns.forEach(function (col) {
       col.slice().sort(function (a, b) { return b.y - a.y; }).forEach(function (row) {
-        var text = rowText(row);
+        var text = rowText(row, deglyph);
         if (!text) return;
         if (isFurniture(text)) return;
         // Baselines live in PDF space: high Y is the top of the page.
@@ -591,6 +643,9 @@
     isAvailable: isAvailable,
     /** Exposed for the dev fixtures page / tests. */
     _pageLines: pageLines,
-    _fixLigatures: fixLigatures
+    _fixLigatures: fixLigatures,
+    _buildRows: buildRows,
+    _rowText: rowText,
+    _pageLooksSpaced: pageLooksSpaced
   };
 })();

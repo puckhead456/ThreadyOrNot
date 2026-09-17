@@ -100,14 +100,19 @@
   // "Row 1", "Row 1 (WS)", "Rows 3-4", "Rows 5 to 8", "Rows 5 & 6",
   // "Rnd1", "Rounds 6-10", "R5", "R 5". The keyword must be followed by a
   // number, so "Repeat"/"Rep" never match.
+  // The far end of a range may repeat the keyword ("R12-R17:") and may be
+  // joined with a plus ("Rnd 7+8:"), both of which are common in translated
+  // amigurumi patterns; without that the range reads as a single row.
   var KEYWORD_RE = new RegExp(
     '^[-*\\u2022]?\\s*(?:rnds?|rounds?|rows?|r)\\.?\\s*' +
-    '(\\d+)\\s*(?:(?:-|to|&|and)\\s*(\\d+))?' +
+    '(\\d+)\\s*(?:(?:-|to|&|and|\\+)\\s*(?:rnds?|rounds?|rows?|r)?\\.?\\s*(\\d+))?' +
     '\\s*(?:\\((?:ws|rs|wrong side|right side)\\))?' +
     '\\s*(?::|\\.|-|\\)|\\s|$)', 'i');
 
   // Bare numbers need adjacent punctuation: "1.", "5:", "6..", "5-6.", "8-11.."
-  var BARE_RE = /^[-*\u2022]?\s*(\d+)(?:\s*-\s*(\d+))?(\.{1,3}|:|\))/;
+  // A single dot followed by a digit is a decimal point, not a row marker, so
+  // a measurement on the cover page ('15.7"') stops opening a phantom row 15.
+  var BARE_RE = /^[-*\u2022]?\s*(\d+)(?:\s*-\s*(\d+))?(\.\.\.?|\.(?!\d)|:|\))/;
 
   var NEXT_ROW_RE = /^next\s+(?:rows?|rnds?|rounds?)\b\s*:?/i;
 
@@ -196,8 +201,9 @@
     return out.replace(/[ \t]{2,}/g, ' ').replace(/\s+$/, '');
   }
 
-  // A bracket whose whole content is a stitch total: "(30)", "(30 sts)".
-  var PLAIN_BRACKET_RE = /[(\[]\s*(\d+)\s*(?:sts?|stitches?|sc|hdc|dc)?\s*(?:total)?\s*[)\]]/ig;
+  // A bracket whose whole content is a stitch total: "(30)", "(30 sts)",
+  // "(6 sc made)".
+  var PLAIN_BRACKET_RE = /[(\[]\s*(\d+)\s*(?:sts?|stitches?|sc|hdc|dc)?\s*(?:total|made)?\s*[)\]]/ig;
 
   // Text that follows a count and is really a note on that row.
   var TRAILING_NOTE_RE = /^[\s.,;:-]*((?:fasten\s+off|fo\b|stuff\b|tie\s+off|sl\s*st|slst|don'?t\s+fo|do\s+not\s+fasten)[\s\S]*)$/i;
@@ -547,6 +553,19 @@
     'supplies', 'difficulty', 'pattern', 'placement', 'facial', 'sculpting',
     'finished', 'shaping', 'colours', 'colors'];
 
+  // ...but a couple of those are a crocheted piece in their own right in some
+  // patterns ("Eye" with its own rounds) and only a face-detail caption in
+  // others ("BODY / EYES" above a note on eye placement). A header that is
+  // nothing but such a word comes back marked `weak`; classify() promotes it
+  // to a real header only when the very next line starts its rounds.
+  var STANDALONE_OK = { eye: true, eyes: true };
+
+  // A part name is a noun phrase. Crochet instructions are written as
+  // imperatives and "Make a Magic Ring" / "Use Orange Yarn" happen to be in
+  // Title Case, so rule the verbs out before Title Case lets them through.
+  // One-word lines are left alone: a part really can be called "Join".
+  var IMPERATIVE_RE = /^(?:make|use|using|start|begin|work|continue|repeat|rep|sew|stuff|fasten|join|attach|turn|skip|insert|place|add|cut|leave|change|weave|thread|pull|fold|close|mark|pinch|do|don'?t|now|then|next|follow|check|keep|take|hold|count)\b/i;
+
   // Photo captions / column labels: "A", "E F", "I J K", "(PHOTO M-N)".
   var PHOTO_LABEL_RE = /^(?:\(?\s*photos?\s+[a-z](?:\s*-\s*[a-z])?\s*\)?|(?:[A-Z]\s+)*[A-Z])$/;
 
@@ -554,10 +573,28 @@
 
   var MAKE_RES = [
     /^(.*?)\s*\(\s*(?:make\s*)?x?\s*(\d+)\s*\)\s*$/i,
+    /^(.*?)\s*\(\s*(\d+)\s*x\s*\)\s*$/i,          // "Feet - green (4x)"
     /^(.*?)\s*-\s*make\s*(\d+)\s*$/i,
     /^(.*?)\s+x\s*(\d+)\s*$/i,
     /^(.*?)\s+make\s*(\d+)\s*$/i
   ];
+
+  // Translated patterns hang the yarn colour off the part name:
+  //   "Shell - brown:"   "Feet - green (4x):"   "Body in light blue:"
+  // That is a note about the piece, not part of its name. The tail is only
+  // dropped when colorHex() actually recognises it as a colour, so a part
+  // genuinely called "Front - Back" or "Hat in Rounds" keeps its name.
+  var HEADER_DASH_COLOUR_RE = /^(.+?[A-Za-z])\s*-\s*([A-Za-z][A-Za-z -]*?)\s*$/;
+  var HEADER_IN_COLOUR_RE = /^(.+?[A-Za-z])\s+in\s+([A-Za-z][A-Za-z -]*?)\s*$/i;
+
+  function stripColourSuffix(s) {
+    var res = [HEADER_DASH_COLOUR_RE, HEADER_IN_COLOUR_RE];
+    for (var i = 0; i < res.length; i++) {
+      var m = res[i].exec(s);
+      if (m && m[1].trim() && colorHex(m[2])) return m[1].trim();
+    }
+    return s;
+  }
 
   var ALLCAPS_RE = /^[A-Z][A-Z '&\/-]*$/;
   var TITLE_RE = /^([A-Z][a-z'-]*)(\s+([A-Z][a-z'-]*|&|of|the|and|in|a|for|to|with))*$/;
@@ -575,15 +612,26 @@
       var m = MAKE_RES[i].exec(s);
       if (m && m[1].trim()) { s = m[1].trim(); makeCount = num(m[2]) || 1; break; }
     }
+    s = stripColourSuffix(s);
     if (!/^[A-Za-z][A-Za-z '&\/-]*$/.test(s)) return null;
     if (!ALLCAPS_RE.test(s) && !TITLE_RE.test(s)) return null;
+    if (/\s/.test(s) && IMPERATIVE_RE.test(s)) return null;
 
     // strip trailing non-part words
     var words = s.split(/\s+/);
     while (words.length && NON_PART.indexOf(words[words.length - 1].toLowerCase()) >= 0) {
       words.pop();
     }
-    if (!words.length) return 'note';
+    if (!words.length) {
+      // Nothing but non-part words. A single one of the few that can also be
+      // a real piece ("Eye") is offered as a weak header for classify() to
+      // confirm; everything else is just a caption.
+      var only = s.split(/\s+/);
+      if (only.length === 1 && STANDALONE_OK[only[0].toLowerCase()]) {
+        return { name: titleCase(s), makeCount: makeCount, weak: true };
+      }
+      return 'note';
+    }
     var name = words.join(' ');
     if (name.replace(/[^A-Za-z]/g, '').length < 3) return 'note';
     return { name: titleCase(name), makeCount: makeCount };
@@ -601,7 +649,7 @@
     // short expansion and not a number in sight.
     if (m[1].trim().length <= 5 && m[2].length < 40 && !/\d/.test(m[2])) return null;
     var h = headerInfo(m[1] + ':');
-    if (!h || h === 'note') return null;
+    if (!h || h === 'note' || h.weak) return null;
     if (!INSTR_START_RE.test(m[2])) return null;
     return { name: h.name, makeCount: h.makeCount, rest: m[2], prefixLen: t.length - m[2].length };
   }
@@ -630,6 +678,12 @@
   function headKey(t) { return t.toLowerCase().replace(/\s+/g, ' '); }
 
   var NOTE_KEY_RE = /^(?:colou?r\s+change|invisible\s+colou?r\s+change|change\b|switch\b|add\b|stuff\b|start\b|begin\b|tie\s+off|fasten\b|fo\b|sl\s*st|slst|join\b|place\b|insert\b|attach\b|sew\b|embroider\b|do\s*not\b|don'?t\b|put\b|with\b|cut\b|leave\b|leaving\b|finish\b|close\b|before\b|after\b|now\b|next\b|make\s+sure|mark\b|pinch\b|fold\b|work\b|continue\b|optional\b|using\b|in\s+colou?r\b|with\s+colou?r\b|in\s+(?:yellow|black|white|grey|gray|brown|pink|red|blue|green|mc|cc)\s*[.,]?\s*$|in\s+(?:colou?r\s+)?[a-z][a-z]*\s*[:.]?\s*$)/i;
+
+  // Front-matter headings. A part name never sits above the materials list or
+  // the abbreviation table, so one of these ends the cover page: a name the
+  // first section picked up from a title further up ("SNOWMAN" three pages
+  // before the rows) is dropped and the pending header group is cleared.
+  var FRONT_MATTER_RE = /^(?:materials?|supplies|tools?|you\s+will\s+need|what\s+you\s+(?:will\s+)?need|abbreviations?|terminolog(?:y|ies)|terms(?:\s+used)?|glossary|gauge|difficulty)\s*[:.]?\s*$/i;
 
   // Lines that may sit between two headers without breaking the header group.
   var COLOUR_NOTE_RE = /^(?:in\s+(?:colou?r\s+)?[a-z][a-z0-9]*\s*[:.,]?|\(\s*[a-z]\s*=\s*[a-z]+\s*\))$/i;
@@ -704,6 +758,45 @@
     return findExplicit(t);
   }
 
+  /** The next line with anything on it, for the lookaheads below. */
+  function nextLine(raws, i) {
+    for (var j = i + 1; j < raws.length; j++) {
+      var t = trimLine(raws[j]);
+      if (t) return t;
+    }
+    return '';
+  }
+
+  // A very long instruction can wrap over a dozen printed lines, with the
+  // stitch count stranded on the last of them ("...continue normally: 9 sc
+  // (40)"). The three-line merge above only follows lines that clearly read as
+  // instructions, which a wrapped paragraph of prose does not, so as a last
+  // resort look ahead for the stranded count. Deliberately narrow: the row
+  // must be left hanging (no sentence-ending full stop), nothing in between
+  // may be a row, header, repeat or page break, and the line that carries the
+  // count must end with it and read like crochet rather than like a remark.
+  var STRANDED_LIMIT = 16;
+  var SENTENCE_END_RE = /[.!?]["')\]]?\s*$/;
+  var PAGE_MARK_RE = /^===\s*page\b/i;
+
+  function strandedCount(raws, i, rowText, size, heads) {
+    if (SENTENCE_END_RE.test(rowText)) return null;
+    var found = null;
+    for (var j = i + 1, seen = 0; j < raws.length && seen < STRANDED_LIMIT; j++) {
+      var t = trimLine(raws[j]);
+      if (!t) continue;
+      if (PAGE_MARK_RE.test(t)) break;
+      seen++;
+      var cls = classify(t, size, heads, nextLine(raws, j));
+      if (cls.marker || cls.repeat || cls.nextRow || cls.setup ||
+          cls.nameRow || cls.header) break;
+      if (!INSTR_ROW_RE.test(t)) continue;
+      var ex = findExplicit(t);
+      if (ex && ex.end >= t.length) found = ex;
+    }
+    return found;
+  }
+
   // A physical line can carry two columns of rows:
   // "2. (Hdc 1, Hdc Inc) x 3 (9) 1. 5 Sc in Magic Ring (5)"
   var COLUMN_SPLIT_RE = /\)\s+(?=\d+(?:\s*-\s*\d+)?\s*[.:]\s)/;
@@ -725,7 +818,15 @@
     return out;
   }
 
-  function classify(t, size, heads) {
+  /**
+   * @param {string} t     the line
+   * @param {number} size
+   * @param {Object} heads running heads to refuse as names
+   * @param {string} [next] the next non-blank line, used to confirm a weak
+   *   header (see STANDALONE_OK): "Eye" is a part when its rounds start on
+   *   the very next line, and a caption when prose follows instead.
+   */
+  function classify(t, size, heads, next) {
     if (!t) return { blank: true };
     if (isPhotoLabel(t)) return { photo: true };
     var mk = detectMarker(t);
@@ -741,7 +842,10 @@
     if (COLOUR_NOTE_RE.test(t)) return { note: true };   // "In Twilight :"
     if (heads && heads[headKey(t)]) return { note: true };  // running head
     var h = headerInfo(t);
-    if (h && h !== 'note') return { header: h };
+    if (h && h !== 'note') {
+      if (h.weak && !(next && detectMarker(next))) return { note: true };
+      return { header: { name: h.name, makeCount: h.makeCount } };
+    }
     return { note: true };
   }
 
@@ -749,7 +853,11 @@
   function looksLikeContinuation(t, cls) {
     if (!t || !cls.note) return false;
     var startsOk = /^[(\[]/.test(t) || /^[a-z]/.test(t) || /^[A-Z]\s*\(/.test(t) ||
-      /^(?:inc|sc|hdc|dc|tr|dec|fsc|bbl|sl\s*st|slst)\b/i.test(t);
+      /^(?:inc|sc|hdc|dc|tr|dec|fsc|bbl|sl\s*st|slst)\b/i.test(t) ||
+      // "...(sc in next 4 sts," / "2 sc in next st) 5 times...": a wrap can
+      // land on the count of a stitch, which reads as a number then a stitch.
+      // A line like that with no row marker of its own is always a leftover.
+      /^\d+\s*(?:inc|sc|hdc|dc|tr|dec|ch|sl\s*st|slst)\b/i.test(t);
     if (!startsOk) return false;
     // must read like instructions, not like prose commentary
     var hasCount = /[(\[]\s*\d+\s*(?:sts?|stitches?|sc|hdc|dc)?\s*[)\]]/i.test(t) || /\|\s*\d+/.test(t);
@@ -836,7 +944,16 @@
       if (consumed[i]) { L.consumed = true; continue; }
       if (!t) continue;
 
-      var cls = classify(t, size, heads);
+      // Front matter closes the cover page: whatever title the not-yet-started
+      // first section is carrying is a document title, not a part name.
+      if (!cur.hasRow && FRONT_MATTER_RE.test(t)) {
+        cur.name = ''; cur.makeCount = 1; cur.startLine = i;
+        cur.titleGroup = null; cur.titleEntry = null;
+        group = { entries: [], sawContent: false };
+        continue;
+      }
+
+      var cls = classify(t, size, heads, nextLine(raws, i));
       var prefixLen = 0;
       var isRow = false, isSetup = false;
 
@@ -847,13 +964,20 @@
         pushHeader(cls.header, i, false);
         // A section that has not started yet takes its name from the newest
         // header group, so the header closest before the first row wins over
-        // a cover title or a chapter heading further up.
+        // a cover title or a chapter heading further up. Inside the group the
+        // FIRST entry wins, because a group of headers is a queue on a
+        // two-column page ("Arms (Make 2)" / "Ears (Make 2)" with a column of
+        // rows each). The pattern-title case ("Little Panda" directly above
+        // "Body") is corrected after the loop, once we know whether the entry
+        // below was ever claimed - see "pattern title" below.
         if (!cur.hasRow) {
           var first = group.entries[0];
           cur.name = first.name;
           cur.makeCount = first.makeCount;
           cur.startLine = first.line;
           first.used = true;
+          cur.titleGroup = group;
+          cur.titleEntry = first;
         }
         continue;
       }
@@ -923,7 +1047,8 @@
       }
 
       if ((isRow || isSetup) && L.stitches === null) {
-        var cont = continuationCount(raws, lastIdx);
+        var cont = continuationCount(raws, lastIdx) ||
+          strandedCount(raws, lastIdx, t, size, heads);
         if (cont) {
           L.sizes = cont.sizes.length > 1 ? cont.sizes : null;
           L.stitches = pickSize(cont.sizes, size);
@@ -956,6 +1081,26 @@
       } else if (L.stitches !== null) {
         L.count = L.stitches;
         L.countSource = 'explicit';
+      }
+    }
+
+    // --- pattern title above the first part header -----------------------
+    // A pattern's own title often sits directly on top of the first part's
+    // header ("Little Panda" over "Body"). Both read as headers and the first
+    // section took the upper one, so if the header just below it was never
+    // claimed by any section, that one was the part name and the line above it
+    // was the title. When the pair is a queue instead (two columns, one header
+    // each) the lower entry IS claimed and nothing moves.
+    var s0 = sections[0];
+    if (s0 && s0.hasRow && s0.titleEntry && s0.titleGroup) {
+      var es = s0.titleGroup.entries;
+      var at = es.indexOf(s0.titleEntry);
+      var below = at >= 0 ? es[at + 1] : null;
+      if (below && !below.used && below.line - s0.titleEntry.line <= 3) {
+        below.used = true;
+        s0.name = below.name;
+        s0.makeCount = below.makeCount;
+        s0.startLine = below.line;   // the title line drops out of the text
       }
     }
 

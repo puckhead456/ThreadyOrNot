@@ -20,6 +20,9 @@
 <div id="summary"></div>
 
 <script src="../js/patterns.js"></script>
+<!-- pdftext.js is loaded for its pure line-rebuilding helpers only; pdf.js
+     itself is not needed here (the library loads lazily, on first extract). -->
+<script src="../js/pdftext.js"></script>
 <script>
 'use strict';
 
@@ -760,6 +763,153 @@ assertEqual(P.colorHex('baby pink'), '#f4c2c2', 'colorHex knows "baby pink" outr
 ['Color A', 'Colour B', 'MC', 'CC', 'A', 'B', 'z', 'wibble', '', null].forEach(function (n) {
   assertEqual(P.colorHex(n), null, 'colorHex(' + JSON.stringify(n) + ') == null');
 });
+
+// -----------------------------------------------------------------------
+group('v2.2: headers that carry a colour, a make-count or a title above them');
+// -----------------------------------------------------------------------
+
+function countOf(lines, n) { var l = rowOf(lines, n); return l ? l.count : null; }
+
+// "Shell - brown:" (en dash, colour word, trailing colon)
+var colHdr = P.splitSections('Shell – brown:\nMR with 6 sc.\nRnd 1: (inc) ×6 (12)\nRnd 2: (1 sc, inc) ×6 (18)');
+assertEqual(colHdr.map(function (s) { return s.name + '/' + s.makeCount; }), ['Shell/1'],
+  '"Shell - brown:" is the part "Shell" (the colour is not part of the name)');
+assertEqual(P.summary(P.parse(colHdr[0].text)).rows, 2, '...and it keeps both of its rounds');
+
+// "Feet - green (4x):" - colour AND a make-count written as "4x"
+var makeHdr = P.splitSections('Feet – green (4x):\nMR with 6 sc in Green.\nRnd 1: (inc) ×6 (12)\nRnd 2-4: 12 sc (12)');
+assertEqual(makeHdr.map(function (s) { return s.name + '/' + s.makeCount; }), ['Feet/4'],
+  '"Feet - green (4x):" is the part "Feet", made four times');
+assertEqual(P.summary(P.parse(makeHdr[0].text)).rows, 4, '...with rounds 1 and 2-4 = 4 rows');
+
+// "Body in light blue:" - the other way of naming the colour
+assertEqual(P.splitSections('Body in light blue:\n1. Rnd: 2 ch, into the first ch: 9 sc (9)\n2. Rnd: inc x9 (18)')[0].name,
+  'Body', '"Body in light blue:" is the part "Body"');
+assertEqual(P.splitSections('Front in Rounds:\n1. Mr6 (6)\n2. Inc x6 (12)')[0].name,
+  'Front In Rounds', '...but "in X" is only dropped when X is a colour we know');
+
+// a title line directly above the real header
+var titled = P.splitSections('Little Panda\nBody\nRnd 1: 6 sc in magic ring (6)\nRnd 2: inc x6 (12)');
+assertEqual(titled.map(function (s) { return s.name; }), ['Body'],
+  'two adjacent headers with one row block: the lower one (nearest the rows) is the part name');
+assertTrue(titled[0].text.indexOf('Little Panda') < 0, '...and the title line is left out of the section text');
+
+// an instruction in Title Case is not a header
+assertEqual(P.splitSections('Hat\nMake a Magic Ring\nR1: 6 sc\nR2: sc inc x6 (12)')[0].name,
+  'Hat', '"Make a Magic Ring" is an instruction, not a part called "Make A Magic Ring"');
+
+// "Eye" is a face detail above prose and a real piece above its rounds
+assertEqual(P.splitSections('Ear\nRnd 1: 6 sc in magic ring (6)\nRnd 2: inc x6 (12)\nEye\nRnd 1: 6 sc in magic ring (6)\nRnd 2: inc x6 (12)')
+  .map(function (s) { return s.name; }), ['Ear', 'Eye'],
+  '"Eye" above its own Rnd 1 is a part of its own');
+assertEqual(P.splitSections('Body\nEyes\nIn yellow I try to place the eyes 4 stitches apart.\n1. 6 sc in magic ring (6)\n2. Inc x6 (12)')
+  .map(function (s) { return s.name; }), ['Body'],
+  '"EYES" above a note on eye placement is still just a caption');
+
+// front matter ends the cover page
+assertEqual(P.splitSections('SNOWMAN\nR1: 6 sc\nR2: sc inc x6 (12)')[0].name,
+  'Snowman', 'a cover title right above the rows does name the first section');
+assertEqual(P.splitSections('SNOWMAN\nMaterials:\n9 mm crochet hook\nR1: 6 sc\nR2: sc inc x6 (12)')[0].name,
+  '', '...but a "Materials:" page in between makes it a document title, not a part');
+
+// -----------------------------------------------------------------------
+group('v2.2: row ranges that repeat the keyword, decimals, stranded counts');
+// -----------------------------------------------------------------------
+
+var plusRange = P.parse('Rnd 6: (5 sc, inc) ×6 (42)\nRnd 7+8: 42 sc (42)');
+assertEqual(rowOf(plusRange, 7).rowEnd, 8, '"Rnd 7+8:" is a two-row range');
+assertEqual(P.summary(plusRange).rows, 3, '...counting as two rows, not one');
+assertEqual(countOf(plusRange, 8), 42, '...and row 8 carries the range\'s count');
+
+var rRange = P.parse('R11: (9 sc, sc inc) x6 (66)\nR12-R17: 66 sc around\nR18: (9 sc, sc dec) x6 (60)');
+assertEqual(rowOf(rRange, 12).rowEnd, 17, '"R12-R17:" repeats the keyword and is still one range');
+assertEqual(P.summary(rRange).rows, 8, '...so R11 + six rows + R18 = 8 rows');
+assertEqual(countOf(rRange, 14), 66, '...and "66 sc around" computes 66 for every row in it');
+
+var decimal = P.parse('15.7"\n40 cm\nR1: 6 sc (6)');
+assertEqual(P.summary(decimal).rows, 1, 'a decimal measurement (15.7") is not a row marker');
+assertEqual(P.summary(decimal).maxRow, 1, '...so the pattern still starts at row 1');
+assertEqual(P.parse('1.5 sc in each st\n2. Sc 6 (6)')[0].kind, 'note', '"1.5" opens no row either');
+
+var longWrap = P.parse(
+  '6. Rnd: (5 sc, inc) x6 (42)\n' +
+  '7. Rnd: If you crocheted a white belly you need to change the colour\n' +
+  'Now the tail fin is crocheted into the FLO of the next two stitches.\n' +
+  'Everything inside the curved bracket is crocheted into one stitch:\n' +
+  '{1 slst, 4 ch, crochet back from the 2nd chain stitch from the hook:\n' +
+  'continue normally: 9 sc (40)\n' +
+  '8. Rnd: dec, 13 sc (34)');
+assertEqual(countOf(longWrap, 7), 40, 'a row that wraps over many prose lines takes the count stranded on the last of them');
+assertEqual(P.summary(longWrap).rows, 3, '...and the wrapped lines add no rows of their own');
+
+var noSteal = P.parse(
+  '1. Mr6 (6)\n' +
+  '2. Sc in each st around.\n' +
+  'Stuff the piece firmly.\n' +
+  'Work the shaping now: 9 sc (18)\n' +
+  '3. Inc x6 (12)');
+assertEqual(countOf(noSteal, 2), 6, 'a row that ends in a full stop is finished, so it never adopts a count further down');
+
+// "(6 sc made)" is a stitch total like "(6 sts)"
+assertEqual(countOf(P.parse('Rnd 1: With white, ch 2, 6 sc in second chain from hook.\n(6 sc made) * Or 6 sc in magic ring. *\nRnd 2: 2 sc in each st around. (12)'), 1),
+  6, '"(6 sc made)" on the line below is read as the row\'s stitch count');
+
+// -----------------------------------------------------------------------
+group('v2.2: PdfText - letter-spaced pages');
+// -----------------------------------------------------------------------
+
+// Some PDFs kern every glyph apart, so pdf.js hands back "R 2 : s c i n c".
+// The word breaks survive as items of their own, which is what the repair
+// leans on. These rows are modelled on tmp-pdf/crochet-snowman.pdf.
+function pdfItem(str, x, w, y) {
+  return { str: str, width: w, height: 14.36, transform: [1, 0, 0, 14.36, x, y] };
+}
+function spacedRowItems(y) {
+  return [
+    pdfItem('R 2 :', 32.6, 26.63, y), pdfItem(' ', 59.24, 14.47, y),
+    pdfItem('s c', 68.85, 17.04, y), pdfItem(' ', 85.89, 14.47, y),
+    pdfItem('i n c', 95.51, 24.71, y), pdfItem(' ', 120.22, 14.47, y),
+    pdfItem('x 6', 129.83, 18.29, y), pdfItem(' ', 148.13, 14.47, y),
+    pdfItem('( 1 2 )', 157.74, 36.98, y)
+  ];
+}
+function plainRowItems(y) {
+  return [
+    pdfItem('Rnd 2:', 32.6, 40, y), pdfItem(' ', 72.6, 8, y),
+    pdfItem('2 sc in each st around.', 80.6, 120, y), pdfItem(' ', 200.6, 8, y),
+    pdfItem('(12)', 208.6, 24, y)
+  ];
+}
+
+if (!window.PdfText || !window.PdfText._rowText) {
+  log(false, 'PdfText helpers available to the test page');
+} else {
+  var PT = window.PdfText;
+  var spacedRow = PT._buildRows(spacedRowItems(650))[0];
+  assertEqual(PT._rowText(spacedRow, false), 'R 2 : s c i n c x 6 ( 1 2 )',
+    'without the repair a letter-spaced line is one space per glyph');
+  assertEqual(PT._rowText(spacedRow, true), 'R2: sc inc x6 (12)',
+    'the repair drops the spaces inside an item and keeps the ones between items');
+
+  var plainRow = PT._buildRows(plainRowItems(650))[0];
+  assertEqual(PT._rowText(plainRow, true), 'Rnd 2: 2 sc in each st around. (12)',
+    'an ordinary line is unchanged even when the repair is switched on');
+
+  var spacedPage = [];
+  [700, 680, 660, 640].forEach(function (y) { spacedPage = spacedPage.concat(spacedRowItems(y)); });
+  assertTrue(PT._pageLooksSpaced(PT._buildRows(spacedPage)), 'four letter-spaced lines make a letter-spaced page');
+
+  var plainPage = [];
+  [700, 680, 660, 640, 620].forEach(function (y) { plainPage = plainPage.concat(plainRowItems(y)); });
+  assertTrue(!PT._pageLooksSpaced(PT._buildRows(plainPage)), 'an ordinary page is not letter-spaced');
+
+  // one stray "A B C" photo label among ordinary lines must not tip a page over
+  var labelPage = plainPage.concat([
+    pdfItem('A', 32.6, 8, 600), pdfItem(' ', 40.6, 8, 600),
+    pdfItem('B', 48.6, 8, 600), pdfItem(' ', 56.6, 8, 600), pdfItem('C', 64.6, 8, 600)
+  ]);
+  assertTrue(!PT._pageLooksSpaced(PT._buildRows(labelPage)), 'a lone "A B C" label does not make a page letter-spaced');
+}
 
 // -----------------------------------------------------------------------
 var summaryEl = document.getElementById('summary');
