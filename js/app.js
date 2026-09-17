@@ -1827,6 +1827,10 @@
    * 16. Project / part editors
    * ================================================================== */
 
+  /* The synthetic "From this PDF" card in the New project template picker.
+     It is never a real template id — on save it becomes 'blank'. */
+  var PDF_TEMPLATE_ID = '__pdf__';
+
   function templatePreview(tpl) {
     return tpl.parts
       .map(function (p) { return p.name + (p.makeCount > 1 ? ' ×' + p.makeCount : ''); })
@@ -1841,14 +1845,17 @@
     var chosenTemplate = 'blank';
     var chosenCraft = p ? p.craft || 'crochet' : 'crochet';
     var nameInput, notesArea, emoji, modeSeg, groupStep;
-    var modeField, groupField, craftFieldsWrap, craftFieldsApi, pdfHint;
+    var modeField, groupField, craftFieldsWrap, craftFieldsApi, pdfWrap;
+    var pdf = null;
 
     /* Rows/Rounds and the stitch group size only mean something to crochet. */
     function syncCraftOnlyFields() {
       var crochet = chosenCraft === 'crochet';
       if (modeField) modeField.hidden = !crochet;
       if (groupField) groupField.hidden = !crochet;
-      if (pdfHint) pdfHint.hidden = !crochet;
+      // Importing a crochet pattern into a cross-stitch project makes no sense;
+      // those crafts have their own importers on the project screen.
+      if (pdfWrap) pdfWrap.hidden = !crochet;
     }
 
     function mountCraftFields() {
@@ -1908,10 +1915,45 @@
               grid.appendChild(el('p', 'muted', 'No templates yet.'));
               return;
             }
+
+            // A PDF has been read: the sections it found are offered as a
+            // synthetic template at the front, and picked by default. Any real
+            // template can still be chosen — the sections are then added on top
+            // of that template's parts.
+            var pdfSecs = pdf && chosenCraft === 'crochet' ? pdf.checkedSections() : [];
+            if (pdfSecs.length) {
+              var pdfCard = button('tpl-card' + (chosenTemplate === PDF_TEMPLATE_ID ? ' on' : ''));
+              pdfCard.setAttribute('data-tour', 'new-pdf-card');
+              pdfCard.appendChild(el('span', 'tpl-emoji', '📄'));
+              var pdfMain = el('div', 'tpl-main');
+              pdfMain.appendChild(el('div', 'tpl-name', pdf.sourceLabel()));
+              pdfMain.appendChild(
+                el(
+                  'div',
+                  'tpl-parts',
+                  pdfSecs
+                    .map(function (s) {
+                      return (s.name || 'Part') + (s.makeCount > 1 ? ' ×' + s.makeCount : '');
+                    })
+                    .join(', ')
+                )
+              );
+              pdfCard.appendChild(pdfMain);
+              on(pdfCard, 'click', function () {
+                chosenTemplate = PDF_TEMPLATE_ID;
+                Array.prototype.forEach.call(grid.children, function (c) { c.classList.remove('on'); });
+                pdfCard.classList.add('on');
+              });
+              grid.appendChild(pdfCard);
+            } else if (chosenTemplate === PDF_TEMPLATE_ID) {
+              // Every section was unticked (or the craft changed) — fall back.
+              chosenTemplate = 'blank';
+            }
+
             // The chosen template may have just been deleted in the editor, or
             // belong to the craft we just switched away from.
-            var chosen = Store.template(chosenTemplate);
-            if (!chosen || (chosen.craft || 'crochet') !== chosenCraft) {
+            var chosen = chosenTemplate === PDF_TEMPLATE_ID ? null : Store.template(chosenTemplate);
+            if (chosenTemplate !== PDF_TEMPLATE_ID && (!chosen || (chosen.craft || 'crochet') !== chosenCraft)) {
               chosenTemplate = list[0].id;
               // Switching craft auto-picks its first template, so the emoji
               // follows too (a sewing project should not start out as 🧶).
@@ -1935,6 +1977,7 @@
                 if (emoji) emoji.set(tpl.emoji);
                 if (modeSeg) modeSeg.set(tpl.countMode);
                 if (groupStep) groupStep.set(tpl.groupSize);
+                if (pdf) pdf.rerender();
               });
               grid.appendChild(card);
             });
@@ -1950,11 +1993,28 @@
           });
           editRow.appendChild(editLink);
           body.appendChild(editRow);
+
+          // Import a PDF while creating the project, rather than making the
+          // project first and importing afterwards.
+          pdfWrap = el('div', 'new-pdf');
+          pdf = newProjectPdfBlock(
+            pdfWrap,
+            nameInput,
+            renderTemplatePicker,
+            function () {
+              chosenTemplate = PDF_TEMPLATE_ID;
+              renderTemplatePicker();
+            },
+            function () { return modeSeg ? rowWord({ countMode: modeSeg.get() }) : 'Row'; }
+          );
+          body.appendChild(pdfWrap);
         }
 
         modeSeg = segmented(
           [{ id: 'rows', label: 'Rows' }, { id: 'rounds', label: 'Rounds' }],
-          p ? p.countMode : 'rows'
+          p ? p.countMode : 'rows',
+          // "20 rounds" / "20 rows" in the sections list follows this segment.
+          function () { if (pdf) pdf.rerender(); }
         );
         modeField = field('Count', modeSeg.node);
         body.appendChild(modeField);
@@ -1973,11 +2033,6 @@
 
         notesArea = textArea(p ? p.notes : '', '', 'Hook 4mm · Paintbox DK · pattern link…');
         body.appendChild(field('Notes', notesArea));
-
-        if (!editing) {
-          pdfHint = el('p', 'pdf-hint', PDF_HINT);
-          body.appendChild(pdfHint);
-        }
 
         syncCraftOnlyFields();
 
@@ -2000,6 +2055,11 @@
           body.appendChild(zone);
         }
       },
+      onClose: function () {
+        // The drop zone hangs a document-level guard on dragover/drop.
+        if (pdf) pdf.destroy();
+        pdf = null;
+      },
       footer: [
         { text: 'Cancel', cls: 'btn ghost', onClick: function (api) { api.close(); } },
         {
@@ -2015,24 +2075,190 @@
             };
             if (editing) {
               Store.updateProject(p.id, patch);
-            } else {
-              patch.templateId = chosenTemplate;
-              patch.craft = chosenCraft;
-              // Whatever the craft's own new-project fields collected.
-              var seed = null;
-              if (craftFieldsApi && typeof craftFieldsApi.get === 'function') {
-                try { seed = craftFieldsApi.get(); } catch (e) { seed = null; }
-              }
-              patch.craftData = seed && typeof seed === 'object' ? seed : {};
-              var created = Store.createProject(patch);
-              Store.setActiveProject(created.id);
+              api.close();
+              render();
+              return;
             }
+
+            // A PDF read in this sheet: its sections become parts right after
+            // the project exists, on top of whatever the template made.
+            var secs = pdf && chosenCraft === 'crochet' ? pdf.checkedSections() : [];
+            if (!patch.name.trim() && secs.length && pdf.fileBase()) patch.name = pdf.fileBase();
+            patch.templateId = chosenTemplate === PDF_TEMPLATE_ID ? 'blank' : chosenTemplate;
+            patch.craft = chosenCraft;
+            // Whatever the craft's own new-project fields collected.
+            var seed = null;
+            if (craftFieldsApi && typeof craftFieldsApi.get === 'function') {
+              try { seed = craftFieldsApi.get(); } catch (e) { seed = null; }
+            }
+            patch.craftData = seed && typeof seed === 'object' ? seed : {};
+            var created = Store.createProject(patch);
+            Store.setActiveProject(created.id);
+
+            var bits = [];
+            if (secs.length) {
+              Store.importPatternSections(created.id, secs, { mode: 'parts', text: pdf.text() });
+              var extra = addChecklistItems(created.id, pdf.checkedChecklist());
+              var fresh = Store.project(created.id);
+              bits.push(plural(fresh ? fresh.parts.length : secs.length, 'part'));
+              if (extra) bits.push(plural(extra, 'checklist item'));
+              if (pdf.wantsTemplate()) {
+                try {
+                  Store.saveTemplate({
+                    name: pdf.templateName(),
+                    emoji: patch.emoji,
+                    countMode: patch.countMode,
+                    groupSize: patch.groupSize,
+                    craft: 'crochet',
+                    parts: secs.map(function (s) {
+                      return { name: s.name || 'Part', makeCount: s.makeCount, patternText: s.text };
+                    }),
+                    checklist: pdf.checkedChecklist()
+                  });
+                  bits.push('saved as template');
+                } catch (e) {
+                  toast(e && e.message ? e.message : 'That template could not be saved');
+                }
+              }
+            }
+
             api.close();
             render();
+            if (bits.length) {
+              toast('Created ' + created.name + ' · ' + bits.join(' · '), { ms: 3600 });
+            }
           }
         }
       ]
     });
+  }
+
+  /**
+   * The "import a PDF while creating the project" block of the New project
+   * sheet: drop zone → sections + checklist (the shared picker) → "Also save as
+   * a template". Everything below the drop zone stays hidden until a PDF has
+   * actually been read, so the sheet is no longer than it was.
+   *
+   * @param {HTMLElement} host      where to build it
+   * @param {HTMLInputElement} nameInput  the project name field (placeholder + template name)
+   * @param {Function} onChange     re-render the template picker
+   * @param {Function} onRead       a PDF was read: pick "From this PDF"
+   * @param {Function} rowWordFn    'Row' or 'Round', read fresh on every render
+   */
+  function newProjectPdfBlock(host, nameInput, onChange, onRead, rowWordFn) {
+    var fileBase = '';
+    var tplTouched = false;
+    var picker, tplField, tplName, wantsTemplate = false;
+
+    function defaultTemplateName() {
+      var base = (nameInput && nameInput.value.trim()) || fileBase || 'Pattern';
+      return base + ' template';
+    }
+
+    function syncTemplateName() {
+      if (!tplName || tplTouched) return;
+      tplName.value = defaultTemplateName();
+    }
+
+    function refreshExtras() {
+      var any = picker ? picker.checkedSections().length > 0 : false;
+      if (tplField) tplField.hidden = !any;
+      if (onChange) onChange();
+    }
+
+    var dropZone = pdfDropZone({
+      tour: 'new-pdf',
+      ariaLabel: 'Choose a pattern PDF',
+      label: 'Drop a pattern PDF here, or choose a file',
+      confirm: function (file) {
+        // Remembered here because onText never sees the file itself.
+        fileBase = String((file && file.name) || '').replace(/\.pdf$/i, '').trim();
+        return true;
+      },
+      onText: function (res) {
+        area.value = res.text;
+        picker.setText(res.text);
+        if (nameInput && !nameInput.value.trim() && fileBase) nameInput.placeholder = fileBase;
+        syncTemplateName();
+        if (picker.checkedSections().length && onRead) onRead();
+        refreshExtras();
+        announce('Read ' + plural(res.pages, 'page') + ' from the PDF');
+      }
+    });
+    host.appendChild(dropZone);
+
+    /* The paste route, folded away so the sheet stays short. */
+    var pasteRow = el('div', 'tpl-edit-link');
+    var pasteLink = button('linkish', 'or paste pattern text');
+    pasteLink.setAttribute('aria-expanded', 'false');
+    pasteRow.appendChild(pasteLink);
+    host.appendChild(pasteRow);
+
+    var area = textArea('', 'mono', 'Paste the instructions from your PDF');
+    area.setAttribute('aria-label', 'Pattern text to import');
+    var pasteField = field('Pattern text', area);
+    pasteField.hidden = true;
+    host.appendChild(pasteField);
+
+    on(pasteLink, 'click', function () {
+      var show = pasteField.hidden;
+      pasteField.hidden = !show;
+      pasteLink.setAttribute('aria-expanded', show ? 'true' : 'false');
+      if (show) area.focus();
+    });
+
+    picker = importPicker({
+      // The sheet's own Count segment decides whether these are rows or rounds.
+      rowWord: typeof rowWordFn === 'function' ? rowWordFn : 'row',
+      hideWhenEmpty: true,
+      sectionsHint: 'Each ticked section becomes a part of the new project.',
+      onChange: refreshExtras
+    });
+    host.appendChild(picker.node);
+
+    on(area, 'input', debounce(function () {
+      picker.setText(area.value);
+      syncTemplateName();
+    }, 200));
+
+    /* "Also save as a template" */
+    var tplWrap = el('div', 'new-pdf-tpl');
+    tplWrap.appendChild(
+      switchRow('Also save as a template', 'Keep these parts and their pattern for next time', false, function (on_) {
+        wantsTemplate = on_;
+        if (tplName) tplName.disabled = !on_;
+      })
+    );
+    tplName = textInput(defaultTemplateName(), 'Panda template');
+    tplName.disabled = true;
+    tplName.setAttribute('aria-label', 'Template name');
+    on(tplName, 'input', function () { tplTouched = true; });
+    tplWrap.appendChild(tplName);
+    tplField = field(null, tplWrap);
+    tplField.hidden = true;
+    host.appendChild(tplField);
+
+    if (nameInput) {
+      on(nameInput, 'input', syncTemplateName);
+    }
+
+    return {
+      text: function () { return picker.getText(); },
+      fileBase: function () { return fileBase; },
+      /** Pasted text gets the same card, under an honest name. */
+      sourceLabel: function () { return fileBase ? 'From this PDF' : 'From this pattern'; },
+      rerender: function () { picker.rerender(); },
+      checkedSections: picker.checkedSections,
+      checkedChecklist: picker.checkedChecklist,
+      wantsTemplate: function () { return wantsTemplate; },
+      templateName: function () {
+        return (tplName && tplName.value.trim()) || defaultTemplateName();
+      },
+      destroy: function () {
+        if (dropZone) dropZone.destroy();
+        if (picker) picker.destroy();
+      }
+    };
   }
 
   /* The undo window is 6 seconds; only once it has passed do the project's
@@ -2513,11 +2739,13 @@
     var templateCraft = source.craft || 'crochet';
     var model = {
       parts: (source.parts || []).map(function (p) {
-        return { name: p.name, makeCount: p.makeCount };
+        // The pattern text rides along through renames, moves and saves; the
+        // editor only ever shows a tag for it and offers to drop it.
+        return { name: p.name, makeCount: p.makeCount, patternText: typeof p.patternText === 'string' ? p.patternText : '' };
       }),
       checklist: (source.checklist || []).slice()
     };
-    if (!model.parts.length) model.parts.push({ name: '', makeCount: 1 });
+    if (!model.parts.length) model.parts.push({ name: '', makeCount: 1, patternText: '' });
 
     var nameInput, emoji, modeSeg, groupStep, partsWrap, checkWrap;
     var partRefs = [];
@@ -2549,7 +2777,7 @@
         on(del, 'click', function () {
           syncModel();
           model.parts.splice(i, 1);
-          if (!model.parts.length) model.parts.push({ name: '', makeCount: 1 });
+          if (!model.parts.length) model.parts.push({ name: '', makeCount: 1, patternText: '' });
           renderParts();
         });
         top.appendChild(nameIn);
@@ -2579,6 +2807,25 @@
 
         row.appendChild(top);
         row.appendChild(bot);
+
+        // A part saved from a PDF import carries the instructions with it.
+        if (p.patternText) {
+          var attach = el('div', 'tpl-part-attach');
+          attach.appendChild(el('span', 'tpl-tag', 'Pattern attached'));
+          var rows = p.patternText.split('\n').filter(function (l) { return l.trim(); }).length;
+          attach.appendChild(el('span', 'tpl-attach-meta', plural(rows, 'line')));
+          var drop = button('tpl-mini', '✕', 'Remove the pattern from ' + (p.name || 'part ' + (i + 1)));
+          drop.setAttribute('title', 'Remove pattern');
+          on(drop, 'click', function () {
+            syncModel();
+            model.parts[i].patternText = '';
+            renderParts();
+            toast('Pattern removed from ' + (model.parts[i].name || 'that part'));
+          });
+          attach.appendChild(drop);
+          row.appendChild(attach);
+        }
+
         partsWrap.appendChild(row);
         partRefs.push({ name: nameIn, step: step });
       });
@@ -2586,7 +2833,7 @@
       var add = button('btn block', '＋ Add part');
       on(add, 'click', function () {
         syncModel();
-        model.parts.push({ name: '', makeCount: 1 });
+        model.parts.push({ name: '', makeCount: 1, patternText: '' });
         renderParts();
         var last = partRefs[partRefs.length - 1];
         if (last) last.name.focus();
@@ -2747,8 +2994,6 @@
   var IMPORT_EMPTY =
     'No rows found yet. Paste the instruction part of your pattern ' +
     '(e.g. “Rnd 1: 6 sc in MR (6)”).';
-
-  var PDF_HINT = 'Have a pattern PDF? Create the project, then use menu → Import pattern to drop it in.';
 
   function sectionRowInfo(text, seq) {
     var s = Store.patternSummary({ id: 'import:' + seq, patternText: text, sizeIndex: 0 });
@@ -3024,20 +3269,58 @@
     return wrap;
   }
 
-  /**
-   * Paste a whole pattern, see the sections the parser found, then either
-   * create/update one part per section or drop the lot into the active part.
-   */
-  function openImportSheet(projectId, initialText) {
-    var p = Store.project(projectId);
-    if (!p) return;
-    var activeName = (Store.activePart(p) || {}).name || 'this part';
-    var area, list, rows = [];
-    var dropZone = null;
-    var checkField, checkList, checkItems = [];
+  /* ================================================================== *
+   * 16c. The shared import picker
+   *
+   * "Sections detected" (tick, rename, row counts) + "Checklist items found",
+   * the two lists that used to live inside the Import pattern sheet. The New
+   * project sheet shows exactly the same thing, so both sheets build one of
+   * these instead of their own copy.
+   *
+   *   importPicker({
+   *     rowWord: 'Round',          // for the "12 rounds" meta line
+   *     sectionsLabel, checklistLabel, sectionsHint,
+   *     tourList, tourChecklist,   // data-tour hooks the tours spotlight
+   *     hideWhenEmpty: true,       // hide both fields until there is something
+   *     onChange()                 // after any rebuild or tick
+   *   }) -> { node, setText, getText, checkedSections, checkedChecklist,
+   *           sectionCount, destroy }
+   * ================================================================== */
+
+  function importPicker(opts) {
+    opts = opts || {};
+    /** 'Round' / 'Row', or a function for a sheet where it can still change. */
+    function word() {
+      var w = typeof opts.rowWord === 'function' ? opts.rowWord() : opts.rowWord;
+      return String(w || 'row').toLowerCase();
+    }
+    var text = '';
+    var rows = [];
+    var checkItems = [];
+
+    var node = el('div', 'imp-picker');
+
+    var list = el('div', 'imp-list');
+    if (opts.tourList) list.setAttribute('data-tour', opts.tourList);
+    var listField = field(opts.sectionsLabel || 'Sections detected', list, opts.sectionsHint);
+    node.appendChild(listField);
+
+    var checkList = el('div', 'imp-list');
+    if (opts.tourChecklist) checkList.setAttribute('data-tour', opts.tourChecklist);
+    var checkField = field(
+      opts.checklistLabel || 'Checklist items found',
+      checkList,
+      'Ticked items get added to the assembly checklist.'
+    );
+    checkField.hidden = true;
+    node.appendChild(checkField);
+
+    function changed() {
+      if (typeof opts.onChange === 'function') opts.onChange();
+    }
 
     function buildRows() {
-      var secs = Store.splitSections(area.value);
+      var secs = Store.splitSections(text);
       var prev = rows;
       rows = secs.map(function (sec, i) {
         var info = sectionRowInfo(sec.text, i);
@@ -3061,9 +3344,13 @@
       var any = false;
       rows.forEach(function (r) { if (r.rows > 0) any = true; });
       if (!rows.length || !any) {
+        // In the New project sheet there is nothing to explain until a PDF has
+        // been read, so the whole field stays out of the way.
+        listField.hidden = !!opts.hideWhenEmpty;
         list.appendChild(el('p', 'muted', IMPORT_EMPTY));
         return;
       }
+      listField.hidden = false;
       rows.forEach(function (r, i) {
         var item = el('div', 'imp-item');
         var chk = button('check', '✓', 'Import ' + (r.name || 'section ' + (i + 1)));
@@ -3072,6 +3359,7 @@
         on(chk, 'click', function () {
           r.checked = !r.checked;
           chk.setAttribute('aria-checked', r.checked ? 'true' : 'false');
+          changed();
         });
 
         var main = el('div', 'imp-main');
@@ -3084,7 +3372,7 @@
 
         var meta = [];
         if (r.makeCount > 1) meta.push('×' + r.makeCount);
-        meta.push(r.rows ? r.rows + ' ' + rowWord(p).toLowerCase() + (r.rows === 1 ? '' : 's') : 'no rows');
+        meta.push(r.rows ? r.rows + ' ' + word() + (r.rows === 1 ? '' : 's') : 'no rows');
         if (r.rows && r.computedOnly) meta.push('counts computed ≈');
         else if (r.rows && r.hasTargets) meta.push('counts found');
         main.appendChild(el('div', 'imp-meta', meta.join(' · ')));
@@ -3100,7 +3388,7 @@
     function buildChecks() {
       var found = [];
       try {
-        found = Store.suggestChecklist(area.value) || [];
+        found = Store.suggestChecklist(text) || [];
       } catch (e) {
         found = [];
       }
@@ -3124,6 +3412,7 @@
         on(chk, 'click', function () {
           c.checked = !c.checked;
           chk.setAttribute('aria-checked', c.checked ? 'true' : 'false');
+          changed();
         });
         item.appendChild(chk);
         item.appendChild(el('div', 'imp-check-text', c.text));
@@ -3131,30 +3420,12 @@
       });
     }
 
-    /** @returns {number} how many items were actually added */
-    function appendChecklist() {
-      var picked = checkItems.filter(function (c) { return c.checked; });
-      if (!picked.length) return 0;
-      var proj = Store.project(p.id);
-      var seen = {};
-      (proj && proj.checklist ? proj.checklist : []).forEach(function (c) {
-        seen[String(c.text || '').trim().toLowerCase()] = true;
-      });
-      var added = 0;
-      picked.forEach(function (c) {
-        var key = c.text.trim().toLowerCase();
-        if (!key || seen[key]) return;
-        seen[key] = true;
-        if (Store.addChecklistItem(p.id, c.text)) added++;
-      });
-      return added;
-    }
-
     function refresh() {
       buildRows();
       renderList();
       buildChecks();
       renderChecks();
+      changed();
     }
 
     function checkedSections() {
@@ -3163,6 +3434,68 @@
         if (r.checked) out.push({ name: (r.name || '').trim(), makeCount: r.makeCount, text: r.text });
       });
       return out;
+    }
+
+    refresh();
+
+    return {
+      node: node,
+      setText: function (t) {
+        text = typeof t === 'string' ? t : '';
+        refresh();
+      },
+      getText: function () { return text; },
+      /** Redraw the section list (the row word may have changed under it). */
+      rerender: renderList,
+      checkedSections: checkedSections,
+      checkedChecklist: function () {
+        return checkItems.filter(function (c) { return c.checked; }).map(function (c) { return c.text; });
+      },
+      /** How many sections the parser found that actually have rows. */
+      sectionCount: function () {
+        var n = 0;
+        rows.forEach(function (r) { if (r.rows > 0) n++; });
+        return n;
+      },
+      destroy: noop
+    };
+  }
+
+  /**
+   * Add checklist texts to a project, skipping ones it already has.
+   * @returns {number} how many were actually added
+   */
+  function addChecklistItems(projectId, texts) {
+    if (!Array.isArray(texts) || !texts.length) return 0;
+    var proj = Store.project(projectId);
+    if (!proj) return 0;
+    var seen = {};
+    (proj.checklist || []).forEach(function (c) {
+      seen[String(c.text || '').trim().toLowerCase()] = true;
+    });
+    var added = 0;
+    texts.forEach(function (t) {
+      var key = String(t || '').trim().toLowerCase();
+      if (!key || seen[key]) return;
+      seen[key] = true;
+      if (Store.addChecklistItem(projectId, t)) added++;
+    });
+    return added;
+  }
+
+  /**
+   * Paste a whole pattern, see the sections the parser found, then either
+   * create/update one part per section or drop the lot into the active part.
+   */
+  function openImportSheet(projectId, initialText) {
+    var p = Store.project(projectId);
+    if (!p) return;
+    var activeName = (Store.activePart(p) || {}).name || 'this part';
+    var area, picker;
+    var dropZone = null;
+
+    function refresh() {
+      if (picker) picker.setText(area.value);
     }
 
     /* ---------------- PDF drop zone (the shared builder) ---------------- */
@@ -3200,21 +3533,20 @@
         area.setAttribute('aria-label', 'Pattern text to import');
         area.setAttribute('data-tour', 'import-text');
         body.appendChild(field('Pattern text', area, 'Drop the PDF above, or paste the instructions straight in.'));
-        list = el('div', 'imp-list');
-        list.setAttribute('data-tour', 'import-list');
-        body.appendChild(field('Sections detected', list));
 
-        checkList = el('div', 'imp-list');
-        checkList.setAttribute('data-tour', 'import-checklist');
-        checkField = field('Checklist items found', checkList, 'Ticked items get added to the assembly checklist.');
-        checkField.hidden = true;
-        body.appendChild(checkField);
+        picker = importPicker({
+          rowWord: rowWord(p),
+          tourList: 'import-list',
+          tourChecklist: 'import-checklist'
+        });
+        body.appendChild(picker.node);
 
         on(area, 'input', debounce(refresh, 200));
         refresh();
       },
       onClose: function () {
         if (dropZone) dropZone.destroy();
+        if (picker) picker.destroy();
       },
       footer: [
         {
@@ -3231,7 +3563,7 @@
               [{ name: activeName, makeCount: 1, text: area.value }],
               { mode: 'active', text: area.value }
             );
-            var extra = appendChecklist();
+            var extra = addChecklistItems(p.id, picker.checkedChecklist());
             api.close();
             render();
             toast('Pattern saved into ' + activeName + checklistSuffix(extra), { ms: extra ? 3200 : 2600 });
@@ -3242,13 +3574,13 @@
           cls: 'btn primary',
           tour: 'import-create',
           onClick: function (api) {
-            var secs = checkedSections();
+            var secs = picker.checkedSections();
             if (!secs.length) {
               toast('Tick at least one section first');
               return;
             }
             var res = Store.importPatternSections(p.id, secs, { mode: 'parts', text: area.value });
-            var extra = appendChecklist();
+            var extra = addChecklistItems(p.id, picker.checkedChecklist());
             api.close();
             render();
             var msg;
@@ -3950,6 +4282,13 @@
         'If the pattern is one piece, use “Put it all in …” instead and it goes into the part you are on.'
     },
     {
+      q: 'Can I import a PDF when creating a project?',
+      a: 'Yes — drop it straight into the New project sheet, under the template picker. The parts it ' +
+        'finds are listed there to tick and rename, “From this PDF” appears as a template card, and ' +
+        'you can save the lot as a template at the same time so the next one starts with the pattern ' +
+        'already in place.'
+    },
+    {
       q: 'What does the ≈ in front of a stitch count mean?',
       a: 'It means nobody wrote that number down. Your pattern line had no count in brackets, so we worked ' +
         'it out from the instruction itself (6 sc in a magic ring, then inc ×6, and so on). A plain number ' +
@@ -4483,6 +4822,7 @@
     openSheet: openSheet,
     closeAllSheets: closeAllSheets,
     openImportSheet: openImportSheet,
+    openProjectEditor: openProjectEditor,
     openSettingsSheet: openSettingsSheet,
     openChecklistSheet: openChecklistSheet,
     startTour: startTour,

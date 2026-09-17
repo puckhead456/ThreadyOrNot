@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Templates carry pattern text (Store) tests</title>
+<style>
+  body { font: 14px/1.4 Menlo, Consolas, monospace; background:#111; color:#eee; padding:16px; }
+  .pass { color:#7bd389; }
+  .fail { color:#ff6b6b; background:#2a1414; }
+  .group { margin-top:18px; font-weight:bold; color:#9cf; border-bottom:1px solid #333; padding-bottom:4px; }
+  #summary { margin-top:20px; font-size:18px; font-weight:bold; }
+  #summary.ok { color:#7bd389; }
+  #summary.bad { color:#ff6b6b; }
+  .note { color:#aaa; }
+</style>
+</head>
+<body>
+<h1>Templates test suite</h1>
+<p class="note">
+  Template parts carry <code>patternText</code>, against the real <code>js/store.js</code>:
+  normalize, validate, saveTemplate, createProject, templateFromProject, a load from
+  localStorage and an export/import round trip. The sheets that drive all this are verified
+  in the Browser pane instead.
+</p>
+<p class="note">This page borrows localStorage and puts it back when it finishes.</p>
+<div id="out"></div>
+<div id="summary"></div>
+
+<script src="../js/patterns.js"></script>
+<script src="../js/store.js"></script>
+<script>
+'use strict';
+
+var out = document.getElementById('out');
+var passed = 0;
+var failed = 0;
+
+function log(ok, label, detail) {
+  if (ok) { passed++; } else { failed++; }
+  var line = (ok ? 'PASS' : 'FAIL') + ' - ' + label + (detail ? '  (' + detail + ')' : '');
+  var div = document.createElement('div');
+  div.className = ok ? 'pass' : 'fail';
+  div.textContent = line;
+  out.appendChild(div);
+  if (ok) { console.log(line); } else { console.error(line); }
+}
+
+function group(title) {
+  var div = document.createElement('div');
+  div.className = 'group';
+  div.textContent = title;
+  out.appendChild(div);
+  console.log('== ' + title + ' ==');
+}
+
+function deepEqual(a, b) {
+  if (a === b) return true;
+  if (a === null || b === null) return a === b;
+  if (typeof a !== typeof b) return false;
+  if (typeof a !== 'object') return a === b;
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  var ak = Object.keys(a), bk = Object.keys(b);
+  if (ak.length !== bk.length) return false;
+  for (var i = 0; i < ak.length; i++) {
+    if (!deepEqual(a[ak[i]], b[ak[i]])) return false;
+  }
+  return true;
+}
+
+function assertEqual(actual, expected, label) {
+  var ok = deepEqual(actual, expected);
+  log(ok, label, ok ? '' : ('expected ' + JSON.stringify(expected) + ' got ' + JSON.stringify(actual)));
+}
+
+function assertTrue(cond, label) { log(!!cond, label); }
+
+function throwsWith(fn, label) {
+  var threw = false;
+  try { fn(); } catch (e) { threw = true; }
+  log(threw, label);
+}
+
+/* ---------------------------------------------------------------------- *
+ * Borrow localStorage
+ * ---------------------------------------------------------------------- */
+
+var KEY = Store.KEY;
+var ORIGINAL = null;
+try { ORIGINAL = window.localStorage.getItem(KEY); } catch (e) { ORIGINAL = null; }
+
+function seed(raw) {
+  try {
+    if (raw === null) window.localStorage.removeItem(KEY);
+    else window.localStorage.setItem(KEY, JSON.stringify(raw));
+  } catch (e) { /* private mode: Store.load() just starts fresh */ }
+  return Store.load();
+}
+
+function restore() {
+  try {
+    Store.flush();
+    if (ORIGINAL === null) window.localStorage.removeItem(KEY);
+    else window.localStorage.setItem(KEY, ORIGINAL);
+  } catch (e) { /* ignore */ }
+}
+
+/* The sort of thing the PDF importer hands over. */
+var BODY_TEXT = 'Rnd 1: 6 sc in MR (6)\nRnd 2: inc x6 (12)\nRnd 3: (sc, inc) x6 (18)';
+var HEAD_TEXT = 'Rnd 1: 6 sc in MR (6)\nRnd 2: inc x6 (12)';
+var LONG_TEXT = (function () {
+  var lines = [];
+  for (var i = 1; i <= 400; i++) lines.push('Rnd ' + i + ': sc around (24)');
+  return lines.join('\n');
+})();
+
+function partNamed(proj, name) {
+  for (var i = 0; i < proj.parts.length; i++) {
+    if (proj.parts[i].name === name) return proj.parts[i];
+  }
+  return null;
+}
+
+function tplPartNamed(tpl, name) {
+  for (var i = 0; i < tpl.parts.length; i++) {
+    if (tpl.parts[i].name === name) return tpl.parts[i];
+  }
+  return null;
+}
+
+/* ====================================================================== */
+group('1. normalizeTemplate keeps the pattern text');
+/* ====================================================================== */
+
+seed(null);
+
+var saved = Store.saveTemplate({
+  name: 'Panda',
+  emoji: '🐼',
+  countMode: 'rounds',
+  groupSize: 10,
+  parts: [
+    { name: 'Body', makeCount: 1, patternText: BODY_TEXT },
+    { name: 'Ear', makeCount: 2, patternText: HEAD_TEXT },
+    { name: 'Tail', makeCount: 1 }
+  ],
+  checklist: ['Stuff body']
+});
+
+assertTrue(!!saved.id, 'saveTemplate returns a stored template with an id');
+assertEqual(saved.parts.length, 3, 'all three parts survive');
+assertEqual(saved.parts[0].patternText, BODY_TEXT, 'the first part keeps its pattern text');
+assertEqual(saved.parts[1].patternText, HEAD_TEXT, 'the second part keeps its own text');
+assertEqual(saved.parts[1].makeCount, 2, 'a make count next to pattern text still works');
+assertEqual(saved.parts[2].patternText, '', 'a part with no text gets an empty string, never undefined');
+assertTrue(typeof saved.parts[2].patternText === 'string', 'patternText is always a string');
+
+var reread = Store.template(saved.id);
+assertEqual(reread.parts[0].patternText, BODY_TEXT, 'Store.template() reads the text back');
+
+/* Rubbish in the field is dropped rather than carried. */
+var junky = Store.saveTemplate({
+  name: 'Junk',
+  parts: [
+    { name: 'A', makeCount: 1, patternText: 42 },
+    { name: 'B', makeCount: 1, patternText: null },
+    { name: 'C', makeCount: 1, patternText: { text: 'no' } }
+  ]
+});
+assertEqual(junky.parts[0].patternText, '', 'a number patternText normalises to ""');
+assertEqual(junky.parts[1].patternText, '', 'a null patternText normalises to ""');
+assertEqual(junky.parts[2].patternText, '', 'an object patternText normalises to ""');
+
+/* No length limit. */
+var big = Store.saveTemplate({ name: 'Big', parts: [{ name: 'Main', makeCount: 1, patternText: LONG_TEXT }] });
+assertEqual(big.parts[0].patternText.length, LONG_TEXT.length, 'a 400-round pattern is stored whole');
+
+/* Validation is unchanged by the new field. */
+throwsWith(function () { Store.saveTemplate({ name: '', parts: [{ name: 'A', makeCount: 1 }] }); },
+  'a nameless template is still rejected');
+throwsWith(function () { Store.saveTemplate({ name: 'X', parts: [{ name: '', makeCount: 1, patternText: BODY_TEXT }] }); },
+  'a nameless part is still rejected, text or no text');
+throwsWith(function () { Store.saveTemplate({ name: 'X', parts: [{ name: 'A', makeCount: 0, patternText: BODY_TEXT }] }); },
+  'a make count of 0 is still rejected');
+
+/* ====================================================================== */
+group('2. Built-ins carry none');
+/* ====================================================================== */
+
+var blank = Store.template('blank');
+assertEqual(blank.parts[0].patternText, '', 'the blank built-in has no pattern text');
+var sheepTpl = Store.template('sheep');
+var sheepTexts = sheepTpl.parts.map(function (p) { return p.patternText; });
+assertEqual(sheepTexts, ['', '', '', '', ''], 'every sheep part has an empty pattern text');
+assertTrue(sheepTpl.builtIn, 'the sheep template is still flagged built-in');
+
+/* ====================================================================== */
+group('3. createProject copies the text onto the parts');
+/* ====================================================================== */
+
+var proj = Store.createProject({ name: 'Panda', templateId: saved.id });
+assertEqual(proj.parts.length, 3, 'three template parts make three project parts');
+assertEqual(partNamed(proj, 'Body').patternText, BODY_TEXT, 'Body starts with its pattern');
+assertEqual(partNamed(proj, 'Ear').patternText, HEAD_TEXT, 'Ear starts with its pattern');
+assertEqual(partNamed(proj, 'Ear').makeCount, 2, 'Ear keeps its make count');
+assertEqual(partNamed(proj, 'Tail').patternText, '', 'Tail starts empty');
+assertEqual(partNamed(proj, 'Body').row, 0, 'a fresh part is still on row 0');
+assertEqual(partNamed(proj, 'Body').sizeIndex, 0, 'a fresh part is still on size 0');
+assertEqual(partNamed(proj, 'Body').piecesDone, 0, 'a fresh part has nothing done');
+assertTrue(partNamed(proj, 'Body').id !== partNamed(proj, 'Ear').id, 'each part gets its own id');
+
+/* The copied text is real pattern text, not just a string that got moved. */
+var lines = Store.linesFor(partNamed(proj, 'Body'));
+assertEqual(lines.filter(function (l) { return l.row > 0; }).length, 3, 'Body parses into three rows');
+
+/* Two projects from one template do not share anything. */
+var proj2 = Store.createProject({ name: 'Panda two', templateId: saved.id });
+Store.updatePart(proj2.id, partNamed(proj2, 'Body').id, { patternText: 'Rnd 1: sc 4 (4)' });
+assertEqual(partNamed(Store.project(proj.id), 'Body').patternText, BODY_TEXT,
+  'editing one project does not touch the other');
+assertEqual(Store.template(saved.id).parts[0].patternText, BODY_TEXT,
+  'editing a project does not touch the template');
+
+/* A project from a built-in is untouched by any of this. */
+var plain = Store.createProject({ name: 'Plain', templateId: 'sheep' });
+assertEqual(plain.parts.length, 5, 'the sheep template still makes five parts');
+assertEqual(plain.parts[0].patternText, '', 'a sheep part still starts with no pattern');
+
+/* ====================================================================== */
+group('4. templateFromProject copies it back');
+/* ====================================================================== */
+
+var draft = Store.templateFromProject(proj.id);
+assertEqual(draft.name, 'Panda template', 'the draft is named after the project');
+assertEqual(draft.parts.length, 3, 'the draft has one part per project part');
+assertEqual(tplPartNamed(draft, 'Body').patternText, BODY_TEXT, 'the draft carries Body’s pattern');
+assertEqual(tplPartNamed(draft, 'Ear').patternText, HEAD_TEXT, 'the draft carries Ear’s pattern');
+assertEqual(tplPartNamed(draft, 'Ear').makeCount, 2, 'the draft carries the make count');
+assertEqual(tplPartNamed(draft, 'Tail').patternText, '', 'a part with no pattern drafts an empty string');
+assertEqual(draft.id, '', 'the draft is unsaved');
+
+/* Round trip: project → draft → saved template → new project. */
+var saved2 = Store.saveTemplate(draft);
+var proj3 = Store.createProject({ name: 'Panda three', templateId: saved2.id });
+assertEqual(partNamed(proj3, 'Body').patternText, BODY_TEXT, 'project → template → project keeps the text');
+assertEqual(partNamed(proj3, 'Ear').makeCount, 2, 'project → template → project keeps the make count');
+
+/* A project whose parts were pattern-free drafts a text-free template. */
+var draftPlain = Store.templateFromProject(plain.id);
+assertEqual(draftPlain.parts.map(function (p) { return p.patternText; }), ['', '', '', '', ''],
+  'a pattern-free project drafts pattern-free parts');
+
+/* ====================================================================== */
+group('5. Editing a template keeps (and can drop) the text');
+/* ====================================================================== */
+
+/* What the template editor does on save: name/makeCount from the inputs,
+   patternText carried through the model untouched. */
+var edited = Store.saveTemplate({
+  id: saved.id,
+  name: 'Panda v2',
+  emoji: '🐼',
+  countMode: 'rounds',
+  groupSize: 10,
+  parts: [
+    { name: 'Ear', makeCount: 2, patternText: HEAD_TEXT },
+    { name: 'Body renamed', makeCount: 1, patternText: BODY_TEXT },
+    { name: 'Tail', makeCount: 1, patternText: '' }
+  ],
+  checklist: ['Stuff body']
+});
+assertEqual(edited.id, saved.id, 'editing updates in place rather than creating a second one');
+assertEqual(edited.name, 'Panda v2', 'the new name is stored');
+assertEqual(edited.parts[0].name, 'Ear', 'the reordered part is first now');
+assertEqual(edited.parts[0].patternText, HEAD_TEXT, 'reordering keeps the text with its part');
+assertEqual(edited.parts[1].name, 'Body renamed', 'the renamed part kept its position in the list');
+assertEqual(edited.parts[1].patternText, BODY_TEXT, 'renaming keeps the pattern text');
+
+/* "Remove pattern" in the editor is just an empty string on save. */
+var dropped = Store.saveTemplate({
+  id: saved.id,
+  name: 'Panda v2',
+  parts: [
+    { name: 'Ear', makeCount: 2, patternText: '' },
+    { name: 'Body renamed', makeCount: 1, patternText: BODY_TEXT },
+    { name: 'Tail', makeCount: 1, patternText: '' }
+  ]
+});
+assertEqual(dropped.parts[0].patternText, '', 'removing a pattern sticks');
+assertEqual(dropped.parts[1].patternText, BODY_TEXT, 'the other part is untouched');
+
+/* Put it back for the rest of the suite. */
+Store.saveTemplate({
+  id: saved.id,
+  name: 'Panda',
+  emoji: '🐼',
+  countMode: 'rounds',
+  groupSize: 10,
+  parts: [
+    { name: 'Body', makeCount: 1, patternText: BODY_TEXT },
+    { name: 'Ear', makeCount: 2, patternText: HEAD_TEXT },
+    { name: 'Tail', makeCount: 1, patternText: '' }
+  ],
+  checklist: ['Stuff body']
+});
+
+/* ====================================================================== */
+group('6. Surviving a reload');
+/* ====================================================================== */
+
+Store.flush();
+var savedRaw = null;
+try { savedRaw = JSON.parse(window.localStorage.getItem(KEY)); } catch (e) { savedRaw = null; }
+assertTrue(!!savedRaw, 'the state made it to localStorage');
+Store.load();
+var afterReload = Store.template(saved.id);
+assertTrue(!!afterReload, 'the user template is still there after a reload');
+assertEqual(afterReload.parts[0].patternText, BODY_TEXT, 'the pattern text survives a reload');
+assertEqual(Store.template('blank').parts[0].patternText, '', 'the re-seeded blank built-in has no text');
+
+/* A save written before this feature existed: parts with no patternText at all. */
+seed({
+  version: 1,
+  templates: [
+    {
+      id: 'old-tpl',
+      name: 'Old template',
+      emoji: '🧶',
+      countMode: 'rounds',
+      groupSize: 10,
+      parts: [{ name: 'Body', makeCount: 1 }, { name: 'Leg', makeCount: 4 }],
+      checklist: []
+    }
+  ],
+  projects: [],
+  activeProjectId: null
+});
+var old = Store.template('old-tpl');
+assertEqual(old.parts[0].patternText, '', 'an old template part migrates to an empty pattern text');
+assertEqual(old.parts[1].makeCount, 4, 'an old template part keeps its make count');
+var fromOld = Store.createProject({ name: 'From old', templateId: 'old-tpl' });
+assertEqual(fromOld.parts[0].patternText, '', 'a project from an old template has empty pattern text');
+
+/* ====================================================================== */
+group('7. Backup export / import round trip');
+/* ====================================================================== */
+
+seed(null);
+var exportMe = Store.saveTemplate({
+  name: 'Snowman',
+  emoji: '⛄',
+  countMode: 'rounds',
+  groupSize: 10,
+  parts: [
+    { name: 'Body', makeCount: 1, patternText: BODY_TEXT },
+    { name: 'Nose', makeCount: 1, patternText: HEAD_TEXT }
+  ],
+  checklist: ['Sew the nose on']
+});
+var projForBackup = Store.createProject({ name: 'Snowman', templateId: exportMe.id });
+var backup = Store.exportJSON();
+assertTrue(backup.indexOf('patternText') >= 0, 'the backup JSON carries patternText');
+
+/* Fresh state, then read the backup back in. */
+seed(null);
+assertTrue(!Store.template(exportMe.id), 'the fresh state does not have the template yet');
+Store.importJSON(backup);
+var back = Store.template(exportMe.id);
+assertTrue(!!back, 'the template comes back from the backup');
+assertEqual(back.name, 'Snowman', 'with its name');
+assertEqual(back.parts.length, 2, 'with both parts');
+assertEqual(back.parts[0].patternText, BODY_TEXT, 'with Body’s pattern text');
+assertEqual(back.parts[1].patternText, HEAD_TEXT, 'with Nose’s pattern text');
+assertEqual(back.checklist, ['Sew the nose on'], 'and its checklist');
+var backProj = Store.project(projForBackup.id);
+assertTrue(!!backProj, 'the project comes back too');
+assertEqual(partNamed(backProj, 'Body').patternText, BODY_TEXT, 'the project part keeps its pattern text');
+
+/* A project made after the import still gets the text. */
+var afterImport = Store.createProject({ name: 'Snowman two', templateId: exportMe.id });
+assertEqual(partNamed(afterImport, 'Nose').patternText, HEAD_TEXT, 'an imported template still seeds new projects');
+
+/* Merge by id: the imported copy wins, text and all. */
+Store.saveTemplate({
+  id: exportMe.id,
+  name: 'Snowman (local edit)',
+  parts: [{ name: 'Body', makeCount: 1, patternText: 'Rnd 1: local (1)' }]
+});
+assertEqual(Store.template(exportMe.id).parts[0].patternText, 'Rnd 1: local (1)', 'the local edit landed');
+Store.importJSON(backup);
+assertEqual(Store.template(exportMe.id).name, 'Snowman', 'the imported template wins on a merge');
+assertEqual(Store.template(exportMe.id).parts[0].patternText, BODY_TEXT, 'and brings its pattern text with it');
+assertEqual(Store.template(exportMe.id).parts.length, 2, 'and its full part list');
+
+/* Built-ins the backup does not know about are left alone. */
+assertTrue(!!Store.template('sheep'), 'the sheep built-in is still there after an import');
+
+/* ---------------------------------------------------------------------- */
+restore();
+
+var summaryEl = document.getElementById('summary');
+var finalLine = passed + ' passed, ' + failed + ' failed';
+summaryEl.textContent = finalLine;
+summaryEl.className = failed === 0 ? 'ok' : 'bad';
+console.log(finalLine);
+
+// The debounced save may still be armed from the assertions above.
+window.setTimeout(restore, 400);
+</script>
+</body>
+</html>

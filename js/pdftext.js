@@ -58,6 +58,26 @@
   var MIN_SPACED_ROWS = 3;      // a page needs this many letter-spaced lines
   var MIN_SPACED_SHARE = 0.4;   // ...and they must be this share of its lines
 
+  /* Diagram callouts. Text drawn on top of a photo or a sketch ("Arm goes
+   * here", "4 sc between", "5 4 3 2 1", "Eye placement") arrives in the same
+   * text stream as the pattern. Left in, the importer hangs it off the row
+   * above as a note, or shows it as a loose line in the middle of a part.
+   * Three geometric signals tell a callout from prose, none of which needs a
+   * word list (which would only ever fit one pattern):
+   *   a) it is drawn rotated - a callout points at the thing it labels;
+   *   b) it is set much smaller than the page's body text;
+   *   c) it floats - a short run of lines cut off from the rest of its column
+   *      by a vertical gap several times the column's own line pitch.
+   * (a) is handled by dropRotated(), (b) and (c) together by labelRows(). */
+  var MAX_ROTATED_SHARE = 0.2;  // a page set sideways is landscape, not art
+  var LABEL_GAP_FACTOR = 3;     // "cut off" = this many line pitches away
+  var LABEL_MAX_LINES = 6;      // a caption is a few lines at most
+  var LABEL_MAX_WORDS = 6;
+  var LABEL_MAX_CHARS = 48;
+  var LABEL_SMALL_FONT = 0.8;   // "much smaller" = this share of body text
+  var LABEL_BIG_FONT = 1.1;     // ...and anything bigger is a heading
+  var MIN_ROWS_FOR_LABELS = 4;  // nothing to compare against on a short page
+
   var libPromise = null;
   var libFailed = false;
 
@@ -149,10 +169,39 @@
    * ================================================================== */
 
   /**
+   * Is this item drawn sideways? `transform` is [a b c d e f] and [a, b] is
+   * the direction its baseline runs in, so upright text has b at (or very
+   * near) zero. Callouts are turned to point at the piece they name ("Arm
+   * goes here" written up the side of a photo).
+   */
+  function isRotated(it) {
+    var t = it && it.transform;
+    if (!t || t.length < 6) return false;
+    return Math.abs(t[1]) > Math.abs(t[0]) * 0.1;
+  }
+
+  /**
+   * Drop the sideways items - unless most of the page is sideways, in which
+   * case the whole page is simply typeset that way and all of it is real.
+   */
+  function dropRotated(items) {
+    var rotChars = 0, allChars = 0, i, n;
+    for (i = 0; i < items.length; i++) {
+      if (!items[i] || typeof items[i].str !== 'string') continue;
+      n = items[i].str.replace(/\s/g, '').length;
+      allChars += n;
+      if (isRotated(items[i])) rotChars += n;
+    }
+    if (!rotChars || rotChars > allChars * MAX_ROTATED_SHARE) return items;
+    return items.filter(function (it) { return !isRotated(it); });
+  }
+
+  /**
    * Group a page's text items into rows by their baseline Y.
    * @returns {Array<{y:number, items:Array<{x:number,end:number,h:number,str:string}>}>}
    */
   function buildRows(items) {
+    items = dropRotated(items || []);
     var rows = [];
     for (var i = 0; i < items.length; i++) {
       var it = items[i];
@@ -237,6 +286,108 @@
       prev = { str: str, end: it.end, h: it.h };
     }
     return fixLigatures(collapse(out));
+  }
+
+  /* ================================================================== *
+   * 3b. Diagram callouts (see the note by LABEL_GAP_FACTOR)
+   * ================================================================== */
+
+  /* A numbered row ("R12-R17:", "3.", "Rnd 4)") - never a caption. */
+  var LABEL_ROW_RE = /^[-*•]?\s*(?:r(?:nd|ound|ow)?s?\.?\s*)?\d+\s*(?:[-–]\s*(?:r(?:nd|ound|ow)?s?\.?\s*)?\d+\s*)?[:.)]/i;
+  /* A stitch total in brackets - real instructions, not a caption. */
+  var LABEL_COUNT_RE = /[(\[]\s*\d+\s*(?:sts?|stitches?|sc)?\s*[)\]]/i;
+  /* A heading ("Ears:") or a make-count ("(make 2)") - keep those too. */
+  var LABEL_HEADING_RE = /[:)]\s*$/;
+
+  /** The gap that one line normally leaves above the next in this column. */
+  function medianPitch(rows) {
+    var gaps = [], i;
+    for (i = 1; i < rows.length; i++) {
+      var g = rows[i - 1].y - rows[i].y;
+      if (g > 0.5) gaps.push(g);
+    }
+    if (!gaps.length) return 0;
+    gaps.sort(function (a, b) { return a - b; });
+    return gaps[Math.floor(gaps.length / 2)];
+  }
+
+  /** The page's body text size: the height that carries the most characters. */
+  function dominantHeight(rows) {
+    var tally = {}, best = 0, bestN = 0;
+    rows.forEach(function (row) {
+      row.items.forEach(function (it) {
+        var n = it.str.replace(/\s/g, '').length;
+        if (!n) return;
+        var key = Math.round(it.h * 2) / 2;
+        tally[key] = (tally[key] || 0) + n;
+        if (tally[key] > bestN) { bestN = tally[key]; best = key; }
+      });
+    });
+    return best;
+  }
+
+  /** Could this one row be a caption rather than pattern text? */
+  function looksLikeCaption(row, bodyH, deglyph) {
+    var text = rowText(row, deglyph);
+    if (!text) return true;
+    if (LABEL_HEADING_RE.test(text)) return false;
+    if (LABEL_ROW_RE.test(text)) return false;
+    if (LABEL_COUNT_RE.test(text)) return false;
+    var h = 0;
+    for (var i = 0; i < row.items.length; i++) {
+      if (row.items[i].h > h) h = row.items[i].h;
+    }
+    // A section heading stands alone between two blocks of rows exactly like
+    // a caption does, and the one thing that always separates them is size:
+    // a heading is set BIGGER than the body text, a caption never is.
+    if (bodyH > 0 && h > bodyH * LABEL_BIG_FONT) return false;
+    // fine print sitting apart from the text is a caption whatever it says
+    if (bodyH > 0 && h <= bodyH * LABEL_SMALL_FONT) return true;
+    return text.split(/\s+/).length <= LABEL_MAX_WORDS && text.length <= LABEL_MAX_CHARS;
+  }
+
+  /**
+   * Which of one column's rows are captions drawn over artwork?
+   * The column is cut into blocks wherever a gap several line-pitches deep
+   * interrupts it; a small block of caption-ish lines that is not the
+   * column's main body is artwork text.
+   * @param {Array} rows   one column's rows, already sorted top to bottom
+   * @param {number} bodyH the page's dominant text height
+   * @param {boolean} [deglyph] letter-spaced page (see rowText)
+   * @returns {Object} map of row index in `rows` -> true
+   */
+  function labelRows(rows, bodyH, deglyph) {
+    var drop = {}, i, k;
+    if (!rows || rows.length < MIN_ROWS_FOR_LABELS) return drop;
+    var pitch = medianPitch(rows);
+    if (!(pitch > 0)) return drop;
+
+    var blocks = [], block = [0];
+    for (i = 1; i < rows.length; i++) {
+      if (rows[i - 1].y - rows[i].y > pitch * LABEL_GAP_FACTOR) {
+        blocks.push(block);
+        block = [];
+      }
+      block.push(i);
+    }
+    blocks.push(block);
+    if (blocks.length < 2) return drop;
+
+    var biggest = 0;
+    for (i = 1; i < blocks.length; i++) {
+      if (blocks[i].length > blocks[biggest].length) biggest = i;
+    }
+    for (i = 0; i < blocks.length; i++) {
+      if (i === biggest) continue;                 // the column's own text
+      if (blocks[i].length > LABEL_MAX_LINES) continue;
+      var all = true;
+      for (k = 0; k < blocks[i].length; k++) {
+        if (!looksLikeCaption(rows[blocks[i][k]], bodyH, deglyph)) { all = false; break; }
+      }
+      if (!all) continue;
+      for (k = 0; k < blocks[i].length; k++) drop[blocks[i][k]] = true;
+    }
+    return drop;
   }
 
   /* ================================================================== *
@@ -347,18 +498,28 @@
     var rows = buildRows(items);
     // Judge letter spacing on the whole page, before it is cut into columns.
     var deglyph = pageLooksSpaced(rows);
+    // The body text size is judged on the whole page, before it is cut up.
+    var bodyH = dominantHeight(rows);
     var budget = { left: MAX_COLUMNS - 1 };
     var res = columnize(rows, 0, pageWidth, budget);
     var h = pageHeight > 0 ? pageHeight : 792;
     var lines = [];
     res.columns.forEach(function (col) {
+      // Page furniture goes first: a page number alone in the corner would
+      // otherwise join the caption block beside it and, being set large,
+      // vouch for it as a heading.
+      var kept = [];
       col.slice().sort(function (a, b) { return b.y - a.y; }).forEach(function (row) {
         var text = rowText(row, deglyph);
-        if (!text) return;
-        if (isFurniture(text)) return;
+        if (!text || isFurniture(text)) return;
+        kept.push({ row: row, text: text });
+      });
+      var labels = labelRows(kept.map(function (k) { return k.row; }), bodyH, deglyph);
+      kept.forEach(function (k, rowIdx) {
+        if (labels[rowIdx]) return;               // caption drawn over artwork
         // Baselines live in PDF space: high Y is the top of the page.
-        var margin = row.y >= h * (1 - MARGIN_BAND) || row.y <= h * MARGIN_BAND;
-        lines.push({ text: text, margin: margin });
+        var margin = k.row.y >= h * (1 - MARGIN_BAND) || k.row.y <= h * MARGIN_BAND;
+        lines.push({ text: k.text, margin: margin });
       });
     });
     return { lines: lines, split: res.split };
@@ -646,6 +807,10 @@
     _fixLigatures: fixLigatures,
     _buildRows: buildRows,
     _rowText: rowText,
-    _pageLooksSpaced: pageLooksSpaced
+    _pageLooksSpaced: pageLooksSpaced,
+    _dropRotated: dropRotated,
+    _dominantHeight: dominantHeight,
+    _medianPitch: medianPitch,
+    _labelRows: labelRows
   };
 })();

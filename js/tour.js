@@ -880,6 +880,22 @@
       steps: function () {
         return [
           {
+            // Only exists while the New project sheet is open, and the engine
+            // walks past a step whose target is missing.
+            target: '[data-tour="new-pdf"]',
+            before: function () {
+              var cl = app('closeAllSheets');
+              if (cl) cl();
+              var open = app('openProjectEditor');
+              if (open) open(null);
+              return wait(60);
+            },
+            title: 'Start from the PDF',
+            body:
+              'A brand new project can begin with the file itself: drop it here in New project and the ' +
+              'parts it finds are set up for you — no need to create the project first.'
+          },
+          {
             target: '[data-tour="import-drop"]',
             before: function (c) {
               var cl = app('closeAllSheets');

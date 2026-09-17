@@ -269,10 +269,17 @@
         if (!p || typeof p !== 'object') continue;
         var pname = str(p.name, '').trim();
         if (!pname) continue;
-        parts.push({ name: pname, makeCount: clampInt(p.makeCount, 1, 99, 1) });
+        // Templates carry the pattern text of the part they were drafted from
+        // (a PDF import saved as a template), so a project made from one comes
+        // out with its rounds already in place. Built-ins have none.
+        parts.push({
+          name: pname,
+          makeCount: clampInt(p.makeCount, 1, 99, 1),
+          patternText: str(p.patternText, '')
+        });
       }
     }
-    if (!parts.length) parts = [{ name: 'Main', makeCount: 1 }];
+    if (!parts.length) parts = [{ name: 'Main', makeCount: 1, patternText: '' }];
 
     var checklist = [];
     if (Array.isArray(t.checklist)) {
@@ -413,7 +420,8 @@
       if (!isFinite(mc) || Math.floor(mc) < 1 || Math.floor(mc) > 99) {
         throw new Error('Make counts must be between 1 and 99.');
       }
-      parts.push({ name: pname, makeCount: Math.floor(mc) });
+      // No length limit on the pattern text — a whole part's instructions fit.
+      parts.push({ name: pname, makeCount: Math.floor(mc), patternText: str(p.patternText, '') });
     }
     if (!parts.length) throw new Error('Add at least one part.');
     var checklist = [];
@@ -482,7 +490,7 @@
       countMode: proj.countMode,
       groupSize: proj.groupSize,
       parts: proj.parts.map(function (p) {
-        return { name: p.name, makeCount: p.makeCount };
+        return { name: p.name, makeCount: p.makeCount, patternText: str(p.patternText, '') };
       }),
       checklist: proj.checklist
         .map(function (c) { return str(c.text, '').trim(); })
@@ -1446,7 +1454,13 @@
       timer: { totalMs: 0, runningSince: null },
       // Non-crochet crafts get the one `Main` part too, so everything in the
       // shell that assumes parts.length >= 1 keeps working.
-      parts: tpl.parts.map(function (p) { return makePart(p.name, p.makeCount); }),
+      // A template part may carry the pattern text it was saved with; the new
+      // part gets a fresh id, so there is no stale lineCache entry to clear.
+      parts: tpl.parts.map(function (p) {
+        var made = makePart(p.name, p.makeCount);
+        made.patternText = str(p.patternText, '');
+        return made;
+      }),
       checklist: tpl.checklist.map(function (t) { return { id: uid(), text: t, done: false }; }),
       history: [],
       craft: craft,

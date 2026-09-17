@@ -201,7 +201,12 @@ var PDF_EXPECT = {
   // "Body in light blue:" header; the "Eyes deepen" 1.-4. steps are not rows
   'crochet-fish.pdf': ['Body/1/15'],
   // "Little Panda" is the pattern title sitting on top of the "Body" header
-  'crochet-panda.pdf': ['Body/1/20', 'Head/1/21', 'Arm/1/11', 'Leg/1/9', 'Tail/1/3', 'Ear/1/5', 'Eye/1/2']
+  'crochet-panda.pdf': ['Body/1/20', 'Head/1/21', 'Arm/1/11', 'Leg/1/9', 'Tail/1/3', 'Ear/1/5', 'Eye/1/2'],
+  // "Arms: (Make 2)" (colon BEFORE the make-count), the slash-joined
+  // "Body/Head" with its "(cont.):" second half, "Tail:" printed twice on
+  // two lines, a "Stitch Terms" glossary, and four pages of photos with
+  // callouts written over them (some of them sideways)
+  'crochet-baphomet.pdf': ['Arms/2/11', 'Tail/1/42', 'Body/Head/1/33', 'Muzzle/1/5', 'Horns/2/14', 'Ears/2/6', 'Feet/2/8']
 };
 
 function runPdfs() {
@@ -210,7 +215,7 @@ function runPdfs() {
     log(false, 'pdf.js + pdftext.js loaded');
     return Promise.resolve();
   }
-  var names = ['bee.pdf', 'cardigan.pdf', 'bear.pdf', 'cato.pdf', 'crochet-snowman.pdf', 'crochet-turtle.pdf', 'crochet-fish.pdf', 'crochet-panda.pdf'];
+  var names = ['bee.pdf', 'cardigan.pdf', 'bear.pdf', 'cato.pdf', 'crochet-snowman.pdf', 'crochet-turtle.pdf', 'crochet-fish.pdf', 'crochet-panda.pdf', 'crochet-baphomet.pdf'];
   var chain = Promise.resolve();
   names.forEach(function (name) {
     chain = chain.then(function () {
@@ -287,6 +292,54 @@ function checkPdf(name, res) {
     eq(rowCounts(sectionNamed(secs, 'Body'), [15, 16, 19]), [30, 24, 18], 'crochet-panda.pdf: Body rounds 15, 16, 19');
     eq(rowCounts(sectionNamed(secs, 'Head'), [6, 8, 21]), [36, 48, 18], 'crochet-panda.pdf: Head rounds 6, 8, 21 (6 and 8 wrap mid-instruction)');
     eq(rowCounts(sectionNamed(secs, 'Eye'), [1, 2]), [6, 12], 'crochet-panda.pdf: Eye rounds 1 and 2');
+  }
+  if (name === 'crochet-baphomet.pdf') {
+    var bn = names(secs);
+    eq(bn.indexOf('Stitch Terms'), -1, 'crochet-baphomet.pdf: the "Stitch Terms" glossary heading names no section');
+    eq(sectionNamed(secs, 'Arms').makeCount, 2, 'crochet-baphomet.pdf: "Arms: (Make 2)" - the colon before the make-count still makes two');
+    eq(bn.filter(function (x) { return x === 'Tail'; }).length, 1, 'crochet-baphomet.pdf: "Tail:" printed twice on two lines is one section');
+    eq(bn.filter(function (x) { return x.indexOf('Body') === 0; }), ['Body/Head'],
+      'crochet-baphomet.pdf: "Body/Head" is one part and "Body/Head (cont.):" does not restart it');
+
+    // callouts written over the photos ("Arm goes here" sideways, "5 4 3 2 1"
+    // under a picture of the rounds) must not reach a line or a note
+    var LABELS = ['Armgoeshere', 'heregoes', '5 4 3 2 1', 'Eye placement', '4 sc between', 'Crochet arms'];
+    var leaked = [];
+    secs.forEach(function (s) {
+      P.parse(s.text).forEach(function (l) {
+        LABELS.forEach(function (lb) {
+          if (String(l.text).indexOf(lb) >= 0) leaked.push(s.name + ' line: ' + lb);
+          if (l.notes.join(' ').indexOf(lb) >= 0) leaked.push(s.name + ' note: ' + lb);
+        });
+      });
+    });
+    eq(leaked, [], 'crochet-baphomet.pdf: no photo caption leaks into a section line or note');
+    eq(LABELS.filter(function (lb) { return res.text.indexOf(lb) >= 0; }), [],
+      'crochet-baphomet.pdf: the captions never reach the extracted text either');
+
+    var bal = P.parse(sectionNamed(secs, 'Arms').text);
+    eq(rangeOf(bal, 3), '3-8', 'crochet-baphomet.pdf: Arms "R3-R8: 16sc around (6 rounds)" is a six-round range');
+    eq([countOf(bal, 3), countOf(bal, 10)], [16, 11], 'crochet-baphomet.pdf: Arms R3-R8 = 16 sts, R10-R11 = 11 sts');
+    var trailer = rowOf(bal, 10).notes.join(' | ');
+    log(trailer.indexOf('Stuff lightly') >= 0 &&
+        trailer.indexOf('Fold in half and 5sc through both sides') >= 0 &&
+        trailer.indexOf('Fasten off, leaving a short tail') >= 0,
+      'crochet-baphomet.pdf: the genuine trailer notes still attach to Arms R10-R11', trailer);
+
+    var bt = P.parse(sectionNamed(secs, 'Tail').text);
+    eq([rangeOf(bt, 13), countOf(bt, 13)], ['13-42', 6],
+      'crochet-baphomet.pdf: Tail "R13-R42: 6sc around (30 rounds)" is thirty rounds of 6');
+
+    var bb = P.parse(sectionNamed(secs, 'Body/Head').text);
+    eq(countOf(bb, 6), 36, 'crochet-baphomet.pdf: Body/Head R6 counts the 3 sc that attach the tail (12+3+21)');
+    eq(countOf(bb, 13), 18, 'crochet-baphomet.pdf: Body/Head R13 wraps over three lines and ends "[18]"');
+
+    eq(rowCounts(sectionNamed(secs, 'Muzzle'), [1]), [24],
+      'crochet-baphomet.pdf: the Muzzle chain round takes the "[24]" stranded on its fourth line');
+    eq([rowCounts(sectionNamed(secs, 'Horns'), [14])[0],
+        rowCounts(sectionNamed(secs, 'Feet'), [3])[0],
+        rowCounts(sectionNamed(secs, 'Ears'), [6])[0]], [18, 24, 30],
+      'crochet-baphomet.pdf: Horns R14, Feet R3, Ears R6');
   }
   // every section the parser offers as a part should have real rows
   log(secs.every(function (s) { return P.summary(P.parse(s.text)).rows > 0; }), name + ': every section has rows');

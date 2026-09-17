@@ -304,6 +304,10 @@
     /^tie\s+off\b/i, /^flip\b/i, /^with\b/i, /^using\b/i, /^pull\b/i,
     /^leave\b/i, /^leaving\b/i, /^cut\b/i, /^stuff\b/i, /^start\s+stuffing\b/i,
     /^place\b/i, /^add\b/i, /^put\b/i, /^mark\b/i, /^before\b/i, /^after\b/i,
+    // "12sc, Attach tail (3sc through both sides of Tail and into body), 21sc"
+    // - "attach X" costs nothing by itself; the stitches that do the joining
+    // are spelled out in the bracket beside it and are counted there.
+    /^attach\b/i,
     /^now\b/i, /^instead\b/i, /^this\b/i, /^these\b/i, /^colou?r\s+change\b/i,
     /^change\s+to\b/i, /^switch\s+to\b/i, /^in\s+(?:yellow|black|white|mc|cc|a|b)\s*$/i,
     /^(?:mr|magic\s*ring|magic\s*circle)\s*$/i,
@@ -597,7 +601,12 @@
   }
 
   var ALLCAPS_RE = /^[A-Z][A-Z '&\/-]*$/;
-  var TITLE_RE = /^([A-Z][a-z'-]*)(\s+([A-Z][a-z'-]*|&|of|the|and|in|a|for|to|with))*$/;
+  // A slash joins two names into one heading for a piece that is worked in
+  // one go ("Body/Head", "Body / Head"), so a slash-joined run of Title Case
+  // words is one title word. Without this "Body/Head" reads as prose.
+  var TITLE_WORD = "[A-Z][a-z'-]*(?:\\s*\\/\\s*[A-Z][a-z'-]*)*";
+  var TITLE_RE = new RegExp(
+    '^(' + TITLE_WORD + ')(\\s+(' + TITLE_WORD + '|&|of|the|and|in|a|for|to|with))*$');
 
   // -> { name, makeCount } | 'note' | null
   function headerInfo(t) {
@@ -612,6 +621,10 @@
       var m = MAKE_RES[i].exec(s);
       if (m && m[1].trim()) { s = m[1].trim(); makeCount = num(m[2]) || 1; break; }
     }
+    // The colon can sit BEFORE the make-count ("Arms: (Make 2)", "Ears:
+    // (make 2)"), so the name is left holding it once the count is off.
+    s = s.replace(/\s*:\s*$/, '').trim();
+    if (!s) return null;
     s = stripColourSuffix(s);
     if (!/^[A-Za-z][A-Za-z '&\/-]*$/.test(s)) return null;
     if (!ALLCAPS_RE.test(s) && !TITLE_RE.test(s)) return null;
@@ -684,6 +697,28 @@
   // first section picked up from a title further up ("SNOWMAN" three pages
   // before the rows) is dropped and the pending header group is cleared.
   var FRONT_MATTER_RE = /^(?:materials?|supplies|tools?|you\s+will\s+need|what\s+you\s+(?:will\s+)?need|abbreviations?|terminolog(?:y|ies)|terms(?:\s+used)?|glossary|gauge|difficulty)\s*[:.]?\s*$/i;
+
+  // An abbreviation table ("MR- Magic ring", "SC - Single crochet", "HDCInc-
+  // Half-double crochet increase") is front matter whatever its heading says,
+  // so a heading that sits straight on top of one ("Stitch Terms") must never
+  // name a section. Deliberately strict: the definitions have to start on the
+  // very next line and a row marker anywhere in the run means it is a part
+  // whose first lines happen to name colours ("MC - main colour" then "R1:").
+  var GLOSSARY_DEF_RE = /^[A-Za-z][A-Za-z0-9]{0,9}\s*[-:]\s*[A-Za-z]/;
+  var GLOSSARY_LOOKAHEAD = 4;
+
+  function looksLikeGlossary(raws, i) {
+    var defs = 0, seen = 0;
+    for (var j = i + 1; j < raws.length && seen < GLOSSARY_LOOKAHEAD; j++) {
+      var t = trimLine(raws[j]);
+      if (!t || PAGE_MARK_RE.test(t)) continue;
+      seen++;
+      if (detectMarker(t) || detectSetup(t)) return false;
+      if (GLOSSARY_DEF_RE.test(t)) defs++;
+      else if (seen === 1) return false;   // must start immediately
+    }
+    return defs >= 2;
+  }
 
   // Lines that may sit between two headers without breaking the header group.
   var COLOUR_NOTE_RE = /^(?:in\s+(?:colou?r\s+)?[a-z][a-z0-9]*\s*[:.,]?|\(\s*[a-z]\s*=\s*[a-z]+\s*\))$/i;
@@ -861,7 +896,10 @@
     if (!startsOk) return false;
     // must read like instructions, not like prose commentary
     var hasCount = /[(\[]\s*\d+\s*(?:sts?|stitches?|sc|hdc|dc)?\s*[)\]]/i.test(t) || /\|\s*\d+/.test(t);
-    var hasStitch = /\b(?:sc|hdc|dc|tr|inc|dec|ch|sl\s*st|slst|bbl|puff|fsc)\b/i.test(t);
+    // The count is often glued to the stitch ("21sc", "3scinc"), which a
+    // plain \b would miss - a digit and a letter are both word characters,
+    // so there is no boundary in front of the "sc" to anchor to.
+    var hasStitch = /\b\d*(?:sc|hdc|dc|tr|inc|dec|ch|sl\s*st|slst|bbl|puff|fsc)\b/i.test(t);
     return hasCount || hasStitch;
   }
 
@@ -883,7 +921,7 @@
         index: sections.length, name: name || '', makeCount: makeCount || 1,
         startLine: startLine, endLine: startLine, rows: 0, maxRow: null,
         lastRow: null, lastRowLine: null, prevCount: null, hasRow: false,
-        instrRows: 0
+        hasSetup: false, instrRows: 0
       };
       sections.push(sec);
       return sec;
@@ -891,6 +929,18 @@
 
     function pushHeader(h, line, used) {
       if (group.sawContent) group = { entries: [], sawContent: false };
+      // A two-column PDF can print the same heading twice - once as the big
+      // display heading over the artwork, once as the label of the column
+      // that carries its rounds ("Tail:" / "Tail:"). Two identical headers on
+      // neighbouring lines are one part, not two, and left as two the spare
+      // entry gets handed to the next unnamed section further down the page.
+      var last = group.entries[group.entries.length - 1];
+      if (last && !used && line - last.line <= 2 &&
+          last.name.toLowerCase() === h.name.toLowerCase()) {
+        // whichever copy carries the make-count speaks for both
+        if (h.makeCount > last.makeCount) last.makeCount = h.makeCount;
+        return;
+      }
       group.entries.push({ name: h.name, makeCount: h.makeCount, line: line, used: !!used });
     }
 
@@ -960,6 +1010,16 @@
       if (cls.photo) { L.photo = true; continue; }
 
       if (cls.header) {
+        // A heading over an abbreviation table is front matter: it closes the
+        // cover page exactly like FRONT_MATTER_RE above and names nothing.
+        if (looksLikeGlossary(raws, i)) {
+          if (!cur.hasRow) {
+            cur.name = ''; cur.makeCount = 1; cur.startLine = i;
+            cur.titleGroup = null; cur.titleEntry = null;
+          }
+          group = { entries: [], sawContent: false };
+          continue;
+        }
         L.kind = 'header';
         pushHeader(cls.header, i, false);
         // A section that has not started yet takes its name from the newest
@@ -970,7 +1030,11 @@
         // rows each). The pattern-title case ("Little Panda" directly above
         // "Body") is corrected after the loop, once we know whether the entry
         // below was ever claimed - see "pattern title" below.
-        if (!cur.hasRow) {
+        // ...and a section that has already started keeps the name it was
+        // given: a heading printed in the middle of its rounds is the
+        // pattern's own title set over the artwork, not a rename. A
+        // foundation row counts as started even though it is not numbered.
+        if (!cur.hasRow && !cur.hasSetup) {
           var first = group.entries[0];
           cur.name = first.name;
           cur.makeCount = first.makeCount;
@@ -997,6 +1061,10 @@
       } else if (cls.setup) {
         if (cur.hasRow) cur = openSectionAtRow(i);
         L.row = 0; L.rowEnd = 0; L.kind = 'setup';
+        // A line that says "Setup row:" in so many words starts the section;
+        // a counted line guessed into a setup further down does not (a
+        // materials list - "Hook size: 2-3" - reads as one).
+        cur.hasSetup = true;
         if (cur.lastRow === null) cur.lastRow = 0;
         prefixLen = t.length - cls.setup.rest.length;
         isSetup = true;

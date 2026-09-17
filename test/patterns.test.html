@@ -912,6 +912,131 @@ if (!window.PdfText || !window.PdfText._rowText) {
 }
 
 // -----------------------------------------------------------------------
+group('v2.3: header forms - colon before the make-count, slash names, duplicates, glossaries');
+// -----------------------------------------------------------------------
+
+// "Arms: (Make 2)" - the colon sits in front of the make-count, so the name
+// is left holding it once the count has been taken off
+assertEqual(P.splitSections('Arms: (Make 2)\nStarting in secondary color.\nR1: MR8\nR2: Inc x8 [16]')
+  .map(function (s) { return s.name + '/' + s.makeCount; }), ['Arms/2'],
+  '"Arms: (Make 2)" is the part "Arms", made twice');
+assertEqual(P.splitSections('Ears: (make 2)\nR1: Mr6\nR2: Inc x6 [12]')
+  .map(function (s) { return s.name + '/' + s.makeCount; }), ['Ears/2'],
+  '...and lower-case "(make 2)" reads the same');
+
+// a slash joins two names into one piece worked in one go
+assertEqual(P.splitSections('Body/Head\nR1: MR8\nR2: Inc x8 [16]')[0].name, 'Body/Head',
+  '"Body/Head" is one part, not prose');
+assertEqual(P.splitSections('Body / Head\nR1: MR8\nR2: Inc x8 [16]')[0].name, 'Body / Head',
+  '...with spaces around the slash too');
+
+var contHdr = P.splitSections('Body/Head\nR1: MR8\nR2: Inc x8 [16]\nBody/Head (cont.):\nR3: (sc, inc)x8 [24]');
+assertEqual(contHdr.map(function (s) { return s.name; }), ['Body/Head'],
+  '"Body/Head (cont.):" continues the part instead of starting a second one');
+assertEqual(P.summary(P.parse(contHdr[0].text)).rows, 3, '...and all three rounds stay together');
+
+// a two-column page can print the same heading twice, once big over the
+// artwork and once as the label of the column that carries the rounds
+var spare = P.splitSections('Tail:\nTail:\nR1: MR4\nR2: (sc, inc)x2 [6]\nR1: MR8\nR2: Inc x8 [16]');
+assertEqual(spare.map(function (s) { return s.name; }), ['Tail', ''],
+  'a heading printed twice is one name: the spare copy is not handed to the next part');
+assertEqual(P.splitSections('Ears:\nEars: (make 2)\nR1: Mr6\nR2: Inc x6 [12]')
+  .map(function (s) { return s.name + '/' + s.makeCount; }), ['Ears/2'],
+  '...and the make-count survives whichever of the two copies carries it');
+
+// a heading over an abbreviation table is front matter
+assertEqual(P.splitSections('Stitch Terms\nMR- Magic ring\nSC - Single crochet\nInc- SC increase\n' +
+  'HDC - Half-double crochet\nR1: MR8\nR2: Inc x8 [16]')
+  .map(function (s) { return s.name; }), [''],
+  '"Stitch Terms" over "MR- Magic ring" style definitions names nothing');
+assertEqual(P.splitSections('Body\nMC - main color\nCC - contrast color\nR1: MR8\nR2: Inc x8 [16]')
+  .map(function (s) { return s.name; }), ['Body'],
+  '...but a row marker inside the run means it is a part whose first lines name colours');
+
+// the pattern's own title, printed over the artwork half way down a part
+assertEqual(P.splitSections('First Section\nSetup Row (WS): Ch 19 (18)\n' +
+  'Row 1: blo sc in each st across, turn. (18)\nWheat Stitch Crochet Cardigan\n' +
+  'Row 2: blo sc in each st across, turn. (18)').map(function (s) { return s.name; }),
+  ['First Section'], 'a heading in the middle of a part that has already started does not rename it');
+
+// joining one piece to another
+assertEqual(P.evaluate('12sc, Attach tail (3sc through both sides of Tail and into body), 21sc', 36), 36,
+  '"Attach tail" costs nothing; the 3 sc that do the joining still count (12+3+21)');
+
+var glued = P.parse('R5: 36sc around\nR6: 12sc, Attach tail (3sc through\n' +
+  'both sides of Tail and into body), 21sc\nR7-R10: 36sc around (4 rounds)');
+assertEqual(countOf(glued, 6), 36,
+  'a wrapped row whose leftover carries only glued counts ("21sc") is still merged in');
+assertEqual(P.summary(glued).rows, 6, '...and the leftover line adds no row of its own');
+
+var wrap4 = P.parse('R1:Ch12, start 2nd chain from hook\n10sc, 3scinc (3sc into one stitch) in\n' +
+  'last chain, 9sc down opposite side, inc\ninto bottom side of first ch [24]\n' +
+  'R2-R5: 24sc around (4 rounds)');
+assertEqual(countOf(wrap4, 1), 24, 'a chain round that wraps over four lines takes the "[24]" on the last');
+assertEqual(P.summary(wrap4).rows, 5, '...and the three leftover lines add no rows');
+
+// -----------------------------------------------------------------------
+group('v2.3: PdfText - callouts drawn over artwork');
+// -----------------------------------------------------------------------
+
+if (!window.PdfText || !window.PdfText._labelRows) {
+  log(false, 'PdfText callout helpers available to the test page');
+} else {
+  var PT2 = window.PdfText;
+
+  /** One text item. `rot` draws it turned 90 degrees, as a callout is. */
+  function gItem(str, x, y, h, rot) {
+    return {
+      str: str, width: str.length * (h * 0.46), height: h,
+      transform: rot ? [0, h, -h, 0, x, y] : [h, 0, 0, h, x, y]
+    };
+  }
+  /** A column of lines, top down, one per string. */
+  function gCol(strs, y0, pitch, h, x) {
+    return strs.map(function (s, i) { return gItem(s, x, y0 - i * pitch, h); });
+  }
+
+  var bodyLines = ['R1: MR8', 'R2: Incx8 [16]', 'R3: (sc, inc)x8 [24]', 'R4: (sc, inc)x12 [36]',
+    'R5: 36sc around', 'R6: 36sc around', 'R7: 36sc around', 'R8: (2sc, dec)x9 [27]'];
+  var bodyItems = gCol(bodyLines, 700, 16, 12, 60);
+
+  var mixed = bodyItems.concat([gItem('Arm', 230, 140, 12, true), gItem('goes', 246, 138, 12, true)]);
+  assertEqual(PT2._dropRotated(mixed).length, bodyItems.length,
+    'sideways callouts are dropped from a page that is otherwise upright');
+  assertEqual(PT2._buildRows(mixed).length, bodyLines.length, '...so they never become rows');
+  var sideways = gCol(bodyLines, 700, 16, 12, 60).map(function (it) {
+    return gItem(it.str, it.transform[4], it.transform[5], 12, true);
+  });
+  assertEqual(PT2._dropRotated(sideways).length, bodyLines.length,
+    'a page set entirely sideways is landscape typesetting, and all of it is kept');
+
+  assertEqual(PT2._dominantHeight(PT2._buildRows(bodyItems.concat([gItem('Body/Head', 60, 730, 23)]))), 12,
+    'the dominant height is the body text, not the one big heading');
+  assertEqual(PT2._medianPitch(PT2._buildRows(bodyItems)), 16, 'the median pitch of an even column is its line spacing');
+
+  function dropped(extra, bodyH) {
+    var rows = PT2._buildRows(bodyItems.concat(extra));
+    var map = PT2._labelRows(rows, bodyH === undefined ? 12 : bodyH, false);
+    return Object.keys(map).map(function (k) { return rows[k].items[0].str; }).sort();
+  }
+
+  assertEqual(dropped(gCol(['4 sc between', 'Eye placement'], 200, 16, 12, 60)),
+    ['4 sc between', 'Eye placement'],
+    'a short run floating well below the column is a caption');
+  assertEqual(dropped(gCol(['Sleeve Cuff'], 200, 16, 20, 60)), [],
+    'a line set bigger than the body text is a heading, and is kept');
+  assertEqual(dropped(gCol(['3sc through both sides of tail and body'], 200, 16, 7.3, 60)),
+    ['3sc through both sides of tail and body'],
+    'fine print floating below the column is a caption however long it is');
+  assertEqual(dropped(gCol(['R9: (sc, dec)x5, sc [11]', 'R10-R11: 11sc around'], 200, 16, 12, 60)), [],
+    'a floating block that still carries row markers is pattern text');
+  assertEqual(dropped(gCol(['Stuff lightly', 'Fold in half'], 700 - 8 * 16, 16, 12, 60)), [],
+    'short trailer notes that follow on at the column\'s own spacing are kept');
+  assertEqual(PT2._labelRows(PT2._buildRows(bodyItems), 12, false), {},
+    'a column with nothing floating loses nothing');
+}
+
+// -----------------------------------------------------------------------
 var summaryEl = document.getElementById('summary');
 var finalLine = passed + ' passed, ' + failed + ' failed';
 summaryEl.textContent = finalLine;

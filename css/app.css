@@ -1417,6 +1417,16 @@ textarea.mono {
   margin: 12px 0 0;
 }
 
+/* New project sheet: import a PDF while creating */
+.new-pdf { display: flex; flex-direction: column; gap: 14px; }
+.new-pdf .dz-wrap { margin-bottom: 0; }
+.new-pdf .tpl-edit-link { margin-top: -10px; }
+.new-pdf textarea { min-height: 110px; }
+.imp-picker { display: flex; flex-direction: column; gap: 14px; }
+.new-pdf-tpl { display: flex; flex-direction: column; gap: 8px; }
+.new-pdf-tpl input[type="text"] { background: var(--surface); }
+.new-pdf-tpl input[type="text"][disabled] { opacity: 0.6; }
+
 /* Templates: list + editor */
 .tpl-edit-link { display: flex; justify-content: flex-start; margin-top: -2px; }
 .tpl-edit-link .linkish { min-height: 36px; padding: 0 2px; }
@@ -1451,7 +1461,10 @@ textarea.mono {
 }
 .tpl-part-top,
 .tpl-part-bot,
+.tpl-part-attach,
 .tpl-check-row { display: flex; align-items: center; gap: 8px; }
+.tpl-part-attach .tpl-tag { color: var(--text); border-color: var(--accent-2); }
+.tpl-attach-meta { flex: 1 1 auto; min-width: 0; font-size: 12px; color: var(--text-muted); }
 .tpl-part-name { flex: 1 1 auto; min-width: 0; background: var(--surface); }
 .tpl-part-bot .stepper { flex: 1 1 auto; min-width: 0; }
 .tpl-part-bot .stepper button { width: 42px; height: 42px; }
