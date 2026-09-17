@@ -21,6 +21,7 @@ built yet; the owner picks.
 | 12 | Interoperability, data formats | 12-interoperability.md | 20 + `.thready` zip layout |
 | 13 | Adversarial bug hunt | 13-bug-hunt.md | 11 bugs (4 data loss) + hardening |
 | 14 | Pattern designers | 14-pattern-designers.md | authoring guide + 20 |
+| 14a | Market research: Ribblr, platform fees, piracy norms, Pattern Keeper badge, OXS | 14a-pattern-distribution-research.md | supporting facts |
 
 ## Found by more than one lens (highest confidence)
 
