@@ -22,6 +22,11 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
+      # Gate: sw.js's CACHE_VERSION must equal the hash of the precached files.
+      # Without this, a changed asset ships behind an unchanged cache version
+      # and installed users keep being served the old build.
+      - name: Check service-worker cache version
+        run: bash tools/sw-version.sh --check
       - uses: actions/configure-pages@v5
         with:
           enablement: true

@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Service worker policy tests</title>
+<style>
+  body { font: 14px/1.4 Menlo, Consolas, monospace; background:#111; color:#eee; padding:16px; }
+  .pass { color:#7bd389; }
+  .fail { color:#ff6b6b; background:#2a1414; }
+  .group { margin-top:18px; font-weight:bold; color:#9cf; border-bottom:1px solid #333; padding-bottom:4px; }
+  #summary { margin-top:20px; font-size:18px; font-weight:bold; }
+  #summary.ok { color:#7bd389; }
+  #summary.bad { color:#ff6b6b; }
+</style>
+</head>
+<body>
+<h1>Service worker routing tests</h1>
+<p class="group">sw.js — `swPolicy`, the pure routing decision. No service worker is
+registered by this page: sw.js is fetched as text and evaluated against a fake
+`self`, once with a production location and once with localhost.</p>
+<div id="out"></div>
+<div id="summary">running…</div>
+
+<script>
+'use strict';
+
+var out = document.getElementById('out');
+var passed = 0;
+var failed = 0;
+
+function log(ok, label, detail) {
+  if (ok) { passed++; } else { failed++; }
+  var line = (ok ? 'PASS' : 'FAIL') + ' - ' + label + (detail ? '  (' + detail + ')' : '');
+  var div = document.createElement('div');
+  div.className = ok ? 'pass' : 'fail';
+  div.textContent = line;
+  out.appendChild(div);
+  if (ok) { console.log(line); } else { console.error(line); }
+}
+
+function group(title) {
+  var div = document.createElement('div');
+  div.className = 'group';
+  div.textContent = title;
+  out.appendChild(div);
+  console.log('== ' + title + ' ==');
+}
+
+function assertEqual(actual, expected, label) {
+  var ok = actual === expected;
+  log(ok, label, ok ? '' : ('expected ' + JSON.stringify(expected) + ' got ' + JSON.stringify(actual)));
+}
+
+function finish() {
+  var el = document.getElementById('summary');
+  var line = passed + ' passed, ' + failed + ' failed';
+  el.textContent = line;
+  el.className = failed === 0 ? 'ok' : 'bad';
+  console.log(line);
+}
+
+/* Load sw.js as text and run it with a fake global. The file only touches
+   `caches` inside its handlers, so evaluating it is side-effect free here. */
+function loadPolicy(href) {
+  return fetch('../sw.js', { cache: 'no-store' }).then(function (r) {
+    return r.text();
+  }).then(function (src) {
+    var u = new URL(href);
+    var fakeSelf = {
+      location: { href: href, origin: u.origin, hostname: u.hostname },
+      addEventListener: function () {},
+      skipWaiting: function () {},
+      clients: { claim: function () {} }
+    };
+    var run = new Function('self', 'caches', 'console',
+      src + '\n;return { policy: self.swPolicy, version: CACHE_VERSION, dev: IS_DEV };');
+    return run(fakeSelf, undefined, window.console);
+  });
+}
+
+var PROD = 'https://puckhead456.github.io/ThreadyOrNot/sw.js';
+var DEV = 'http://localhost:8765/sw.js';
+
+function req(url, mode, method) {
+  return { url: url, mode: mode || 'no-cors', method: method || 'GET' };
+}
+
+Promise.all([loadPolicy(PROD), loadPolicy(DEV)]).then(function (both) {
+  var prod = both[0];
+  var dev = both[1];
+  var P = prod.policy;
+  var D = dev.policy;
+
+  group('sanity');
+  assertEqual(typeof P, 'function', 'swPolicy is exported on self');
+  assertEqual(/^h[0-9a-f]{10}$/.test(prod.version), true,
+    'CACHE_VERSION is a generated hash (' + prod.version + ')');
+  assertEqual(prod.dev, false, 'github.io is not dev');
+  assertEqual(dev.dev, true, 'localhost is dev');
+
+  group('production — same origin');
+  assertEqual(P(req('https://puckhead456.github.io/ThreadyOrNot/js/app.js')).strategy, 'swr',
+    'precached js is stale-while-revalidate');
+  assertEqual(P(req('https://puckhead456.github.io/ThreadyOrNot/js/app.js')).store, true,
+    'precached js is written back to the cache');
+  assertEqual(P(req('https://puckhead456.github.io/ThreadyOrNot/css/app.css')).strategy, 'swr',
+    'precached css is stale-while-revalidate');
+  assertEqual(P(req('https://puckhead456.github.io/ThreadyOrNot/icons/icon-maskable-512.png')).store, true,
+    'any icon may be stored even when it is not in the list');
+  assertEqual(P(req('https://puckhead456.github.io/ThreadyOrNot/docs/whatever.json')).strategy, 'swr',
+    'a non-precached same-origin file is still served');
+  assertEqual(P(req('https://puckhead456.github.io/ThreadyOrNot/docs/whatever.json')).store, false,
+    '…but is never written to the cache');
+
+  group('production — navigation, fonts, cross-origin');
+  assertEqual(P(req('https://puckhead456.github.io/ThreadyOrNot/', 'navigate')).strategy, 'navigate',
+    'navigation is network-first');
+  assertEqual(P(req('https://fonts.googleapis.com/css2?family=X')).strategy, 'swr',
+    'google fonts css is SWR');
+  assertEqual(P(req('https://fonts.gstatic.com/s/x.woff2')).strategy, 'swr',
+    'google fonts files are SWR');
+  assertEqual(P(req('https://example.com/thing.js')).strategy, 'skip',
+    'other cross-origin requests are untouched');
+  assertEqual(P(req('https://puckhead456.github.io/ThreadyOrNot/js/app.js', 'no-cors', 'POST')).strategy, 'skip',
+    'non-GET is untouched');
+
+  group('never cached, any host');
+  assertEqual(P(req('https://puckhead456.github.io/ThreadyOrNot/tmp-pdf/xs-a.pdf')).strategy, 'skip',
+    'prod: /tmp-pdf/ bypasses the cache');
+  assertEqual(P(req('https://puckhead456.github.io/ThreadyOrNot/test/patterns.test.html', 'navigate')).strategy, 'skip',
+    'prod: /test/ pages bypass the cache');
+  assertEqual(D(req('http://localhost:8765/tmp-pdf/xs-a.pdf')).strategy, 'skip',
+    'dev: /tmp-pdf/ bypasses the cache');
+  assertEqual(D(req('http://localhost:8765/test/xstitch.test.html', 'navigate')).strategy, 'skip',
+    'dev: /test/ pages bypass the cache');
+
+  group('localhost — network first, nothing stored');
+  assertEqual(D(req('http://localhost:8765/js/app.js')).strategy, 'network-first',
+    'dev js is network-first');
+  assertEqual(D(req('http://localhost:8765/js/app.js')).store, false,
+    'dev never writes to the cache');
+  assertEqual(D(req('http://localhost:8765/css/app.css')).store, false,
+    'dev css is never stored');
+  assertEqual(D(req('http://localhost:8765/', 'navigate')).strategy, 'navigate',
+    'dev navigation is network-first');
+  assertEqual(D(req('http://localhost:8765/', 'navigate')).store, false,
+    'dev navigation is not stored');
+  assertEqual(D(req('https://fonts.gstatic.com/s/x.woff2')).strategy, 'skip',
+    'dev leaves google fonts to the browser');
+
+  group('127.0.0.1 is dev too');
+  return loadPolicy('http://127.0.0.1:8765/sw.js').then(function (loop) {
+    assertEqual(loop.dev, true, '127.0.0.1 is dev');
+    assertEqual(loop.policy(req('http://127.0.0.1:8765/js/store.js')).strategy, 'network-first',
+      '127.0.0.1 js is network-first');
+  });
+}).then(finish, function (err) {
+  log(false, 'harness', String(err && err.message || err));
+  finish();
+});
+</script>
+</body>
+</html>

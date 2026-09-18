@@ -1,0 +1,59 @@
+#!/bin/sh
+# .githooks/pre-commit — keep sw.js's CACHE_VERSION honest.
+#
+# Install once per clone:   git config core.hooksPath .githooks
+#
+# When a precached file (or sw.js itself) is staged, regenerate the content
+# hash and re-stage sw.js, so no commit can ship a changed asset behind an
+# unchanged service-worker cache version. The same check runs in CI
+# (.github/workflows/pages.yml) because a hook can always be skipped.
+#
+# This file must stay LF-only: a CRLF shebang breaks the hook on Windows.
+
+ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+[ -n "$ROOT" ] || exit 0
+cd "$ROOT" || exit 0
+
+[ -f tools/sw-version.sh ] || exit 0
+
+# Staged (added/copied/modified/renamed) paths.
+STAGED=$(git diff --cached --name-only --diff-filter=ACMR | tr -d '\r')
+[ -n "$STAGED" ] || exit 0
+
+# The watch list comes out of sw.js itself, so it can never drift from what
+# actually gets precached.
+WATCHED=$(bash tools/sw-version.sh --list 2>/dev/null | tr -d '\r')
+WATCHED="$WATCHED
+sw.js"
+
+hit=0
+for f in $WATCHED; do
+  [ -n "$f" ] || continue
+  for s in $STAGED; do
+    if [ "$f" = "$s" ]; then
+      hit=1
+      break
+    fi
+  done
+  if [ "$hit" = "1" ]; then
+    break
+  fi
+done
+
+if [ "$hit" != "1" ]; then
+  exit 0
+fi
+
+before=$(git hash-object sw.js)
+if ! bash tools/sw-version.sh; then
+  echo "pre-commit: tools/sw-version.sh failed; commit aborted." >&2
+  exit 1
+fi
+after=$(git hash-object sw.js)
+
+if [ "$before" != "$after" ]; then
+  git add sw.js
+  echo "pre-commit: sw.js CACHE_VERSION regenerated and re-staged."
+fi
+
+exit 0

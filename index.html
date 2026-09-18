@@ -215,8 +215,90 @@
   if (!('serviceWorker' in navigator)) return;
   var secure = location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1';
   if (!secure) return;
+
+  var UPDATE_CHECK_MS = 10 * 60 * 1000;   // at most one reg.update() per 10 min
+  var lastCheck = 0;
+  var prompted = false;                   // one prompt per page load
+  var reloading = false;                  // reload-loop guard
+  var wantsReload = false;                // only the user's click reloads
+
+  function reloadOnce() {
+    if (reloading) return;
+    // Belt and braces: never reload twice inside a few seconds, whatever fires.
+    try {
+      var last = Number(sessionStorage.getItem('sk-sw-reloaded') || 0);
+      if (last && Date.now() - last < 5000) return;
+      sessionStorage.setItem('sk-sw-reloaded', String(Date.now()));
+    } catch (e) { /* private mode: the in-page guard above still holds */ }
+    reloading = true;
+    location.reload();
+  }
+
+  navigator.serviceWorker.addEventListener('controllerchange', function () {
+    if (wantsReload) reloadOnce();
+  });
+
+  function doReload() {
+    wantsReload = true;
+    navigator.serviceWorker.getRegistration().then(function (r) {
+      var w = r && (r.waiting || r.installing);
+      if (w) w.postMessage({ type: 'SKIP_WAITING' });
+    })['catch'](function () {});
+    // The new worker may already have taken over (sw.js calls skipWaiting on
+    // install), in which case controllerchange has been and gone — reload anyway.
+    setTimeout(reloadOnce, 700);
+  }
+
+  /* A small, non-blocking banner. Uses the app's own toast when it is up. */
+  function showUpdatePrompt() {
+    if (prompted) return;
+    prompted = true;
+    var msg = 'A new version is ready';
+    if (window.App && typeof window.App.toast === 'function') {
+      window.App.toast(msg, { actionText: 'Reload', onAction: doReload, ms: 12000 });
+      return;
+    }
+    var bar = document.createElement('div');
+    bar.className = 'sw-update';
+    bar.setAttribute('role', 'status');
+    bar.setAttribute('aria-live', 'polite');
+    var text = document.createElement('span');
+    text.className = 'sw-update-text';
+    text.textContent = msg + ' — ';
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'sw-update-action';
+    btn.textContent = 'Reload';
+    btn.addEventListener('click', doReload);
+    bar.appendChild(text);
+    bar.appendChild(btn);
+    document.body.appendChild(bar);
+  }
+
+  function watch(reg) {
+    // Already waiting when the page loaded (another tab installed it).
+    if (reg.waiting && navigator.serviceWorker.controller) showUpdatePrompt();
+    reg.addEventListener('updatefound', function () {
+      var sw = reg.installing;
+      if (!sw) return;
+      sw.addEventListener('statechange', function () {
+        // A controller means this is an update, not the first install.
+        if (sw.state === 'installed' && navigator.serviceWorker.controller) showUpdatePrompt();
+      });
+    });
+    document.addEventListener('visibilitychange', function () {
+      if (document.visibilityState !== 'visible') return;
+      var now = Date.now();
+      if (now - lastCheck < UPDATE_CHECK_MS) return;
+      lastCheck = now;
+      try { reg.update(); } catch (e) { /* offline, or the worker is gone */ }
+    });
+  }
+
   window.addEventListener('load', function () {
-    navigator.serviceWorker.register('./sw.js', { scope: './' }).catch(function () {});
+    lastCheck = Date.now();
+    navigator.serviceWorker.register('./sw.js', { scope: './' })
+      .then(watch)['catch'](function () {});
   });
 })();
 </script>

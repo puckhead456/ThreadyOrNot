@@ -897,6 +897,42 @@ dialog.sheet.sheet-viewer .sheet-inner { height: 92dvh; }
   to { opacity: 1; transform: none; }
 }
 
+/* "A new version is ready" — the fallback used only when App.toast is not up
+   (index.html's service-worker registration builds it). */
+.sw-update {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: calc(16px + env(safe-area-inset-bottom));
+  z-index: 70;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: min(92vw, 460px);
+  padding: 8px 8px 8px 14px;
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow);
+  font-size: 15px;
+  font-weight: 700;
+  animation: sk-toast-in 0.18s ease;
+}
+.sw-update-action {
+  flex: 0 0 auto;
+  min-height: 44px;
+  min-width: 44px;
+  padding: 0 12px;
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-weight: 800;
+  text-decoration: underline;
+}
+@media (prefers-reduced-motion: reduce) {
+  .sw-update { animation: none; }
+}
+
 /* --------------------------------------------------------------------------
    13. Sheets (dialog)
    -------------------------------------------------------------------------- */
