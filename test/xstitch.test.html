@@ -1606,10 +1606,10 @@ var synthKey = {
     'matchGlyphs pairs marks to key entries by stitch count, within 3%');
 
   var bySymbol = X._grid.matchGlyphs(
-    [{ id: 'f2★', n: 5 }, { id: 'f2x', n: 900 }],
+    [{ id: 'f2\u0001★', n: 5 }, { id: 'f2\u0001x', n: 900 }],
     [{ code: '310', stitchCount: 900, symbol: 'x' }, { code: '666', stitchCount: 5, symbol: '★' }]
   );
-  assertEqual([bySymbol['f2★'], bySymbol['f2x']], [1, 0],
+  assertEqual([bySymbol['f2\u0001★'], bySymbol['f2\u0001x']], [1, 0],
     'a symbol the key printed wins over the frequency ranking');
 
   var merged = X._grid.matchGlyphs(

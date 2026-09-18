@@ -10,14 +10,17 @@ Read in this order: this file → `SPEC.md` (crochet + shell contract; the "Craf
 - **Crafts shell** (`docs/CRAFTS.md`): `Project.craft` ('crochet' default; old saves migrate), opaque `Project.craftData`, `Store.registerCraft` / `App.registerCraft`, `#screen-craft`, craft picker in New project (only when a craft module registered), `Store.updateCraftData` (undoable), `Settings.crafts`, `js/blobstore.js` (IndexedDB for page images), `PdfText.open`, `Tour.register`, `ctx` helper bag incl. `pdfDropZone` and `wake`. Crochet code paths untouched; a crochet-only install is byte-identical.
 - **Cross-stitch** (`js/xstitch.js`, `js/app-xstitch.js`, `css/xstitch.css`): OXS import/export with full cell data; PDF import = colour-key parser (KG-Chart, Spriter and DMC-library layouts, confidence banner, declared-colour sanity check, embroidery detection) + chart pages rendered to BlobStore (cap 40) + **grid reader beta** (`XStitch.extractGrid` reads per-stitch coloured rectangles from the page operator list; all 7 KG-Chart fixtures recover exactly in 0.4–8 s, Spriter/DMC fail fast); manual entry; chart viewer with tap / drag / 10×10 / whole-colour marking and a layer switch for backstitch / knots / fractionals; colour key with per-layer tallies; big tap button with a live chart preview that walks backstitch once a colour's crosses are done; floss (skein ranges, shopping list), fabric & size, pages, parking sheets; printable chart (inline-SVG tiles in mm, colour or B&W); oversize-chart guard (1 MB sheet, image-only downgrade keeps tallies); 6 FAQs + tour.
 - **Photo → chart** (`js/xstitch-photo.js`): on-device Web Worker (linear-light resample → CIELAB → seeded k-means → nearest DMC by CIEDE2000 → confetti cleanup → symbols), ~90–160 ms for 200×250 / 24 colours on desktop, deterministic, cancellable, crop frame with aspect lock. No LLM, no network, no per-user cost.
+- **Wave 1** (2026-09-18, branch `wave-1`, from `docs/brainstorm/README.md`): the data-safety bundle and the bug-hunt items are in. **Store** — a failed write is loud (`onStorageError`, `storageHealth`, `wouldExceedQuota`, one retry with the undo stack cleared), an unreadable key is quarantined as `<KEY>.corrupt.<ts>` and never written over, every write carries `revision`/`writerId` so a second tab is adopted or raises a conflict, `requestPersist` + a `touchDays`-based backup-due signal, tolerant backup versions with `MIGRATIONS` / `previewImport` / per-id choices / `undoImport`, `untapRow` is the inverse of `tapRow` across the piece boundary, terminal states are idempotent (`alreadyDone`), imported sections carry a content `importKey` and set `targetRows`, `allPartsDone` no longer shelves a toy with untouched parts, `finishProject(force)` + `blockingParts`, `makeCountImpact`, a monotonic timer. **Parser** — phantom rows from bare numbers, UK / post-stitch vocabulary + `dialectHints`, per-page `emptyPages`, `maxPages` + cancellable `signal`. **Shell** — persistent storage banners and the corrupt-state recovery screen, the multi-tab conflict bar, the home backup nag, the backup import preview with Undo import, the ⤢ moved out of the tap surface into a labelled "3D view" control (9.9–12.5:1 in all six themes, correct tab order), part chips clip with an ellipsis, a sheet closes when its project is deleted, "→ target 20" and a "Don't set targets" checkbox in the import picker, weak checklist suggestions offered unticked, the empty-pages line, the UK-terms chip, a big-file confirm with a 20-page cap and a Cancel button. Per-tap render on a 1,500-row pattern went from **1,162 ms on a completed row to 0.5 ms** by not mounting the live 3D canvas past 250 rows (see the note below — the real fix is in `Store.diagramModel`).
 - **Sewing** (`js/sewing.js`, `js/app-sewing.js`, `css/sewing.css`): booklet parser (steps incl. titled paragraphs, cutting list incl. quilting WOF/subcut, notions, seam allowance with exceptions, size charts with dual-unit cells, grouped fabric yardage per size, kind detection, reference blocks skipped); step counter with big Step-done button; steps / cutting (tap-to-cycle counts) / notions (copy shopping list) / size & alterations (shared "my measurements") / fabric (chosen-size card) / machine settings + presets / seam-allowance sheets; quilt unit counters; import review list with "Make steps from paragraphs" picker; opt-in page images with pinch-zoom viewer; cutting-table SVG illustration + step ring; Awake toggle; 6 FAQs + tour.
 
-## Tests (all green 2026-09-17)
+## Tests (all green 2026-09-18)
 
 | page | assertions | notes |
 |---|---|---|
-| `test/patterns.test.html` | 479 | crochet parser, synthetic |
-| `test/patterns.fixtures.html` | 263 | real crochet PDFs in `tmp-pdf/` |
+| `test/store-safety.test.html` | 210 | wave 1: save failures, corrupt-state quarantine, multi-tab revision/conflict, persist + backup nag, counter inverses and terminal states, import keys and targets |
+| `test/backup.test.html` | 102 | tolerant backup versions, `MIGRATIONS`, frozen v1 fixture, `previewImport` / choices / `undoImport` |
+| `test/patterns.test.html` | 578 | crochet parser, synthetic |
+| `test/patterns.fixtures.html` | 285 | real crochet PDFs in `tmp-pdf/` |
 | `test/templates.test.html` | 94 | templates carry pattern text + placement notes; createProject / templateFromProject / export round-trip |
 | `test/crafts.test.html` | 124 | Store craft plumbing |
 | `test/sw.test.html` | 27 | service-worker routing policy (dev vs production) |
@@ -33,6 +36,11 @@ Fixtures: `tmp-pdf/` is gitignored and copyrighted (**never commit it**). The fi
 
 ## What's left
 
+Wave 1 of `docs/brainstorm/README.md` is done and lives in **What is live** above — the data-safety
+bundle (13 #1–#3, 09 #2–#4, 12 #1/#3), the bug-hunt items 4–11, `targetRows` from import +
+`allPartsDone`, checklist fragments, the ⤢ button, the release plumbing and the cheap parser wins
+(06 #2–#4, #6). What it left behind is items 12–14 below. Waves 2 and 3 are unchanged.
+
 Owner-side (fixtures):
 1. A FlossCross export of one of your own photos as **PDF + OXS** (`xs-flosscross.pdf/.oxs`): the only ground-truth pair we can own outright; also settles the fractional-stitch direction → corner mapping, which is unverified against a real generator.
 2. A commercial chart in the Artecy / Pattern-Keeper style (a different key layout than KG-Chart), and a **quilt** and a **bag** booklet: the quilting WOF/subcut and hardware/interfacing rules have only seen synthetic text.
@@ -45,6 +53,9 @@ Small code items (each < half a day):
 6. `ctx.pdfDropZone` with `onPages` + `onText` skips the cross-page running-head pass (documented in CRAFTS.md; both craft importers avoid the combination).
 7. Steps-from-paragraphs picker re-renders the whole list per edit (fine at ≤ 300 rows).
 8. Cross-stitch grid reader recovers full stitches only; backstitch/knots from PDFs would need stroke parsing.
+12. **`Store.diagramModel` is O(rows²)** and it is the only reason the live 3D piece is switched off past 250 rows (see **What is live** → Wave 1). `buildDiagramModel` loops `row = 1..total` and calls `lineForRow(prt, patternRow)` inside the loop, and `lineForRow` scans every parsed line; on a 1,500-row pattern one completed row costs ~1,040 ms in the Browser pane. Build a row → line index once (or memoise `lineForRow` per part) and the guard in `js/app.js` (`DIAGRAM_MAX_LIVE_ROWS`, `partIsHeavy`) can be relaxed or deleted.
+13. **The quota banner has no "Free up space" button yet.** `js/app.js` `freeUpSpaceAction()` looks for a `freeUpSpace(projectId, ctx)` on the craft's registration; cross-stitch has exactly the right path internally (`switchToCountsMode` / `X.toCountsMode` in `js/app-xstitch.js`, which also calls `forgetCaches()`), it is just not published on `App.registerCraft({...})`. Add it there and the button appears on its own.
+14. `ctx.pdfDropZone`'s **Cancel** stops the per-page text pass on the `onPages` route, but `PdfText.open` itself has no signal, so a craft module's own page rendering keeps going until that pass is reached. Give `PdfText.open` the same `{cancelled}` contract as `extract` if a craft ever needs a hard stop.
 
 Bigger / product decisions:
 9. Photo → chart: free or the first Pro feature (it costs nothing to run).

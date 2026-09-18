@@ -162,6 +162,7 @@
     els.project = $('#screen-project');
     els.live = $('#live-region');
     els.toasts = $('#toasts');
+    els.banners = $('#app-banners');
 
     // Craft screen (docs/CRAFTS.md) — absent from an old cached index.html,
     // so everything that touches it is guarded.
@@ -196,6 +197,7 @@
     els.patternText = $('#pattern-line-text');
     els.patternNotes = $('#pattern-line-notes');
     els.stitchSection = $('.stitch-section');
+    els.stitchActions = $('#stitch-actions');
     els.stitchBtn = $('#stitch-btn');
     els.stitchNumber = $('#stitch-number');
     els.stitchReadout = $('#stitch-readout');
@@ -250,6 +252,372 @@
   }
 
   /* ================================================================== *
+   * 5b. Top banners
+   *
+   * A persistent strip above every screen for the two things the user must
+   * not be able to miss: a save that failed (13 #2, 09 #2) and another tab
+   * that changed the same data (13 #1). They are `role="alert"`, they are not
+   * dismissable, and they push the screens down rather than covering them.
+   * ================================================================== */
+
+  var banners = Object.create(null); // id -> node, so one id never stacks
+
+  /** Screens read --banner-h; keep it in step with whatever is showing. */
+  function syncBannerHeight() {
+    if (!els.banners) return;
+    var h = els.banners.childNodes.length ? els.banners.offsetHeight : 0;
+    document.documentElement.style.setProperty('--banner-h', (h || 0) + 'px');
+  }
+
+  /**
+   * @param {{id:string, tone?:'danger'|'calm', text:string,
+   *          actions?:Array<{text:string, onClick:Function}>}} opts
+   */
+  function showBanner(opts) {
+    if (!els.banners || !opts || !opts.id) return null;
+    hideBanner(opts.id);
+    var bar = el('div', 'banner banner-' + (opts.tone === 'calm' ? 'calm' : 'danger'));
+    bar.setAttribute('role', 'alert');
+    bar.setAttribute('data-banner', opts.id);
+    bar.appendChild(el('p', 'banner-text', opts.text || ''));
+    if (opts.actions && opts.actions.length) {
+      var row = el('div', 'banner-actions');
+      opts.actions.forEach(function (a) {
+        var b = button('btn small', a.text);
+        on(b, 'click', a.onClick);
+        row.appendChild(b);
+      });
+      bar.appendChild(row);
+    }
+    banners[opts.id] = bar;
+    els.banners.appendChild(bar);
+    syncBannerHeight();
+    return bar;
+  }
+
+  function hideBanner(id) {
+    var node = banners[id];
+    if (!node) return false;
+    delete banners[id];
+    if (node.parentNode) node.parentNode.removeChild(node);
+    syncBannerHeight();
+    return true;
+  }
+
+  /* ================================================================== *
+   * 5c. Storage health (13 #2–#3, 09 #2) and multi-tab (13 #1)
+   * ================================================================== */
+
+  var QUOTA_TEXT = 'Your last taps are not saved. Free up space or download a backup.';
+  var PRIVATE_TEXT = 'Private browsing: nothing will be saved after you close this tab.';
+
+  /**
+   * The craft module's own "make this project smaller" path, if it published
+   * one. Cross-stitch has the counts-mode downgrade internally but does not
+   * expose it on its registration yet, so today this returns null and the
+   * button is simply not shown (see HANDOFF).
+   */
+  function freeUpSpaceAction() {
+    var p = currentProject();
+    var def = craftFor(p);
+    if (!p || !def || typeof def.freeUpSpace !== 'function') return null;
+    return {
+      text: 'Free up space',
+      onClick: function () {
+        try { def.freeUpSpace(p.id, ctx); } catch (e) { /* the banner stays */ }
+      }
+    };
+  }
+
+  /** What raised the current storage banner, or null. */
+  var storageBannerKind = null;
+
+  /**
+   * The banner is not dismissable by hand, but it should not outlive the
+   * problem: once a write succeeds again (space freed, a backup taken) it
+   * goes. Private mode is forever, so that one stays.
+   */
+  function syncStorageBanner() {
+    if (!storageBannerKind || storageBannerKind === 'private') return;
+    if (Store.saveFailed()) return;
+    storageBannerKind = null;
+    hideBanner('storage');
+  }
+
+  /** One banner, whatever kind of write failure put it there. */
+  function showStorageBanner(kind) {
+    var calm = kind === 'private';
+    storageBannerKind = kind || 'quota';
+    var actions = [];
+    if (!calm) {
+      actions.push({ text: 'Download backup', onClick: function () { exportBackup(); } });
+      var free = freeUpSpaceAction();
+      if (free) actions.push(free);
+    }
+    showBanner({
+      id: 'storage',
+      tone: calm ? 'calm' : 'danger',
+      text: calm ? PRIVATE_TEXT : QUOTA_TEXT,
+      actions: actions
+    });
+  }
+
+  /**
+   * "Your saved projects could not be read": the only screen that gets in the
+   * way of everything, because the next write would destroy the evidence.
+   */
+  function openCorruptSheet() {
+    var key = Store.corruptKey() || (Store.KEY + '.corrupt');
+    openSheet({
+      title: 'Your saved projects could not be read',
+      cls: 'sheet-corrupt',
+      locked: true,
+      build: function (body) {
+        body.appendChild(
+          el(
+            'p',
+            null,
+            'Something wrote a damaged copy of your data — a phone that shut down mid-save is the ' +
+              'usual cause. Nothing has been thrown away: the unreadable text is still on this ' +
+              'device under “' + key + '”.'
+          )
+        );
+        body.appendChild(
+          el(
+            'p',
+            'muted',
+            'Download the copy first. Then “Start fresh” lets the app save again; send us the file ' +
+              'and we can often get the projects back out of it.'
+          )
+        );
+      },
+      footer: [
+        {
+          text: 'Download the copy',
+          cls: 'btn',
+          onClick: function () {
+            downloadCorruptSnapshot(key);
+          }
+        },
+        {
+          text: 'Start fresh',
+          cls: 'btn primary',
+          onClick: function (api) {
+            confirmSheet({
+              title: 'Start fresh?',
+              message: 'The app will save again from now on. The damaged copy stays under “' + key + '”.',
+              confirmText: 'Start fresh',
+              danger: true
+            }).then(function (ok) {
+              if (!ok) return;
+              Store.acknowledgeCorrupt();
+              api.close();
+              render();
+              toast('Starting fresh — the old copy is still on this device');
+            });
+          }
+        }
+      ]
+    });
+  }
+
+  function downloadCorruptSnapshot(key) {
+    var text = Store.corruptSnapshot();
+    if (typeof text !== 'string' || !text) {
+      toast('That copy is no longer available');
+      return;
+    }
+    downloadText(text, String(key || 'stitchkeeper-corrupt') + '.json', 'application/json');
+    toast('Copy downloaded');
+  }
+
+  /** One anchor-click download, shared by the backup and the corrupt copy. */
+  function downloadText(text, filename, type) {
+    try {
+      var url = URL.createObjectURL(new Blob([text], { type: type || 'application/json' }));
+      var a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      a.style.display = 'none';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      window.setTimeout(function () { URL.revokeObjectURL(url); }, 1500);
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /** 'takeTheirs' re-emits onExternalChange; one toast is enough. */
+  var resolvingConflict = false;
+
+  function resolveConflictWith(how) {
+    hideBanner('conflict');
+    resolvingConflict = true;
+    try {
+      Store.resolveConflict(how);
+    } catch (e) {
+      /* the store keeps the flag; the banner comes back on the next event */
+    }
+    resolvingConflict = false;
+    render();
+    toast(how === 'takeTheirs' ? 'Using the other tab’s copy' : 'Kept this tab’s copy');
+  }
+
+  function showConflictBanner() {
+    showBanner({
+      id: 'conflict',
+      tone: 'danger',
+      text: 'This app is open in another tab and both made changes.',
+      actions: [
+        { text: 'Keep mine', onClick: function () { resolveConflictWith('keepMine'); } },
+        { text: 'Use the other tab’s', onClick: function () { resolveConflictWith('takeTheirs'); } }
+      ]
+    });
+  }
+
+  /** Boot-time wiring; everything it subscribes to lives for the page's life. */
+  function watchStorage() {
+    var health;
+    try {
+      health = Store.storageHealth();
+    } catch (e) {
+      health = { writable: true, privateMode: false };
+    }
+    if (health && (health.privateMode || !health.writable)) {
+      showStorageBanner(health.privateMode ? 'private' : 'unknown');
+    } else if (Store.saveFailed()) {
+      var last = Store.lastSaveError();
+      showStorageBanner(last && last.kind ? last.kind : 'quota');
+    }
+    if (Store.isCorrupt()) openCorruptSheet();
+
+    Store.onStorageError(function (e) {
+      showStorageBanner(e && e.kind);
+    });
+
+    // Another tab wrote and we had nothing in flight: take it and say so.
+    Store.onExternalChange(function () {
+      if (resolvingConflict) return; // resolveConflictWith says it itself
+      render();
+      toast('Updated from another tab');
+    });
+    // Both tabs changed things: the user picks.
+    Store.onConflict(showConflictBanner);
+    if (Store.conflict()) showConflictBanner();
+
+    window.addEventListener('resize', debounce(syncBannerHeight, 150));
+  }
+
+  /* ---- persistent storage + the backup nag (12 #1, 09 #4) ---- */
+
+  var persistAsked = false;
+
+  /** Once per session, after the first row is actually finished. */
+  function askForPersistOnce() {
+    if (persistAsked) return;
+    persistAsked = true;
+    if (typeof Store.requestPersist !== 'function') return;
+    try {
+      Store.requestPersist();
+    } catch (e) {
+      /* a browser without the API simply never grants it */
+    }
+  }
+
+  /** "61 MB" — one place so every size guard says it the same way. */
+  function mb(bytes) {
+    var n = Number(bytes) || 0;
+    if (n < 1024 * 1024) return Math.max(1, Math.round(n / 1024)) + ' KB';
+    return Math.round(n / (1024 * 1024)) + ' MB';
+  }
+
+  /**
+   * A PDF's own bytes never reach localStorage — only the text pulled out of
+   * it does, and even a 200-page pattern is well under a megabyte of text. So
+   * the PDF path asks "is there room for a megabyte?" rather than "is there
+   * room for twice this file?", which would warn on every ordinary 3 MB
+   * pattern however empty the storage was.
+   */
+  var PDF_TEXT_BUDGET = 1024 * 1024;
+
+  /**
+   * Pre-flight for anything that will end up in localStorage: text pulled out
+   * of a PDF, a backup about to be merged in (09 #2). `file.size * 2` is the
+   * bound on what the read will need, capped for PDFs as above.
+   * @param {File} file
+   * @param {string} what   named in the message
+   * @param {number} [cap]  upper bound on the estimate
+   * @returns {Promise<boolean>} false when the user backed out
+   */
+  function guardQuota(file, what, cap) {
+    var bytes = file && file.size ? file.size * 2 : 0;
+    if (cap && bytes > cap) bytes = cap;
+    var tight = false;
+    try {
+      tight = !!(bytes && Store.wouldExceedQuota(bytes));
+    } catch (e) {
+      tight = false;
+    }
+    if (!tight) return Promise.resolve(true);
+    return confirmSheet({
+      title: 'Storage is nearly full',
+      message:
+        'There may not be room for ' + (what || 'this file') + ' (' + mb(file.size) + '). ' +
+        'Download a backup first, or free up space — importing anyway may fail to save.',
+      confirmText: 'Import anyway'
+    });
+  }
+
+  /** iOS Safari that is not installed: Add to Home Screen is the real fix. */
+  function iosNotInstalled() {
+    var ua = String(navigator.userAgent || '');
+    var isIOS = /iPad|iPhone|iPod/.test(ua) ||
+      (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+    if (!isIOS) return false;
+    if (navigator.standalone === true) return false;
+    try {
+      if (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) return false;
+    } catch (e) { /* no matchMedia: treat as a browser tab */ }
+    return true;
+  }
+
+  /** The one-line dismissible bar at the top of the home list. */
+  function backupNagBar() {
+    var status;
+    try {
+      status = Store.backupStatus();
+    } catch (e) {
+      return null;
+    }
+    if (!status || !status.due) return null;
+
+    var bar = el('div', 'nag-bar');
+    bar.setAttribute('role', 'note');
+    var text = 'Your work lives only on this phone. Save a backup →';
+    if (iosNotInstalled()) text += ' Add to Home Screen keeps it safer.';
+    bar.appendChild(el('p', 'nag-text', text));
+
+    var actions = el('div', 'nag-actions');
+    var save = button('btn small primary', 'Download backup');
+    on(save, 'click', function () {
+      exportBackup();
+      renderHome();
+    });
+    var not = button('linkish', 'Not now');
+    on(not, 'click', function () {
+      Store.snoozeBackupNag(14);
+      renderHome();
+      toast('We’ll ask again in a couple of weeks');
+    });
+    actions.appendChild(save);
+    actions.appendChild(not);
+    bar.appendChild(actions);
+    return bar;
+  }
+
+  /* ================================================================== *
    * 6. Sheets (dynamic <dialog>)
    * ================================================================== */
 
@@ -257,7 +625,12 @@
   var sheetSeq = 0;
 
   /**
-   * @param {{title:string, cls?:string, build?:Function, footer?:Array, onClose?:Function}} opts
+   * @param {{title:string, cls?:string, build?:Function, footer?:Array,
+   *          onClose?:Function,
+   *          locked?:boolean,        // no ✕, no Escape, no backdrop close
+   *          subject?:string         // a project id this sheet is *about*;
+   *                                  // render() closes the sheet if it goes
+   *         }} opts
    */
   function openSheet(opts) {
     opts = opts || {};
@@ -273,6 +646,7 @@
     h.id = 'sheet-title-' + sheetSeq;
     dlg.setAttribute('aria-labelledby', h.id);
     var closeBtn = button('sheet-close', '✕', 'Close');
+    if (opts.locked) closeBtn.hidden = true;
     head.appendChild(h);
     head.appendChild(closeBtn);
 
@@ -301,6 +675,8 @@
       dialog: dlg,
       body: body,
       title: h,
+      /** The project this sheet edits, so render() can close it if it goes. */
+      subject: opts.subject || null,
       close: function (value) {
         result = value;
         try {
@@ -333,6 +709,7 @@
       api.close();
     });
     on(dlg, 'click', function (e) {
+      if (opts.locked) return;
       if (e.target === dlg) api.close();
     });
     on(dlg, 'close', teardown);
@@ -345,9 +722,14 @@
       if (e.defaultPrevented) return;
       if (e.key === 'Escape' || e.key === 'Esc') {
         e.preventDefault();
-        api.close();
+        if (!opts.locked) api.close();
       }
     });
+    // A locked sheet (the corrupt-state recovery) must not be dismissed by the
+    // dialog element's own cancel either.
+    if (opts.locked) {
+      on(dlg, 'cancel', function (e) { e.preventDefault(); });
+    }
 
     if (opts.build) opts.build(body, api);
 
@@ -364,6 +746,23 @@
     openSheets.slice().forEach(function (s) {
       s.close();
     });
+  }
+
+  /**
+   * 13 #11: a sheet whose project has been deleted was left open over the home
+   * screen, fully interactive, saving into nothing. Every sheet that names a
+   * `subject` project is checked on each render and closes itself.
+   */
+  function closeOrphanSheets() {
+    var gone = 0;
+    openSheets.slice().forEach(function (s) {
+      if (!s.subject) return;
+      if (Store.project(s.subject)) return;
+      gone++;
+      s.close();
+    });
+    if (gone) toast('That project is gone, so its editor closed');
+    return gone;
   }
 
   /** Custom confirm sheet (window.confirm looks wrong in standalone PWAs). */
@@ -822,6 +1221,8 @@
    * ================================================================== */
 
   function render() {
+    closeOrphanSheets();
+    syncStorageBanner();
     var p = currentProject();
     if (p && isCraftProject(p)) {
       // A craft module owns this screen.
@@ -923,6 +1324,9 @@
     }
 
     clear(els.homeList);
+    // "Your work lives only on this phone" — above the projects it is about.
+    var nag = backupNagBar();
+    if (nag) els.homeList.appendChild(nag);
     live.forEach(function (p) {
       els.homeList.appendChild(projectCard(p));
     });
@@ -957,7 +1361,11 @@
         'aria-label',
         prt.name + (isActive ? ' (current part — tap to edit)' : '')
       );
-      tab.appendChild(document.createTextNode(prt.name));
+      // 13 #10: a 2,000-character part name used to wrap into a block that
+      // filled the whole strip. The chip clips with an ellipsis; the full name
+      // is still on the tooltip and in the accessible name.
+      tab.title = prt.name;
+      tab.appendChild(el('span', 'tab-name', prt.name));
       if (prt.makeCount > 1) {
         tab.appendChild(document.createTextNode(' '));
         tab.appendChild(el('span', 'tab-badge', prt.piecesDone + '/' + prt.makeCount));
@@ -1209,12 +1617,51 @@
     }, 500);
   }
 
-  function showProjectDoneSheet(p) {
+  /**
+   * The finish sheet, in both of its shapes.
+   *
+   * With nothing blocking it is the celebration. With parts still outstanding
+   * (02 #2: a target-less part that was never touched blocks the project) it
+   * names them and offers "Finish anyway", which is `finishProject(force)`.
+   * @param {object} p
+   * @param {string[]} [blocking] part names still in the way
+   */
+  function showProjectDoneSheet(p, blocking) {
+    var left = Array.isArray(blocking) ? blocking : [];
     openSheet({
-      title: 'All parts done! 🎉',
+      subject: p.id,
+      title: left.length ? 'Finish ' + p.name + '?' : 'All parts done! 🎉',
       build: function (body) {
-        body.appendChild(el('p', null, p.name + ' is off the hook. Time for assembly.'));
-        var b = button('btn primary block big', 'Assembly checklist →');
+        if (!left.length) {
+          body.appendChild(el('p', null, p.name + ' is off the hook. Time for assembly.'));
+        } else {
+          body.appendChild(
+            el('p', null, 'These parts are not finished yet:')
+          );
+          var ul = el('ul', 'blocking-list');
+          left.slice(0, 12).forEach(function (name) {
+            ul.appendChild(el('li', null, name));
+          });
+          if (left.length > 12) ul.appendChild(el('li', 'muted', '…and ' + (left.length - 12) + ' more'));
+          body.appendChild(ul);
+          body.appendChild(
+            el('p', 'muted', 'Finish anyway if you are done with them — nothing is deleted, and Undo puts it back.')
+          );
+          var anyway = button('btn primary block big', 'Finish anyway');
+          on(anyway, 'click', function () {
+            var res = Store.finishProject(p.id, { force: true });
+            closeAllSheets();
+            if (res && res.ok) {
+              fb('done');
+              celebrate('project');
+              render();
+              announce('Project complete');
+              toast(p.name + ' is finished ✓', { ms: 3200 });
+            }
+          });
+          body.appendChild(anyway);
+        }
+        var b = button('btn' + (left.length ? ' block' : ' primary block big'), 'Assembly checklist →');
         on(b, 'click', function () {
           closeAllSheets();
           openChecklistSheet(p.id);
@@ -1224,6 +1671,9 @@
     });
   }
 
+  /** Once per part per session — the guard is a nudge, not a nag. */
+  var alreadyDoneSaid = Object.create(null);
+
   function applyResult(res) {
     if (!res || res.event === 'none') return;
     var p = currentProject();
@@ -1231,6 +1681,18 @@
     var prt = Store.activePart(p);
 
     switch (res.event) {
+      // 13 #6: the part is already finished, so nothing moved. Say so once
+      // and stop — the counter must not pretend to climb past its target.
+      case 'alreadyDone':
+        var key = String(res.partName || (prt && prt.id) || '');
+        if (!alreadyDoneSaid[key]) {
+          alreadyDoneSaid[key] = true;
+          toast('Already finished — undo a row to keep counting', { ms: 3600 });
+        }
+        fb('undo');
+        updateCounters(p, prt);
+        break;
+
       case 'stitch':
         fb('tap');
         updateCounters(p, prt);
@@ -1258,6 +1720,9 @@
         updateBottomBar(p, prt);
         pushDiagram('round');
         announce(rowWord(p) + ' ' + prt.row);
+        // 12 #1: a finished row is the earliest honest moment to ask the
+        // browser to keep this data. Once, after a real gesture.
+        askForPersistOnce();
         break;
 
       case 'pieceDone':
@@ -1279,11 +1744,14 @@
 
       case 'projectDone':
         fb('done');
-        Store.setStatus(p.id, 'finished');
+        // finishProject banks the timer and stamps finishedAt exactly once;
+        // if something still blocks, the sheet offers "Finish anyway".
+        var fin = Store.finishProject(p.id);
         celebrate('project');
         render();
         announce('Project complete');
-        showProjectDoneSheet(p);
+        askForPersistOnce();
+        showProjectDoneSheet(p, fin && fin.ok ? [] : (fin ? fin.blocking : []));
         break;
 
       default:
@@ -1467,16 +1935,66 @@
     };
   }
 
+  /* ---- The "too long to draw live" guard (13 #5) ----
+   *
+   * Store.diagramModel rebuilds the whole piece whenever the row changes, and
+   * that build walks every row of the pattern looking each one up, so its cost
+   * grows with the square of the pattern length: measured in the Browser pane,
+   * a 1,500-row pattern costs ~1,040 ms per completed row while a 60-row
+   * amigurumi costs well under a millisecond. Stitch taps are cheap either way
+   * (the model is cached), but a row tap on a long pattern froze the counter.
+   *
+   * The shell cannot make that build cheaper from here, so it stops asking for
+   * it: past the threshold the live canvas inside the tap button is not
+   * mounted at all and the piece is only built when the user opens the 3D view
+   * on purpose. Everything under the threshold is exactly as it was.
+   */
+  var DIAGRAM_MAX_LIVE_ROWS = 250;
+  var DIAGRAM_BUDGET_MS = 60;
+  /** partId -> true once this part has proved too expensive to draw live. */
+  var diagramHeavy = Object.create(null);
+
+  function partIsHeavy(prt) {
+    if (!prt) return false;
+    if (diagramHeavy[prt.id]) return true;
+    var rows = 0;
+    try {
+      var s = Store.patternSummary(prt);
+      rows = Math.max(s.maxRow || 0, prt.targetRows || 0, prt.row || 0);
+    } catch (e) {
+      rows = 0;
+    }
+    if (rows > DIAGRAM_MAX_LIVE_ROWS) {
+      diagramHeavy[prt.id] = true;
+      return true;
+    }
+    return false;
+  }
+
   /** The model for whatever is on screen, or null. */
   function currentModel() {
     var p = currentProject();
     var prt = p ? Store.activePart(p) : null;
     if (!p || !prt) return null;
+    var t0 = 0;
     try {
-      return Store.diagramModel(prt, p);
+      t0 = window.performance && performance.now ? performance.now() : 0;
+    } catch (e) {
+      t0 = 0;
+    }
+    var model;
+    try {
+      model = Store.diagramModel(prt, p);
     } catch (e) {
       return null;
     }
+    // A build that blew the frame budget: never again on the tap path.
+    if (t0) {
+      try {
+        if (performance.now() - t0 > DIAGRAM_BUDGET_MS) diagramHeavy[prt.id] = true;
+      } catch (e) { /* ignore */ }
+    }
+    return model;
   }
 
   /**
@@ -1485,6 +2003,8 @@
    */
   function pushDiagram(animate) {
     if (!live.handle && !viewer.handle) return;
+    // Nothing but the deliberately-opened viewer pays for a heavy piece.
+    if (!viewer.handle && partIsHeavy(currentPart())) return;
     var model = currentModel();
     if (!model) return;
     var opts = { animate: animate || 'none' };
@@ -1565,7 +2085,8 @@
     });
   }
 
-  function destroyLiveDiagram() {
+  /** Just the canvas and its renderer; the "3D view" button stays. */
+  function destroyLiveCanvas() {
     if (live.handle) {
       try {
         live.handle.destroy();
@@ -1576,15 +2097,26 @@
     }
     if (live.canvas && live.canvas.parentNode) live.canvas.parentNode.removeChild(live.canvas);
     live.canvas = null;
+    if (els.stitchBtn) els.stitchBtn.classList.remove('has-diagram');
+  }
+
+  function destroyLiveDiagram() {
+    destroyLiveCanvas();
     if (live.btn && live.btn.parentNode) live.btn.parentNode.removeChild(live.btn);
     live.btn = null;
-    if (els.stitchBtn) els.stitchBtn.classList.remove('has-diagram');
   }
 
   /** Mount (or refresh) the canvas inside the stitch button. */
   function mountLiveDiagram() {
     if (!diagramEnabled() || !els.stitchBtn) {
       destroyLiveDiagram();
+      return;
+    }
+    ensureThreeDButton();
+    // A pattern long enough that rebuilding the piece costs more than a frame
+    // keeps the 3D view button but not the live canvas (13 #5).
+    if (partIsHeavy(currentPart())) {
+      destroyLiveCanvas();
       return;
     }
     if (!live.canvas) {
@@ -1614,19 +2146,38 @@
       // the app reads it back.
       live.canvas.diagram = live.handle;
     }
-    if (!live.btn && els.stitchSection) {
-      var b = button('stitch-3d', '⤢', 'Open 3D view');
-      b.id = 'stitch-3d';
-      on(b, 'click', function (e) {
-        e.stopPropagation();
-        openViewerSheet();
-      });
-      els.stitchSection.appendChild(b);
-      live.btn = b;
-    }
     els.stitchBtn.classList.add('has-diagram');
     resizeDiagrams();
     pushDiagram('none');
+  }
+
+  /**
+   * 02 #8 / 07 #7–#8: this used to be a 44×44 hole punched in the top-right
+   * corner of the tap button, so a mis-tap cost a stitch and opened a modal,
+   * it was last in the tab order, and its glyph failed WCAG 1.4.11 on the two
+   * dark `--primary-text` themes (1.81:1 and 2.53:1). It is now a labelled
+   * control in the actions row, on `--surface-2`, in DOM order.
+   */
+  function ensureThreeDButton() {
+    if (live.btn || !els.stitchActions) return;
+    // Plain `.btn` on purpose: --surface-2 / --text is a pair every theme
+    // designed to contrast, unlike the old --primary-text on a black scrim.
+    var b = button('btn stitch-3d', null, 'Open the 3D view');
+    b.id = 'stitch-3d';
+    b.setAttribute('data-tour', 'stitch-3d');
+    b.appendChild(el('span', 'stitch-3d-glyph', '⤢'));
+    b.appendChild(el('span', 'stitch-3d-label', '3D view'));
+    on(b, 'click', function (e) {
+      e.stopPropagation();
+      openViewerSheet();
+    });
+    var reset = document.getElementById('stitch-reset');
+    if (reset && reset.parentNode === els.stitchActions) {
+      els.stitchActions.insertBefore(b, reset);
+    } else {
+      els.stitchActions.appendChild(b);
+    }
+    live.btn = b;
   }
 
   /** "Rnd 5 · 13 / 24" for the viewer header. */
@@ -1666,6 +2217,7 @@
     if (!p || !prt) return;
 
     openSheet({
+      subject: p.id,
       title: prt.name,
       cls: 'sheet-viewer',
       build: function (body, api) {
@@ -1794,6 +2346,7 @@
     var p = Store.project(projectId);
     if (!p) return;
     openSheet({
+      subject: projectId,
       title: 'Yarn colours',
       build: function (body) {
         var list = el('div', 'list');
@@ -1873,6 +2426,7 @@
     }
 
     openSheet({
+      subject: editing ? projectId : null,
       title: editing ? 'Edit project' : 'New project',
       build: function (body, api) {
         nameInput = textInput(p ? p.name : '', 'Sunny the sheep');
@@ -2097,7 +2651,9 @@
 
             var bits = [];
             if (secs.length) {
-              var res = Store.importPatternSections(created.id, secs, { mode: 'parts', text: pdf.text() });
+              var res = Store.importPatternSections(created.id, secs, {
+                mode: 'parts', text: pdf.text(), noTargets: pdf.noTargets()
+              });
               var extra = addChecklistItems(created.id, pdf.checkedChecklist());
               var fresh = Store.project(created.id);
               bits.push(plural(fresh ? fresh.parts.length : secs.length, 'part'));
@@ -2254,6 +2810,7 @@
       /** Pasted text gets the same card, under an honest name. */
       sourceLabel: function () { return fileBase ? 'From this PDF' : 'From this pattern'; },
       rerender: function () { picker.rerender(); },
+      noTargets: picker.noTargets,
       checkedSections: picker.checkedSections,
       checkedChecklist: picker.checkedChecklist,
       wantsTemplate: function () { return wantsTemplate; },
@@ -2305,6 +2862,7 @@
   function addPartFlow(projectId) {
     var nameInput, countStep;
     openSheet({
+      subject: projectId,
       title: 'Add a part',
       build: function (body) {
         nameInput = textInput('', 'Wing');
@@ -2497,6 +3055,7 @@
     }
 
     openSheet({
+      subject: projectId,
       title: 'Part: ' + prt.name,
       build: function (body, api) {
         nameInput = textInput(prt.name, 'Body');
@@ -2583,19 +3142,46 @@
           text: 'Save',
           cls: 'btn primary',
           onClick: function (api) {
-            Store.updatePart(p.id, prt.id, collectPatch());
-            api.close();
-            render();
+            savePart(api);
           }
         }
       ]
     });
+
+    /**
+     * 13 #9: dropping the make-count clamps `piecesDone` and the finished
+     * pieces just vanish. Ask first, with the number in the question.
+     */
+    function savePart(api) {
+      var patch = collectPatch();
+      var impact = Store.makeCountImpact(p.id, prt.id, patch.makeCount);
+      function commit() {
+        Store.updatePart(p.id, prt.id, patch);
+        api.close();
+        render();
+      }
+      if (!impact || impact.piecesLost <= 0) {
+        commit();
+        return;
+      }
+      confirmSheet({
+        title: 'Lose ' + plural(impact.piecesLost, 'finished piece') + '?',
+        message:
+          'This part has ' + impact.piecesDone + ' pieces done — drop to ' + impact.makeCount + '? ' +
+          'Undo puts them back if you change your mind.',
+        confirmText: 'Drop to ' + impact.makeCount,
+        danger: true
+      }).then(function (ok) {
+        if (ok) commit();
+      });
+    }
   }
 
   function openPartsSheet(projectId) {
     var p = Store.project(projectId);
     if (!p) return;
     openSheet({
+      subject: projectId,
       title: 'Parts',
       build: function (body, api) {
         var list = el('div', 'list');
@@ -3002,8 +3588,43 @@
     '(e.g. “Rnd 1: 6 sc in MR (6)”).';
 
   function sectionRowInfo(text, seq) {
-    var s = Store.patternSummary({ id: 'import:' + seq, patternText: text, sizeIndex: 0 });
-    return { rows: s.rows, computedOnly: s.computedOnly, hasTargets: s.hasTargets };
+    var probe = { id: 'import:' + seq, patternText: text, sizeIndex: 0 };
+    var s = Store.patternSummary(probe);
+    return {
+      rows: s.rows,
+      computedOnly: s.computedOnly,
+      hasTargets: s.hasTargets,
+      // What Store.importPatternSections will set as targetRows (01 #1). Same
+      // rule: rows 1..maxRow, contiguous, at least two of them.
+      target: contiguousTarget(probe)
+    };
+  }
+
+  /** Mirrors Store's own targetRowsFromText so the picker can show it first. */
+  function contiguousTarget(probePart) {
+    var lines;
+    try {
+      lines = Store.linesFor(probePart) || [];
+    } catch (e) {
+      return null;
+    }
+    var seen = Object.create(null);
+    var max = 0;
+    for (var i = 0; i < lines.length; i++) {
+      var l = lines[i];
+      if (!l || l.kind !== 'row') continue;
+      var a = typeof l.row === 'number' && isFinite(l.row) ? Math.floor(l.row) : 0;
+      if (a < 1) continue;
+      var b = typeof l.rowEnd === 'number' && isFinite(l.rowEnd) && l.rowEnd >= a ? Math.floor(l.rowEnd) : a;
+      if (b - a > 9999) continue;
+      for (var r = a; r <= b; r++) {
+        seen[r] = true;
+        if (r > max) max = r;
+      }
+    }
+    if (max < 2) return null;
+    for (var k = 1; k <= max; k++) if (!seen[k]) return null;
+    return max;
   }
 
   function plural(n, word) {
@@ -3100,6 +3721,23 @@
 
     var resultLine = el('p', 'dz-result muted');
     resultLine.hidden = true;
+    /** "Pages 12–20 had no readable text" (06 #4) — never the word "failed". */
+    var emptyLine = el('p', 'dz-result dz-empty muted');
+    emptyLine.hidden = true;
+
+    // 06 #6: there was no way to abort an import at all.
+    var signal = null;
+    var cancelBtn = button('btn ghost block dz-cancel', 'Cancel');
+    cancelBtn.hidden = true;
+    on(cancelBtn, 'click', function () {
+      if (signal) signal.cancelled = true;
+      cancelBtn.disabled = true;
+      setBusyText('Stopping…');
+    });
+
+    function setBusyText(text) {
+      zoneLabel.textContent = text || '';
+    }
 
     function setBusy(text, frac) {
       reading = !!text;
@@ -3109,19 +3747,58 @@
       zoneLabel.hidden = !text;
       progress.hidden = !text;
       progressFill.style.width = Math.round(Math.max(0, Math.min(1, frac || 0)) * 100) + '%';
+      cancelBtn.hidden = !(reading && signal);
+      if (!reading) cancelBtn.disabled = false;
+    }
+
+    /** [12,13,14,17] → "12–14, 17" */
+    function pageRanges(nums) {
+      var sorted = nums.slice().sort(function (a, b) { return a - b; });
+      var out = [];
+      var i = 0;
+      while (i < sorted.length) {
+        var start = sorted[i];
+        var end = start;
+        while (i + 1 < sorted.length && sorted[i + 1] === end + 1) { i++; end = sorted[i]; }
+        out.push(start === end ? String(start) : start + '–' + end);
+        i++;
+      }
+      return out.join(', ');
     }
 
     function showResult(res) {
       if (!res) return;
-      var bits = [plural(res.pages, 'page')];
+      var bits = [];
+      // The page cap was used: say what was left out rather than pretending.
+      if (res.pagesTotal && res.pagesTotal > res.pages) {
+        bits.push(res.pages + ' of ' + res.pagesTotal + ' pages');
+      } else {
+        bits.push(plural(res.pages, 'page'));
+      }
       if (res.columnsDetected) bits.push(plural(res.columnsDetected, 'column') + ' untangled');
       bits.push(Number(res.chars).toLocaleString() + ' characters');
       resultLine.textContent = 'Read ' + bits.join(' · ');
       resultLine.hidden = false;
+
+      var empty = res.emptyPages && res.emptyPages.length ? res.emptyPages : null;
+      if (empty) {
+        emptyLine.textContent =
+          (empty.length === 1 ? 'Page ' : 'Pages ') + pageRanges(empty) +
+          (empty.length === 1 ? ' had' : ' had') +
+          ' no readable text (they are probably images).';
+        emptyLine.hidden = false;
+      } else {
+        emptyLine.hidden = true;
+      }
     }
 
     function fail(err) {
       setBusy('', 0);
+      // The user pressed Cancel: leave everything exactly as it was.
+      if (err && err.name === 'AbortError') {
+        toast('Import cancelled');
+        return;
+      }
       if (typeof opts.onError === 'function') {
         try {
           opts.onError(err);
@@ -3140,6 +3817,12 @@
       var chain = Promise.resolve();
       var step = function (n) {
         return function () {
+          // PdfText.open has no signal of its own, so Cancel is checked here.
+          if (signal && signal.cancelled) {
+            var err = new Error('Cancelled');
+            err.name = 'AbortError';
+            throw err;
+          }
           setBusy('Reading page ' + n + ' of ' + total + '…', total ? n / total : 0);
           return handle.textOf(n).then(function (txt) {
             blocks.push('=== PAGE ' + n + ' ===\n' + txt);
@@ -3148,6 +3831,7 @@
       };
       for (var n = 1; n <= total; n++) chain = chain.then(step(n));
       return chain.then(function () {
+        signal = null;
         setBusy('', 0);
         var text = blocks.join('\n\n').replace(/\n{3,}/g, '\n\n').trim();
         var res = { text: text, pages: total, chars: text.length, columnsDetected: 0 };
@@ -3156,7 +3840,9 @@
       }, fail);
     }
 
-    function readPdf(file) {
+    function readPdf(file, readOpts) {
+      readOpts = readOpts || {};
+      signal = { cancelled: false };
       setBusy('Reading page 1…', 0.02);
       if (typeof opts.onPages === 'function') {
         window.PdfText.open(file).then(function (handle) {
@@ -3168,20 +3854,27 @@
             return;
           }
           if (typeof opts.onText === 'function') gatherText(handle);
-        }, fail);
+          else signal = null;
+        }, function (err) { signal = null; fail(err); });
         return;
       }
       window.PdfText.extract(file, {
+        maxPages: readOpts.maxPages || 0,
+        signal: signal,
         onProgress: function (page, total) {
           setBusy('Reading page ' + page + ' of ' + total + '…', total ? page / total : 0);
         }
       }).then(function (res) {
+        signal = null;
         setBusy('', 0);
         showResult(res);
         if (typeof opts.onText === 'function') {
           try { opts.onText(res); } catch (e) { fail(e); }
         }
-      }, fail);
+      }, function (err) {
+        signal = null;
+        fail(err);
+      });
     }
 
     function matchesAccept(file) {
@@ -3206,19 +3899,48 @@
         toast('The PDF reader isn’t available. Paste the text instead.', { ms: 4200 });
         return;
       }
-      if (typeof opts.confirm !== 'function') {
-        readPdf(file);
-        return;
-      }
-      var gate;
-      try {
-        gate = opts.confirm(file);
-      } catch (e) {
-        gate = false;
-      }
-      Promise.resolve(gate).then(function (ok) {
-        if (ok !== false) readPdf(file);
-      }, noop);
+      // Three gates, in the order that costs the user least: is there room,
+      // is the file huge, and whatever the caller wanted to ask.
+      guardQuota(file, 'the text in that PDF', PDF_TEXT_BUDGET)
+        .then(function (ok) {
+          if (!ok) return null;
+          return guardPdfSize(file);
+        })
+        .then(function (readOpts) {
+          if (!readOpts) return;
+          if (typeof opts.confirm !== 'function') {
+            readPdf(file, readOpts);
+            return;
+          }
+          var gate;
+          try {
+            gate = opts.confirm(file);
+          } catch (e) {
+            gate = false;
+          }
+          Promise.resolve(gate).then(function (ok2) {
+            if (ok2 !== false) readPdf(file, readOpts);
+          }, noop);
+        }, noop);
+    }
+
+    /**
+     * 06 #6: a 60 MB tiled PDF on a 3 GB phone kills the tab with no error to
+     * read. Over the threshold, offer the first 20 pages instead.
+     * @returns {Promise<object|null>} read options, or null to stop
+     */
+    function guardPdfSize(file) {
+      var warnAt = (window.PdfText && window.PdfText.SIZE_WARN_BYTES) || 25 * 1024 * 1024;
+      if (!file || file.size <= warnAt) return Promise.resolve({});
+      return confirmSheet({
+        title: 'That’s a ' + mb(file.size) + ' file',
+        message:
+          'Reading it may take a while or run out of memory on this phone. Read the first 20 pages?',
+        confirmText: 'Read 20 pages',
+        cancelText: 'Not now'
+      }).then(function (ok) {
+        return ok ? { maxPages: 20 } : null;
+      });
     }
 
     on(fileInput, 'change', function () {
@@ -3256,8 +3978,10 @@
     document.addEventListener('drop', docGuard);
 
     wrap.appendChild(zone);
+    wrap.appendChild(cancelBtn);
     wrap.appendChild(fileInput);
     wrap.appendChild(resultLine);
+    wrap.appendChild(emptyLine);
 
     wrap.zone = zone;
     wrap.fileInput = fileInput;
@@ -3303,12 +4027,39 @@
     var text = '';
     var rows = [];
     var checkItems = [];
+    /** 06 #3: informational only — the arithmetic is the same either way. */
+    var dialect = null;
+    /** 01 #1: the import sets targetRows unless the user says not to. */
+    var noTargets = false;
 
     var node = el('div', 'imp-picker');
+
+    var chips = el('div', 'imp-chips');
+    chips.hidden = true;
+    node.appendChild(chips);
 
     var list = el('div', 'imp-list');
     if (opts.tourList) list.setAttribute('data-tour', opts.tourList);
     var listField = field(opts.sectionsLabel || 'Sections detected', list, opts.sectionsHint);
+
+    // "Don't set targets" lives in the sections header, next to the numbers it
+    // turns off (06 #3, 01 #1).
+    var targetsRow = el('div', 'imp-targets');
+    var targetsChk = button('check', '✓', 'Don’t set targets');
+    targetsChk.setAttribute('role', 'checkbox');
+    targetsChk.setAttribute('aria-checked', 'false');
+    var targetsLabel = el('span', 'imp-targets-label', 'Don’t set targets');
+    on(targetsChk, 'click', function () {
+      noTargets = !noTargets;
+      targetsChk.setAttribute('aria-checked', noTargets ? 'true' : 'false');
+      renderList();
+      changed();
+    });
+    on(targetsLabel, 'click', function () { targetsChk.click(); });
+    targetsRow.appendChild(targetsChk);
+    targetsRow.appendChild(targetsLabel);
+    // After the <label>, before the list itself.
+    listField.insertBefore(targetsRow, list);
     node.appendChild(listField);
 
     var checkList = el('div', 'imp-list');
@@ -3341,9 +4092,24 @@
           placement: sec.placement || '',
           rows: info.rows,
           computedOnly: info.computedOnly,
-          hasTargets: info.hasTargets
+          hasTargets: info.hasTargets,
+          target: info.target
         };
       });
+      dialect = null;
+      if (window.Patterns && typeof window.Patterns.dialectHints === 'function') {
+        try { dialect = window.Patterns.dialectHints(text); } catch (e) { dialect = null; }
+      }
+    }
+
+    function renderChips() {
+      clear(chips);
+      var any = false;
+      if (dialect && dialect.uk && !dialect.us) {
+        chips.appendChild(el('span', 'imp-chip', 'Looks like UK terms'));
+        any = true;
+      }
+      chips.hidden = !any;
     }
 
     function renderList() {
@@ -3354,10 +4120,13 @@
         // In the New project sheet there is nothing to explain until a PDF has
         // been read, so the whole field stays out of the way.
         listField.hidden = !!opts.hideWhenEmpty;
+        targetsRow.hidden = true;
         list.appendChild(el('p', 'muted', IMPORT_EMPTY));
         return;
       }
       listField.hidden = false;
+      // Only worth offering when at least one section would get a target.
+      targetsRow.hidden = !rows.some(function (r) { return r.rows > 0 && r.target; });
       rows.forEach(function (r, i) {
         var item = el('div', 'imp-item');
         var chk = button('check', '✓', 'Import ' + (r.name || 'section ' + (i + 1)));
@@ -3380,6 +4149,8 @@
         var meta = [];
         if (r.makeCount > 1) meta.push('×' + r.makeCount);
         meta.push(r.rows ? r.rows + ' ' + word() + (r.rows === 1 ? '' : 's') : 'no rows');
+        // 01 #1: say the target out loud so it is visible and correctable.
+        if (r.rows && r.target && !noTargets) meta.push('→ target ' + r.target);
         if (r.rows && r.computedOnly) meta.push('counts computed ≈');
         else if (r.rows && r.hasTargets) meta.push('counts found');
         // The parser found assembly prose for this piece - it lands in the
@@ -3404,9 +4175,17 @@
       }
       var was = {};
       checkItems.forEach(function (c) { was[c.text.toLowerCase()] = c.checked; });
-      checkItems = found.map(function (t) {
+      checkItems = found.map(function (s) {
+        // Store.suggestChecklist hands back { text, confidence }.
+        var t = String(s && s.text !== undefined ? s.text : s);
+        var conf = (s && s.confidence) === 'strong' ? 'strong' : 'weak';
         var key = t.toLowerCase();
-        return { text: t, checked: was[key] === undefined ? true : was[key] };
+        return {
+          text: t,
+          confidence: conf,
+          // 01 #3: anything we had to reconstruct arrives unticked.
+          checked: was[key] === undefined ? conf === 'strong' : was[key]
+        };
       });
     }
 
@@ -3425,13 +4204,18 @@
           changed();
         });
         item.appendChild(chk);
-        item.appendChild(el('div', 'imp-check-text', c.text));
+        var txt = el('div', 'imp-check-text', c.text);
+        if (c.confidence === 'weak') {
+          txt.appendChild(el('span', 'imp-weak', ' · check this one'));
+        }
+        item.appendChild(txt);
         checkList.appendChild(item);
       });
     }
 
     function refresh() {
       buildRows();
+      renderChips();
       renderList();
       buildChecks();
       renderChecks();
@@ -3464,6 +4248,8 @@
       getText: function () { return text; },
       /** Redraw the section list (the row word may have changed under it). */
       rerender: renderList,
+      /** `opts.noTargets` for Store.importPatternSections. */
+      noTargets: function () { return noTargets; },
       checkedSections: checkedSections,
       checkedChecklist: function () {
         return checkItems.filter(function (c) { return c.checked; }).map(function (c) { return c.text; });
@@ -3541,6 +4327,7 @@
     }
 
     openSheet({
+      subject: p.id,
       title: 'Import pattern',
       cls: 'sheet-import',
       build: function (body) {
@@ -3578,7 +4365,7 @@
             Store.importPatternSections(
               p.id,
               [{ name: activeName, makeCount: 1, text: area.value }],
-              { mode: 'active', text: area.value }
+              { mode: 'active', text: area.value, noTargets: picker.noTargets() }
             );
             var extra = addChecklistItems(p.id, picker.checkedChecklist());
             api.close();
@@ -3596,7 +4383,9 @@
               toast('Tick at least one section first');
               return;
             }
-            var res = Store.importPatternSections(p.id, secs, { mode: 'parts', text: area.value });
+            var res = Store.importPatternSections(p.id, secs, {
+              mode: 'parts', text: area.value, noTargets: picker.noTargets()
+            });
             var extra = addChecklistItems(p.id, picker.checkedChecklist());
             api.close();
             render();
@@ -3641,6 +4430,7 @@
     var currentSection = currentLine && typeof currentLine.section === 'number' ? currentLine.section : null;
 
     openSheet({
+      subject: projectId,
       title: 'Pattern · ' + prt.name,
       build: function (body, api) {
         if (!lines.length) {
@@ -3753,6 +4543,7 @@
     if (!p) return;
 
     openSheet({
+      subject: projectId,
       title: 'Assembly checklist',
       build: function (body) {
         var count = el('p', 'muted');
@@ -3965,6 +4756,7 @@
     var p = Store.project(projectId);
     if (!p) return;
     openSheet({
+      subject: projectId,
       title: 'Project notes',
       build: function (body) {
         var area = textArea(p.notes, '', 'Hook 4mm · Paintbox DK · pattern link…');
@@ -3986,6 +4778,7 @@
     var prt = Store.part(p, partId);
     if (!p || !prt) return;
     openSheet({
+      subject: projectId,
       title: 'Placement notes · ' + prt.name,
       build: function (body) {
         var area = textArea(prt.placementNotes, '', 'Eyes between rnd 8–9, 6 sts apart');
@@ -4009,6 +4802,7 @@
     if (!p || !prt) return;
     var input;
     openSheet({
+      subject: projectId,
       title: 'Stitch alerts · ' + prt.name,
       build: function (body) {
         input = textInput(prt.alerts.join(', '), '40, 80');
@@ -4035,6 +4829,7 @@
     var p = Store.project(projectId);
     if (!p) return;
     openSheet({
+      subject: projectId,
       title: 'History',
       build: function (body, api) {
         if (!p.history.length) {
@@ -4073,6 +4868,7 @@
     var p = Store.project(projectId);
     if (!p) return;
     openSheet({
+      subject: projectId,
       title: 'Project status',
       build: function (body, api) {
         var list = el('div', 'list');
@@ -4081,8 +4877,21 @@
           b.appendChild(el('b', null, s.label));
           b.appendChild(el('span', null, s.desc));
           on(b, 'click', function () {
+            // "Finished" goes through finishProject so the parts that are not
+            // done get a say (02 #2); everything else is a plain status.
+            if (s.id === 'finished') {
+              var res = Store.finishProject(p.id);
+              api.close();
+              render();
+              if (res && res.ok) {
+                celebrate('project');
+                toast('Now finished');
+              } else {
+                showProjectDoneSheet(p, res ? res.blocking : []);
+              }
+              return;
+            }
             Store.setStatus(p.id, s.id);
-            if (s.id === 'finished') celebrate('project');
             api.close();
             render();
             toast('Now ' + s.label.toLowerCase());
@@ -4168,6 +4977,7 @@
       { icon: '❓', label: 'Show me around', run: function () { startTour('counter'); } }
     ];
     openSheet({
+      subject: projectId,
       title: p.name,
       build: function (body, api) {
         var list = el('div', 'list');
@@ -4201,23 +5011,19 @@
   }
 
   function exportBackup() {
+    var text;
     try {
-      var name = backupFilename();
-      var url = URL.createObjectURL(backupBlob());
-      var a = document.createElement('a');
-      a.href = url;
-      a.download = name;
-      a.style.display = 'none';
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      window.setTimeout(function () {
-        URL.revokeObjectURL(url);
-      }, 1500);
-      toast('Backup downloaded');
+      Store.flush();
+      text = Store.exportJSON();
     } catch (e) {
       toast('Could not create the backup file');
+      return;
     }
+    if (!downloadText(text, backupFilename(), 'application/json')) {
+      toast('Could not create the backup file');
+      return;
+    }
+    toast('Backup downloaded');
   }
 
   function canShareBackup() {
@@ -4241,6 +5047,135 @@
     }
   }
 
+  /* ---- import: preview first, then choose (09 #3, 12 #3) ---- */
+
+  var BACKUP_MAX_BYTES = 25 * 1024 * 1024;
+
+  function fmtBackupDate(ts) {
+    if (!ts) return 'never';
+    return fmtClock(ts);
+  }
+
+  /** The default each row starts on, per 12 #3. */
+  function defaultChoice(row) {
+    if (row.status === 'new') return 'replace';   // nothing local: just import
+    if (row.status === 'replace') return 'replace'; // the file is newer
+    return 'skip';                                  // identical, or local is newer
+  }
+
+  function countsLine(counts) {
+    var bits = [];
+    bits.push(counts['new'] + ' new');
+    bits.push(counts.replace + ' will be replaced');
+    bits.push(counts.identical + ' identical');
+    bits.push(counts.older + ' older');
+    return bits.join(' · ');
+  }
+
+  function importRow(row, choices, label) {
+    var item = el('div', 'imp-row');
+    var main = el('div', 'imp-row-main');
+    main.appendChild(el('div', 'imp-row-name', row.name || '(unnamed)'));
+    var meta = [];
+    if (label) meta.push(label);
+    if (row.craft) meta.push(row.craft);
+    meta.push('in the file: ' + fmtBackupDate(row.updatedAt));
+    meta.push('on this phone: ' + (row.localUpdatedAt ? fmtBackupDate(row.localUpdatedAt) : 'not here yet'));
+    main.appendChild(el('div', 'imp-row-meta', meta.join(' · ')));
+    item.appendChild(main);
+
+    // Nothing here to replace or keep two of: it is in or it is out.
+    var options = row.status === 'new'
+      ? [{ id: 'skip', label: 'Skip' }, { id: 'replace', label: 'Import' }]
+      : [
+          { id: 'skip', label: 'Skip' },
+          { id: 'replace', label: 'Replace' },
+          { id: 'keepBoth', label: 'Keep both' }
+        ];
+    var seg = segmented(options, choices[row.id], function (v) { choices[row.id] = v; });
+    seg.node.setAttribute('aria-label', 'What to do with ' + (row.name || 'this item'));
+    item.appendChild(seg.node);
+    return item;
+  }
+
+  function openImportPreviewSheet(text, preview) {
+    var choices = { projects: Object.create(null), templates: Object.create(null) };
+    preview.projects.forEach(function (r) { choices.projects[r.id] = defaultChoice(r); });
+    preview.templates.forEach(function (r) { choices.templates[r.id] = defaultChoice(r); });
+
+    openSheet({
+      title: 'Import this backup?',
+      cls: 'sheet-import-preview',
+      build: function (body) {
+        body.appendChild(el('p', 'imp-counts', countsLine(preview.counts)));
+
+        var changedProjects = preview.projects.filter(function (r) { return r.status !== 'identical'; });
+        var changedTemplates = preview.templates.filter(function (r) { return r.status !== 'identical'; });
+
+        if (!changedProjects.length && !changedTemplates.length) {
+          body.appendChild(el('p', 'muted', 'Everything in this file is already on this phone.'));
+        }
+
+        if (changedProjects.length) {
+          var pl = el('div', 'imp-rows');
+          changedProjects.forEach(function (r) { pl.appendChild(importRow(r, choices.projects)); });
+          body.appendChild(field('Projects', pl));
+        }
+        if (changedTemplates.length) {
+          var tl = el('div', 'imp-rows');
+          changedTemplates.forEach(function (r) { tl.appendChild(importRow(r, choices.templates, 'template')); });
+          body.appendChild(field('Templates', tl));
+        }
+
+        body.appendChild(
+          el('p', 'muted', 'Keep both copies have no page images — those stay with the project that owns them.')
+        );
+      },
+      footer: [
+        { text: 'Cancel', cls: 'btn ghost', onClick: function (api) { api.close(); } },
+        {
+          text: 'Import',
+          cls: 'btn primary',
+          onClick: function (api) {
+            var n;
+            try {
+              n = Store.importJSON(text, choices);
+            } catch (err) {
+              api.close();
+              toast(importErrorText(err), { ms: 5200 });
+              return;
+            }
+            api.close();
+            applyTheme(Store.settings().theme, false);
+            render();
+            toast('Imported ' + plural(n, 'project'), {
+              ms: 8000,
+              actionText: Store.canUndoImport() ? 'Undo import' : '',
+              onAction: Store.canUndoImport()
+                ? function () {
+                    if (!Store.undoImport()) {
+                      toast('That import can no longer be undone');
+                      return;
+                    }
+                    applyTheme(Store.settings().theme, false);
+                    render();
+                    toast('Import undone');
+                  }
+                : null
+            });
+          }
+        }
+      ]
+    });
+  }
+
+  function importErrorText(err) {
+    if (err && err.code === 'newerVersion') {
+      return 'This backup was made by a newer version. Update the app, then try again.';
+    }
+    return (err && err.message) || 'That backup could not be imported';
+  }
+
   function importBackup() {
     var input = document.createElement('input');
     input.type = 'file';
@@ -4251,21 +5186,31 @@
       var file = input.files && input.files[0];
       document.body.removeChild(input);
       if (!file) return;
-      var reader = new FileReader();
-      reader.onload = function () {
-        try {
-          var n = Store.importJSON(String(reader.result));
-          applyTheme(Store.settings().theme, false);
-          render();
-          toast('Imported ' + n + ' project' + (n === 1 ? '' : 's'));
-        } catch (err) {
-          toast(err && err.message ? err.message : 'That backup could not be imported');
-        }
-      };
-      reader.onerror = function () {
-        toast('Could not read that file');
-      };
-      reader.readAsText(file);
+      // A wrong file (a video, a disk image) would otherwise hang the main
+      // thread inside readAsText.
+      if (file.size > BACKUP_MAX_BYTES) {
+        toast('That file is ' + mb(file.size) + ' — a backup is never that big', { ms: 4200 });
+        return;
+      }
+      guardQuota(file, 'that backup').then(function (ok) {
+        if (!ok) return;
+        var reader = new FileReader();
+        reader.onload = function () {
+          var text = String(reader.result);
+          var preview;
+          try {
+            preview = Store.previewImport(text);
+          } catch (err) {
+            toast(importErrorText(err), { ms: 5200 });
+            return;
+          }
+          openImportPreviewSheet(text, preview);
+        };
+        reader.onerror = function () {
+          toast('Could not read that file');
+        };
+        reader.readAsText(file);
+      });
     });
     input.click();
   }
@@ -4699,7 +5644,10 @@
       var p = currentProject();
       var prt = currentPart();
       if (!p || !prt) return;
-      Store.untapRow(p.id, prt.id);
+      var res = Store.untapRow(p.id, prt.id);
+      // Nothing to step back off (row 0 of the first piece): no buzz, no
+      // announcement, and above all no history entry eaten (13 #4).
+      if (res && res.event === 'none') return;
       fb('undo');
       render();
       announce(rowWord(p) + ' ' + Store.activePart(p).row);
@@ -4821,6 +5769,9 @@
 
     applyTheme(Store.settings().theme, false);
     bindEvents();
+    // Save failures, a corrupt key and a second tab all have to be visible
+    // before the first tap (13 #1–#3).
+    watchStorage();
 
     // Craft modules registered while their scripts evaluated; now the shell is
     // ready they can add FAQ entries, tours and whatever else they need.

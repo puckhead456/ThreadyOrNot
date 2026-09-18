@@ -804,10 +804,13 @@
           },
           {
             // Only there when the live diagram is on — the step trims itself out
-            // when the canvas is missing.
-            target: '#stitch-canvas',
+            // when the button is missing. It used to point at #stitch-canvas and
+            // say "tap ⤢"; the ⤢ now lives down here, out of the tap surface.
+            target: '#stitch-3d',
             title: 'Your piece, in 3D',
-            body: 'This is your piece growing as you count. Tap ⤢ to spin it around.'
+            body:
+              'The piece inside the big button grows as you count. Tap 3D view to open it ' +
+              'full size and spin it around.'
           },
           {
             target: '#stitch-readout',

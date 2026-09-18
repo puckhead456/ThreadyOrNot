@@ -122,10 +122,73 @@ p { margin: 0 0 0.6em; }
 .screen {
   position: fixed;
   inset: 0;
+  /* A persistent top banner pushes every screen down rather than covering it. */
+  top: var(--banner-h, 0px);
   display: flex;
   flex-direction: column;
-  height: 100dvh;
+  height: calc(100dvh - var(--banner-h, 0px));
 }
+
+/* --------------------------------------------------------------------------
+   3b. Top banners — a save that failed, private browsing, a second tab
+   (13 #1–#3, 09 #2). Never dismissable; the user has to act or accept.
+   -------------------------------------------------------------------------- */
+
+.banners {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 80;
+  display: flex;
+  flex-direction: column;
+}
+.banners:empty { display: none; }
+
+.banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 10px var(--pad);
+  padding-top: calc(10px + env(safe-area-inset-top));
+  border-bottom: 1px solid var(--border);
+  background: var(--danger);
+  color: var(--primary-text);
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+.banner-calm {
+  background: var(--surface-2);
+  color: var(--text);
+}
+.banner-text { flex: 1 1 200px; margin: 0; min-width: 0; }
+.banner-actions { flex: 0 0 auto; display: flex; gap: 8px; flex-wrap: wrap; }
+.banner .btn {
+  min-height: 40px;
+  padding: 6px 12px;
+  font-size: 14px;
+  background: var(--surface);
+  color: var(--text);
+  border-color: var(--surface);
+}
+.banner-calm .btn { border-color: var(--border); }
+
+/* "Your work lives only on this phone" (12 #1) — dismissible, on Home. */
+.nag-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+}
+.nag-text { flex: 1 1 180px; margin: 0; font-size: 14px; font-weight: 700; line-height: 1.35; }
+.nag-actions { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; }
+.btn.small { min-height: 40px; padding: 6px 12px; font-size: 14px; }
 
 .screen-body {
   flex: 1 1 auto;
@@ -385,6 +448,18 @@ p { margin: 0 0 0.6em; }
   color: var(--text);
   font-weight: 700;
   font-size: 14px;
+  white-space: nowrap;
+  /* 13 #10: a very long part name used to wrap into a block that filled the
+     whole strip and pushed "＋ part" out of reach. */
+  max-width: 11em;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.tab-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 .tab.active {
@@ -658,25 +733,20 @@ p { margin: 0 0 0.6em; }
 .stitch-btn.has-diagram .stitch-caption { margin-bottom: 6px; }
 .stitch-btn.has-diagram .stitch-hint { margin-top: 6px; }
 
+/* 02 #8 / 07 #7–#8: out of the tap surface and into the actions row. It is a
+   plain .btn now, so its colours come from --surface-2 / --text and pass
+   contrast in all six themes (the old rule painted --primary-text on a fixed
+   black scrim, which measured 1.81:1 in dragon-pixel and 2.53:1 in
+   dragon-fury). */
 .stitch-3d {
-  position: absolute;
-  top: 8px;
-  right: 8px;
-  z-index: 2;
-  width: 44px;
-  height: 44px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: var(--radius-sm);
-  font-size: 17px;
-  line-height: 1;
-  color: var(--primary-text);
-  background: rgba(0, 0, 0, 0.55);
-  border: 1px solid rgba(255, 255, 255, 0.45);
-  backdrop-filter: blur(2px);
+  flex: 0 0 auto;
+  gap: 6px;
+  min-height: 44px;
+  padding: 6px 12px;
+  font-size: 14px;
 }
-.stitch-3d:active { transform: scale(0.94); }
+.stitch-3d-glyph { font-size: 16px; line-height: 1; }
+.stitch-3d:active { transform: translateY(1px); }
 
 /* --- 3D viewer sheet --- */
 
@@ -776,6 +846,7 @@ dialog.sheet.sheet-viewer .sheet-inner { height: 92dvh; }
   align-items: center;
   justify-content: space-between;
   gap: 10px;
+  flex-wrap: wrap;
 }
 
 /* --------------------------------------------------------------------------
@@ -952,6 +1023,16 @@ dialog.sheet {
   overflow: hidden;
 }
 dialog.sheet::backdrop { background: var(--overlay); }
+
+/* The corrupt-state recovery covers everything: the next write would destroy
+   the evidence, so there is nothing else to do first (13 #3). */
+dialog.sheet.sheet-corrupt .sheet-inner {
+  top: 0;
+  max-height: none;
+  border-radius: 0;
+  border: none;
+}
+dialog.sheet.sheet-corrupt .sheet-grab { display: none; }
 
 dialog.sheet .sheet-inner {
   position: absolute;
@@ -1387,6 +1468,42 @@ textarea.mono {
   line-height: 1.3;
   overflow-wrap: anywhere;
 }
+/* 01 #3: a suggestion we had to reconstruct arrives unticked and says so. */
+.imp-weak { color: var(--text-muted); font-weight: 700; font-size: 12px; }
+
+/* "Looks like UK terms" and friends (06 #3) — informational only. */
+.imp-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.imp-chip {
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  font-size: 12px;
+  font-weight: 800;
+  color: var(--text-muted);
+}
+
+/* "Don't set targets", in the sections header (01 #1) */
+.imp-targets { display: flex; align-items: center; gap: 8px; margin: -4px 0 2px; }
+.imp-targets-label { font-size: 13px; font-weight: 700; color: var(--text-muted); }
+
+/* Backup import preview (09 #3, 12 #3) */
+.imp-counts { margin: 0; font-weight: 800; }
+.imp-rows { display: flex; flex-direction: column; gap: 10px; }
+.imp-row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+}
+.imp-row-name { font-weight: 800; overflow-wrap: anywhere; }
+.imp-row-meta { font-size: 12px; font-weight: 700; color: var(--text-muted); line-height: 1.4; }
+
+/* "These parts are not finished yet" on the project-done sheet (02 #2) */
+.blocking-list { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 2px; }
 
 /* PDF drop zone */
 .dz-wrap { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
@@ -1444,6 +1561,10 @@ textarea.mono {
 }
 
 .dz-result { font-size: 12px; font-weight: 700; margin: 0; }
+/* "Pages 12–20 had no readable text" (06 #4) */
+.dz-empty { line-height: 1.4; }
+/* 06 #6: the only way out of a long read */
+.dz-cancel { min-height: 40px; font-size: 14px; }
 
 /* "Have a pattern PDF?" pointer on the empty state and the new-project sheet */
 .pdf-hint {
