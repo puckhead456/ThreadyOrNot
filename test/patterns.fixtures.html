@@ -222,6 +222,15 @@ var PDF_EXPECT = {
   'crochet-baphomet.pdf': ['Arms/2/11', 'Tail/1/42', 'Body/Head/1/33', 'Muzzle/1/5', 'Horns/2/14', 'Ears/2/6', 'Feet/2/8']
 };
 
+// wave 1 (06 #4): pages that carried no readable text. The cardigan's pages
+// 12-20 are the photo tutorial, baphomet's page 8 is the photo appendix -
+// exactly the "the rounds for the Legs live in a picture" case the UI has to
+// be able to say out loud. Everything else in the corpus is text all through.
+var EMPTY_EXPECT = {
+  'cardigan.pdf': [12, 13, 14, 15, 16, 17, 18, 19, 20],
+  'crochet-baphomet.pdf': [8]
+};
+
 function runPdfs() {
   h('h2', 'REAL PDFs (PdfText.extract -> Patterns)');
   if (!window.PdfText || !window.pdfjsLib) {
@@ -239,7 +248,53 @@ function runPdfs() {
         .catch(function (e) { log(false, name + ': extract failed - ' + (e && e.message ? e.message : e)); });
     });
   });
-  return chain;
+  return chain.then(runGuards);
+}
+
+// ------------------------------------------- wave 1 (06 #6): the guards
+// A page cap and a Cancel button are the difference between "the app took a
+// while" and "the tab vanished" on a 3 GB phone, so both are exercised
+// against a real multi-page PDF.
+function runGuards() {
+  h('h2', 'PdfText guards: page cap, cancel, size warning');
+  eq(window.PdfText.SIZE_WARN_BYTES, 25 * 1024 * 1024,
+    'PdfText.SIZE_WARN_BYTES is exported for the UI confirm sheet');
+  return fetch('../tmp-pdf/cardigan.pdf')
+    .then(function (r) { return r.blob(); })
+    .then(function (blob) {
+      return window.PdfText.extract(blob, { maxPages: 3 })
+        .then(function (capped) {
+          eq([capped.pages, capped.pagesTotal], [3, 22],
+            'maxPages:3 reads three pages of a 22-page PDF and still reports the real length');
+          log(capped.text.indexOf('=== PAGE 4 ===') < 0,
+            'maxPages:3 stops at page 3', capped.text.slice(-40));
+          // Cancel: the signal is flipped from onProgress once page 1 is in.
+          var signal = { cancelled: false };
+          var seen = [];
+          return window.PdfText.extract(blob, {
+            signal: signal,
+            onProgress: function (p) { seen.push(p); if (p >= 1) signal.cancelled = true; }
+          }).then(
+            function () { log(false, 'a cancelled import must not resolve'); },
+            function (err) {
+              eq(err.name, 'AbortError', 'a cancelled import rejects with an AbortError');
+              eq(seen, [1], '...at the head of the page step after the one that was running');
+            }
+          );
+        })
+        .then(function () {
+          // A real AbortSignal works too, and an already-aborted one never
+          // even opens the document.
+          if (typeof AbortController !== 'function') return null;
+          var ac = new AbortController();
+          ac.abort();
+          return window.PdfText.extract(blob, { signal: ac.signal }).then(
+            function () { log(false, 'an aborted AbortSignal must not resolve'); },
+            function (err) { eq(err.name, 'AbortError', 'an AbortSignal is accepted as the cancel signal'); }
+          );
+        });
+    })
+    .catch(function (e) { log(false, 'guard run failed - ' + (e && e.message ? e.message : e)); });
 }
 
 function checkPdf(name, res) {
@@ -249,6 +304,8 @@ function checkPdf(name, res) {
     res.columnsDetected + ' two-column pages -> ' + JSON.stringify(shape));
   window.__pdfText = window.__pdfText || {};
   window.__pdfText[name] = res.text;
+
+  eq(res.emptyPages, EMPTY_EXPECT[name] || [], name + ': pages with no readable text');
 
   if (PDF_EXPECT[name]) {
     eq(shape, PDF_EXPECT[name], name + ': section list from the real PDF');
@@ -268,6 +325,26 @@ function checkPdf(name, res) {
     eq(fs ? P.summary(P.parse(fs.text)).rows : null, 8, 'cardigan.pdf: First Section has 8 rows');
     var sizes = P.detectSizes(res.text);
     eq(sizes ? sizes.length : 0, 9, 'cardigan.pdf: detectSizes finds 9 sizes');
+
+    // wave 1 (03 #4): the wrapped size lists "…the remaining 96 (108," /
+    // "116) sts unworked" and "116), turn. 184 (208, 224)" used to open
+    // Row 108 and Row 116, splitting Center Back into a 2-row part plus an
+    // unnamed 5-row "Part 4". Seven named sections, no absurd row numbers.
+    eq(nm.length, 7, 'cardigan.pdf: exactly 7 sections');
+    eq(nm.filter(function (x) { return !x; }), [], 'cardigan.pdf: no unnamed section');
+    var maxRows = secs.map(function (s) { return P.summary(P.parse(s.text)).maxRow; });
+    eq(maxRows.filter(function (r) { return r > 60; }), [],
+      'cardigan.pdf: no phantom row past 60 (the wrapped size lists are not markers)');
+    eq(P.summary(P.parse(sectionNamed(secs, 'Center Back').text)).rows, 6,
+      'cardigan.pdf: Center Back is one 6-row part, not 2 rows plus an unnamed 5');
+    // (03 #10) the running title block and the back-matter adverts
+    var allText = secs.map(function (s) { return s.text; }).join('\n');
+    eq(/wheat stitch crochet cardigan|briana k designs/i.test(allText), false,
+      'cardigan.pdf: the title/byline block never reaches a part’s text');
+    eq(/click here|gpsr|etsy\.com|facebook\.com/i.test(allText), false,
+      'cardigan.pdf: the back-matter adverts are cut from the last part');
+    var dh = P.dialectHints(res.text);
+    eq([dh.us, dh.uk], [true, false], 'cardigan.pdf: dialectHints reads it as US terms');
   }
   if (name === 'crochet-snowman.pdf') {
     // the text arrives as "R 1 2 - R 1 7 :  6 6  s c  a r o u n d" before the

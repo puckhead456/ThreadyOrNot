@@ -2856,7 +2856,7 @@
 
     /** Add a row, merging it onto an earlier row for the same floss. */
     function addEntry(entry) {
-      var mk = (entry.brand || '') + ' ' + entry.code.toLowerCase() + ' ' + entry.kind;
+      var mk = (entry.brand || '') + '\u0000' + entry.code.toLowerCase() + '\u0000' + entry.kind;
       var prev = byKey[mk];
       if (!prev) {
         byKey[mk] = entry;
@@ -3894,7 +3894,7 @@
       var x = num(it.transform[4], 0), y = num(it.transform[5], 0);
       if (/^\d{1,4}$/.test(trimmed)) { nums.push({ v: parseInt(trimmed, 10), x: x, y: y }); continue; }
       if (trimmed.length !== 1) continue;
-      out.push({ x: x, y: y, w: 1, h: 1, id: str(it.fontName, 'f') + '' + trimmed });
+      out.push({ x: x, y: y, w: 1, h: 1, id: str(it.fontName, 'f') + '\u0001' + trimmed });
     }
     return { marks: out, nums: nums };
   }
@@ -4156,7 +4156,7 @@
 
     /* 1. the symbol the key printed, when the mark is a real text glyph */
     for (i = 0; i < marks.length; i++) {
-      var glyph = marks[i].id.indexOf('') > 0 ? marks[i].id.split('')[1] : '';
+      var glyph = marks[i].id.indexOf('\u0001') > 0 ? marks[i].id.split('\u0001')[1] : '';
       if (!glyph) continue;
       for (j = 0; j < entries.length; j++) {
         if (usedE[j]) continue;

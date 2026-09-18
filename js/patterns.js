@@ -22,9 +22,36 @@
 
   function normDashes(s) { return s.replace(DASHES, '-'); }
 
+  // --- Unicode hygiene (06 #7) -----------------------------------------
+  // Text pasted from a web page, a Google Doc or a justified-typeset PDF
+  // carries characters none of the rules below would ever match: a soft
+  // hyphen inside "in-crease", a zero-width space in front of "Rnd 6", a
+  // fullwidth "\uff17", a "\u25aa" bullet, a curly quote in a 6" measurement, a
+  // non-breaking space between a number and its unit. Each one used to make
+  // a whole round disappear from the count, silently. Fold them all to ASCII
+  // before anything looks at the line.
+  var INVISIBLE_RE = /[\u0000\u00ad\u200b-\u200d\u2060\ufeff]/g;
+  var NBSP_RE = /[\u00a0\u2007\u202f]/g;
+  // "exotic" bullets: any of these in front of a round is the same "-".
+  var BULLET_RE = /[\u2022\u2023\u25e6\u25aa\u25ab\u25cf\u25cb\u25fe\u00b7\u2027\u2043\u2219]/g;
+  var FULLWIDTH_RE = /[\uff01-\uff5e]/g;
+  var SQUOTE_RE = /[\u2018\u2019\u201a\u201b\u2032]/g;
+  var DQUOTE_RE = /[\u201c\u201d\u201e\u201f\u2033]/g;
+
+  function normUnicode(s) {
+    return String(s == null ? '' : s)
+      .replace(INVISIBLE_RE, '')
+      .replace(FULLWIDTH_RE, function (c) {
+        return String.fromCharCode(c.charCodeAt(0) - 0xfee0);
+      })
+      .replace(NBSP_RE, ' ')
+      .replace(BULLET_RE, '-')
+      .replace(SQUOTE_RE, '\'')
+      .replace(DQUOTE_RE, '"');
+  }
+
   function trimLine(s) {
-    return normDashes(String(s == null ? '' : s))
-      .replace(/\u00a0/g, ' ')
+    return normDashes(normUnicode(s))
       .replace(/\s+$/, '')
       .replace(/^\s+/, '');
   }
@@ -55,6 +82,11 @@
     ['sl\\s*st(?:itch)?(?:es)?', 1, 1],
     ['slst', 1, 1],
     ['slip\\s+stitch(?:es)?', 1, 1],
+    // Post stitches (06 #3): the backbone of ribbing, baskets, cuffs and
+    // textured blankets. They must sit above the plain stitches so "fpdc"
+    // never reads as an "f" and a "dc".
+    ['(?:fp|bp)(?:sc|hdc|dc|tr)', 1, 1],
+    ['(?:sc|hdc|dc|tr)3tog', 1, 3],
     ['sc2tog', 1, 2],
     ['hdc2tog', 1, 2],
     ['dc2tog', 1, 2],
@@ -66,7 +98,17 @@
     ['incr', 2, 1],
     ['inc', 2, 1],
     ['fsc', 1, 0],
+    ['spike\\s*(?:sc|hdc|dc|tr)?', 1, 1],
+    ['crossed\\s+(?:dc|tr)', 2, 2],
+    ['x[- ]?st(?:itch)?', 2, 2],
+    ['v[- ]?st(?:itch)?', 2, 1],
+    ['picot', 0, 0],
+    // UK terms. "htr" and "ttr"/"trtr" have to be matched before "tr" or the
+    // leading letter is left behind and the row never computes.
+    ['trtr', 1, 1],
+    ['ttr', 1, 1],
     ['dtr', 1, 1],
+    ['htr', 1, 1],
     ['hdc', 1, 1],
     ['tr(?:eble)?', 1, 1],
     ['dc', 1, 1],
@@ -78,6 +120,7 @@
     ['shell', 1, 1],
     ['bbl', 1, 1],
     ['skip', 0, 1],
+    ['miss', 0, 1],
     ['sk', 0, 1]
   ];
 
@@ -91,6 +134,37 @@
       if (re.test(w)) return { p: VOCAB[i][1], c: VOCAB[i][2] };
     }
     return null;
+  }
+
+  // --- UK / US terms (06 #3) -------------------------------------------
+  // sc/dc/tr are all one-produced-one-consumed, so a UK pattern computes
+  // exactly the same numbers as a US one and there is nothing to convert.
+  // The hint is purely informational: the import review shows "Looks like UK
+  // terms" so the maker knows the app read the pattern the way it is written.
+  // "miss" is also an ordinary English verb ("be careful not to miss any
+  // stitches"), so it only counts as the UK word for skip when it is used as
+  // an instruction - otherwise half the US patterns in the world grow a UK
+  // chip.
+  var DIALECT_TOKENS = [
+    ['htr', 'uk', '\\bhtr\\b'],
+    ['miss', 'uk', '\\bmiss\\s+(?:\\d+|the\\s+next\\b|next\\b|a\\s+st)'],
+    ['dtr', 'uk', '\\bdtr\\b'],
+    ['tension', 'uk', '\\btension\\b'],
+    ['sc', 'us', '\\bsc\\b'],
+    ['hdc', 'us', '\\bhdc\\b'],
+    ['gauge', 'us', '\\bgauge\\b']
+  ];
+
+  /** @returns {{uk:boolean, us:boolean, tokens:string[]}} */
+  function dialectHints(text) {
+    var s = normUnicode(text).toLowerCase();
+    var res = { uk: false, us: false, tokens: [] };
+    for (var i = 0; i < DIALECT_TOKENS.length; i++) {
+      if (!new RegExp(DIALECT_TOKENS[i][2], 'i').test(s)) continue;
+      res[DIALECT_TOKENS[i][1]] = true;
+      res.tokens.push(DIALECT_TOKENS[i][0]);
+    }
+    return res;
   }
 
   // =====================================================================
@@ -123,7 +197,41 @@
   // just prose that happens to mention a round.
   var ROW_REST_OK_RE = new RegExp('^(?:[(\\[*]|\\d|with|using|work|into|fold|turn|join|magic|mr\\b|ch(?:ain)?\\b|' + STITCH_ALT + '\\b)', 'i');
 
-  // Returns { row, rowEnd, rest } or null.
+  // --- bare-number rejections (06 #2, 03 #4) ---------------------------
+  // BARE_RE takes any line-initial number with punctuation after it and has
+  // never had a rest-check of its own, so a video timestamp, a table of
+  // contents and a numbered materials list each opened a phantom section at
+  // the front of the import - and because those rows start at 1, the
+  // expected-next-row matcher happily handed real page-4 rounds to it.
+  // ROW_REST_OK_RE stays the primary allow ("1. 6 sc in MR" is a round);
+  // everything below is a rejection of last resort.
+  var TIMESTAMP_RE = /^[-*•]?\s*\d{1,2}:\d{2}\b/;            // "3:40 Attaching the head"
+  var DOT_LEADER_RE = /\.{3,}/;                                   // "5. Assembly ..... 12"
+  var TOC_TAIL_RE = /[ .]\d{1,3}\s*$/;                            // "...Assembly 12"
+  var UNIT_SRC = '(?:mm|cm|mtr|m|yds?|yards?|g|gr|oz|inch(?:es)?|in|")';
+  var MEASURE_LEAD_RE = new RegExp('^\\d+(?:[.,]\\d+)?\\s*' + UNIT_SRC + '(?![a-z])', 'i');
+  var MEASURE_RE = new RegExp('\\d+(?:[.,]\\d+)?\\s*' + UNIT_SRC + '(?![a-z])', 'i');
+  var STITCH_WORD_RE = new RegExp(
+    '\\b(?:' + STITCH_ALT + '|ch(?:ain)?s?|sts?|stitch(?:es)?|magic\\s*ring|mr|rnds?|rounds?|rows?)\\b', 'i');
+  // A wrapped multi-size list puts its tail at the head of the next printed
+  // line: "...leaving the remaining 96 (108," / "116) sts unworked, turn."
+  // reads as Row 116 (03 #4). Nothing real starts a round with "sts".
+  var STS_REST_RE = /^\s*(?:sts?|stitches?)\b/i;
+
+  function bareLooksWrong(line, rest) {
+    var r = String(rest).trim();
+    if (STS_REST_RE.test(r)) return true;
+    var stitchy = STITCH_WORD_RE.test(r);
+    if (!stitchy && TIMESTAMP_RE.test(line)) return true;
+    if (!stitchy && MEASURE_LEAD_RE.test(r)) return true;         // "1. 4 mm hook"
+    if (ROW_REST_OK_RE.test(r)) return false;                     // "1. 6 sc in MR"
+    if (DOT_LEADER_RE.test(line)) return true;
+    if (!stitchy && TOC_TAIL_RE.test(line)) return true;
+    if (!stitchy && MEASURE_RE.test(line)) return true;           // "2) Safety eyes, 8 mm"
+    return false;
+  }
+
+  // Returns { row, rowEnd, rest, bare } or null.
   function detectMarker(line) {
     var m = KEYWORD_RE.exec(line);
     if (m) {
@@ -131,12 +239,14 @@
       var rest = line.slice(m[0].length);
       var sep = m[0].charAt(m[0].length - 1);
       if (/\s/.test(sep) && rest.trim() && !ROW_REST_OK_RE.test(rest.trim())) return null;
-      return { row: r, rowEnd: m[2] !== undefined ? num(m[2]) : r, rest: rest };
+      return { row: r, rowEnd: m[2] !== undefined ? num(m[2]) : r, rest: rest, bare: false };
     }
     var b = BARE_RE.exec(line);
     if (b) {
+      var rest2 = line.slice(b[0].length);
+      if (bareLooksWrong(line, rest2)) return null;
       var r2 = num(b[1]);
-      return { row: r2, rowEnd: b[2] !== undefined ? num(b[2]) : r2, rest: line.slice(b[0].length) };
+      return { row: r2, rowEnd: b[2] !== undefined ? num(b[2]) : r2, rest: rest2, bare: true };
     }
     return null;
   }
@@ -473,7 +583,7 @@
   function evaluate(instruction, prevCount) {
     if (instruction == null) return null;
     var prev = (typeof prevCount === 'number' && isFinite(prevCount)) ? prevCount : null;
-    var s = normDashes(String(instruction)).replace(/\u00a0/g, ' ');
+    var s = normDashes(normUnicode(instruction));
     s = fixTypos(s);
 
     // Drop a leading row marker if the caller passed a whole line.
@@ -788,6 +898,55 @@
     return !!t && (PAGE_LINE_RE.test(t) || END_FURNITURE_RE.test(t));
   }
 
+  // --- running heads and back matter (03 #10) --------------------------
+  // (a) A designer's title block ("WHEAT STITCH CROCHET CARDIGAN" / "by
+  // Briana K Designs") is printed on every page at whatever y-position they
+  // chose, so the geometric margin pass in PdfText does not always catch it
+  // and the pattern sheet ends up showing it as a heading in the middle of
+  // somebody's rounds. A line is page furniture when it is the document's
+  // own title (it appears on the cover, before the first row) or a byline,
+  // AND it turns up on two or more pages. Both halves are needed: a real
+  // part name reprinted over its second column must survive.
+  var BYLINE_RE = /^by\s+[A-Z]/;
+
+  function titleFurniture(raws) {
+    var pages = {}, cover = {}, out = {};
+    var page = 0, seenRow = false, prevKey = null, i, t, key;
+    for (i = 0; i < raws.length; i++) {
+      t = trimLine(raws[i]);
+      if (PAGE_LINE_RE.test(t)) { page++; continue; }
+      if (!t) continue;
+      if (!seenRow && detectMarker(t)) seenRow = true;
+      var byline = t.length <= 60 && BYLINE_RE.test(t);
+      // "<Pattern name>" / "by <Designer>" is a title block wherever it is
+      // printed - no part is ever called "by someone" - so the pair goes
+      // whether or not the geometry pass saw it repeat.
+      if (byline) {
+        out[headKey(t)] = true;
+        if (prevKey) out[prevKey] = true;
+      }
+      var shaped = t.length <= 60 && !/[.!?,;:]/.test(t) &&
+        (t.split(/\s+/).length >= 3 || t.length >= 18) &&
+        !detectMarker(t) && !detectSetup(t) && !detectNextRow(t);
+      prevKey = shaped ? headKey(t) : null;
+      if (!shaped && !byline) continue;
+      key = headKey(t);
+      if (!seenRow || byline) cover[key] = true;
+      if (!pages[key]) pages[key] = {};
+      pages[key][page] = true;
+    }
+    Object.keys(pages).forEach(function (k) {
+      if (cover[k] && Object.keys(pages[k]).length >= 2) out[k] = true;
+    });
+    return out;
+  }
+
+  // (b) Back matter: the designer's other patterns, the shop links and the
+  // legal boilerplate. Cut from the first advert-shaped line to the end of
+  // the document - but only once no row marker follows it, so a "click here"
+  // in the middle of a pattern never truncates the pattern.
+  var ADVERT_RE = /click\s+here|for\s+more\s+information|\bGPSR\b|^https?:|@[\w.-]+\.(?:com|co\.uk|net|org)\b/i;
+
   // A heading that opens a block of assembly prose. The line has to be nothing
   // but one of these words (a trailing colon is fine), so the "Finishing" that
   // bleeds off the next column into "Ear Finishing" still names the Ear, and
@@ -905,7 +1064,25 @@
   function findSpecial(raws, size, heads) {
     var furniture = [], assembly = [], blocks = [];
     var i, j, k, t, u, cls, prose;
-    for (i = 0; i < raws.length; i++) furniture[i] = isFurniture(trimLine(raws[i]));
+    var titles = titleFurniture(raws);
+    for (i = 0; i < raws.length; i++) {
+      t = trimLine(raws[i]);
+      furniture[i] = isFurniture(t) || (!!t && !!titles[headKey(t)]);
+    }
+
+    // Back matter (03 #10b): from the first advert line that has no row
+    // marker after it, to the end of the document.
+    var lastRowAt = -1;
+    for (i = raws.length - 1; i >= 0; i--) {
+      t = trimLine(raws[i]);
+      if (t && (detectMarker(t) || detectSetup(t) || detectNextRow(t))) { lastRowAt = i; break; }
+    }
+    for (i = lastRowAt + 1; i < raws.length; i++) {
+      t = trimLine(raws[i]);
+      if (!t || !ADVERT_RE.test(t)) continue;
+      for (j = i; j < raws.length; j++) furniture[j] = true;
+      break;
+    }
 
     for (i = 0; i < raws.length; i++) {
       if (furniture[i]) continue;
@@ -1152,8 +1329,34 @@
   // "2. (Hdc 1, Hdc Inc) x 3 (9) 1. 5 Sc in Magic Ring (5)"
   var COLUMN_SPLIT_RE = /\)\s+(?=\d+(?:\s*-\s*\d+)?\s*[.:]\s)/;
 
+  // The rest of 03 #4, the half that needs context detectMarker does not
+  // have. A bare number is not a row when the printed line above it left a
+  // multi-size bracket hanging open ("...the remaining 96 (108," then
+  // "116) sts unworked"), and it is not a row when it lands absurdly far
+  // past the rounds this section has counted so far.
+  var OPEN_LIST_END_RE = /[(,]\s*$/;
+
+  function unclosedBracket(s) {
+    return (s.match(/\(/g) || []).length > (s.match(/\)/g) || []).length;
+  }
+
+  var ROW_JUMP_LIMIT = 40;
+
+  function bareIsStray(raws, i, mk, cur) {
+    if (!mk || !mk.bare) return false;
+    if (cur && cur.hasRow && cur.lastRow !== null && mk.row > cur.lastRow + ROW_JUMP_LIMIT) return true;
+    for (var j = i - 1; j >= 0; j--) {
+      var p = trimLine(raws[j]);
+      if (!p) continue;
+      return unclosedBracket(p) && OPEN_LIST_END_RE.test(p);
+    }
+    return false;
+  }
+
   function prepareLines(text) {
-    var raws = String(text).split(/\r\n|\r|\n/);
+    // Unicode hygiene runs here, once, so every downstream rule (and the
+    // `text` a section hands back) sees plain ASCII punctuation (06 #7).
+    var raws = normUnicode(text).split(/\r\n|\r|\n/);
     var out = [];
     for (var i = 0; i < raws.length; i++) {
       var s = stripFragments(raws[i]);
@@ -1225,6 +1428,15 @@
     var raws = prepareLines(text);
     var heads = findRunningHeads(raws);
     var special = findSpecial(raws, size, heads);
+    // A bare-number run printed BEFORE the first front-matter heading is a
+    // table of contents or a numbered supply list, never rounds (06 #2).
+    // Only front matter that really is at the front counts, so a glossary
+    // printed at the back of the pattern never disqualifies real rows.
+    var frontMatterAt = -1;
+    for (var fmi = 0; fmi < raws.length; fmi++) {
+      if (FRONT_MATTER_RE.test(trimLine(raws[fmi]))) { frontMatterAt = fmi; break; }
+    }
+    if (frontMatterAt > raws.length * 0.5) frontMatterAt = -1;
     var lines = [];
     var sections = [];
     var consumed = [];
@@ -1327,6 +1539,13 @@
       }
 
       var cls = classify(t, size, heads, nextLine(raws, i));
+      // Phantom rows from bare numbers (06 #2) and from wrapped size lists
+      // (03 #4): both need the context this loop has and detectMarker does
+      // not, so they are demoted to notes here.
+      if (cls.marker && cls.marker.bare &&
+          (i < frontMatterAt || bareIsStray(raws, i, cls.marker, cur))) {
+        cls = { note: true };
+      }
       var prefixLen = 0;
       var isRow = false, isSetup = false;
 
@@ -2079,7 +2298,7 @@
   function expandInstruction(instruction, prevCount, ctx) {
     if (instruction == null) return null;
     var prev = (typeof prevCount === 'number' && isFinite(prevCount)) ? prevCount : null;
-    var s = normDashes(String(instruction)).replace(/ /g, ' ');
+    var s = normDashes(normUnicode(instruction));
     s = fixTypos(s);
 
     var mk = detectMarker(s.trim());
@@ -2329,6 +2548,7 @@
     splitSections: splitSections,
     placement: placement,
     detectSizes: detectSizes,
+    dialectHints: dialectHints,
     evaluate: evaluate,
     colors: colors,
     colorHex: colorHex,

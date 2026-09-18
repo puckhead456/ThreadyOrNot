@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Backup format tests</title>
+<style>
+  body { font: 14px/1.4 Menlo, Consolas, monospace; background:#111; color:#eee; padding:16px; }
+  .pass { color:#7bd389; }
+  .fail { color:#ff6b6b; background:#2a1414; }
+  .group { margin-top:18px; font-weight:bold; color:#9cf; border-bottom:1px solid #333; padding-bottom:4px; }
+  #summary { margin-top:20px; font-size:18px; font-weight:bold; }
+  #summary.ok { color:#7bd389; }
+  #summary.bad { color:#ff6b6b; }
+  .note { color:#aaa; }
+</style>
+</head>
+<body>
+<h1>Backup format test suite</h1>
+<p class="note">
+  The promise behind <code>docs/brainstorm/12-interoperability.md</code> #2 and #3: a frozen v1
+  backup that must keep importing for the life of the app, an ordered pure migration chain, keys
+  this reader does not understand surviving the round trip, a preview that writes nothing, per-project
+  Skip / Replace / Keep both, and "Undo import".
+</p>
+<p class="note">
+  <strong>The fixture string below is frozen. Never regenerate it.</strong> When the state shape
+  changes, add a <code>MIGRATIONS[n]</code> step and a NEW fixture beside this one.
+</p>
+<p class="note">Runs against its own localStorage key (<code>ZW1_backup.v1</code>).</p>
+<div id="out"></div>
+<div id="summary"></div>
+
+<script src="../js/patterns.js"></script>
+<script src="../js/store.js"></script>
+<script>
+'use strict';
+
+var out = document.getElementById('out');
+var passed = 0;
+var failed = 0;
+
+function log(ok, label, detail) {
+  if (ok) { passed++; } else { failed++; }
+  var line = (ok ? 'PASS' : 'FAIL') + ' - ' + label + (detail ? '  (' + detail + ')' : '');
+  var div = document.createElement('div');
+  div.className = ok ? 'pass' : 'fail';
+  div.textContent = line;
+  out.appendChild(div);
+  if (ok) { console.log(line); } else { console.error(line); }
+}
+
+function group(title) {
+  var div = document.createElement('div');
+  div.className = 'group';
+  div.textContent = title;
+  out.appendChild(div);
+  console.log('== ' + title + ' ==');
+}
+
+function deepEqual(a, b) {
+  if (a === b) return true;
+  if (a === null || b === null) return a === b;
+  if (typeof a !== typeof b) return false;
+  if (typeof a !== 'object') return a === b;
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  var ak = Object.keys(a), bk = Object.keys(b);
+  if (ak.length !== bk.length) return false;
+  for (var i = 0; i < ak.length; i++) {
+    if (!deepEqual(a[ak[i]], b[ak[i]])) return false;
+  }
+  return true;
+}
+
+function assertEqual(actual, expected, label) {
+  var ok = deepEqual(actual, expected);
+  log(ok, label, ok ? '' : ('expected ' + JSON.stringify(expected) + ' got ' + JSON.stringify(actual)));
+}
+
+function assertTrue(cond, label, detail) { log(!!cond, label, cond ? '' : (detail || '')); }
+
+function assertThrows(fn, code, label) {
+  var err = null;
+  try { fn(); } catch (e) { err = e; }
+  if (!err) { log(false, label, 'nothing was thrown'); return null; }
+  log(err.code === code, label, err.code === code ? '' : ('code ' + JSON.stringify(err.code) + ': ' + err.message));
+  return err;
+}
+
+/* ---------------------------------------------------------------------- *
+ * Our own storage key.
+ * ---------------------------------------------------------------------- */
+
+var K = 'ZW1_backup.v1';
+
+function wipe() {
+  var doomed = [];
+  try {
+    for (var i = 0; i < window.localStorage.length; i++) {
+      var k = window.localStorage.key(i);
+      if (k && k.indexOf(K) === 0) doomed.push(k);
+    }
+    for (var j = 0; j < doomed.length; j++) window.localStorage.removeItem(doomed[j]);
+  } catch (e) { /* ignore */ }
+}
+
+function fresh() {
+  wipe();
+  Store.__setKeyForTests(K);
+  return Store.load();
+}
+
+/* ====================================================================== *
+ * THE FROZEN v1 BACKUP.
+ *
+ * Written by cache v20 (September 2026), byte for byte. It carries: a crochet
+ * project mid-row with history, alerts, yarn colours and row stitches; a
+ * project whose craft has no module registered on this page, with unknown keys
+ * inside its craftData; a user template; and an unknown TOP-LEVEL key that a
+ * later version of the app might add.
+ *
+ * This string must import cleanly forever. If a change makes it stop, the
+ * change is wrong or it needs a migration — not a new fixture.
+ * ====================================================================== */
+
+var FIXTURE_V1 =
+  '{' +
+  '"version":1,' +
+  '"activeProjectId":"zw1-proj-a",' +
+  '"settings":{' +
+    '"theme":"stardew-night","haptics":true,"sounds":true,"keepAwake":false,' +
+    '"autoAdvance":true,"liveDiagram":true,"toursSeen":["counter"],"welcomed":true,' +
+    '"crafts":{"beadwork":{"loomWidth":24,"futureSetting":"kept"}}' +
+  '},' +
+  '"templates":[{' +
+    '"id":"zw1-tpl-user","name":"ZW1 user template","emoji":"\\uD83E\\uDDF5","countMode":"rounds",' +
+    '"groupSize":10,' +
+    '"parts":[{"name":"Body","makeCount":1,"patternText":"Rnd 1: 6 sc in a ring. (6)","placementNotes":""}],' +
+    '"checklist":["Stuff body"],"craft":"crochet","craftData":null,"builtIn":false,' +
+    '"updatedAt":1757980000000' +
+  '}],' +
+  '"projects":[{' +
+    '"id":"zw1-proj-a","name":"ZW1 Frozen panda","emoji":"\\uD83D\\uDC3C","status":"active",' +
+    '"createdAt":1757900000000,"updatedAt":1757980000000,"finishedAt":null,' +
+    '"countMode":"rounds","groupSize":10,"notes":"3 mm hook","templateId":"blank",' +
+    '"timer":{"totalMs":5400000,"runningSince":null},' +
+    '"parts":[' +
+      '{"id":"zw1-part-1","name":"Body","makeCount":1,"piecesDone":0,"row":7,"stitch":3,' +
+      '"targetRows":20,"repeat":{"enabled":false,"startRow":1,"endRow":1,"times":1},' +
+      '"alerts":[12],"placementNotes":"Sew arms on rnd 19",' +
+      '"patternText":"Rnd 1: 6 sc in a ring. (6)\\nRnd 2: 2 sc in each st around. (12)",' +
+      '"sizeIndex":0,"rowStitches":[0,6,12,18,24,30,36,36]},' +
+      '{"id":"zw1-part-2","name":"Ear","makeCount":2,"piecesDone":1,"row":0,"stitch":0,' +
+      '"targetRows":5,"repeat":{"enabled":false,"startRow":1,"endRow":1,"times":1},' +
+      '"alerts":[],"placementNotes":"","patternText":"","sizeIndex":0,"rowStitches":[0]}' +
+    '],' +
+    '"activePartId":"zw1-part-1",' +
+    '"checklist":[{"id":"zw1-chk-1","text":"Stuff body","done":true},' +
+                 '{"id":"zw1-chk-2","text":"Sew ears","done":false}],' +
+    '"history":[{"ts":1757970000000,"partId":"zw1-part-1","partName":"Body","row":7}],' +
+    '"yarnColors":{"*":"#f1e3c8","Black":"#101010"},' +
+    '"sizes":null,"craft":"crochet","craftData":{}' +
+  '},{' +
+    '"id":"zw1-proj-b","name":"ZW1 Loom bracelet","emoji":"\\uD83D\\uDD37","status":"paused",' +
+    '"createdAt":1757800000000,"updatedAt":1757900000000,"finishedAt":null,' +
+    '"countMode":"rows","groupSize":0,"notes":"","templateId":null,' +
+    '"timer":{"totalMs":0,"runningSince":null},' +
+    '"parts":[{"id":"zw1-part-3","name":"Main","makeCount":1,"piecesDone":0,"row":0,"stitch":0,' +
+    '"targetRows":null,"repeat":{"enabled":false,"startRow":1,"endRow":1,"times":1},' +
+    '"alerts":[],"placementNotes":"","patternText":"","sizeIndex":0,"rowStitches":[0]}],' +
+    '"activePartId":"zw1-part-3","checklist":[],"history":[],' +
+    '"yarnColors":{"*":"#f1e3c8"},"sizes":null,' +
+    '"craft":"beadwork",' +
+    '"craftData":{"beads":42,"palette":["#ff0000","#00ff00"],' +
+                 '"unknownFutureKey":{"deep":{"kept":true}}}' +
+  '}],' +
+  '"futureTopLevelKey":{"written":"by a later version","n":7}' +
+  '}';
+
+/** A mutated copy of the fixture, for the version tests. Never mutates it. */
+function variant(mutate) {
+  var raw = JSON.parse(FIXTURE_V1);
+  mutate(raw);
+  return JSON.stringify(raw);
+}
+
+/* ====================================================================== */
+group('1. The frozen v1 backup imports, forever');
+/* ====================================================================== */
+
+(function () {
+  fresh();
+  assertEqual(Store.projects().length, 0, 'we start empty');
+
+  var n = Store.importJSON(FIXTURE_V1);
+  assertEqual(n, 2, 'both projects are applied');
+  assertEqual(Store.projects().length, 2, 'and both are in the store');
+
+  var a = Store.project('zw1-proj-a');
+  assertTrue(!!a, 'the crochet project came back');
+  assertEqual(a.name, 'ZW1 Frozen panda', 'with its name');
+  assertEqual(a.parts.length, 2, 'both parts');
+  assertEqual(a.parts[0].row, 7, 'the row it was left on');
+  assertEqual(a.parts[0].stitch, 3, 'and the stitch');
+  assertEqual(a.parts[0].targetRows, 20, 'its target');
+  assertEqual(a.parts[0].alerts, [12], 'its alerts');
+  assertEqual(a.parts[0].rowStitches, [0, 6, 12, 18, 24, 30, 36, 36], 'and every row it recorded');
+  assertEqual(a.parts[0].placementNotes, 'Sew arms on rnd 19', 'its placing notes');
+  assertEqual(a.parts[1].piecesDone, 1, 'the second part keeps its finished pieces');
+  assertEqual(a.checklist.length, 2, 'the checklist');
+  assertEqual(a.checklist[0].done, true, 'with what was ticked');
+  assertEqual(a.history.length, 1, 'the history');
+  assertEqual(a.timer.totalMs, 5400000, 'and an hour and a half on the clock');
+  assertEqual(a.yarnColors.Black, '#101010', 'yarn colours survive');
+  assertEqual(a.parts[0].importKey, '', 'a part written before import keys simply has none');
+
+  var t = Store.template('zw1-tpl-user');
+  assertTrue(!!t, 'the user template came back');
+  assertEqual(t.parts[0].patternText, 'Rnd 1: 6 sc in a ring. (6)', 'carrying its pattern text');
+  assertEqual(t.checklist, ['Stuff body'], 'and its checklist');
+  assertTrue(!!Store.template('sheep'), 'and the built-ins the file did not carry are still there');
+})();
+
+/* ====================================================================== */
+group('2. Keys this reader does not understand are kept (12 #2)');
+/* ====================================================================== */
+
+(function () {
+  var s = Store.getState();
+  assertEqual(s.futureTopLevelKey, { written: 'by a later version', n: 7 },
+    'an unknown top-level key survives the import');
+
+  var b = Store.project('zw1-proj-b');
+  assertEqual(b.craft, 'beadwork', 'a craft with no module registered keeps its id');
+  assertEqual(b.craftData, {
+    beads: 42,
+    palette: ['#ff0000', '#00ff00'],
+    unknownFutureKey: { deep: { kept: true } }
+  }, 'and its craftData byte for byte, unknown keys included');
+  // Known gap, 12 #5: importJSON has never applied the file's `settings`
+  // block (theme, haptics, toursSeen, per-craft bags). Pinned here so the day
+  // it changes is a deliberate one.
+  assertEqual(Store.craftSettings('beadwork'), {},
+    'import still ignores the file\'s settings, per-craft bags included (12 #5, not wave 1)');
+
+  var round = JSON.parse(Store.exportJSON());
+  assertEqual(round.futureTopLevelKey, { written: 'by a later version', n: 7 },
+    'and it goes back out again on the next export');
+
+  Store.flush();
+  Store.load();
+  assertEqual(Store.getState().futureTopLevelKey, { written: 'by a later version', n: 7 },
+    'it survives a save and a reload as well');
+})();
+
+/* ====================================================================== */
+group('3. Versions: newer is a message, older is a migration (12 #2)');
+/* ====================================================================== */
+
+(function () {
+  fresh();
+
+  var newer = variant(function (raw) { raw.version = 99; });
+  var err = assertThrows(function () { Store.importJSON(newer); }, 'newerVersion',
+    'a backup from a newer version is refused with its own error code');
+  if (err) {
+    assertTrue(/newer version/i.test(err.message), 'and a message that says to update the app', err.message);
+  }
+  assertThrows(function () { Store.previewImport(newer); }, 'newerVersion',
+    'previewImport refuses it the same way');
+  assertEqual(Store.projects().length, 0, 'and nothing was written');
+
+  // version < CURRENT runs the ordered chain.
+  assertTrue(typeof Store.MIGRATIONS[0] === 'function', 'there is a 0 → 1 migration');
+  var zero = variant(function (raw) { raw.version = 0; });
+  assertEqual(Store.importJSON(zero), 2, 'a version 0 backup migrates and imports');
+  assertEqual(Store.project('zw1-proj-a').parts[0].row, 7, 'with its rows intact');
+
+  fresh();
+  var none = variant(function (raw) { delete raw.version; });
+  assertEqual(Store.importJSON(none), 2, 'a backup with no version at all is treated as 0');
+
+  // Migrations are pure and idempotent.
+  var input = JSON.parse(zero);
+  var once = Store.MIGRATIONS[0](input);
+  var twice = Store.MIGRATIONS[0](Store.MIGRATIONS[0](JSON.parse(zero)));
+  assertEqual(once.version, 1, 'MIGRATIONS[0] stamps version 1');
+  assertEqual(once, twice, 'running it twice gives the same thing');
+  assertEqual(input.version, 0, 'and it never mutates its input');
+
+  // A version with no migration for it is a clear refusal, not a crash.
+  fresh();
+  assertThrows(function () { Store.importJSON(variant(function (raw) { raw.version = -3; })); },
+    'noMigration', 'a version with no migration step is refused by name');
+
+  // The old, sharp errors are still there, with codes the UI can branch on.
+  assertThrows(function () { Store.importJSON('not json at all'); }, 'notJson', 'rubbish is not JSON');
+  assertThrows(function () { Store.importJSON('[1,2,3]'); }, 'notBackup', 'an array is not a backup');
+  assertThrows(function () { Store.importJSON('null'); }, 'notBackup', 'null is not a backup');
+  assertThrows(function () { Store.importJSON('{"version":1}'); }, 'noProjects', 'and a backup needs projects');
+  assertEqual(Store.projects().length, 0, 'none of which wrote anything');
+})();
+
+/* ====================================================================== */
+group('4. previewImport says what would happen, and writes nothing (12 #3)');
+/* ====================================================================== */
+
+(function () {
+  fresh();
+  var before = window.localStorage.getItem(K);
+
+  var p1 = Store.previewImport(FIXTURE_V1);
+  assertEqual(p1.projects.length, 2, 'two project rows');
+  assertEqual(p1.counts.new, 3, 'counts covers the whole sheet: two projects and a template');
+  assertEqual(p1.projectCounts.new, 2, 'projectCounts is the header line for projects');
+  assertEqual(p1.templateCounts.new, 1, 'and templateCounts for templates');
+  assertEqual(p1.counts.replace, 0, 'nothing is replaced');
+  assertEqual(p1.projects[0].id, 'zw1-proj-a', 'the row carries the id');
+  assertEqual(p1.projects[0].name, 'ZW1 Frozen panda', 'the name');
+  assertEqual(p1.projects[0].craft, 'crochet', 'the craft');
+  assertEqual(p1.projects[0].updatedAt, 1757980000000, 'when the file says it was last worked on');
+  assertEqual(p1.projects[0].localUpdatedAt, null, 'and that there is no local copy');
+  assertEqual(p1.projects[0].status, 'new', 'so its status is new');
+  assertEqual(p1.templates.length, 1, 'the template is previewed too');
+  assertEqual(p1.templates[0].status, 'new', 'and it is new as well');
+  assertEqual(p1.version, 1, 'the preview reports the file version');
+  assertEqual(Store.projects().length, 0, 'previewing wrote nothing to the store');
+  assertEqual(window.localStorage.getItem(K), before, 'and nothing to localStorage');
+
+  Store.importJSON(FIXTURE_V1);
+
+  var p2 = Store.previewImport(FIXTURE_V1);
+  assertEqual(p2.counts.identical, 3, 'importing the same file again is identical, projects and template');
+  assertEqual(p2.counts.new, 0, 'with nothing new');
+  assertEqual(p2.projects[0].localUpdatedAt, 1757980000000, 'and the local date is shown beside the file one');
+
+  // Older on disk → the file would replace it.
+  Store.project('zw1-proj-a').updatedAt = 1757900000000;
+  var p3 = Store.previewImport(FIXTURE_V1);
+  assertEqual(p3.projects[0].status, 'replace', 'a newer file replaces an older local copy');
+
+  // Newer on disk → the file is older.
+  Store.project('zw1-proj-a').updatedAt = 1758990000000;
+  var p4 = Store.previewImport(FIXTURE_V1);
+  assertEqual(p4.projects[0].status, 'older', 'an older file is flagged as older, not silently applied');
+  assertEqual(p4.counts.older, 1, 'and counted');
+})();
+
+/* ====================================================================== */
+group('5. Skip / Replace / Keep both (09 #3, 12 #3)');
+/* ====================================================================== */
+
+(function () {
+  fresh();
+  Store.importJSON(FIXTURE_V1);
+  // Work happens after the backup was taken.
+  Store.updateProject('zw1-proj-a', { notes: 'the work I did today' });
+  Store.updateProject('zw1-proj-b', { notes: 'and here too' });
+
+  // skip
+  Store.importJSON(FIXTURE_V1, { projects: { 'zw1-proj-a': 'skip', 'zw1-proj-b': 'skip' } });
+  assertEqual(Store.project('zw1-proj-a').notes, 'the work I did today', 'skip leaves the local copy alone');
+  assertEqual(Store.projects().length, 2, 'and adds nothing');
+
+  // replace, with the other one still skipped
+  Store.importJSON(FIXTURE_V1, { projects: { 'zw1-proj-a': 'replace', 'zw1-proj-b': 'skip' } });
+  assertEqual(Store.project('zw1-proj-a').notes, '3 mm hook', 'replace overwrites it with the file');
+  assertEqual(Store.project('zw1-proj-b').notes, 'and here too', 'and touches nothing else in the same call');
+
+  // keepBoth
+  fresh();
+  Store.importJSON(FIXTURE_V1);
+  Store.updateProject('zw1-proj-a', { notes: 'mine' });
+  var partIdsBefore = Store.project('zw1-proj-a').parts.map(function (p) { return p.id; });
+  Store.importJSON(FIXTURE_V1, { projects: { 'zw1-proj-a': 'keepBoth', 'zw1-proj-b': 'skip' } });
+
+  assertEqual(Store.projects().length, 3, 'keep both adds a second copy');
+  assertEqual(Store.project('zw1-proj-a').notes, 'mine', 'the local one is untouched');
+  var clone = Store.projects()[2];
+  assertEqual(clone.name, 'ZW1 Frozen panda (from backup)', 'the clone says where it came from');
+  assertTrue(clone.id !== 'zw1-proj-a', 'and has a fresh id', clone.id);
+  assertEqual(clone.notes, '3 mm hook', 'carrying the backup\'s contents');
+  assertEqual(clone.parts.length, 2, 'with both parts');
+  assertTrue(partIdsBefore.indexOf(clone.parts[0].id) === -1, 'whose ids are fresh too');
+  assertEqual(clone.activePartId, clone.parts[0].id, 'and whose active part still resolves');
+  assertEqual(clone.history[0].partId, clone.parts[0].id, 'history points at the new part ids');
+
+  // Templates take the same three choices.
+  fresh();
+  Store.importJSON(FIXTURE_V1);
+  Store.saveTemplate({ id: 'zw1-tpl-user', name: 'ZW1 renamed by me', parts: [{ name: 'Body', makeCount: 1 }], checklist: [] });
+  Store.importJSON(FIXTURE_V1, { templates: { 'zw1-tpl-user': 'skip' } });
+  assertEqual(Store.template('zw1-tpl-user').name, 'ZW1 renamed by me', 'a skipped template is left alone');
+  Store.importJSON(FIXTURE_V1, { templates: { 'zw1-tpl-user': 'keepBoth' } });
+  assertEqual(Store.template('zw1-tpl-user').name, 'ZW1 renamed by me', 'keep both keeps mine');
+  var clones = Store.templates().filter(function (t) { return t.name === 'ZW1 user template (from backup)'; });
+  assertEqual(clones.length, 1, 'and adds the file\'s copy beside it');
+  assertEqual(clones[0].builtIn, false, 'as a user template');
+
+  // The default, when nothing is said, is what importJSON has always done.
+  fresh();
+  Store.importJSON(FIXTURE_V1);
+  Store.updateProject('zw1-proj-a', { notes: 'mine' });
+  Store.importJSON(FIXTURE_V1);
+  assertEqual(Store.project('zw1-proj-a').notes, '3 mm hook', 'with no choices given, the file still wins');
+  assertEqual(Store.projects().length, 2, 'and nothing is duplicated');
+})();
+
+/* ====================================================================== */
+group('6. Undo import (09 #3)');
+/* ====================================================================== */
+
+(function () {
+  fresh();
+  var mine = Store.createProject({ name: 'ZW1 my week of work' });
+  Store.updatePart(mine.id, mine.parts[0].id, { targetRows: 40 });
+  for (var i = 0; i < 12; i++) Store.tapRow(mine.id, mine.parts[0].id);
+  Store.flush();
+  assertEqual(Store.part(Store.project(mine.id), mine.parts[0].id).row, 12, 'twelve rows in');
+  assertEqual(Store.canUndoImport(), false, 'nothing to undo before an import');
+
+  assertEqual(Store.canUndo(), true, 'and there is a real undo stack');
+
+  Store.importJSON(FIXTURE_V1, { projects: { 'zw1-proj-a': 'replace' } });
+  assertEqual(Store.canUndo(), true, 'importing does NOT wipe the undo stack');
+  assertEqual(Store.canUndoImport(), true, 'and "Undo import" is offered');
+  assertTrue(!!window.localStorage.getItem(K + '.preimport'), 'the whole state was snapshotted first');
+  assertEqual(Store.projects().length, 3, 'the file landed');
+
+  assertEqual(Store.undoImport(), true, 'undoImport() puts it back');
+  assertEqual(Store.projects().length, 1, 'the imported projects are gone');
+  assertEqual(Store.project(mine.id).name, 'ZW1 my week of work', 'and my week of work is back');
+  assertEqual(Store.part(Store.project(mine.id), mine.parts[0].id).row, 12, 'on the row I left it');
+  assertEqual(Store.canUndoImport(), false, 'and the offer is spent');
+  assertEqual(Store.undoImport(), false, 'a second undoImport does nothing');
+  assertEqual(window.localStorage.getItem(K + '.preimport'), null, 'the snapshot key is cleaned up');
+
+  Store.flush();
+  Store.load();
+  assertEqual(Store.projects().length, 1, 'the restored state is what is on disk');
+})();
+
+/* ---------------------------------------------------------------------- */
+
+wipe();
+
+var summaryEl = document.getElementById('summary');
+var finalLine = passed + ' passed, ' + failed + ' failed';
+summaryEl.textContent = finalLine;
+summaryEl.className = failed === 0 ? 'ok' : 'bad';
+console.log(finalLine);
+
+window.setTimeout(wipe, 400);
+</script>
+</body>
+</html>

@@ -1,0 +1,1060 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Store safety tests</title>
+<style>
+  body { font: 14px/1.4 Menlo, Consolas, monospace; background:#111; color:#eee; padding:16px; }
+  .pass { color:#7bd389; }
+  .fail { color:#ff6b6b; background:#2a1414; }
+  .skip { color:#d8b75a; }
+  .group { margin-top:18px; font-weight:bold; color:#9cf; border-bottom:1px solid #333; padding-bottom:4px; }
+  #summary { margin-top:20px; font-size:18px; font-weight:bold; }
+  #summary.ok { color:#7bd389; }
+  #summary.bad { color:#ff6b6b; }
+  .note { color:#aaa; }
+</style>
+</head>
+<body>
+<h1>Store safety test suite</h1>
+<p class="note">
+  Wave 1 of <code>docs/brainstorm</code>: the persistence, multi-tab, counter and import fixes in
+  <code>js/store.js</code> (13 #1–#4, #6–#10; 09 #2/#4/#9; 12 #1; 01 #1/#3; 02 #1/#2).
+  Everything here runs against its own localStorage key (<code>ZW1_store_safety.v1</code>) through
+  <code>Store.__setKeyForTests</code>, so it never touches the app's real data and never races
+  another agent on this origin.
+</p>
+<div id="out"></div>
+<div id="summary"></div>
+
+<script src="../js/patterns.js"></script>
+<script src="../js/store.js"></script>
+<script>
+'use strict';
+
+var out = document.getElementById('out');
+var passed = 0;
+var failed = 0;
+
+function log(ok, label, detail) {
+  if (ok) { passed++; } else { failed++; }
+  var line = (ok ? 'PASS' : 'FAIL') + ' - ' + label + (detail ? '  (' + detail + ')' : '');
+  var div = document.createElement('div');
+  div.className = ok ? 'pass' : 'fail';
+  div.textContent = line;
+  out.appendChild(div);
+  if (ok) { console.log(line); } else { console.error(line); }
+}
+
+function skip(label, why) {
+  var div = document.createElement('div');
+  div.className = 'skip';
+  div.textContent = 'SKIP - ' + label + (why ? '  (' + why + ')' : '');
+  out.appendChild(div);
+}
+
+function group(title) {
+  var div = document.createElement('div');
+  div.className = 'group';
+  div.textContent = title;
+  out.appendChild(div);
+  console.log('== ' + title + ' ==');
+}
+
+function deepEqual(a, b) {
+  if (a === b) return true;
+  if (a === null || b === null) return a === b;
+  if (typeof a !== typeof b) return false;
+  if (typeof a !== 'object') return a === b;
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  var ak = Object.keys(a), bk = Object.keys(b);
+  if (ak.length !== bk.length) return false;
+  for (var i = 0; i < ak.length; i++) {
+    if (!deepEqual(a[ak[i]], b[ak[i]])) return false;
+  }
+  return true;
+}
+
+function assertEqual(actual, expected, label) {
+  var ok = deepEqual(actual, expected);
+  log(ok, label, ok ? '' : ('expected ' + JSON.stringify(expected) + ' got ' + JSON.stringify(actual)));
+}
+
+function assertTrue(cond, label, detail) { log(!!cond, label, cond ? '' : (detail || '')); }
+
+/* ---------------------------------------------------------------------- *
+ * Our own storage key. Nothing below ever reads or writes stitchkeeper.v1.
+ * ---------------------------------------------------------------------- */
+
+var K = 'ZW1_store_safety.v1';
+
+function wipe() {
+  var doomed = [];
+  try {
+    for (var i = 0; i < window.localStorage.length; i++) {
+      var k = window.localStorage.key(i);
+      if (k && k.indexOf(K) === 0) doomed.push(k);
+    }
+    for (var j = 0; j < doomed.length; j++) window.localStorage.removeItem(doomed[j]);
+  } catch (e) { /* ignore */ }
+}
+
+function fresh() {
+  wipe();
+  Store.__setKeyForTests(K);
+  return Store.load();
+}
+
+var origSetItem = window.Storage && window.Storage.prototype ? window.Storage.prototype.setItem : null;
+
+function stubSetItem(fn) {
+  if (!origSetItem) return false;
+  window.Storage.prototype.setItem = fn;
+  return true;
+}
+
+function unstubSetItem() {
+  if (origSetItem) window.Storage.prototype.setItem = origSetItem;
+}
+
+fresh();
+
+/* ====================================================================== */
+group('1. Persistence that can fail loudly (13 #2, 09 #2)');
+/* ====================================================================== */
+
+(function () {
+  var p = Store.createProject({ name: 'ZW1 quota' });
+  var res = Store.flush();
+  assertEqual(res.ok, true, 'writeNow returns a status, and a normal write succeeds');
+  assertEqual(Store.saveFailed(), false, 'nothing has failed yet');
+
+  var seen = [];
+  var unsub = Store.onStorageError(function (e) { seen.push(e); });
+
+  // Quota: this one key is full, every other key is fine.
+  var ok = stubSetItem(function (k, v) {
+    if (k === Store.KEY) {
+      var e = new Error('quota'); e.name = 'QuotaExceededError'; throw e;
+    }
+    return origSetItem.call(this, k, v);
+  });
+  if (!ok) {
+    skip('storage failure kinds', 'Storage.prototype is not writable here');
+  } else {
+    Store.tapRow(p.id, p.parts[0].id);
+    var bad = Store.flush();
+    assertEqual(bad.ok, false, 'a write that throws reports ok:false');
+    assertEqual(bad.kind, 'quota', 'a full key with a writable origin is a quota failure');
+    assertEqual(bad.retried, true, 'it retried once');
+    assertEqual(Store.saveFailed(), true, 'Store.saveFailed() is true');
+    assertEqual(seen.length, 1, 'one onStorageError subscriber call');
+    assertEqual(seen[0].kind, 'quota', 'the subscriber is told which kind');
+    assertTrue(!!seen[0].error, 'and is handed the error');
+    assertEqual(Store.canUndo(), false, 'the retry cleared the undo stack first');
+    assertEqual(Store.undoBytes(), 0, 'and its byte count with it');
+
+    // Private mode: nothing at all can be written.
+    stubSetItem(function () { var e = new Error('nope'); e.name = 'QuotaExceededError'; throw e; });
+    seen.length = 0;
+    Store.tapRow(p.id, p.parts[0].id);
+    var priv = Store.flush();
+    assertEqual(priv.kind, 'private', 'a write that fails for every key is private mode, not "full"');
+    assertEqual(seen[0].kind, 'private', 'the subscriber hears private, so the banner can be calmer');
+
+    // Anything else.
+    stubSetItem(function (k, v) {
+      if (k === Store.KEY) throw new Error('something else');
+      return origSetItem.call(this, k, v);
+    });
+    seen.length = 0;
+    Store.tapRow(p.id, p.parts[0].id);
+    assertEqual(Store.flush().kind, 'unknown', 'an error that is neither reports unknown');
+
+    unstubSetItem();
+    Store.tapRow(p.id, p.parts[0].id);
+    assertEqual(Store.flush().ok, true, 'the next write that works succeeds again');
+    assertEqual(Store.saveFailed(), false, 'and clears the failed flag');
+  }
+  unsub();
+  seen.length = 0;
+  Store.tapRow(p.id, p.parts[0].id);
+  Store.flush();
+  assertEqual(seen.length, 0, 'unsubscribing stops the callbacks');
+})();
+
+(function () {
+  var h = Store.storageHealth();
+  assertEqual(h.writable, true, 'storageHealth() probes a real write');
+  assertEqual(h.privateMode, false, 'and this is not a private window');
+  assertTrue(h.bytesUsed > 0, 'it reports bytes in use', String(h.bytesUsed));
+  assertEqual(h.corruptKey, null, 'with nothing quarantined');
+
+  assertEqual(Store.wouldExceedQuota(0), false, 'wouldExceedQuota(0) is false');
+  assertEqual(Store.wouldExceedQuota(2048), false, 'a 2 KB import fits');
+  assertEqual(Store.wouldExceedQuota(50 * 1024 * 1024), true, 'a 50 MB import does not');
+})();
+
+/* ====================================================================== */
+group('2. Corrupt-state quarantine (13 #3)');
+/* ====================================================================== */
+
+(function () {
+  fresh();
+  Store.createProject({ name: 'ZW1 keepme' });
+  Store.createProject({ name: 'ZW1 keepmetoo' });
+  Store.flush();
+  var good = window.localStorage.getItem(K);
+  var truncated = good.slice(0, Math.floor(good.length * 0.95));
+  window.localStorage.setItem(K, truncated);
+
+  Store.load();
+  assertEqual(Store.projects().length, 0, 'unreadable text loads as an empty app, not a crash');
+  assertEqual(Store.isCorrupt(), true, 'the corrupt flag is set');
+
+  var snap = Store.corruptSnapshot();
+  assertTrue(!!snap && snap.indexOf('ZW1 keepme') >= 0, 'corruptSnapshot() still holds the projects');
+  assertEqual(snap, truncated, 'and is exactly the text that could not be read');
+
+  var ck = Store.corruptKey();
+  assertTrue(!!ck && ck.indexOf(K + '.corrupt.') === 0, 'a copy went to <KEY>.corrupt.<timestamp>', String(ck));
+  assertEqual(window.localStorage.getItem(ck), truncated, 'the quarantine copy is intact');
+  assertEqual(Store.storageHealth().corruptKey, ck, 'storageHealth() points at it');
+
+  // The user taps. Nothing may overwrite the damaged blob.
+  var p = Store.createProject({ name: 'ZW1 after the crash' });
+  Store.tapRow(p.id, p.parts[0].id);
+  var blocked = Store.flush();
+  assertEqual(blocked.ok, false, 'save() refuses while the corrupt flag stands');
+  assertEqual(blocked.blocked, 'corrupt', 'and says why');
+  assertEqual(window.localStorage.getItem(K), truncated, 'a tap does not overwrite the main key');
+
+  assertEqual(Store.acknowledgeCorrupt(), true, 'acknowledgeCorrupt() releases the lock');
+  assertEqual(Store.isCorrupt(), false, 'the flag is cleared');
+  assertEqual(Store.corruptSnapshot(), null, 'and the snapshot with it');
+  assertEqual(Store.flush().ok, true, 'writing resumes');
+  assertTrue(window.localStorage.getItem(K) !== truncated, 'the main key is written at last');
+  assertEqual(window.localStorage.getItem(ck), truncated, 'the quarantine copy survives for the download button');
+
+  // Valid JSON that is not a state object is corruption too.
+  window.localStorage.setItem(K, '"just a string"');
+  Store.load();
+  assertEqual(Store.isCorrupt(), true, 'valid JSON of the wrong shape is quarantined too');
+  Store.acknowledgeCorrupt();
+
+  // An empty / missing key is a fresh install, not corruption.
+  window.localStorage.removeItem(K);
+  Store.load();
+  assertEqual(Store.isCorrupt(), false, 'a missing key is a fresh install');
+  window.localStorage.setItem(K, '   ');
+  Store.load();
+  assertEqual(Store.isCorrupt(), false, 'and so is a blank one');
+  wipe();
+})();
+
+/* ====================================================================== */
+group('3. Multi-tab safety (13 #1)');
+/* ====================================================================== */
+
+function foreignWrite(mutate, writer, revision) {
+  var raw = JSON.parse(window.localStorage.getItem(K));
+  mutate(raw);
+  raw.writerId = writer;
+  raw.revision = revision;
+  var text = JSON.stringify(raw);
+  window.localStorage.setItem(K, text);
+  return text;
+}
+
+function fireStorage(text) {
+  var ev;
+  try {
+    ev = new StorageEvent('storage', { key: K, newValue: text, oldValue: null, storageArea: window.localStorage });
+  } catch (e) {
+    ev = document.createEvent('StorageEvent');
+    ev.initStorageEvent('storage', false, false, K, null, text, location.href, window.localStorage);
+  }
+  window.dispatchEvent(ev);
+}
+
+(function () {
+  fresh();
+  var p = Store.createProject({ name: 'ZW1 tabA' });
+  Store.flush();
+  assertTrue(Store.revision() > 0, 'every write bumps the revision', String(Store.revision()));
+  assertTrue(!!Store.writerId(), 'and stamps this tab');
+  assertEqual(JSON.parse(window.localStorage.getItem(K)).writerId, Store.writerId(), 'the stamp reaches the disk');
+
+  // --- nothing in flight: adopt what the other tab wrote -----------------
+  var external = [];
+  var un = Store.onExternalChange(function (e) { external.push(e); });
+  var mine = Store.revision();
+  var text = foreignWrite(function (raw) {
+    raw.projects.push({ id: 'ZW1tabB', name: 'ZW1 tabB' });
+  }, 'writer-B', mine + 5);
+  fireStorage(text);
+
+  assertTrue(!!Store.project('ZW1tabB'), 'with nothing unsaved we reload the other tab\'s state');
+  assertTrue(!!Store.project(p.id), 'and our own project is still there');
+  assertEqual(external.length, 1, 'onExternalChange fired once');
+  assertEqual(external[0].revision, mine + 5, 'with their revision');
+  assertEqual(external[0].writerId, 'writer-B', 'and their writer id');
+
+  // Our own write echoing back is not an external change.
+  external.length = 0;
+  Store.createProject({ name: 'ZW1 mine again' });
+  Store.flush();
+  fireStorage(window.localStorage.getItem(K));
+  assertEqual(external.length, 0, 'our own write, echoed, is ignored');
+  assertEqual(Store.conflict(), false, 'and is never a conflict');
+  un();
+
+  // --- unsaved work in flight: conflict ---------------------------------
+  var conflicts = [];
+  var un2 = Store.onConflict(function (e) { conflicts.push(e); });
+  Store.tapRow(p.id, p.parts[0].id);              // arms the debounce, sets dirty
+  var before = Store.revision();
+  var text2 = foreignWrite(function (raw) {
+    raw.projects.push({ id: 'ZW1tabC', name: 'ZW1 tabC' });
+  }, 'writer-C', before + 9);
+  fireStorage(text2);
+
+  assertEqual(Store.conflict(), true, 'unsaved local work turns a foreign write into a conflict');
+  assertEqual(conflicts.length, 1, 'onConflict fired once');
+  assertEqual(conflicts[0].mine, before, 'with our revision');
+  assertEqual(conflicts[0].theirs, before + 9, 'and theirs');
+  assertEqual(Store.conflictInfo().theirs, before + 9, 'conflictInfo() carries the same');
+  assertTrue(!Store.project('ZW1tabC'), 'their state is NOT adopted behind our back');
+
+  Store.tapRow(p.id, p.parts[0].id);
+  Store.save();
+  assertEqual(Store.flush().blocked, 'conflict', 'auto-saving is stopped until it is resolved');
+  assertEqual(window.localStorage.getItem(K), text2, 'nothing was written over their copy');
+
+  assertEqual(Store.resolveConflict('keepMine'), true, 'resolveConflict("keepMine") resolves it');
+  assertEqual(Store.conflict(), false, 'the flag is cleared');
+  var onDisk = JSON.parse(window.localStorage.getItem(K));
+  assertEqual(onDisk.writerId, Store.writerId(), 'our state is now on disk');
+  assertTrue(onDisk.revision > before + 9, 'with a revision past theirs', String(onDisk.revision));
+  assertTrue(!Store.project('ZW1tabC'), 'and their project is gone, which is what "keep mine" means');
+  un2();
+})();
+
+(function () {
+  fresh();
+  var p = Store.createProject({ name: 'ZW1 tabA2' });
+  Store.flush();
+  Store.tapRow(p.id, p.parts[0].id);              // unsaved work
+  var text = foreignWrite(function (raw) {
+    raw.projects.push({ id: 'ZW1tabD', name: 'ZW1 tabD' });
+  }, 'writer-D', Store.revision() + 3);
+  fireStorage(text);
+  assertEqual(Store.conflict(), true, 'conflict raised');
+
+  assertEqual(Store.resolveConflict('takeTheirs'), true, 'resolveConflict("takeTheirs") resolves it');
+  assertTrue(!!Store.project('ZW1tabD'), 'their project is now ours');
+  assertEqual(Store.canUndo(), false, 'the undo stack went with our discarded state');
+  assertEqual(Store.resolveConflict('keepMine'), false, 'resolving twice does nothing');
+})();
+
+/* ====================================================================== */
+group('4. Persistent storage + backup reminder (09 #4, 12 #1)');
+/* ====================================================================== */
+
+(function () {
+  fresh();
+  Store.createProject({ name: 'ZW1 backup' });
+  var s = Store.settings();
+  assertEqual(s.lastBackupAt, 0, 'a fresh install has never backed up');
+  assertEqual(s.backupNagSnoozedUntil, 0, 'and has never been snoozed');
+  assertTrue(Array.isArray(s.touchDays), 'settings carry the working-day log');
+
+  s.lastBackupAt = 0;
+  s.touchDays = ['2026-09-10', '2026-09-11', '2026-09-12', '2026-09-13'];
+  assertEqual(Store.backupDue(), false, 'four working days is not yet a nag');
+  assertEqual(Store.backupStatus().days, 4, 'backupStatus() counts them');
+  s.touchDays.push('2026-09-14');
+  assertEqual(Store.backupDue(), true, 'five separate days since the last backup is');
+
+  Store.snoozeBackupNag(14);
+  assertEqual(Store.backupDue(), false, '"not now" silences it');
+  assertTrue(Store.settings().backupNagSnoozedUntil > Date.now(), 'for fourteen days');
+  Store.settings().backupNagSnoozedUntil = 0;
+  assertEqual(Store.backupDue(), true, 'and it comes back when the snooze runs out');
+
+  var json = Store.exportJSON();
+  assertTrue(Store.settings().lastBackupAt > 0, 'exportJSON() records the backup');
+  assertEqual(Store.settings().backupNagSnoozedUntil, 0, 'and clears the snooze');
+  assertTrue(JSON.parse(json).settings.lastBackupAt > 0, 'the file itself carries lastBackupAt');
+  assertEqual(Store.backupDue(), false, 'nothing is due straight after a backup');
+
+  // touch() records today.
+  var p = Store.projects()[0];
+  Store.settings().touchDays = [];
+  Store.tapRow(p.id, p.parts[0].id);
+  assertEqual(Store.settings().touchDays.length, 1, 'working on a project records today');
+  Store.tapRow(p.id, p.parts[0].id);
+  assertEqual(Store.settings().touchDays.length, 1, 'twice in one day is still one day');
+})();
+
+/* ====================================================================== */
+group('5. untapRow is the inverse of completeRow (13 #4)');
+/* ====================================================================== */
+
+(function () {
+  fresh();
+  var p = Store.createProject({ name: 'ZW1 untap' });
+  var ptId = p.parts[0].id;
+  Store.updatePart(p.id, ptId, { makeCount: 3, targetRows: 2 });
+  function st() {
+    var q = Store.part(Store.project(p.id), ptId);
+    return [q.row, q.piecesDone, q.stitch];
+  }
+  Store.tapRow(p.id, ptId);
+  Store.tapRow(p.id, ptId);
+  assertEqual(st(), [0, 1, 0], 'two rows finish piece 1 of 3');
+  assertEqual(Store.project(p.id).history.length, 2, 'two history entries');
+
+  Store.untapRow(p.id, ptId);
+  assertEqual(st(), [2, 0, 0], 'back a row crosses the piece boundary: piecesDone-1, row = targetRows');
+  assertEqual(Store.project(p.id).history.length, 1, 'and eats exactly one history entry');
+
+  Store.untapRow(p.id, ptId);
+  assertEqual(st(), [1, 0, 0], 'then walks back normally');
+  Store.untapRow(p.id, ptId);
+  assertEqual(st(), [0, 0, 0], 'to the start');
+
+  var hist = Store.project(p.id).history.length;
+  var r = Store.untapRow(p.id, ptId);
+  assertEqual(r.event, 'none', 'at the very start nothing moves');
+  assertEqual(Store.project(p.id).history.length, hist, 'and NO history entry is destroyed');
+  Store.untapRow(p.id, ptId);
+  Store.untapRow(p.id, ptId);
+  assertEqual(Store.project(p.id).history.length, hist, 'three dead presses still destroy nothing');
+  assertEqual(st(), [0, 0, 0], 'and change nothing');
+
+  // A part-started stitch count is the one thing left to step back at row 0.
+  Store.tapStitch(p.id, ptId);
+  Store.tapStitch(p.id, ptId);
+  assertEqual(st(), [0, 0, 2], 'two stitches into row 1');
+  assertEqual(Store.untapRow(p.id, ptId).event, 'row', 'back a row clears them');
+  assertEqual(st(), [0, 0, 0], 'to a clean row 1');
+  assertEqual(Store.project(p.id).history.length, hist, 'still without touching history');
+})();
+
+/* ====================================================================== */
+group('6. Terminal states are idempotent (13 #6)');
+/* ====================================================================== */
+
+(function () {
+  fresh();
+  var p = Store.createProject({ name: 'ZW1 over' });
+  var ptId = p.parts[0].id;
+  Store.updatePart(p.id, ptId, { makeCount: 1, targetRows: 3 });
+  var events = [];
+  for (var i = 0; i < 8; i++) events.push(Store.tapRow(p.id, ptId).event);
+
+  var q = Store.part(Store.project(p.id), ptId);
+  assertEqual([q.row, q.piecesDone], [3, 1], 'the counter stops at 3 / 3 instead of running to 8');
+  assertEqual(events.slice(0, 3), ['row', 'row', 'projectDone'], 'the finale fires on the third tap');
+  assertEqual(events.slice(3), ['alreadyDone', 'alreadyDone', 'alreadyDone', 'alreadyDone', 'alreadyDone'],
+    'every tap after that is a no-op that says so');
+  assertEqual(Store.project(p.id).history.length, 3, 'and adds no history');
+  assertEqual(Store.project(p.id).finishedAt, null, 'finishedAt is never rewritten by a tap');
+
+  // And it is undoable, exactly once per real tap.
+  Store.untapRow(p.id, ptId);
+  q = Store.part(Store.project(p.id), ptId);
+  assertEqual([q.row, q.piecesDone], [2, 0], 'untap from the terminal state is the inverse of the tap that made it');
+})();
+
+(function () {
+  // Auto-advance must not creep past the target either: a finished part with
+  // a stitch target on the row beyond it stays pinned there.
+  fresh();
+  var p = Store.createProject({ name: 'ZW1 pin' });
+  var ptId = p.parts[0].id;
+  Store.updatePart(p.id, ptId, {
+    makeCount: 1,
+    targetRows: 2,
+    patternText: 'Rnd 1: sc in each st around. (6)\nRnd 2: sc in each st around. (6)\nRnd 3: sc in each st around. (6)'
+  });
+  Store.tapRow(p.id, ptId);
+  Store.tapRow(p.id, ptId);
+  var q = Store.part(Store.project(p.id), ptId);
+  assertEqual([q.row, q.piecesDone], [2, 1], 'the part is finished at row 2 of 2');
+
+  var events = {};
+  for (var k = 0; k < 20; k++) {
+    var e = Store.tapStitch(p.id, ptId).event;
+    events[e] = (events[e] || 0) + 1;
+  }
+  q = Store.part(Store.project(p.id), ptId);
+  assertEqual([q.row, q.piecesDone], [2, 1], 'twenty stitch taps do not move a finished part on');
+  assertTrue(q.stitch <= 6, 'and the stitch count stays pinned at the target', String(q.stitch));
+  assertEqual(events.rowAuto, undefined, 'auto-advance never fires again');
+  assertEqual(events.projectDone, undefined, 'and neither does the celebration');
+  assertEqual(Store.project(p.id).history.length, 2, 'no history is added');
+})();
+
+/* ====================================================================== */
+group('7. Imported sections have a stable identity and a target (13 #7, 01 #1, 02 #1)');
+/* ====================================================================== */
+
+var SECTIONS = [
+  {
+    name: '',
+    makeCount: 1,
+    text: 'Rnd 1: With white, ch 2, 6 sc in second chain from hook. (6)\n' +
+          'Rnd 2: 2 sc in each st around. (12)\n' +
+          'Rnd 3: (Sc in next st, 2 sc in next st) around. (18)',
+    placement: ''
+  },
+  {
+    name: 'Ear',
+    makeCount: 2,
+    text: 'Rnd 1: With black, ch 2, 6 sc in second chain from hook. (6)\n' +
+          'Rnd 2: 2 sc in each st around. (12)',
+    placement: 'Sew ears on rnds 5-10 of head.'
+  }
+];
+
+(function () {
+  fresh();
+  var p = Store.createProject({ name: 'ZW1 twice' });
+  var r1 = Store.importPatternSections(p.id, SECTIONS, { mode: 'parts' });
+  assertEqual(r1.created, 2, 'the first import creates both sections');
+  assertEqual(r1.targeted, 2, 'and gives both a target row count');
+
+  var parts = Store.project(p.id).parts;
+  assertEqual(parts.length, 2, 'the pristine Main placeholder is dropped');
+  assertEqual(parts[0].targetRows, 3, 'three contiguous rounds → target 3');
+  assertEqual(parts[1].targetRows, 2, 'two contiguous rounds → target 2');
+  assertTrue(!!parts[0].importKey, 'the unnamed section got a content key');
+  assertTrue(!!parts[1].importKey, 'and so did the named one');
+  assertTrue(parts[0].importKey !== parts[1].importKey, 'they are different');
+
+  var key0 = parts[0].importKey;
+  var r2 = Store.importPatternSections(p.id, SECTIONS, { mode: 'parts' });
+  assertEqual(r2.created, 0, 're-importing the same PDF creates nothing');
+  assertEqual(r2.updated, 2, 'it updates both');
+  assertEqual(Store.project(p.id).parts.length, 2, 'so there are still two parts, not four');
+  assertEqual(Store.project(p.id).parts[0].importKey, key0, 'and the key is stable across runs');
+
+  var r3 = Store.importPatternSections(p.id, SECTIONS, { mode: 'parts' });
+  assertEqual(Store.project(p.id).parts.length, 2, 'a third import still adds nothing');
+  assertEqual(r3.targeted, 0, 'and re-targets nothing');
+})();
+
+(function () {
+  fresh();
+  // A target the user set by hand is never overwritten; noTargets sets none.
+  var p = Store.createProject({ name: 'ZW1 targets' });
+  Store.importPatternSections(p.id, SECTIONS, { mode: 'parts' });
+  var pt = Store.project(p.id).parts[0];
+  Store.updatePart(p.id, pt.id, { targetRows: 99 });
+  Store.importPatternSections(p.id, SECTIONS, { mode: 'parts' });
+  assertEqual(Store.project(p.id).parts[0].targetRows, 99, 'a hand-set target survives a re-import');
+
+  var p2 = Store.createProject({ name: 'ZW1 notargets' });
+  var r = Store.importPatternSections(p2.id, SECTIONS, { mode: 'parts', noTargets: true });
+  assertEqual(r.targeted, 0, 'opts.noTargets sets no targets');
+  assertEqual(Store.project(p2.id).parts[0].targetRows, null, 'and leaves them null');
+
+  // Holes in the numbering mean no target rather than a wrong one.
+  var p3 = Store.createProject({ name: 'ZW1 holes' });
+  var gappy = [{ name: 'Gappy', makeCount: 1, text: 'Rnd 1: sc. (6)\nRnd 5: sc. (6)\nRnd 9: sc. (6)', placement: '' }];
+  var r3 = Store.importPatternSections(p3.id, gappy, { mode: 'parts' });
+  assertEqual(r3.targeted, 0, 'rows 1, 5, 9 are not contiguous, so no target is guessed');
+
+  // One row is not a pattern worth a target.
+  var p4 = Store.createProject({ name: 'ZW1 one' });
+  var one = [{ name: 'One', makeCount: 1, text: 'Rnd 1: sc in each st around. (6)', placement: '' }];
+  assertEqual(Store.importPatternSections(p4.id, one, { mode: 'parts' }).targeted, 0, 'a single row gets no target');
+
+  // A range counts for every row it covers.
+  var p5 = Store.createProject({ name: 'ZW1 range' });
+  var ranged = [{ name: 'Ranged', makeCount: 1, text: 'Rnd 1: sc. (6)\nRnd 2-7: Sc in each st around.\nRnd 8: sc. (6)', placement: '' }];
+  assertEqual(Store.importPatternSections(p5.id, ranged, { mode: 'parts' }).targeted, 1, 'a range keeps the numbering contiguous');
+  assertEqual(Store.project(p5.id).parts[0].targetRows, 8, 'and the target is the last row of the range run');
+})();
+
+/* ====================================================================== */
+group('8. allPartsDone and "Finish anyway" (02 #2)');
+/* ====================================================================== */
+
+(function () {
+  fresh();
+  var p = Store.createProject({ name: 'ZW1 baphomet' });
+  var mainId = p.parts[0].id;
+  var ear = Store.addPart(p.id, { name: 'Ear', makeCount: 2 });
+  Store.updatePart(p.id, ear.id, { targetRows: 2 });
+
+  var last = null;
+  for (var i = 0; i < 4; i++) last = Store.tapRow(p.id, ear.id);
+  assertEqual(last.event, 'partDone', 'finishing the ears does NOT finish the toy');
+  assertEqual(Store.blockingParts(p.id), ['Main'], 'the untouched, untargeted part is what blocks it');
+
+  var refused = Store.finishProject(p.id);
+  assertEqual(refused.ok, false, 'finishProject refuses while a part blocks');
+  assertEqual(refused.blocking, ['Main'], 'and names it');
+  assertEqual(Store.project(p.id).status, 'active', 'the project stays active');
+
+  var forced = Store.finishProject(p.id, { force: true });
+  assertEqual(forced.ok, true, '"Finish anyway" goes through');
+  assertEqual(Store.project(p.id).status, 'finished', 'and finishes it');
+  assertTrue(Store.project(p.id).finishedAt > 0, 'with a finishedAt');
+})();
+
+(function () {
+  fresh();
+  // A part with no target that HAS been worked on is still skipped: it is the
+  // open-ended scrap-yarn tail, not a forgotten piece.
+  var p = Store.createProject({ name: 'ZW1 openended' });
+  var mainId = p.parts[0].id;
+  var ear = Store.addPart(p.id, { name: 'Ear', makeCount: 1 });
+  Store.updatePart(p.id, ear.id, { targetRows: 2 });
+  Store.tapStitch(p.id, mainId);                 // the tail has been started
+  assertEqual(Store.blockingParts(p.id), ['Ear'], 'only the unfinished targeted part blocks now');
+  var last = null;
+  for (var i = 0; i < 2; i++) last = Store.tapRow(p.id, ear.id);
+  assertEqual(last.event, 'projectDone', 'and the celebration is reachable again');
+  assertEqual(Store.finishProject(p.id).ok, true, 'finishProject needs no force');
+})();
+
+/* ====================================================================== */
+group('9. Make-count impact and name safety (13 #9, 13 #10)');
+/* ====================================================================== */
+
+(function () {
+  fresh();
+  var p = Store.createProject({ name: 'ZW1 mc' });
+  var ptId = p.parts[0].id;
+  Store.updatePart(p.id, ptId, { makeCount: 99, targetRows: 1 });
+  for (var i = 0; i < 50; i++) Store.tapRow(p.id, ptId);
+  assertEqual(Store.part(Store.project(p.id), ptId).piecesDone, 50, 'fifty pieces done');
+
+  var impact = Store.makeCountImpact(p.id, ptId, 2);
+  assertEqual(impact.piecesLost, 48, 'makeCountImpact says how many pieces would go');
+  assertEqual(impact.piecesDone, 50, 'and what there is now');
+  assertEqual(impact.makeCount, 2, 'and what it would become');
+  assertEqual(Store.part(Store.project(p.id), ptId).piecesDone, 50, 'asking changes nothing');
+  assertEqual(Store.makeCountImpact(p.id, ptId, 99).piecesLost, 0, 'raising it loses nothing');
+  assertEqual(Store.makeCountImpact(p.id, 'nope', 2).piecesLost, 0, 'an unknown part loses nothing');
+
+  Store.updatePart(p.id, ptId, { makeCount: 2 });
+  assertEqual(Store.part(Store.project(p.id), ptId).piecesDone, 2, 'updatePart still clamps once the user has confirmed');
+})();
+
+(function () {
+  fresh();
+  var long = new Array(2001).join('L');
+  var p = Store.createProject({ name: long });
+  assertEqual(p.name.length, 120, 'a 2000-character project name is capped at 120');
+
+  var pt = Store.addPart(p.id, { name: long });
+  assertEqual(pt.name.length, 120, 'and so is a part name');
+
+  // Built with fromCharCode on purpose: a literal override typed into this
+  // file would reverse the source around it in every editor that opens it,
+  // and would make git and ripgrep treat the page as binary (09 #7).
+  function ch(code) { return String.fromCharCode(code); }
+  var RLO = ch(0x202E), LRO = ch(0x202D), POP = ch(0x202C);
+  var LRI = ch(0x2066), PDI = ch(0x2069);
+
+  var evil = 'Sleeve ' + RLO + 'evil' + POP + ' tail';
+  var pt2 = Store.addPart(p.id, { name: evil });
+  assertEqual(pt2.name, 'Sleeve evil tail', 'bidi overrides are stripped from a part name');
+  Store.updatePart(p.id, pt2.id, { name: 'A' + LRI + 'B' + PDI + 'C' });
+  assertEqual(Store.part(Store.project(p.id), pt2.id).name, 'ABC', 'isolates too, on updatePart');
+  Store.updateProject(p.id, { name: 'Hat ' + LRO + 'back' + POP });
+  assertEqual(Store.project(p.id).name, 'Hat back', 'and on updateProject');
+  Store.updateProject(p.id, { name: long });
+  assertEqual(Store.project(p.id).name.length, 120, 'updateProject caps too');
+  Store.updateProject(p.id, { name: '    ' });
+  assertEqual(Store.project(p.id).name.length, 120, 'a whitespace-only name still falls back');
+  assertEqual(Store.createProject({ name: 'Panda 🐼' }).name, 'Panda 🐼', 'emoji survive');
+})();
+
+/* ====================================================================== */
+group('10. The timer cannot be erased by a clock change (13 #8)');
+/* ====================================================================== */
+
+(function () {
+  fresh();
+  var realNow = Date.now;
+  var offset = 0;
+  var realPerf = null;
+  var pnow = 0;
+  var canStubPerf = false;
+  try {
+    realPerf = window.performance.now;
+    window.performance.now = function () { return pnow; };
+    canStubPerf = window.performance.now() === 0;
+  } catch (e) { canStubPerf = false; }
+
+  Date.now = function () { return realNow() + offset; };
+  var p = Store.createProject({ name: 'ZW1 timer' });
+
+  if (!canStubPerf) {
+    skip('monotonic timer', 'performance.now is not stubbable here');
+  } else {
+    pnow = 1000;
+    Store.toggleTimer(p.id);
+    pnow = 1000 + 3600e3;          // an hour of real, monotonic time
+    offset = -7200e3;              // …during which the wall clock jumps back two hours
+    var el = Store.elapsedMs(Store.project(p.id));
+    assertEqual(Math.round(el / 1000), 3600, 'an hour is an hour even when the wall clock goes backwards');
+    Store.toggleTimer(p.id);
+    assertEqual(Math.round(Store.project(p.id).timer.totalMs / 1000), 3600, 'and it is banked, not zeroed');
+
+    // Forward jumps are capped, not believed.
+    var banked = Store.project(p.id).timer.totalMs;
+    pnow = 0;
+    offset = 0;
+    Store.toggleTimer(p.id);
+    pnow = 40 * 3600e3;            // "40 hours" in one span
+    assertEqual(Store.elapsedMs(Store.project(p.id)) - banked, 18 * 3600e3, 'a single span is capped at 18 hours');
+    Store.toggleTimer(p.id);
+    assertEqual(Store.project(p.id).timer.totalMs - banked, 18 * 3600e3, 'and the cap is what gets banked');
+
+    // Only completed spans are persisted.
+    pnow = 0;
+    Store.toggleTimer(p.id);
+    var stored = JSON.parse(JSON.stringify(Store.project(p.id).timer));
+    pnow = 600e3;
+    assertEqual(Store.project(p.id).timer.totalMs, stored.totalMs, 'a running span is not written into totalMs');
+    assertTrue(Store.project(p.id).timer.runningSince > 0, 'only the wall-clock start is persisted, for reload');
+    Store.toggleTimer(p.id);
+  }
+
+  // After a reload there is no monotonic span left, so the wall clock is used —
+  // and capped. A backward jump there is worth nothing, never a negative.
+  var q = Store.project(p.id);
+  var base = q.timer.totalMs;
+  q.timer.runningSince = realNow() + 5000;       // "started in the future"
+  offset = 0;
+  assertEqual(Store.elapsedMs(q), base, 'a start in the future counts as zero, not as a negative');
+  q.timer.runningSince = realNow() - 40 * 3600e3;
+  assertEqual(Store.elapsedMs(q) - base, 18 * 3600e3, 'a recovered span is capped at 18 hours too');
+  q.timer.runningSince = null;
+
+  Date.now = realNow;
+  if (realPerf) { try { window.performance.now = realPerf; } catch (e) { /* ignore */ } }
+})();
+
+/* ====================================================================== */
+group('11. Undo is bounded by bytes as well as entries (09 #9)');
+/* ====================================================================== */
+
+(function () {
+  fresh();
+  Store.clearUndo();
+  assertEqual(Store.undoBytes(), 0, 'an empty stack holds no bytes');
+
+  var p = Store.createProject({ name: 'ZW1 small' });
+  Store.tapStitch(p.id, p.parts[0].id);
+  assertTrue(Store.undoBytes() > 0, 'one snapshot has a size');
+
+  // The entry cap still applies: 60 snapshots, 50 undos.
+  Store.clearUndo();
+  for (var i = 0; i < 60; i++) Store.tapStitch(p.id, p.parts[0].id);
+  var undos = 0;
+  while (Store.undo()) undos++;
+  assertEqual(undos, 50, 'the 50-entry cap still holds for small projects');
+  assertEqual(Store.undoBytes(), 0, 'and unwinding gives the bytes back');
+
+  // A big project: the byte cap bites first.
+  Store.clearUndo();
+  var big = Store.createProject({ name: 'ZW1 big' });
+  var chunk = new Array(20001).join('x');
+  var text = '';
+  for (var c = 0; c < 30; c++) text += 'Row ' + (c + 1) + ': ' + chunk + '\n';   // ~600 KB
+  Store.updatePart(big.id, big.parts[0].id, { patternText: text });
+  Store.clearUndo();
+  for (var k = 0; k < 12; k++) Store.tapStitch(big.id, big.parts[0].id);
+  assertTrue(Store.undoBytes() <= 2 * 1024 * 1024, 'the stack is trimmed under 2 MB', String(Store.undoBytes()));
+  assertTrue(Store.undoBytes() > 1024 * 1024, 'but not emptied', String(Store.undoBytes()));
+  assertEqual(Store.canUndo(), true, 'and a big project is still undoable');
+  Store.clearUndo();
+  assertEqual(Store.undoBytes(), 0, 'clearUndo() resets the count');
+})();
+
+/* ====================================================================== */
+group('12. Checklist suggestions (01 #3)');
+/* ====================================================================== */
+
+/*
+ * Text of tmp-pdf/crochet-panda.pdf as PdfText hands it to the parser
+ * (window.__pdfText['crochet-panda.pdf'] in test/patterns.fixtures.html),
+ * captured 2026-09-18. It lives here so this page needs neither the PDF —
+ * which is copyrighted and gitignored — nor pdf.js.
+ *
+ * It is a capture, not a contract: PdfText's whitespace and bullet handling
+ * moves, and only the assembly sentences below matter to what is asserted.
+ * When window.__pdfText is present (a combined runner, or a page opened after
+ * the fixture run) the SAME assertions run against the live text too.
+ */
+var PANDA_TEXT = [
+  '=== PAGE 1 ===',
+  'Materials',
+  '- DMC Petra No.3 colors: black = 11 g and',
+  'white = 15 g',
+  '- 3 mm crochet hook',
+  '- Tapestry needle',
+  '- Polyester fiberfill 25 g',
+  '- Pins',
+  'Size',
+  'The panda is 4 inches (10 cm) high (sitting).',
+  'Abbreviations',
+  'This pattern uses USA crochet terminology.',
+  'ch = chain',
+  'sc = single crochet',
+  'st = stitch',
+  'sl st = slip stitch',
+  'rnd = round',
+  'tog = together',
+  'Little Panda',
+  'Body',
+  'Rnd 1: With white, ch 2, 6 sc in second chain from hook.',
+  '(6 sc made) * Or you can do 6 sc in magic ring. *',
+  'Rnd 2: 2 sc in each st around. (12)',
+  'Rnd 3: (Sc in next st, 2 sc in next st) around. (18)',
+  'Rnd 4: (2 sc in next st, sc in next 2 sts) around. (24)',
+  'Rnd 5: (Sc in next 3 sts, 2 sc in next st) around. (30)',
+  'Rnd 6: Sc in next 2 sts, 2 sc in next st, (sc in next 4 sts, 2',
+  'sc in next st) 5 times, sc in next 2 sts. (36)',
+  'Rnd 7-12: Sc in each st around.',
+  'Rnd 13: Sc in next 2 sts, sc next 2 sts tog, (sc in next 4',
+  'sts, sc next 2 sts tog) 5 times, sc in next 2 sts. (30)',
+  'Rnd 14: Sc in each st around.',
+  'Rnd 15: Sc in each st around, changing to black in last 2',
+  'loops of last st. (30)',
+  'Rnd 16: (Sc in next 3 sts,',
+  'sc next 2 sts tog) around. (24)',
+  'Rnd 17-18: Sc in each st around.',
+  'Rnd 19: (Sc in next 2 sts,',
+  'sc next 2 sts tog) around. (18)',
+  'Rnd 20: Sc in each st around,',
+  'leave long end for sewing,',
+  'fasten off. Stuff body.',
+  '',
+  '=== PAGE 2 ===',
+  'Head',
+  'Rnd 1: With white, ch 2, 6 sc in second chain from hook.',
+  '(6 sc made) * Or you can do 6 sc in magic ring. *',
+  'Rnd 2: 2 sc in each st around. (12)',
+  'Rnd 3: (Sc in next st, 2 sc in next st) around. (18)',
+  'Rnd 4: (2 sc in next st, sc in next 2 sts) around. (24)',
+  'Rnd 5: (Sc in next 3 sts, 2 sc in next st) around. (30)',
+  'Rnd 6: Sc in next 2 sts, 2 sc in next st, (sc in next 4 sts,',
+  '2 sc in next st) 5 times, sc in next 2 sts. (36)',
+  'Rnd 7: (Sc in next 5 sts, 2 sc in next st) around. (42)',
+  'Rnd 8: Sc in next 3 sts, 2 sc in next st, (sc in next 6 sts,',
+  '2 sc in next st) 5 times, sc in next 3 sts. (48)',
+  'Rnd 9-16: Sc in each st around.',
+  'Rnd 17: Sc in next 3 sts, sc next 2 sts tog, (sc in next 6',
+  'sts, sc next 2 sts tog) 5 times, sc in next 3 sts. (42)',
+  'Rnd 18: (Sc in next 5 sts, sc next 2 sts tog) around. (36)',
+  'Rnd 19: Sc in next 2 sts, sc next 2 sts tog, (sc in next 4',
+  'sts, sc next 2 sts tog) 5 times, sc in next 2 sts. (30)',
+  'Rnd 20: (Sc in next 3 sts, sc next 2 sts tog) around. (24)',
+  'Rnd 21: (Sc in next 2 sts, sc next 2 sts tog) around, join',
+  'with sl st in first st, fasten off. (18) Stuff head and sew to',
+  'the body.',
+  'Arm',
+  '*Only stuff hand.*',
+  'Rnd 1: With black, ch 2, 6 sc in second chain from hook.',
+  '(6 sc made) * Or you can do 6 sc in magic ring. *',
+  'Rnd 2: (Sc in next st, 2 sc in next st) around. (9)',
+  'Rnd 3: Sc in each st around. (9)',
+  'Rnd 4: (Sc in next st,',
+  'sc next 2 sts tog) around.',
+  'Stuff hand. (6)',
+  'Rnd 5-10: Sc in each st',
+  'around.',
+  'Rnd 11: Sc in each st around,',
+  'join with sl st in first st.',
+  'Leave long end for sewing,',
+  'fasten off.',
+  'Sew arms to body on rnd 19.',
+  'Leg',
+  'Rnd 1: With black, ch 2, 6 sc in second chain from hook.',
+  '(6 sc made) * Or you can do 6 sc in magic ring. *',
+  'Rnd 2: 2 sc in each st around. (12)',
+  'Rnd 3: (Sc in next st, 2 sc in next st) around. (18)',
+  'Rnd 4: Sc in each st around.',
+  'Rnd 5: Sc in next 6 sts, sc next 2 sts tog 3 times,',
+  'sc in next 6 sts. (15)',
+  'Rnd 6: Sc in next 3 sts, sc next 2 sts tog 2 times,',
+  'sc in next st, sc next 2 sts tog 2 times, sc in next 3 sts. (11)',
+  'Rnd 7: Sc in next 4 sts, sc next 3 sts tog,',
+  'sc in next 4 sts. (9)',
+  'Rnd 8: Sc in each st around.',
+  'Rnd 9: Sc in each st around, join with sl st in first st,',
+  'leave long end for sewing, fasten off. Stuff.',
+  'Tail',
+  'Rnd 1: With black, ch 2, 6 sc in second chain from hook.',
+  '(6 sc made) * Or you can do 6 sc in magic ring. *',
+  'Rnd 2: Sc in each st around. (6)',
+  'Rnd 3: Sc in each st around, join with sl st in first st,',
+  'fasten of. (6) Stuff.',
+  'Use pins to position legs and tail as in pictures. Panda',
+  'can sit by himself if you do position them properly.',
+  '',
+  '=== PAGE 3 ===',
+  'Ear Finishing',
+  'Rnd 1: With black, ch 2, 6 sc in second chain from hook. Sew ears on rnds 5-10 of head.',
+  '(6 sc made) * Or you can do 6 sc in magic ring. *',
+  'Rnd 2: 2 sc in each st around. (12)',
+  'Rnd 3: (Sc in next st, 2 sc in next st) around. (18)',
+  'Rnd 4: Sc in each st around.',
+  'Rnd 5: (Sc next 2 sts tog, sc in next st) around, leave long',
+  'end for sewing, fasten off. (12 )',
+  'Eye',
+  'Rnd 1: With black, ch 2, 6 sc in second chain from hook.',
+  '(6) * Or you can do 6 sc in magic ring. *',
+  'Rnd 2: 2 sc in each st around, join with sl st in first st,',
+  'leave long end for sewing, fasten off. (12)',
+  'Sew eyes 6 sts apart on rnds 10-14.',
+  'With white yarn, embroider a cross on black eye.',
+  'Copyright',
+  'reserved.',
+  'This pattern is for your personal use only. It cannot be',
+  'reproduced, published online, altered or resold.',
+  'You can sell finished dolls based on this pattern,',
+  'provided that they are handmade by you (the seller)',
+  'and a limited number.',
+  'Please add the following lines to your online add for the',
+  'finished doll:',
+  'The design for this doll is from Sayjai.',
+  'kandjdolls.blogspot.co.uk',
+  'www.facebook.com/kandjdolls.amigurumi.patterns'
+].join('\n');
+
+(function () {
+  fresh();
+
+  function texts(list) {
+    return list.map(function (s) { return s.text; });
+  }
+  function findOne(list, want) {
+    for (var i = 0; i < list.length; i++) if (list[i].text === want) return list[i];
+    return null;
+  }
+
+  function checkPanda(text, where) {
+    var got = Store.suggestChecklist(text);
+    var list = texts(got);
+
+    assertTrue(got.length > 0, where + ': the panda yields suggestions', JSON.stringify(list));
+    var arms = findOne(got, 'Sew arms to body on rnd 19');
+    assertTrue(!!arms, where + ': "Sew arms to body on rnd 19" is suggested', JSON.stringify(list));
+    if (arms) assertEqual(arms.confidence, 'strong', where + ': and it is strong');
+
+    var eyes = findOne(got, 'Sew eyes 6 sts apart on rnds 10-14');
+    assertTrue(!!eyes, where + ': "Sew eyes 6 sts apart on rnds 10-14" is suggested', JSON.stringify(list));
+    if (eyes) assertEqual(eyes.confidence, 'strong', where + ': and it is strong');
+
+    assertTrue(list.indexOf('Stuff head and sew to') === -1,
+      where + ': the half-sentence "Stuff head and sew to" is never offered');
+    assertTrue(list.indexOf('join with sl st in first st') === -1,
+      where + ': and neither is "join with sl st in first st"');
+    assertTrue(list.indexOf('Stuff hand. (6)') === -1, where + ': nor a stitch count masquerading as a step');
+    assertTrue(list.indexOf('Stuff hand') === -1, where + ': nor the two-word remains of one');
+
+    for (var i = 0; i < got.length; i++) {
+      var t = got[i].text;
+      assertTrue(/^[A-Z]/.test(t), where + ': every suggestion starts upper-case: ' + JSON.stringify(t));
+      assertTrue(t.replace(/…$/, '').split(/\s+/).length >= 3,
+        where + ': every suggestion has three words: ' + JSON.stringify(t));
+      assertTrue(got[i].confidence === 'strong' || got[i].confidence === 'weak',
+        where + ': every suggestion carries a confidence: ' + JSON.stringify(t));
+    }
+  }
+
+  checkPanda(PANDA_TEXT, 'captured text');
+
+  var live = window.__pdfText && window.__pdfText['crochet-panda.pdf'];
+  if (live) {
+    checkPanda(live, 'live PDF');
+  } else {
+    skip('the same assertions against the live PDF', 'window.__pdfText is only set by test/patterns.fixtures.html');
+  }
+})();
+
+(function () {
+  // The rules, one at a time, on text the parser cannot mistake for anything.
+  function only(text) { return Store.suggestChecklist(text).map(function (s) { return s.text; }); }
+
+  assertEqual(only('Sew the ears to\nthe head firmly.'),
+    ['Sew the ears to the head firmly'],
+    'a wrapped sentence is completed from the line below');
+  assertEqual(only('Sew the ears to\nRnd 4: sc in each st around. (12)'),
+    [],
+    'a fragment the next line cannot finish is dropped rather than offered');
+  assertEqual(only('Sew eyes onto the head. (12 sts)'),
+    ['Sew eyes onto the head'],
+    'a trailing stitch count is stripped');
+  assertEqual(only('Sew eyes onto the head. (12)'),
+    ['Sew eyes onto the head'],
+    'in either spelling');
+  assertEqual(only('sew the arms to the body'),
+    [],
+    'a lower-case fragment is rejected');
+  assertEqual(only('Sew on'),
+    [],
+    'under three words is rejected');
+  assertEqual(only('Rnd 19: Sew arms to body of panda'),
+    [],
+    'a line that is really a row instruction is rejected');
+  assertEqual(only('Sew arms to body on rnd 19'),
+    ['Sew arms to body on rnd 19'],
+    'but a row NUMBER inside a real step is fine');
+  assertEqual(only('Join our lovely Facebook group for more patterns'),
+    [],
+    'and the spam guard still holds');
+
+  var strong = Store.suggestChecklist('Sew the ears to the head firmly.');
+  assertEqual(strong[0].confidence, 'strong', 'a sewing-up verb is a strong signal');
+  assertEqual(String(strong[0]), 'Sew the ears to the head firmly',
+    'a suggestion still behaves as its own string, for the shell that has not moved yet');
+  assertEqual(strong[0].toLowerCase(), 'sew the ears to the head firmly', 'including toLowerCase()');
+  assertEqual(JSON.parse(JSON.stringify(strong))[0], 'Sew the ears to the head firmly', 'and JSON.stringify()');
+
+  var rebuilt = Store.suggestChecklist('Sew the ears to\nthe head firmly.');
+  assertEqual(rebuilt[0].text, 'Sew the ears to the head firmly', 'a rebuilt sentence is still offered');
+  assertEqual(rebuilt[0].confidence, 'weak',
+    'but only weakly: a step we had to put back together should go on the sheet unticked');
+
+  assertEqual(only(''), [], 'empty text suggests nothing');
+  assertEqual(only('   \n  \n'), [], 'and so does whitespace');
+})();
+
+/* ---------------------------------------------------------------------- */
+
+wipe();
+try { window.localStorage.removeItem(K + '.preimport'); } catch (e) { /* ignore */ }
+
+var summaryEl = document.getElementById('summary');
+
+Store.requestPersist().then(function (granted) {
+  log(typeof granted === 'boolean', 'requestPersist() resolves to a boolean', 'got ' + JSON.stringify(granted));
+  log(typeof Store.settings().persistGranted === 'boolean', 'and records the answer in settings');
+  finish();
+}, function () {
+  log(false, 'requestPersist() never rejects');
+  finish();
+});
+
+function finish() {
+  wipe();
+  var finalLine = passed + ' passed, ' + failed + ' failed';
+  summaryEl.textContent = finalLine;
+  summaryEl.className = failed === 0 ? 'ok' : 'bad';
+  console.log(finalLine);
+  window.setTimeout(wipe, 400);
+}
+</script>
+</body>
+</html>

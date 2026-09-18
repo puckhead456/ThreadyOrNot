@@ -1,0 +1,28 @@
+# One line-ending convention (09 #18).
+#
+# Half the JS in this repo was committed CRLF and half LF, so a single
+# line-ending flip has already shown up as a 9,130-line diff on
+# js/xstitch.js, burying the ~50 lines that actually changed. Text files are
+# normalised to LF in the repository; Git still checks them out with the
+# platform's own endings.
+#
+# NOTE: this only governs files as they are committed from here on. The
+# existing CRLF files are NOT renormalised in this pass - that wants its own
+# clearly-labelled commit plus a .git-blame-ignore-revs entry, so the noise
+# stays in one place forever.
+* text=auto eol=lf
+
+# PowerShell tooling is run by Windows and stays CRLF.
+*.ps1 text eol=crlf
+
+# Never touched, never diffed.
+*.png binary
+*.ico binary
+*.pdf binary
+*.woff2 binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.woff binary
+*.ttf binary

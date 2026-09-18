@@ -127,7 +127,7 @@
   // Dot leaders, spaced or solid: 'Front . . . . Cut 2' and 'Front........Cut 2'.
   var LEADER_RE = /(?:[.·…–—_\-][ \t]*){3,}/g;
   var UNI_DASH = /[‐-―−]/g;
-  var LEADER_MARK = '';
+  var LEADER_MARK = '\u0001';
 
   /**
    * Glyph / fraction / dot-leader normalisation. Idempotent.
@@ -644,7 +644,7 @@
     return out;
   }
 
-  var SENT_DOT = '';
+  var SENT_DOT = '\u0001';
 
   /**
    * Sewing.sentences(text) -> string[]  (lossless: join(' ') gives the text back)
@@ -1033,7 +1033,7 @@
   var SA_ANY = new RegExp(SA_NUM + '\\s*' + SA_UNIT, 'i');
   var SA_MENTION = /seam allowance|seams? are|seams? is|sewn at|stitch at/i;
 
-  var DOT_MARK = '';
+  var DOT_MARK = '\u0002';
   var SA_STOP_LINE = /^(?:size\s*chart|sizes?\b|finished\b|fabric\b|yardage\b|cutting\b|notions?\b|trims?\b|materials?\b|supplies\b|measurements?\b)/i;
 
   /**

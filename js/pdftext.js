@@ -6,8 +6,25 @@
  * the library and its worker are precached by the service worker, so once the
  * app has been installed this works with no network at all.
  *
- *   PdfText.extract(file, { onProgress(page, total) })
- *     → Promise<{ text, pages, chars, columnsDetected }>
+ *   PdfText.extract(file, { onProgress(page, total), maxPages, signal })
+ *     → Promise<{ text, pages, pagesTotal, chars, columnsDetected, emptyPages }>
+ *
+ *     emptyPages  1-based page numbers that carried fewer than ~20
+ *                 non-whitespace characters once the page furniture was
+ *                 dropped: an image cover, a photo-tutorial page, a blank.
+ *                 Mixed PDFs (a designed cover, real text, photo pages) are
+ *                 extremely common and until now "Read 24 pages · 1,240
+ *                 characters" gave no hint that the Legs live in a picture.
+ *                 The UI wording must be "no readable text", never "failed".
+ *     pages       pages actually read; pagesTotal is what the document holds.
+ *     maxPages    stop after this many pages (the big-file guard).
+ *     signal      { cancelled:boolean } or an AbortSignal. Checked at the head
+ *                 of every page step; on cancel the document is destroyed and
+ *                 the promise rejects with an Error whose .name is
+ *                 'AbortError'. The caller must leave the textarea untouched.
+ *
+ *   PdfText.SIZE_WARN_BYTES - files bigger than this deserve a confirm sheet
+ *     ("That's a 61 MB file... read the first 20 pages?") before extract runs.
  *   PdfText.isAvailable() → boolean
  *
  * The output is aimed squarely at window.Patterns: one line per printed line,
@@ -582,9 +599,69 @@
     });
   }
 
+  /* ---- size guard, cancellation and page cap (06 #6) ---------------- */
+
+  /** Over this, the UI should offer a page range instead of the whole file. */
+  var SIZE_WARN_BYTES = 25 * 1024 * 1024;
+
+  /** A page with less than this much real text carried no readable text. */
+  var MIN_PAGE_CHARS = 20;
+
+  /** `signal` is either { cancelled:boolean } of ours or a real AbortSignal. */
+  function isCancelled(signal) {
+    return !!(signal && (signal.cancelled || signal.aborted));
+  }
+
+  function abortError() {
+    var e = new Error('Import cancelled.');
+    e.name = 'AbortError';
+    return e;
+  }
+
+  /**
+   * Page numbers whose text is under MIN_PAGE_CHARS. Exposed for tests.
+   * @param {Array<Array<string>>} cleaned one array of lines per page
+   * @param {number[]} [numbers] the pages' own 1-based numbers
+   */
+  function emptyPageNumbers(cleaned, numbers) {
+    var out = [];
+    for (var i = 0; i < cleaned.length; i++) {
+      var n = (cleaned[i] || []).join('').replace(/\s/g, '').length;
+      if (n < MIN_PAGE_CHARS) out.push(numbers && numbers[i] !== undefined ? numbers[i] : i + 1);
+    }
+    return out;
+  }
+
+  /* ---- Unicode hygiene (06 #7) -------------------------------------- *
+   * Justified typesetting, Canva exports and anything that has been through
+   * a word processor carry soft hyphens, zero-width joiners, fullwidth
+   * digits, exotic bullets and curly quotes. Each one silently costs the
+   * parser a whole round, so fold them to ASCII on the way out of extract().
+   * (open()/textOf() is deliberately left alone: the craft modules match
+   * chart glyphs against it byte for byte.) */
+  var INVISIBLE_RE = /[\u0000­​-‍⁠﻿]/g;
+  var NBSP_RE = /[   ]/g;
+  var BULLET_RE = /[•‣◦▪▫●○◾·‧⁃∙]/g;
+  var FULLWIDTH_RE = /[！-～]/g;
+  var SQUOTE_RE = /[‘’‚‛′]/g;
+  var DQUOTE_RE = /[“”„‟″]/g;
+
+  function normUnicode(s) {
+    return String(s == null ? '' : s)
+      .replace(INVISIBLE_RE, '')
+      .replace(FULLWIDTH_RE, function (c) {
+        return String.fromCharCode(c.charCodeAt(0) - 0xfee0);
+      })
+      .replace(NBSP_RE, ' ')
+      .replace(BULLET_RE, '-')
+      .replace(SQUOTE_RE, '\'')
+      .replace(DQUOTE_RE, '"');
+  }
+
   function friendlyError(err) {
     var name = (err && err.name) || '';
     var msg = (err && err.message) || '';
+    if (name === 'AbortError') return err;   // the user pressed Cancel
     if (name === 'PasswordException' || /password/i.test(msg)) {
       return new Error('That PDF is password protected.');
     }
@@ -597,13 +674,19 @@
 
   /**
    * @param {File|Blob} file
-   * @param {{onProgress?: function(number, number)}} [opts]
-   * @returns {Promise<{text:string, pages:number, chars:number, columnsDetected:number}>}
+   * @param {{onProgress?: function(number, number), maxPages?: number,
+   *          signal?: {cancelled:boolean}|AbortSignal}} [opts]
+   * @returns {Promise<{text:string, pages:number, pagesTotal:number,
+   *          chars:number, columnsDetected:number, emptyPages:number[]}>}
    */
   function extract(file, opts) {
     opts = opts || {};
     var onProgress = typeof opts.onProgress === 'function' ? opts.onProgress : null;
+    var signal = opts.signal || null;
+    var maxPages = (typeof opts.maxPages === 'number' && opts.maxPages > 0)
+      ? Math.floor(opts.maxPages) : 0;
     if (!file) return Promise.reject(new Error('No file to read.'));
+    if (isCancelled(signal)) return Promise.reject(abortError());
 
     var lib, doc;
     return loadLib()
@@ -612,21 +695,27 @@
         return readArrayBuffer(file);
       })
       .then(function (buf) {
+        if (isCancelled(signal)) throw abortError();
+        // The ArrayBuffer goes straight in: pdf.js accepts one, and the
+        // second `new Uint8Array(buf)` copy used to double peak memory on
+        // exactly the big files least able to afford it (06 #6).
         return lib.getDocument({
-          data: new Uint8Array(buf),
+          data: buf,
           isEvalSupported: false,
           disableFontFace: true
         }).promise;
       })
       .then(function (pdf) {
         doc = pdf;
-        var total = pdf.numPages || 0;
+        var docPages = pdf.numPages || 0;
+        var total = maxPages ? Math.min(maxPages, docPages) : docPages;
         var pages = [];
         var columnsDetected = 0;
         var chain = Promise.resolve();
 
         var makeStep = function (p) {
           return function () {
+            if (isCancelled(signal)) throw abortError();
             if (onProgress) {
               try { onProgress(p, total); } catch (e) { /* UI errors are not our problem */ }
             }
@@ -641,7 +730,12 @@
                 } catch (e) { /* fall back to US Letter */ }
                 var res = pageLines(tc.items || [], width, height);
                 if (res.split) columnsDetected++;
-                pages.push({ number: p, lines: res.lines });
+                pages.push({
+                  number: p,
+                  lines: res.lines.map(function (l) {
+                    return { text: normUnicode(l.text), margin: l.margin };
+                  })
+                });
                 if (typeof page.cleanup === 'function') page.cleanup();
               });
             });
@@ -652,6 +746,8 @@
 
         return chain.then(function () {
           var cleaned = dropRunningFurniture(pages);
+          var numbers = pages.map(function (pg) { return pg.number; });
+          var emptyPages = emptyPageNumbers(cleaned, numbers);
           var blocks = cleaned.map(function (lines, i) {
             return '=== PAGE ' + pages[i].number + ' ===\n' + lines.join('\n');
           });
@@ -663,8 +759,10 @@
           return {
             text: text,
             pages: total,
+            pagesTotal: docPages,
             chars: text.length,
-            columnsDetected: columnsDetected
+            columnsDetected: columnsDetected,
+            emptyPages: emptyPages
           };
         });
       })
@@ -802,7 +900,11 @@
     extract: extract,
     open: open,
     isAvailable: isAvailable,
+    SIZE_WARN_BYTES: SIZE_WARN_BYTES,
+    MIN_PAGE_CHARS: MIN_PAGE_CHARS,
     /** Exposed for the dev fixtures page / tests. */
+    _emptyPageNumbers: emptyPageNumbers,
+    _normUnicode: normUnicode,
     _pageLines: pageLines,
     _fixLigatures: fixLigatures,
     _buildRows: buildRows,

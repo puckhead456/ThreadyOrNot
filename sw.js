@@ -18,7 +18,7 @@
                                  "clear the service worker" ritual, ever
      any host    /tmp-pdf/ /test/  never touched by the cache at all
 */
-const CACHE_VERSION = 'h09ee9b9825';
+const CACHE_VERSION = 'hb8fcb19aa7';
 const CACHE_NAME = 'stitchkeeper-' + CACHE_VERSION;
 
 const PRECACHE_URLS = [

@@ -13,14 +13,59 @@
   var KEY = 'stitchkeeper.v1';
   var VERSION = 1;
   var UNDO_CAP = 50;
+  /* Wave 1 (09 #9): the entry cap is not enough when one entry is a 500x500
+   * chart. Shift the oldest until the serialised stack is under this. */
+  var UNDO_BYTE_CAP = 2 * 1024 * 1024;
   var HISTORY_CAP = 500;
   var SAVE_DEBOUNCE = 150;
 
+  /* Free-text safety (13 #10): no name may reach the DOM unbounded, and the
+   * bidi overrides must never travel with one. */
+  var NAME_MAX = 120;
+  /* Built from strings, never from literals: a bidi override or a control byte
+   * typed straight into this file would be invisible here and would make git
+   * and ripgrep treat js/store.js as binary (09 #7). */
+  var BIDI_RE = new RegExp('[\u202A-\u202E\u2066-\u2069]', 'g');
+  var CONTROL_RE = new RegExp('[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]', 'g');
+
+  /* Timers (13 #8): a single span longer than this is a clock artefact, not
+   * crochet. */
+  var MAX_SPAN_MS = 18 * 60 * 60 * 1000;
+
   var state = null;
   var undoStack = [];
+  var undoBytesTotal = 0;
   var saveTimer = null;
   var lineCache = Object.create(null); // partId -> { key, lines }   (key = sizeIndex + ' ' + text)
   var diagramCache = Object.create(null); // partId -> { key, model } (live 3D diagram)
+
+  /* ---- Wave 1: persistence health -------------------------------------- *
+   * Nothing in here is persisted. It is what this tab knows about whether
+   * the last write worked, whether another tab has moved underneath us, and
+   * whether the data on disk was readable at all.
+   * ---------------------------------------------------------------------- */
+
+  /** Identifies THIS tab across the `storage` event (13 #1). */
+  var WRITER_ID = null;
+  /** True once a write failed; cleared by the next write that works. */
+  var saveFailedFlag = false;
+  var lastStorageError = null;
+  var storageErrorSubs = [];
+  /** Unsaved local changes: set by save(), cleared by a successful write. */
+  var dirty = false;
+  /** The raw text that could not be read, and where a copy of it went. */
+  var corruptFlag = false;
+  var corruptText = null;
+  var corruptKeyName = null;
+  /** Another tab wrote while we had work in flight. */
+  var conflictFlag = false;
+  var conflictDetail = null;
+  var conflictSubs = [];
+  var externalSubs = [];
+  /** The pre-import snapshot, for Store.undoImport() (09 #3). */
+  var preimportText = null;
+  /** Timer (13 #8): the monotonic start of the span currently running. */
+  var runningSpan = null;
 
   /* Live diagram: the reserved main-yarn key and its warm cream default. */
   var MAIN_YARN = '*';
@@ -69,6 +114,72 @@
       return copy;
     } catch (e) {
       return {};
+    }
+  }
+
+  /**
+   * A name that is safe to store and to render (13 #10): bidi overrides and
+   * control characters stripped, trimmed, capped at 120 characters on a whole
+   * code point.
+   */
+  function safeName(v, dflt) {
+    var s = str(v, '');
+    if (!s) return dflt;
+    s = s.replace(BIDI_RE, '').replace(CONTROL_RE, ' ').replace(/\s+/g, ' ').trim();
+    if (s.length > NAME_MAX) {
+      s = s.slice(0, NAME_MAX);
+      // Never leave half a surrogate pair behind.
+      var last = s.charCodeAt(s.length - 1);
+      if (last >= 0xd800 && last <= 0xdbff) s = s.slice(0, s.length - 1);
+      s = s.replace(/\s+$/, '');
+    }
+    return s || dflt;
+  }
+
+  /** FNV-1a, base36. Short, stable, and good enough to key a PDF section. */
+  function hash32(text) {
+    var h = 0x811c9dc5;
+    var s = String(text == null ? '' : text);
+    for (var i = 0; i < s.length; i++) {
+      h ^= s.charCodeAt(i);
+      // h *= 16777619, kept in 32 bits without Math.imul (ES5).
+      h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
+    }
+    return (h >>> 0).toString(36);
+  }
+
+  /** A monotonic millisecond clock. Never goes backwards; never jumps. */
+  function mono() {
+    try {
+      if (window.performance && typeof window.performance.now === 'function') {
+        var t = window.performance.now();
+        if (typeof t === 'number' && isFinite(t)) return t;
+      }
+    } catch (e) { /* fall through */ }
+    return Date.now();
+  }
+
+  /** 'YYYY-MM-DD' in local time, for the backup-nag day counter. */
+  function dayKey(ts) {
+    var d = new Date(typeof ts === 'number' && isFinite(ts) ? ts : Date.now());
+    var m = d.getMonth() + 1;
+    var day = d.getDate();
+    return d.getFullYear() + '-' + (m < 10 ? '0' : '') + m + '-' + (day < 10 ? '0' : '') + day;
+  }
+
+  /** Subscribe helper — returns the unsubscribe function. */
+  function subscribe(list, fn) {
+    if (typeof fn !== 'function') return function () {};
+    list.push(fn);
+    return function () {
+      var i = list.indexOf(fn);
+      if (i >= 0) list.splice(i, 1);
+    };
+  }
+
+  function emit(list, payload) {
+    for (var i = 0; i < list.length; i++) {
+      try { list[i](payload); } catch (e) { /* a broken subscriber never breaks a save */ }
     }
   }
 
@@ -521,8 +632,11 @@
   function makePart(name, makeCount) {
     return {
       id: uid(),
-      name: name || 'Main',
+      name: safeName(name, 'Main'),
       makeCount: clampInt(makeCount, 1, 99, 1),
+      // Stable identity for a section imported from a PDF (13 #7). '' on any
+      // part the user made by hand.
+      importKey: '',
       piecesDone: 0,
       row: 0,
       stitch: 0,
@@ -567,8 +681,10 @@
     }
     return {
       id: str(p.id, '') || uid(),
-      name: str(p.name, '') || 'Main',
+      name: safeName(p.name, 'Main'),
       makeCount: clampInt(p.makeCount, 1, 99, 1),
+      // v4 (13 #7): parts saved before import keys simply have none.
+      importKey: str(p.importKey, ''),
       piecesDone: clampInt(p.piecesDone, 0, 99, 0),
       row: clampInt(p.row, 0, 999999, 0),
       stitch: clampInt(p.stitch, 0, 999999, 0),
@@ -666,7 +782,7 @@
 
     return {
       id: str(p.id, '') || uid(),
-      name: str(p.name, '') || 'Untitled project',
+      name: safeName(p.name, 'Untitled project'),
       emoji: str(p.emoji, '') || '🧶',
       status: status,
       createdAt: clampInt(p.createdAt, 0, 1e15, 0) || now(),
@@ -703,6 +819,10 @@
   function defaultState() {
     return {
       version: VERSION,
+      // Multi-tab safety (13 #1): bumped on every write, stamped with the tab
+      // that wrote it, so a `storage` event can tell "them" from "us".
+      revision: 0,
+      writerId: '',
       settings: {
         theme: 'stardew-night',
         haptics: true,
@@ -715,6 +835,13 @@
         // first-run welcome card has been answered.
         toursSeen: [],
         welcomed: false,
+        // Backup reminder (12 #1): when the last backup was taken, until when
+        // the nag is snoozed, and the distinct days work happened on.
+        lastBackupAt: 0,
+        backupNagSnoozedUntil: 0,
+        touchDays: [],
+        // Whether navigator.storage.persist() has been granted (09 #4).
+        persistGranted: false,
         // Per-craft settings shared across projects (body measurements, fabric
         // defaults…): { [craftId]: object }, opaque to the shell.
         crafts: {}
@@ -742,12 +869,39 @@
     return out;
   }
 
+  /**
+   * A list of 'YYYY-MM-DD' day stamps, newest last, capped. Nothing else in
+   * the app reads it — it exists so `backupDue()` can say "you have worked on
+   * five separate days since your last backup".
+   */
+  function normalizeTouchDays(raw) {
+    var out = [];
+    if (!Array.isArray(raw)) return out;
+    for (var i = 0; i < raw.length; i++) {
+      var d = str(raw[i], '');
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) continue;
+      if (out.indexOf(d) === -1) out.push(d);
+    }
+    out.sort();
+    if (out.length > 60) out = out.slice(out.length - 60);
+    return out;
+  }
+
+  /* Everything the shell knows how to normalise. Anything else in a saved or
+   * imported state is carried through verbatim (12 #2). */
+  var KNOWN_STATE_KEYS = {
+    version: 1, revision: 1, writerId: 1,
+    settings: 1, templates: 1, projects: 1, activeProjectId: 1
+  };
+
   function normalizeState(raw) {
     var d = defaultState();
     if (!raw || typeof raw !== 'object') return d;
     var s = raw.settings && typeof raw.settings === 'object' ? raw.settings : {};
     var out = {
       version: VERSION,
+      revision: clampInt(raw.revision, 0, 1e12, 0),
+      writerId: str(raw.writerId, ''),
       settings: {
         theme: str(s.theme, '') || d.settings.theme,
         haptics: s.haptics === undefined ? true : !!s.haptics,
@@ -761,6 +915,11 @@
           ? s.toursSeen.filter(function (t) { return typeof t === 'string' && t; })
           : [],
         welcomed: !!s.welcomed,
+        // Old saves have never taken a backup and have never been nagged.
+        lastBackupAt: clampInt(s.lastBackupAt, 0, 1e15, 0),
+        backupNagSnoozedUntil: clampInt(s.backupNagSnoozedUntil, 0, 1e15, 0),
+        touchDays: normalizeTouchDays(s.touchDays),
+        persistGranted: !!s.persistGranted,
         // Old saves have no craft settings at all.
         crafts: normalizeCraftSettings(s.crafts)
       },
@@ -768,13 +927,14 @@
       projects: Array.isArray(raw.projects) ? raw.projects.map(normalizeProject) : [],
       activeProjectId: str(raw.activeProjectId, '') || null
     };
-    // Only one timer may run at a time.
+    // Only one timer may run at a time. A span banked here comes from the wall
+    // clock (the monotonic one does not survive a reload) so it is capped.
     var running = false;
     for (var i = 0; i < out.projects.length; i++) {
       var t = out.projects[i].timer;
       if (t.runningSince) {
         if (running) {
-          t.totalMs += Math.max(0, now() - t.runningSince);
+          t.totalMs += cappedSpan(now() - t.runningSince);
           t.runningSince = null;
         } else {
           running = true;
@@ -784,6 +944,16 @@
     // Active project must exist.
     if (out.activeProjectId && !findProject(out.projects, out.activeProjectId)) {
       out.activeProjectId = null;
+    }
+    // A reader keeps what it does not understand rather than dropping it on the
+    // next export (12 #2): unknown top-level keys survive load AND import.
+    var keys = Object.keys(raw);
+    for (var k = 0; k < keys.length && k < 200; k++) {
+      var name = keys[k];
+      if (KNOWN_STATE_KEYS[name]) continue;
+      try {
+        out[name] = JSON.parse(JSON.stringify(raw[name]));
+      } catch (e) { /* not JSON-safe — it could not have come from a backup */ }
     }
     return out;
   }
@@ -797,31 +967,228 @@
    * Persistence
    * ------------------------------------------------------------------ */
 
+  function ls() {
+    return window.localStorage;
+  }
+
+  function lsGet(key) {
+    try { return ls().getItem(key); } catch (e) { return null; }
+  }
+
+  function lsRemove(key) {
+    try { ls().removeItem(key); } catch (e) { /* ignore */ }
+  }
+
+  /**
+   * Which kind of storage failure this is (13 #2). A write that fails for a
+   * DIFFERENT key too is a browser that will not store anything at all —
+   * Safari's private mode — and deserves a calmer message than "full".
+   */
+  function classifyStorageError(err) {
+    var probe = KEY + '.__probe';
+    try {
+      ls().setItem(probe, 'x');
+      ls().removeItem(probe);
+    } catch (e) {
+      return 'private';
+    }
+    var name = err && (err.name || '');
+    var code = err && err.code;
+    if (
+      name === 'QuotaExceededError' ||
+      name === 'NS_ERROR_DOM_QUOTA_REACHED' ||
+      code === 22 || code === 1014
+    ) {
+      return 'quota';
+    }
+    return 'unknown';
+  }
+
+  function reportStorageError(kind, err) {
+    saveFailedFlag = true;
+    lastStorageError = { kind: kind, error: err || null, at: now() };
+    emit(storageErrorSubs, { kind: kind, error: err || null });
+  }
+
+  /**
+   * Boot probe (09 #2): can we write at all, are we in a private window, how
+   * much of the origin's budget is already spent, and is there a quarantined
+   * copy of unreadable data sitting there.
+   */
+  function storageHealth() {
+    var out = { writable: false, privateMode: false, bytesUsed: 0, corruptKey: null };
+    var probe = KEY + '.__probe';
+    try {
+      ls().setItem(probe, 'x');
+      ls().removeItem(probe);
+      out.writable = true;
+    } catch (e) {
+      out.writable = false;
+    }
+    var newestCorrupt = '';
+    try {
+      var store = ls();
+      for (var i = 0; i < store.length; i++) {
+        var k = store.key(i);
+        if (k === null) continue;
+        var v = store.getItem(k);
+        // UTF-16 code units; the browsers that meter localStorage meter these.
+        out.bytesUsed += k.length + (v === null ? 0 : v.length);
+        if (k.indexOf(KEY + '.corrupt.') === 0 && k > newestCorrupt) newestCorrupt = k;
+      }
+    } catch (e) { /* a storage we cannot even enumerate reports 0 */ }
+    // Safari private mode: writes throw and there is nothing stored at all.
+    out.privateMode = !out.writable && out.bytesUsed === 0;
+    out.corruptKey = corruptKeyName || newestCorrupt || null;
+    return out;
+  }
+
+  /**
+   * Pre-flight for the import paths (09 #2): would another `extraBytes` fit?
+   * Answered by actually trying, because every browser's budget differs.
+   */
+  function wouldExceedQuota(extraBytes) {
+    var n = clampInt(extraBytes, 0, 1e9, 0);
+    if (!n) return false;
+    // Building a >5 MB probe string costs more than the answer is worth, and
+    // nothing that big belongs in localStorage anyway.
+    if (n > 5 * 1024 * 1024) return true;
+    var probe = KEY + '.__quotaprobe';
+    try {
+      ls().setItem(probe, new Array(n + 1).join('x'));
+      lsRemove(probe);
+      return false;
+    } catch (e) {
+      lsRemove(probe);
+      return true;
+    }
+  }
+
+  /**
+   * Put the unreadable text somewhere the user can still get at it (13 #3),
+   * and refuse to write over the main key until they have been told.
+   */
+  function quarantine(txt) {
+    corruptFlag = true;
+    corruptText = txt;
+    var base = KEY + '.corrupt.' + now();
+    var name = base;
+    var n = 1;
+    try {
+      while (ls().getItem(name) !== null && n < 50) name = base + '.' + n++;
+      ls().setItem(name, txt);
+      corruptKeyName = name;
+    } catch (e) {
+      // No room for the copy — the ORIGINAL is still under KEY and we are
+      // about to refuse to overwrite it, so nothing is lost either way.
+      corruptKeyName = null;
+      reportStorageError(classifyStorageError(e), e);
+    }
+  }
+
   function load() {
     var raw = null;
+    var txt = null;
+    var bad = false;
+
+    if (!WRITER_ID) WRITER_ID = uid();
+    corruptFlag = false;
+    corruptText = null;
+    corruptKeyName = null;
+    conflictFlag = false;
+    conflictDetail = null;
+    saveFailedFlag = false;
+    lastStorageError = null;
+    dirty = false;
+    runningSpan = null;
+
     try {
-      var txt = window.localStorage.getItem(KEY);
-      if (txt) raw = JSON.parse(txt);
+      txt = ls().getItem(KEY);
     } catch (e) {
-      raw = null;
+      txt = null;
     }
-    state = normalizeState(raw);
+    if (typeof txt === 'string' && txt.replace(/\s/g, '')) {
+      try {
+        raw = JSON.parse(txt);
+      } catch (e) {
+        bad = true;
+      }
+      // Valid JSON that is not a state object is corruption too — normalising
+      // it would hand back a pristine empty app and the next save would erase
+      // whatever was really there.
+      if (!bad && (!raw || typeof raw !== 'object' || Array.isArray(raw))) bad = true;
+      if (!bad) {
+        try {
+          state = normalizeState(raw);
+        } catch (e) {
+          bad = true;
+        }
+      }
+    }
+
+    if (bad) {
+      quarantine(txt);
+      state = normalizeState(null);
+    } else if (!state || raw === null) {
+      state = normalizeState(raw);
+    }
+
     lineCache = Object.create(null);
     diagramCache = Object.create(null);
     return state;
   }
 
+  /**
+   * @returns {{ok:boolean, kind:string|null, error:Error|null, retried:boolean, blocked:string|null}}
+   */
   function writeNow() {
     saveTimer = null;
-    if (!state) return;
+    if (!state) return { ok: false, kind: null, error: null, retried: false, blocked: 'nostate' };
+    // Refuse to destroy data we could not read (13 #3) or to stamp on a tab
+    // that has moved underneath us (13 #1).
+    if (corruptFlag) return { ok: false, kind: null, error: null, retried: false, blocked: 'corrupt' };
+    if (conflictFlag) return { ok: false, kind: null, error: null, retried: false, blocked: 'conflict' };
+
+    state.revision = clampInt(state.revision, 0, 1e12, 0) + 1;
+    state.writerId = WRITER_ID;
+
+    var text;
     try {
-      window.localStorage.setItem(KEY, JSON.stringify(state));
+      text = JSON.stringify(state);
     } catch (e) {
-      /* quota / private mode — nothing useful to do */
+      reportStorageError('unknown', e);
+      return { ok: false, kind: 'unknown', error: e, retried: false, blocked: null };
+    }
+
+    try {
+      ls().setItem(KEY, text);
+      saveFailedFlag = false;
+      lastStorageError = null;
+      dirty = false;
+      return { ok: true, kind: null, error: null, retried: false, blocked: null };
+    } catch (e) {
+      // One second chance with the in-memory undo stack gone: it frees heap,
+      // and on a browser that counts the whole origin it can free bytes too.
+      clearUndo();
+      try {
+        ls().setItem(KEY, text);
+        saveFailedFlag = false;
+        lastStorageError = null;
+        dirty = false;
+        return { ok: true, kind: null, error: null, retried: true, blocked: null };
+      } catch (e2) {
+        var kind = classifyStorageError(e2);
+        reportStorageError(kind, e2);
+        return { ok: false, kind: kind, error: e2, retried: true, blocked: null };
+      }
     }
   }
 
   function save() {
+    dirty = true;
+    // While a conflict is unresolved nothing auto-saves; the shell must call
+    // resolveConflict() first.
+    if (conflictFlag || corruptFlag) return;
     if (saveTimer) clearTimeout(saveTimer);
     saveTimer = setTimeout(writeNow, SAVE_DEBOUNCE);
   }
@@ -831,12 +1198,214 @@
       clearTimeout(saveTimer);
       saveTimer = null;
     }
-    writeNow();
+    return writeNow();
+  }
+
+  /* touch() is on the tap path, so the day stamp is worked out at most once a
+   * minute rather than once a tap. */
+  var dayCache = { at: 0, key: '' };
+  function dayKeyNow() {
+    var t = now();
+    if (dayCache.key && t - dayCache.at >= 0 && t - dayCache.at < 60000) return dayCache.key;
+    dayCache.at = t;
+    dayCache.key = dayKey(t);
+    return dayCache.key;
+  }
+
+  /** Remember that work happened today (12 #1). Cheap: one string compare. */
+  function markTouchDay() {
+    var s = state && state.settings;
+    if (!s) return;
+    if (!Array.isArray(s.touchDays)) s.touchDays = [];
+    var d = dayKeyNow();
+    if (s.touchDays[s.touchDays.length - 1] === d) return;
+    if (s.touchDays.indexOf(d) === -1) s.touchDays.push(d);
+    if (s.touchDays.length > 60) s.touchDays.splice(0, s.touchDays.length - 60);
   }
 
   function touch(project) {
     if (project) project.updatedAt = now();
+    markTouchDay();
     save();
+  }
+
+  /* ---- corrupt state (13 #3) ----------------------------------------- */
+
+  function isCorrupt() { return corruptFlag; }
+  function corruptSnapshot() { return corruptFlag ? corruptText : null; }
+  function corruptKey() { return corruptKeyName; }
+
+  /** The user has been shown the copy — writing may resume. */
+  function acknowledgeCorrupt() {
+    if (!corruptFlag) return false;
+    corruptFlag = false;
+    corruptText = null;
+    save();
+    return true;
+  }
+
+  /* ---- save failure (13 #2) ------------------------------------------- */
+
+  function saveFailed() { return saveFailedFlag; }
+  function lastSaveError() { return lastStorageError; }
+  function onStorageError(fn) { return subscribe(storageErrorSubs, fn); }
+
+  /* ---- multi-tab (13 #1) ---------------------------------------------- */
+
+  function revision() { return state ? clampInt(state.revision, 0, 1e12, 0) : 0; }
+  function writerId() { return WRITER_ID; }
+  function conflict() { return conflictFlag; }
+  function conflictInfo() { return conflictDetail; }
+  function onConflict(fn) { return subscribe(conflictSubs, fn); }
+  function onExternalChange(fn) { return subscribe(externalSubs, fn); }
+
+  function adoptForeign(raw) {
+    state = normalizeState(raw);
+    lineCache = Object.create(null);
+    diagramCache = Object.create(null);
+    dirty = false;
+    runningSpan = null;
+  }
+
+  /**
+   * Another tab (or another window of the same PWA) wrote our key. With
+   * nothing of our own in flight we simply take their state; with unsaved
+   * work we stop saving and hand the decision to the shell.
+   */
+  function handleStorageEvent(e) {
+    if (!e || e.key !== KEY) return;
+    if (!state) return;
+    if (e.newValue === null || e.newValue === undefined) return;
+    var raw;
+    try {
+      raw = JSON.parse(e.newValue);
+    } catch (err) {
+      return; // someone else wrote rubbish; our copy in memory is still good
+    }
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return;
+    if (str(raw.writerId, '') === WRITER_ID) return; // our own write, echoed
+    if (conflictFlag) return; // already flagged; the first one wins
+
+    var theirs = clampInt(raw.revision, 0, 1e12, 0);
+    var mine = clampInt(state.revision, 0, 1e12, 0);
+
+    if (!dirty && !saveTimer) {
+      adoptForeign(raw);
+      emit(externalSubs, { revision: theirs, writerId: str(raw.writerId, '') });
+      return;
+    }
+
+    conflictFlag = true;
+    conflictDetail = { mine: mine, theirs: theirs, writerId: str(raw.writerId, ''), theirState: raw };
+    if (saveTimer) {
+      clearTimeout(saveTimer);
+      saveTimer = null;
+    }
+    emit(conflictSubs, { mine: mine, theirs: theirs, writerId: conflictDetail.writerId });
+  }
+
+  /**
+   * 'keepMine'    — our state wins; it is written over theirs immediately.
+   * 'takeTheirs'  — their state wins; ours is dropped, and so is the undo
+   *                 stack, whose snapshots belong to projects that are gone.
+   * @returns {boolean} whether anything was resolved
+   */
+  function resolveConflict(how) {
+    if (!conflictFlag) return false;
+    var detail = conflictDetail;
+    conflictFlag = false;
+    conflictDetail = null;
+    if (how === 'takeTheirs') {
+      var raw = detail && detail.theirState;
+      if (!raw) {
+        load();
+      } else {
+        adoptForeign(raw);
+      }
+      clearUndo();
+      emit(externalSubs, { revision: revision(), writerId: (detail && detail.writerId) || '' });
+      return true;
+    }
+    // keepMine (the default): jump past their revision so the next storage
+    // event in the OTHER tab is unambiguous, then write.
+    if (detail && state) {
+      state.revision = Math.max(clampInt(state.revision, 0, 1e12, 0), detail.theirs);
+    }
+    dirty = true;
+    flush();
+    return true;
+  }
+
+  try {
+    if (window.addEventListener) window.addEventListener('storage', handleStorageEvent, false);
+  } catch (e) { /* no window events — the app still works, single-tab */ }
+
+  /* ---- persistent storage (09 #4 / 12 #1) ----------------------------- */
+
+  /** @returns {Promise<boolean>} — resolves false wherever it is unavailable. */
+  function requestPersist() {
+    function done(granted) {
+      var ok = !!granted;
+      try {
+        if (state && state.settings && state.settings.persistGranted !== ok) {
+          state.settings.persistGranted = ok;
+          save();
+        }
+      } catch (e) { /* ignore */ }
+      return ok;
+    }
+    try {
+      var nav = window.navigator;
+      if (nav && nav.storage && typeof nav.storage.persist === 'function' && window.Promise) {
+        return window.Promise.resolve(nav.storage.persist()).then(done, function () { return done(false); });
+      }
+    } catch (e) { /* fall through */ }
+    return window.Promise ? window.Promise.resolve(false) : { then: function (f) { f(false); } };
+  }
+
+  /* ---- backup reminder (12 #1) ---------------------------------------- */
+
+  /**
+   * How many separate days work has happened on since the last backup.
+   * Days are local calendar days, recorded by touch().
+   */
+  function daysSinceBackup() {
+    var s = settings();
+    var last = clampInt(s.lastBackupAt, 0, 1e15, 0);
+    var since = last ? dayKey(last) : '';
+    var days = Array.isArray(s.touchDays) ? s.touchDays : [];
+    var n = 0;
+    for (var i = 0; i < days.length; i++) {
+      if (!since || days[i] > since) n++;
+    }
+    return n;
+  }
+
+  /** True when it is fair to ask for a backup (5+ working days, not snoozed). */
+  function backupDue() {
+    var s = settings();
+    if (!projects().length) return false;
+    if (clampInt(s.backupNagSnoozedUntil, 0, 1e15, 0) > now()) return false;
+    return daysSinceBackup() >= 5;
+  }
+
+  function backupStatus() {
+    var s = settings();
+    return {
+      due: backupDue(),
+      days: daysSinceBackup(),
+      lastBackupAt: clampInt(s.lastBackupAt, 0, 1e15, 0),
+      snoozedUntil: clampInt(s.backupNagSnoozedUntil, 0, 1e15, 0),
+      persistGranted: !!s.persistGranted
+    };
+  }
+
+  /** "Not now" — default 14 days, per 12 #1. */
+  function snoozeBackupNag(days) {
+    var n = clampInt(days, 1, 365, 14);
+    settings().backupNagSnoozedUntil = now() + n * 86400000;
+    save();
+    return settings().backupNagSnoozedUntil;
   }
 
   /* ------------------------------------------------------------------ *
@@ -909,16 +1478,43 @@
    * Undo stack (in memory only)
    * ------------------------------------------------------------------ */
 
+  /**
+   * The undo stack is bounded twice (09 #9): by entry count, and by the
+   * serialised size of what it holds — 50 crochet snapshots are 275 KB, but
+   * 50 snapshots of a 500x500 cross-stitch chart are tens of megabytes of
+   * heap that never shrinks. One entry always survives, so even a project
+   * bigger than the whole budget stays undoable once.
+   */
+  function trimUndo() {
+    while (undoStack.length > UNDO_CAP) {
+      undoBytesTotal -= undoStack.shift().bytes || 0;
+    }
+    while (undoStack.length > 1 && undoBytesTotal > UNDO_BYTE_CAP) {
+      undoBytesTotal -= undoStack.shift().bytes || 0;
+    }
+    if (undoBytesTotal < 0) undoBytesTotal = 0;
+  }
+
   function snapshot(proj) {
     if (!proj) return;
     var list = projects();
+    var data = deepCopy(proj);
+    var bytes = 0;
+    try { bytes = JSON.stringify(data).length; } catch (e) { bytes = 0; }
     undoStack.push({
       id: proj.id,
       index: list.indexOf(proj),
-      data: deepCopy(proj),
+      data: data,
+      bytes: bytes,
       activeProjectId: getState().activeProjectId
     });
-    if (undoStack.length > UNDO_CAP) undoStack.shift();
+    undoBytesTotal += bytes;
+    trimUndo();
+  }
+
+  /** The serialised size of everything the undo stack is holding on to. */
+  function undoBytes() {
+    return undoBytesTotal;
   }
 
   function canUndo() {
@@ -928,6 +1524,8 @@
   function undo() {
     var entry = undoStack.pop();
     if (!entry) return false;
+    undoBytesTotal -= entry.bytes || 0;
+    if (undoBytesTotal < 0) undoBytesTotal = 0;
     var list = projects();
     var idx = -1;
     for (var i = 0; i < list.length; i++) if (list[i].id === entry.id) idx = i;
@@ -949,6 +1547,7 @@
 
   function clearUndo() {
     undoStack.length = 0;
+    undoBytesTotal = 0;
   }
 
   /* ------------------------------------------------------------------ *
@@ -1098,6 +1697,69 @@
     return [{ name: '', makeCount: 1, text: String(text), placement: '' }];
   }
 
+  /** Parse a loose block of pattern text without touching any part's cache. */
+  function parseLoose(text) {
+    var api = patternsApi();
+    if (!api || typeof api.parse !== 'function') return [];
+    if (!text || !String(text).replace(/\s/g, '')) return [];
+    try {
+      var out = api.parse(String(text));
+      return Array.isArray(out) ? out : [];
+    } catch (e) {
+      return [];
+    }
+  }
+
+  /**
+   * The row count a section implies (01 #1 / 02 #1): its highest row number,
+   * but only when the rows run contiguously from 1 up to it — a range like
+   * "Rnd 7-12" counts for every row it covers — and there are at least two.
+   * A section whose numbering has holes (a page bleed, a finishing note that
+   * parsed as a row) gets no target rather than a wrong one.
+   * @returns {number|null}
+   */
+  function targetRowsFromText(text) {
+    var lines = parseLoose(text);
+    if (!lines.length) return null;
+    var seen = Object.create(null);
+    var max = 0;
+    for (var i = 0; i < lines.length; i++) {
+      var l = lines[i];
+      if (!l || l.kind !== 'row') continue;
+      var a = typeof l.row === 'number' && isFinite(l.row) ? Math.floor(l.row) : 0;
+      if (a < 1) continue;
+      var b = typeof l.rowEnd === 'number' && isFinite(l.rowEnd) && l.rowEnd >= a ? Math.floor(l.rowEnd) : a;
+      if (b - a > 9999) continue;
+      for (var r = a; r <= b; r++) {
+        seen[r] = true;
+        if (r > max) max = r;
+      }
+    }
+    if (max < 2) return null;
+    for (var k = 1; k <= max; k++) if (!seen[k]) return null;
+    return max;
+  }
+
+  /**
+   * A content-derived identity for an imported section (13 #7): the section
+   * name plus its first instruction line. Unlike the positional fallback name
+   * `'Part ' + (n + 1)`, it means the same thing on every re-import, so a
+   * corrected PDF updates the parts it made last time instead of appending
+   * copies of them.
+   * @returns {string} '' when there is nothing to key on
+   */
+  function sectionImportKey(name, text) {
+    var first = '';
+    var rows = str(text, '').split(/\r?\n/);
+    for (var i = 0; i < rows.length; i++) {
+      var t = rows[i].replace(/\s+/g, ' ').trim();
+      if (t) { first = t; break; }
+    }
+    var n = str(name, '').trim();
+    if (!first && !n) return '';
+    return hash32(n.toLowerCase() + String.fromCharCode(0) + first.toLowerCase());
+  }
+
   /* ------------------------------------------------------------------ *
    * Assembly steps hiding in a pasted / imported pattern
    * ------------------------------------------------------------------ */
@@ -1126,31 +1788,99 @@
     return t;
   }
 
+  /* A step that stops on a preposition, a conjunction or an article is half a
+   * sentence — "Stuff head and sew to" (01 #3). */
+  var DANGLING_RE =
+    /(?:^|\s)(?:to|and|with|on|in|for|from|of|into|onto|at|by|or|the|a|an)$/i;
+  /* "Rnd 7:" / "Row 12." at the start, or a labelled row marker anywhere, is a
+   * pattern instruction rather than an assembly step. "…on rnd 19" is not. */
+  var ROW_MARKER_START_RE = /^(?:rows?|rnds?|rounds?|r)\s*\.?\s*\d/i;
+  var ROW_LABEL_RE = /\b(?:rows?|rnds?|rounds?)\s*\d+(?:\s*[-–—+&]\s*\d+)?\s*:/i;
+  var TRAILING_COUNT_RE = /\s*\(\s*\d+\s*(?:sts?|stitches?|st)?\s*\)\s*$/i;
+
+  /** "Stuff hand. (6)" → "Stuff hand." — the count belongs on the row, not here. */
+  function stripTrailingCount(t) {
+    return str(t, '').replace(TRAILING_COUNT_RE, '').replace(/\s+$/, '');
+  }
+
+  function danglingTail(t) {
+    var s = str(t, '').replace(/…$/, '').replace(/[.;,:]+$/, '').replace(/\s+$/, '');
+    return DANGLING_RE.test(s);
+  }
+
+  function hasRowMarker(t) {
+    return ROW_MARKER_START_RE.test(str(t, '')) || ROW_LABEL_RE.test(str(t, ''));
+  }
+
+  /** The four rejections from 01 #3, in one place. */
+  function usableStep(t) {
+    if (!t || t.length < 5) return false;
+    if (!/^[A-Z]/.test(t)) return false;                       // starts lower-case
+    if (danglingTail(t)) return false;                         // ends on a preposition
+    var words = t.replace(/…$/, '').replace(/\s+$/, '').split(/\s+/);
+    if (words.length < 3) return false;                        // under three words
+    if (hasRowMarker(t)) return false;                         // a row instruction
+    if (CHECKLIST_SPAM_RE.test(t)) return false;
+    return true;
+  }
+
+  /**
+   * One suggestion. It is an object with `.text` and `.confidence` AND it
+   * still behaves as its own string (`toLowerCase`, concatenation,
+   * `JSON.stringify`, `textContent`), so the shell can be moved over to the
+   * object shape without a flag day. Once js/app.js reads `.text`, the String
+   * wrapper here can become a plain object literal.
+   */
+  function suggestion(text, confidence) {
+    var s = new String(text);
+    s.text = text;
+    s.confidence = confidence === 'strong' ? 'strong' : 'weak';
+    return s;
+  }
+
   /**
    * Pull the assembly steps out of a pasted (or PDF-imported) pattern:
    * anything in an Assembly / Finishing / Construction / Sewing section, plus
-   * any line anywhere that opens with a sewing-up verb.
+   * any line anywhere that opens with a sewing-up verb. Fragments are either
+   * completed from the line below or dropped (01 #3).
    * @param {string} text
-   * @returns {string[]} at most 20, de-duplicated, ≤ 90 chars each
+   *
+   * Confidence: 'strong' is a sentence that stood on its own and opened with
+   * a sewing-up verb. 'weak' is one this code had to put back together from
+   * two lines, or one that only qualified by living in an Assembly section —
+   * the sheet should offer those unticked (01 #3).
+   * @returns {Array<{text:string, confidence:'strong'|'weak'}>} at most 20
    */
   function suggestChecklist(text) {
     var out = [];
     var seen = Object.create(null);
 
-    function add(raw) {
-      var t = tidyStep(raw);
-      if (t.length < 5 || out.length >= CHECKLIST_MAX) return;
-      if (CHECKLIST_SPAM_RE.test(t)) return;
+    function add(raw, strong, next) {
+      if (out.length >= CHECKLIST_MAX) return;
+      var t = tidyStep(stripTrailingCount(raw));
+      // A wrapped sentence: glue the line below on when that finishes it.
+      // A step we had to reconstruct is only ever weak, however good the verb
+      // was — the user should look at it before it goes on the list.
+      if (t && danglingTail(t) && next) {
+        var joined = tidyStep(
+          stripTrailingCount(str(raw, '').replace(/[.;,:]+\s*$/, '') + ' ' + str(next, ''))
+        );
+        if (joined && !danglingTail(joined)) {
+          t = joined;
+          strong = false;
+        }
+      }
+      if (!usableStep(t)) return;
       var key = t.toLowerCase();
       if (seen[key]) return;
       // "Sew the ears onto either side of the" and the full sentence are one step.
       var head = key.slice(0, 40);
       for (var i = 0; i < out.length; i++) {
-        var other = out[i].toLowerCase();
+        var other = out[i].text.toLowerCase();
         if (other.indexOf(head) === 0 || key.indexOf(other.slice(0, 40)) === 0) return;
       }
       seen[key] = true;
-      out.push(t);
+      out.push(suggestion(t, strong ? 'strong' : 'weak'));
     }
 
     var raw = str(text, '');
@@ -1173,22 +1903,26 @@
         if (!l) continue;
         var notes = Array.isArray(l.notes) ? l.notes : [];
         for (var n = 0; n < notes.length; n++) {
-          if (CHECKLIST_START_RE.test(tidyStep(notes[n]))) add(notes[n]);
+          if (CHECKLIST_START_RE.test(tidyStep(notes[n]))) add(notes[n], true, notes[n + 1]);
         }
         if (l.photo || l.kind === 'header' || l.kind === 'row' || l.kind === 'repeat') continue;
         var t = tidyStep(l.text);
         if (!t) continue;
-        if (CHECKLIST_START_RE.test(t)) add(t);
-        else if (assembly[l.section] && /^[A-Za-z]/.test(t) && t.split(' ').length >= 3) add(t);
+        var nxt = lines[i + 1] && !lines[i + 1].photo ? str(lines[i + 1].text, '') : '';
+        // An explicit sewing-up verb is a strong signal; living in an Assembly
+        // section is a weak one.
+        if (CHECKLIST_START_RE.test(t)) add(l.text, true, nxt);
+        else if (assembly[l.section]) add(l.text, false, nxt);
       }
       return out;
     }
 
     // No parser (or it threw): a plain line scan still finds most of them.
-    raw.split(/\r?\n/).forEach(function (line) {
-      var t = tidyStep(line);
-      if (t && CHECKLIST_START_RE.test(t)) add(t);
-    });
+    var plain = raw.split(/\r?\n/);
+    for (var p = 0; p < plain.length; p++) {
+      var pt = tidyStep(plain[p]);
+      if (pt && CHECKLIST_START_RE.test(pt)) add(plain[p], true, plain[p + 1]);
+    }
     return out;
   }
 
@@ -1276,16 +2010,54 @@
     }
   }
 
-  /** True when every targeted part is finished (and at least one has a target). */
+  /**
+   * True when every targeted part is finished (and at least one has a target).
+   *
+   * 02 #2: a part with no target that has never been touched BLOCKS the
+   * project rather than being skipped — otherwise finishing two ears shelves
+   * the whole toy while five parts sit untouched. A part with no target that
+   * HAS been worked on is still skipped: it is the open-ended scrap-yarn tail
+   * the user chose not to bound, and "Finish anyway" covers the rest.
+   */
   function allPartsDone(proj) {
     var any = false;
     for (var i = 0; i < proj.parts.length; i++) {
       var p = proj.parts[i];
-      if (!p.targetRows) continue;
+      if (!p.targetRows) {
+        if (!p.row && !p.stitch && !p.piecesDone) return false;
+        continue;
+      }
       any = true;
       if (p.piecesDone < p.makeCount) return false;
     }
     return any;
+  }
+
+  /**
+   * The parts standing between this project and "done", by name.
+   * @param {object|string} projectOrId
+   */
+  function blockingParts(projectOrId) {
+    var out = [];
+    var proj = projectOrId && typeof projectOrId === 'object' ? projectOrId : project(projectOrId);
+    if (!proj || !Array.isArray(proj.parts)) return out;
+    for (var i = 0; i < proj.parts.length; i++) {
+      var p = proj.parts[i];
+      if (!p.targetRows) {
+        if (!p.row && !p.stitch && !p.piecesDone) out.push(p.name);
+        continue;
+      }
+      if (p.piecesDone < p.makeCount) out.push(p.name);
+    }
+    return out;
+  }
+
+  /**
+   * The terminal state of a part: the last piece of the last row is done.
+   * Every transition into it must be idempotent (13 #6).
+   */
+  function isPartTerminal(prt) {
+    return !!(prt && prt.targetRows && prt.piecesDone >= prt.makeCount && prt.row >= prt.targetRows);
   }
 
   /**
@@ -1308,8 +2080,17 @@
     if (prt.rowStitches.length > rowCount + 1) prt.rowStitches.length = rowCount + 1;
   }
 
-  /** Shared row-completion logic used by tapRow and auto-advance. */
+  /**
+   * Shared row-completion logic used by tapRow and auto-advance.
+   *
+   * 13 #6: at the terminal state this is a no-op that says so. Counting does
+   * not run past the target, the celebration fires exactly once, and
+   * `finishedAt` is never rewritten.
+   */
   function completeRow(proj, prt) {
+    if (isPartTerminal(prt)) {
+      return { event: 'alreadyDone', partName: prt.name, row: prt.row, targetRows: prt.targetRows };
+    }
     recordRowStitches(prt, prt.row + 1, prt.stitch);
     prt.row += 1;
     prt.stitch = 0;
@@ -1347,6 +2128,9 @@
     var target = currentTarget(prt);
     if (target && s >= target && settings().autoAdvance) {
       var res = completeRow(proj, prt);
+      // A finished part pins its stitch count at the target instead of
+      // creeping past it forever (13 #6).
+      if (res.event === 'alreadyDone') prt.stitch = target;
       touch(proj);
       // Plain row completions report as 'rowAuto'; bigger milestones win.
       if (res.event === 'row') return { event: 'rowAuto', row: prt.row };
@@ -1390,24 +2174,61 @@
     var proj = project(projectId);
     var prt = part(proj, partId);
     if (!proj || !prt) return { event: 'none' };
+    // A dead press on a finished part costs nothing: no snapshot, no write,
+    // no second celebration, no rewritten finishedAt (13 #6).
+    if (isPartTerminal(prt)) {
+      return { event: 'alreadyDone', partName: prt.name, row: prt.row, targetRows: prt.targetRows };
+    }
     snapshot(proj);
     var res = completeRow(proj, prt);
     touch(proj);
     return res;
   }
 
+  /**
+   * The exact inverse of `completeRow` (13 #4), piece boundary included:
+   *
+   * - at the terminal state → back to piecesDone-1 / row targetRows-1,
+   * - at row 0 with pieces done → piecesDone-1, row = targetRows,
+   * - otherwise row-1,
+   * - and when nothing can move, nothing moves: no history entry is eaten,
+   *   no undo snapshot is pushed, no save is triggered.
+   */
   function untapRow(projectId, partId) {
     var proj = project(projectId);
     var prt = part(proj, partId);
     if (!proj || !prt) return { event: 'none' };
+
+    var canStep = prt.row > 0 || prt.piecesDone > 0;
+    if (!canStep) {
+      // Row 0 of the first piece. Clearing a part-started stitch count is the
+      // only thing left to step back, and it is not a row, so no history goes.
+      if (prt.stitch > 0) {
+        snapshot(proj);
+        prt.stitch = 0;
+        touch(proj);
+        return { event: 'row', row: 0 };
+      }
+      return { event: 'none', row: 0 };
+    }
+
     snapshot(proj);
-    prt.row = Math.max(0, prt.row - 1);
+    if (isPartTerminal(prt)) {
+      prt.piecesDone = Math.max(0, prt.makeCount - 1);
+      prt.row = Math.max(0, prt.targetRows - 1);
+    } else if (prt.row > 0) {
+      prt.row -= 1;
+    } else {
+      // Stepping back off row 0 onto the piece before it.
+      prt.piecesDone -= 1;
+      prt.row = prt.targetRows || 0;
+    }
     prt.stitch = 0;
     trimRowStitches(prt, prt.row);
     var last = proj.history[proj.history.length - 1];
     if (last && last.partId === prt.id) proj.history.pop();
     touch(proj);
-    return { event: 'row', row: prt.row };
+    return { event: 'row', row: prt.row, piecesDone: prt.piecesDone };
   }
 
   function jumpToRow(projectId, partId, rowNumber) {
@@ -1457,7 +2278,7 @@
 
     var proj = normalizeProject({
       id: uid(),
-      name: (opts.name || '').trim() || tpl.name,
+      name: safeName(opts.name, '') || safeName(tpl.name, 'Untitled project'),
       emoji: opts.emoji || tpl.emoji,
       status: 'active',
       createdAt: now(),
@@ -1545,7 +2366,7 @@
   function updateProject(projectId, patch) {
     var proj = project(projectId);
     if (!proj || !patch) return null;
-    if (typeof patch.name === 'string') proj.name = patch.name.trim() || proj.name;
+    if (typeof patch.name === 'string') proj.name = safeName(patch.name, proj.name);
     if (typeof patch.emoji === 'string' && patch.emoji) proj.emoji = patch.emoji;
     if (patch.countMode === 'rows' || patch.countMode === 'rounds') proj.countMode = patch.countMode;
     if (patch.groupSize !== undefined) proj.groupSize = clampInt(patch.groupSize, 0, 50, proj.groupSize);
@@ -1564,12 +2385,47 @@
     } else {
       proj.finishedAt = null;
     }
-    if (status !== 'active' && proj.timer.runningSince) {
-      proj.timer.totalMs += Math.max(0, now() - proj.timer.runningSince);
-      proj.timer.runningSince = null;
-    }
+    if (status !== 'active') bankTimer(proj);
     touch(proj);
     return proj;
+  }
+
+  /**
+   * What lowering a part's make-count would throw away (13 #9). The UI asks
+   * before calling updatePart, which still clamps — this only reports.
+   * @returns {{piecesLost:number, piecesDone:number, makeCount:number}}
+   */
+  function makeCountImpact(projectId, partId, newCount) {
+    var prt = part(project(projectId), partId);
+    if (!prt) return { piecesLost: 0, piecesDone: 0, makeCount: 0 };
+    var n = clampInt(newCount, 1, 99, prt.makeCount);
+    return {
+      piecesLost: Math.max(0, prt.piecesDone - n),
+      piecesDone: prt.piecesDone,
+      makeCount: n
+    };
+  }
+
+  /**
+   * Mark a project finished. Without `force` it refuses while any part still
+   * blocks completion and says which ones — that is the "Finish anyway" path
+   * 02 #2 asks for.
+   * @returns {{ok:boolean, blocking:string[], project:object|null}}
+   */
+  function finishProject(projectId, opts) {
+    var proj = project(projectId);
+    if (!proj) return { ok: false, blocking: [], project: null };
+    var force = !!(opts && opts.force);
+    var blocking = blockingParts(proj);
+    if (!force && (blocking.length || !allPartsDone(proj))) {
+      return { ok: false, blocking: blocking, project: proj };
+    }
+    snapshot(proj);
+    proj.status = 'finished';
+    if (!proj.finishedAt) proj.finishedAt = now();
+    bankTimer(proj);
+    touch(proj);
+    return { ok: true, blocking: [], project: proj };
   }
 
   function deleteProject(projectId) {
@@ -1597,7 +2453,7 @@
     if (!proj) return null;
     opts = opts || {};
     snapshot(proj);
-    var prt = makePart((opts.name || '').trim() || 'Part ' + (proj.parts.length + 1), opts.makeCount);
+    var prt = makePart(safeName(opts.name, '') || 'Part ' + (proj.parts.length + 1), opts.makeCount);
     proj.parts.push(prt);
     proj.activePartId = prt.id;
     touch(proj);
@@ -1609,7 +2465,8 @@
     var prt = part(proj, partId);
     if (!proj || !prt || !patch) return null;
     snapshot(proj);
-    if (typeof patch.name === 'string') prt.name = patch.name.trim() || prt.name;
+    if (typeof patch.name === 'string') prt.name = safeName(patch.name, prt.name);
+    if (typeof patch.importKey === 'string') prt.importKey = patch.importKey;
     if (patch.makeCount !== undefined) {
       prt.makeCount = clampInt(patch.makeCount, 1, 99, prt.makeCount);
       if (prt.piecesDone > prt.makeCount) prt.piecesDone = prt.makeCount;
@@ -1693,11 +2550,16 @@
    *                 `placementNotes` — replacing it on a new part, and adding
    *                 only the lines it does not have yet on an existing one.
    * mode 'active' → every section's text lands in the active part.
-   * @returns {{created:number, updated:number, placed:number}}
+   *
+   * Parts are matched on their `importKey` (content) before their name, and a
+   * section whose rows run 1..maxRow contiguously sets `targetRows` on the
+   * part it makes (or on one that has none). `opts.noTargets` turns the
+   * second half off.
+   * @returns {{created:number, updated:number, placed:number, targeted:number}}
    */
   function importPatternSections(projectId, sections, opts) {
     var proj = project(projectId);
-    var out = { created: 0, updated: 0, placed: 0 };
+    var out = { created: 0, updated: 0, placed: 0, targeted: 0 };
     if (!proj || !Array.isArray(sections) || !sections.length) return out;
     var mode = opts && opts.mode === 'active' ? 'active' : 'parts';
     snapshot(proj);
@@ -1728,31 +2590,57 @@
         var merged = mergePlacement(prt.placementNotes, place);
         if (merged !== str(prt.placementNotes, '')) { prt.placementNotes = merged; out.placed = 1; }
       }
+      if (!(opts && opts.noTargets) && !prt.targetRows) {
+        var activeTarget = targetRowsFromText(joined);
+        if (activeTarget) { prt.targetRows = activeTarget; out.targeted = 1; }
+      }
       delete lineCache[prt.id];
       out.updated = 1;
       touch(proj);
       return out;
     }
 
+    var noTargets = !!(opts && opts.noTargets);
+
     for (var i = 0; i < sections.length; i++) {
       var sec = sections[i] || {};
       var name = str(sec.name, '').trim();
       var text = str(sec.text, '');
       var makeCount = clampInt(sec.makeCount, 1, 99, 1);
+      var key = sectionImportKey(name, text);
       var existing = null;
-      if (name) {
-        for (var j = 0; j < proj.parts.length; j++) {
+      var j;
+      // Content key first (13 #7) — a section the parser could not name still
+      // matches itself on a re-import. Only then the name.
+      if (key) {
+        for (j = 0; j < proj.parts.length; j++) {
+          if (proj.parts[j].importKey && proj.parts[j].importKey === key) {
+            existing = proj.parts[j];
+            break;
+          }
+        }
+      }
+      if (!existing && name) {
+        for (j = 0; j < proj.parts.length; j++) {
           if (proj.parts[j].name.toLowerCase() === name.toLowerCase()) {
             existing = proj.parts[j];
             break;
           }
         }
       }
+      // 01 #1 / 02 #1: without this every PDF project is un-finishable.
+      var target = noTargets ? null : targetRowsFromText(text);
       var place = str(sec.placement, '');
       if (existing) {
         existing.patternText = text;
         existing.makeCount = makeCount;
+        existing.importKey = key || existing.importKey;
         if (existing.piecesDone > existing.makeCount) existing.piecesDone = existing.makeCount;
+        // A target the user set by hand is never overwritten.
+        if (target && !existing.targetRows) {
+          existing.targetRows = target;
+          out.targeted++;
+        }
         // The part is already there and may carry notes the owner typed, so
         // only the lines that are not in it yet are added.
         if (place) {
@@ -1767,6 +2655,8 @@
       } else {
         var added = makePart(name || 'Part ' + (proj.parts.length + 1), makeCount);
         added.patternText = text;
+        added.importKey = key;
+        if (target) { added.targetRows = target; out.targeted++; }
         if (place) { added.placementNotes = place; out.placed++; }
         proj.parts.push(added);
         out.created++;
@@ -1960,15 +2850,48 @@
    * Timer
    * ------------------------------------------------------------------ */
 
+  /**
+   * A span of work, sanity-checked (13 #8). Negative is a clock that moved
+   * backwards and is worth nothing; longer than 18 hours is a clock that
+   * jumped forward, or a timer left running for a week, and is capped rather
+   * than believed.
+   */
+  function cappedSpan(ms) {
+    if (typeof ms !== 'number' || !isFinite(ms) || ms <= 0) return 0;
+    return ms > MAX_SPAN_MS ? MAX_SPAN_MS : Math.floor(ms);
+  }
+
+  /**
+   * How long the running span has lasted. `performance.now()` is the source
+   * whenever this tab started the span; after a reload only the wall clock is
+   * left, so that path is capped too. Because a span is never negative,
+   * `totalMs` can only ever go up — a backward clock change cannot erase
+   * recorded time.
+   */
+  function runningMs(proj) {
+    if (!proj || !proj.timer || !proj.timer.runningSince) return 0;
+    if (runningSpan && runningSpan.projectId === proj.id) {
+      return cappedSpan(mono() - runningSpan.startMono);
+    }
+    return cappedSpan(now() - proj.timer.runningSince);
+  }
+
+  /** Bank whatever the running span is worth and stop it. */
+  function bankTimer(proj) {
+    if (!proj || !proj.timer || !proj.timer.runningSince) return 0;
+    var span = runningMs(proj);
+    proj.timer.totalMs = clampInt(proj.timer.totalMs, 0, 1e15, 0) + span;
+    proj.timer.runningSince = null;
+    if (runningSpan && runningSpan.projectId === proj.id) runningSpan = null;
+    return span;
+  }
+
   function stopAllTimers(exceptId) {
     var list = projects();
     for (var i = 0; i < list.length; i++) {
       var p = list[i];
       if (p.id === exceptId) continue;
-      if (p.timer.runningSince) {
-        p.timer.totalMs += Math.max(0, now() - p.timer.runningSince);
-        p.timer.runningSince = null;
-      }
+      bankTimer(p);
     }
   }
 
@@ -1976,11 +2899,13 @@
     var proj = project(projectId);
     if (!proj) return false;
     if (proj.timer.runningSince) {
-      proj.timer.totalMs += Math.max(0, now() - proj.timer.runningSince);
-      proj.timer.runningSince = null;
+      bankTimer(proj);
     } else {
       stopAllTimers(projectId);
+      // The wall clock is what survives a reload; the monotonic one is what
+      // the arithmetic actually uses while this tab is open.
       proj.timer.runningSince = now();
+      runningSpan = { projectId: proj.id, startMono: mono(), startWall: proj.timer.runningSince };
     }
     touch(proj);
     return !!proj.timer.runningSince;
@@ -1988,40 +2913,250 @@
 
   function elapsedMs(proj) {
     if (!proj || !proj.timer) return 0;
-    return proj.timer.totalMs + (proj.timer.runningSince ? Math.max(0, now() - proj.timer.runningSince) : 0);
+    return clampInt(proj.timer.totalMs, 0, 1e15, 0) + runningMs(proj);
   }
 
   /* ------------------------------------------------------------------ *
    * Export / import
    * ------------------------------------------------------------------ */
 
+  /**
+   * The whole state as a file. Taking one counts as a backup, so the nag
+   * clock resets here (12 #1) and the file itself carries the new
+   * `lastBackupAt`.
+   */
   function exportJSON() {
-    return JSON.stringify(getState(), null, 2);
+    var s = getState();
+    s.settings.lastBackupAt = now();
+    s.settings.backupNagSnoozedUntil = 0;
+    save();
+    return JSON.stringify(s, null, 2);
   }
 
-  function importJSON(text) {
+  var PREIMPORT_KEY_SUFFIX = '.preimport';
+
+  /**
+   * Ordered, pure, idempotent state → state migrations (12 #2).
+   * `MIGRATIONS[n]` reads a backup written by version n and returns one at
+   * version n + 1. Never delete one: `test/backup.test.html` holds a frozen
+   * fixture per version that must keep importing for the life of the app.
+   */
+  var MIGRATIONS = {
+    /* 0 → 1. The very first backups carried no `version` key at all. Every
+     * field they are missing — craft, craftData, templates, sizeIndex,
+     * rowStitches, importKey — is filled in by normalizeProject and
+     * normalizeState, so this step only has to stamp the number on. */
+    0: function (raw) {
+      var out = {};
+      var keys = Object.keys(raw || {});
+      for (var i = 0; i < keys.length; i++) out[keys[i]] = raw[keys[i]];
+      out.version = 1;
+      return out;
+    }
+  };
+
+  function backupError(message, code) {
+    var e = new Error(message);
+    e.code = code;
+    return e;
+  }
+
+  /**
+   * Parse, version-check and migrate a backup. Writes nothing; both
+   * `previewImport` and `importJSON` go through it so they can never disagree
+   * about what a file says.
+   */
+  function readBackup(text) {
     var raw;
     try {
       raw = JSON.parse(text);
     } catch (e) {
-      throw new Error('That file is not valid JSON.');
+      throw backupError('That file is not valid JSON.', 'notJson');
     }
-    if (!raw || typeof raw !== 'object') throw new Error('That file is not a Stitchkeeper backup.');
-    if (raw.version !== VERSION) throw new Error('Unsupported backup version: ' + raw.version);
-    if (!Array.isArray(raw.projects)) throw new Error('That backup has no projects.');
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      throw backupError('That file is not a Thready or Not backup.', 'notBackup');
+    }
+    var v = raw.version;
+    if (v === undefined || v === null) v = 0;
+    if (typeof v !== 'number' || !isFinite(v)) {
+      throw backupError('That file is not a Thready or Not backup.', 'notBackup');
+    }
+    v = Math.floor(v);
+    if (v > VERSION) {
+      throw backupError(
+        'This backup was made by a newer version of Thready or Not. Update the app, then try again.',
+        'newerVersion'
+      );
+    }
+    for (var n = v; n < VERSION; n++) {
+      var step = MIGRATIONS[n];
+      if (typeof step !== 'function') {
+        throw backupError('This backup is from version ' + v + ' and cannot be read by this app.', 'noMigration');
+      }
+      raw = step(raw);
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+        throw backupError('That backup could not be migrated.', 'badMigration');
+      }
+    }
+    if (!Array.isArray(raw.projects)) throw backupError('That backup has no projects.', 'noProjects');
+    return raw;
+  }
 
-    // Templates merge by id — imported wins. Built-ins that the backup does not
-    // carry stay put.
+  function sameJson(a, b) {
+    try {
+      return JSON.stringify(a) === JSON.stringify(b);
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /** One preview row for a project or a template. */
+  function previewRow(incoming, local) {
+    var row = {
+      id: incoming.id,
+      name: incoming.name,
+      craft: incoming.craft || DEFAULT_CRAFT,
+      updatedAt: clampInt(incoming.updatedAt, 0, 1e15, 0),
+      localUpdatedAt: local ? clampInt(local.updatedAt, 0, 1e15, 0) : null,
+      status: 'new'
+    };
+    if (!local) return row;
+    if (sameJson(local, incoming)) row.status = 'identical';
+    else if (row.updatedAt > row.localUpdatedAt) row.status = 'replace';
+    else row.status = 'older';
+    return row;
+  }
+
+  /**
+   * What importing this file WOULD do (09 #3 / 12 #3). Writes nothing and
+   * throws the same errors `importJSON` would, so the sheet can show them.
+   * @returns {{projects:Array, templates:Array, counts:object, version:number}}
+   */
+  function previewImport(text) {
+    var raw = readBackup(text);
+    var list = projects();
+    var tlist = templateList();
+    // `counts` is the whole sheet (projects AND templates); the two split
+    // tallies are there for a header line that names them separately.
+    var counts = { new: 0, replace: 0, identical: 0, older: 0 };
+    var projectCounts = { new: 0, replace: 0, identical: 0, older: 0 };
+    var templateCounts = { new: 0, replace: 0, identical: 0, older: 0 };
+    var projRows = [];
+    var tplRows = [];
+    var i;
+
+    for (i = 0; i < raw.projects.length; i++) {
+      if (!raw.projects[i] || typeof raw.projects[i] !== 'object') continue;
+      var incoming = normalizeProject(raw.projects[i]);
+      var row = previewRow(incoming, findProject(list, incoming.id));
+      counts[row.status]++;
+      projectCounts[row.status]++;
+      projRows.push(row);
+    }
+
+    if (Array.isArray(raw.templates)) {
+      for (i = 0; i < raw.templates.length; i++) {
+        if (!raw.templates[i] || typeof raw.templates[i] !== 'object') continue;
+        var tpl = normalizeTemplate(raw.templates[i]);
+        if (tpl.id === 'blob') tpl.id = 'sheep';
+        var trow = previewRow(tpl, findTemplate(tlist, tpl.id));
+        counts[trow.status]++;
+        templateCounts[trow.status]++;
+        tplRows.push(trow);
+      }
+    }
+
+    return {
+      projects: projRows,
+      templates: tplRows,
+      counts: counts,
+      projectCounts: projectCounts,
+      templateCounts: templateCounts,
+      version: clampInt(raw.version, 0, 1e6, 0)
+    };
+  }
+
+  /** Fresh ids throughout, so a "keep both" copy shares nothing with its twin. */
+  function reidentify(proj) {
+    var map = Object.create(null);
+    var i;
+    proj.id = uid();
+    for (i = 0; i < proj.parts.length; i++) {
+      var old = proj.parts[i].id;
+      proj.parts[i].id = uid();
+      map[old] = proj.parts[i].id;
+    }
+    proj.activePartId = map[proj.activePartId] || (proj.parts[0] && proj.parts[0].id) || '';
+    for (i = 0; i < proj.history.length; i++) {
+      var h = proj.history[i];
+      if (map[h.partId]) h.partId = map[h.partId];
+    }
+    for (i = 0; i < proj.checklist.length; i++) proj.checklist[i].id = uid();
+    return proj;
+  }
+
+  function fromBackupName(name) {
+    return safeName(str(name, '') + ' (from backup)', str(name, '') || 'Untitled project');
+  }
+
+  /**
+   * Restore a backup.
+   *
+   * @param {string} text
+   * @param {{projects?:Object, templates?:Object}} [choices] per-id
+   *        'skip' | 'replace' | 'keepBoth'. Anything not named defaults to
+   *        'replace', which is what this call has always done.
+   * @returns {number} how many projects were applied
+   */
+  function importJSON(text, choices) {
+    var raw = readBackup(text);
+    choices = choices && typeof choices === 'object' ? choices : {};
+    var projChoice = choices.projects && typeof choices.projects === 'object' ? choices.projects : {};
+    var tplChoice = choices.templates && typeof choices.templates === 'object' ? choices.templates : {};
+
+    var s = getState();
+    // Take the whole state first (09 #3): "Undo import" for the rest of the
+    // session, in memory and on disk so a reload can still use it.
+    preimportText = null;
+    try {
+      preimportText = JSON.stringify(s);
+      try { ls().setItem(KEY + PREIMPORT_KEY_SUFFIX, preimportText); } catch (e) { /* memory copy stands */ }
+    } catch (e) {
+      preimportText = null;
+    }
+
+    var i;
+
+    // Keys this reader does not understand survive the round trip (12 #2).
+    var topKeys = Object.keys(raw);
+    for (i = 0; i < topKeys.length && i < 200; i++) {
+      if (KNOWN_STATE_KEYS[topKeys[i]]) continue;
+      try {
+        s[topKeys[i]] = JSON.parse(JSON.stringify(raw[topKeys[i]]));
+      } catch (e) { /* not JSON-safe; it cannot have come from a file */ }
+    }
+
+    // Templates merge by id — imported wins unless the caller said otherwise.
+    // Built-ins that the backup does not carry stay put.
     if (Array.isArray(raw.templates)) {
       var tlist = templateList();
-      for (var t = 0; t < raw.templates.length; t++) {
-        if (!raw.templates[t] || typeof raw.templates[t] !== 'object') continue;
-        var incomingTpl = normalizeTemplate(raw.templates[t]);
+      for (i = 0; i < raw.templates.length; i++) {
+        if (!raw.templates[i] || typeof raw.templates[i] !== 'object') continue;
+        var incomingTpl = normalizeTemplate(raw.templates[i]);
         if (incomingTpl.id === 'blob') {
           incomingTpl.id = 'sheep';
           incomingTpl.builtIn = true;
         }
+        var howTpl = str(tplChoice[incomingTpl.id], '') || 'replace';
+        if (howTpl === 'skip') continue;
         var existingTpl = findTemplate(tlist, incomingTpl.id);
+        if (existingTpl && howTpl === 'keepBoth') {
+          incomingTpl.id = uid();
+          incomingTpl.builtIn = false;
+          incomingTpl.name = fromBackupName(incomingTpl.name);
+          tlist.push(incomingTpl);
+          continue;
+        }
         if (existingTpl) tlist[tlist.indexOf(existingTpl)] = incomingTpl;
         else tlist.push(incomingTpl);
       }
@@ -2029,21 +3164,65 @@
 
     var list = projects();
     var count = 0;
-    for (var i = 0; i < raw.projects.length; i++) {
+    for (i = 0; i < raw.projects.length; i++) {
+      if (!raw.projects[i] || typeof raw.projects[i] !== 'object') continue;
       var incoming = normalizeProject(raw.projects[i]);
+      var how = str(projChoice[incoming.id], '') || 'replace';
+      if (how === 'skip') continue;
       var existing = findProject(list, incoming.id);
-      if (existing) {
-        list[list.indexOf(existing)] = incoming; // imported wins
-      } else {
+      if (existing && how === 'keepBoth') {
+        // The clone carries no BlobStore page images: those are keyed by the
+        // id it no longer has. The import sheet says so.
+        incoming.name = fromBackupName(incoming.name);
+        reidentify(incoming);
         list.push(incoming);
+        count++;
+        continue;
       }
+      if (existing) list[list.indexOf(existing)] = incoming;
+      else list.push(incoming);
       count++;
     }
+
     lineCache = Object.create(null);
     diagramCache = Object.create(null);
-    clearUndo();
+    // The undo stack is NOT cleared: it belongs to the state the pre-import
+    // snapshot restores, and losing it was half of what made 09 #3 dangerous.
+    dirty = true;
     flush();
     return count;
+  }
+
+  function preimportSnapshot() {
+    if (preimportText) return preimportText;
+    var txt = lsGet(KEY + PREIMPORT_KEY_SUFFIX);
+    return typeof txt === 'string' && txt ? txt : null;
+  }
+
+  function canUndoImport() {
+    return !!preimportSnapshot();
+  }
+
+  /** Put everything back the way it was before the last import. */
+  function undoImport() {
+    var txt = preimportSnapshot();
+    if (!txt) return false;
+    var raw;
+    try {
+      raw = JSON.parse(txt);
+    } catch (e) {
+      return false;
+    }
+    var keepRevision = revision();
+    state = normalizeState(raw);
+    state.revision = Math.max(clampInt(state.revision, 0, 1e12, 0), keepRevision);
+    lineCache = Object.create(null);
+    diagramCache = Object.create(null);
+    preimportText = null;
+    lsRemove(KEY + PREIMPORT_KEY_SUFFIX);
+    dirty = true;
+    flush();
+    return true;
   }
 
   /* ------------------------------------------------------------------ *
@@ -2431,9 +3610,32 @@
     load: load,
     save: save,
     flush: flush,
+    writeNow: writeNow,
     getState: getState,
     settings: settings,
     setSetting: setSetting,
+
+    // persistence health (13 #1–#3, 09 #2/#4, 12 #1)
+    saveFailed: saveFailed,
+    lastSaveError: lastSaveError,
+    onStorageError: onStorageError,
+    storageHealth: storageHealth,
+    wouldExceedQuota: wouldExceedQuota,
+    isCorrupt: isCorrupt,
+    corruptSnapshot: corruptSnapshot,
+    corruptKey: corruptKey,
+    acknowledgeCorrupt: acknowledgeCorrupt,
+    revision: revision,
+    writerId: writerId,
+    conflict: conflict,
+    conflictInfo: conflictInfo,
+    onConflict: onConflict,
+    onExternalChange: onExternalChange,
+    resolveConflict: resolveConflict,
+    requestPersist: requestPersist,
+    backupDue: backupDue,
+    backupStatus: backupStatus,
+    snoozeBackupNag: snoozeBackupNag,
 
     // lookup
     projects: projects,
@@ -2445,6 +3647,8 @@
     createProject: createProject,
     updateProject: updateProject,
     setStatus: setStatus,
+    finishProject: finishProject,
+    blockingParts: blockingParts,
     deleteProject: deleteProject,
     setActiveProject: setActiveProject,
 
@@ -2454,6 +3658,7 @@
     deletePart: deletePart,
     setActivePart: setActivePart,
     resetPart: resetPart,
+    makeCountImpact: makeCountImpact,
     importPatternSections: importPatternSections,
     applySuggestions: applySuggestions,
 
@@ -2510,12 +3715,36 @@
     undo: undo,
     canUndo: canUndo,
     clearUndo: clearUndo,
+    undoBytes: undoBytes,
 
     // backup
     exportJSON: exportJSON,
     importJSON: importJSON,
+    previewImport: previewImport,
+    canUndoImport: canUndoImport,
+    undoImport: undoImport,
+    MIGRATIONS: MIGRATIONS,
 
     // misc
-    uid: uid
+    uid: uid,
+
+    /**
+     * TEST ONLY. Point the store at a different localStorage key so a test
+     * page can run without borrowing (and racing for) the real one. Reloads
+     * from the new key. Never call this from app code.
+     */
+    __setKeyForTests: function (key) {
+      var k = str(key, '').trim();
+      if (!k) return KEY;
+      KEY = k;
+      window.Store.KEY = k;
+      state = null;
+      undoStack.length = 0;
+      undoBytesTotal = 0;
+      preimportText = null;
+      if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+      load();
+      return KEY;
+    }
   };
 })();

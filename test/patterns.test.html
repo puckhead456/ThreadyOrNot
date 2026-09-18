@@ -1205,6 +1205,240 @@ if (!window.PdfText || !window.PdfText._labelRows) {
 }
 
 // -----------------------------------------------------------------------
+group('wave1 06 #2: phantom rows from bare numbers (TOC, timestamps, materials)');
+// -----------------------------------------------------------------------
+
+function rowLines(text) {
+  return P.parse(text).filter(function (l) { return l.kind === 'row' || l.kind === 'setup'; });
+}
+function rowNums(text) {
+  return rowLines(text).map(function (l) { return l.row; });
+}
+
+assertEqual(P.parse('3:40 Attaching the head')[0].row, null,
+  'a video timestamp "3:40 Attaching the head" is not row 3');
+assertEqual(P.parse('5. Assembly ................ 12')[0].row, null,
+  'a dot-leader contents line "5. Assembly ..... 12" is not row 5');
+assertEqual(P.parse('1. 4 mm hook')[0].row, null,
+  'a numbered materials line "1. 4 mm hook" is not row 1');
+assertEqual(P.parse('2) Safety eyes, 8 mm')[0].row, null,
+  'a numbered materials line "2) Safety eyes, 8 mm" is not row 2');
+assertEqual(P.parse('1. 6 sc in MR')[0].row, 1,
+  '...but "1. 6 sc in MR" is still row 1 (ROW_REST_OK_RE stays the primary allow)');
+assertEqual(P.parse('1. 6 sc in MR')[0].count, 6,
+  '..."1. 6 sc in MR" still computes 6');
+assertEqual(P.parse('7. 10 sc, 2 inc (14)')[0].row, 7,
+  'a bare row whose instruction starts with a number is untouched');
+assertEqual(P.parse('4. Attaching the arms 11')[0].row, null,
+  'a contents line with a bare trailing page number is not a row');
+
+var tocText =
+  'Contents\n' +
+  '1. Materials ............ 2\n' +
+  '2. Abbreviations ........ 3\n' +
+  '3:40 Attaching the head\n' +
+  'Materials:\n' +
+  '1. 4 mm hook\n' +
+  '2) Safety eyes, 8 mm\n' +
+  'Body\n' +
+  '1. 6 sc in MR (6)\n' +
+  '2. inc x6 (12)\n' +
+  '3. (sc, inc) x6 (18)';
+assertEqual(rowNums(tocText), [1, 2, 3],
+  'a contents page + a numbered supply list open no rounds; the real 1-2-3 do');
+assertEqual(P.summary(P.parse(tocText)).maxRow, 3,
+  '...and maxRow is 3, not 3-from-the-contents-page');
+assertEqual(P.splitSections(tocText).map(function (s) { return s.name; }), ['Body'],
+  '...and the contents page opens no phantom section');
+
+var frontRunText =
+  '1. Wind the yarn into a centre-pull ball\n' +
+  '2. Block the finished pieces\n' +
+  'Materials:\n' +
+  'Worsted yarn\n' +
+  'Body\n' +
+  '1. 6 sc in MR (6)\n' +
+  '2. inc x6 (12)';
+assertEqual(rowNums(frontRunText), [1, 2],
+  'a bare-number run before the first front-matter heading is front matter, not rounds');
+
+// -----------------------------------------------------------------------
+group('wave1 06 #3: vocabulary - post stitches, UK terms, specials');
+// -----------------------------------------------------------------------
+
+['fpsc', 'fphdc', 'fpdc', 'fptr', 'bpsc', 'bphdc', 'bpdc', 'bptr'].forEach(function (st) {
+  assertEqual(P.evaluate('24 ' + st), 24, st + ' alone: "24 ' + st + '" -> 24');
+  assertEqual(P.evaluate('(' + st + ') x6'), 6, st + ' in a group: "(' + st + ') x6" -> 6');
+});
+assertEqual(P.evaluate('fpdc in each st', 48), 48, 'fpdc in each st -> prev (one for one)');
+
+assertEqual(P.evaluate('32 htr'), 32, 'htr alone: "32 htr" -> 32');
+assertEqual(P.evaluate('(htr) x6'), 6, 'htr in a group: "(htr) x6" -> 6');
+assertEqual(P.evaluate('htr in each st', 32), 32, 'htr is matched before tr, so "htr in each st" -> prev');
+assertEqual(P.evaluate('1 htr in each st'), null, 'htr with no previous count stays honest (null)');
+
+assertEqual(P.evaluate('miss 1 ch, 2 tr in next ch'), 2, 'miss alone: "miss 1 ch, 2 tr in next ch" -> 2');
+assertEqual(P.evaluate('(sc, miss) x6', 12), 6, 'miss in a group: "(sc, miss) x6" -> 6 (it consumes, produces nothing)');
+
+['sc3tog', 'hdc3tog', 'dc3tog', 'tr3tog'].forEach(function (st) {
+  assertEqual(P.evaluate(st), 1, st + ' alone -> 1');
+  assertEqual(P.evaluate('(' + st + ') x6'), 6, '"(' + st + ') x6" -> 6 (18 stitches become 6)');
+});
+
+assertEqual(P.evaluate('sc, picot'), 1, 'picot alone adds nothing: "sc, picot" -> 1');
+assertEqual(P.evaluate('(sc, picot) x6'), 6, 'picot in a group: "(sc, picot) x6" -> 6');
+
+assertEqual(P.evaluate('v-st'), 2, 'v-st alone -> 2');
+assertEqual(P.evaluate('(v-st) x6'), 12, '"(v-st) x6" -> 12');
+assertEqual(P.evaluate('v st'), 2, '"v st" (spaced) -> 2');
+assertEqual(P.evaluate('(v st) x6'), 12, '"(v st) x6" -> 12');
+
+assertEqual(P.evaluate('x-st'), 2, 'x-st alone -> 2');
+assertEqual(P.evaluate('(x-st) x6'), 12, '"(x-st) x6" -> 12');
+assertEqual(P.evaluate('crossed dc'), 2, 'crossed dc -> 2');
+assertEqual(P.evaluate('(crossed tr) x6'), 12, '"(crossed tr) x6" -> 12');
+
+assertEqual(P.evaluate('spike sc'), 1, 'spike sc alone -> 1');
+assertEqual(P.evaluate('(spike sc) x6'), 6, '"(spike sc) x6" -> 6');
+
+assertEqual(P.evaluate('ttr'), 1, 'ttr alone -> 1');
+assertEqual(P.evaluate('(ttr) x6'), 6, '"(ttr) x6" -> 6');
+assertEqual(P.evaluate('trtr'), 1, 'trtr alone -> 1');
+assertEqual(P.evaluate('(trtr) x6'), 6, '"(trtr) x6" -> 6');
+
+var ribText =
+  'Rnd 11: sc in each st around (48)\n' +
+  'Rnd 12: *fpdc in next 2 sts, bpdc in next 2 sts; rep from * around (48)';
+var rib = P.parse(ribText);
+assertEqual(rib[1].computed, 48, 'UK ribbing row: the fp/bp repeat computes 48');
+assertEqual(rib[1].count, 48, '...and agrees with the printed (48)');
+assertEqual(P.evaluate('(fpdc in next 2 sts, bpdc in next 2 sts) x12'), 48,
+  '...and the same round written as a x12 group also computes 48');
+
+assertEqual(P.dialectHints('Row 4: 1 htr in each st to end, turn (32)\nTension: 16 sts'),
+  { uk: true, us: false, tokens: ['htr', 'tension'] }, 'dialectHints: htr + tension -> UK');
+assertEqual(P.dialectHints('Rnd 1: 6 sc in MR (6)\nGauge: 4 in'),
+  { uk: false, us: true, tokens: ['sc', 'gauge'] }, 'dialectHints: sc + gauge -> US');
+assertEqual(P.dialectHints('Row 7: miss 1 ch, 2 dtr in next ch'),
+  { uk: true, us: false, tokens: ['miss', 'dtr'] }, 'dialectHints: miss + dtr -> UK');
+assertEqual(P.dialectHints('Ch 20 and turn'), { uk: false, us: false, tokens: [] },
+  'dialectHints: a pattern with neither says neither');
+assertEqual(P.dialectHints('Tip: be careful not to miss any stitches').uk, false,
+  'dialectHints: "miss" as an ordinary English verb is not a UK term');
+assertTrue(P.dialectHints('htr and sc in the same pattern').uk &&
+  P.dialectHints('htr and sc in the same pattern').us,
+  'dialectHints: a mixed pattern reports both (the chip is informational)');
+
+// -----------------------------------------------------------------------
+group('wave1 06 #4 / #6: PdfText empty pages, size guard, page cap');
+// -----------------------------------------------------------------------
+
+var PT3 = window.PdfText;
+assertEqual(PT3.SIZE_WARN_BYTES, 25 * 1024 * 1024, 'SIZE_WARN_BYTES is 25 MB, exported for the UI confirm');
+assertEqual(PT3.MIN_PAGE_CHARS, 20, 'a page under 20 non-whitespace characters carried no readable text');
+assertEqual(PT3._emptyPageNumbers([
+  [],                                        // an image cover
+  ['Rnd 1: 6 sc in magic ring (6)', 'Rnd 2: inc around (12)'],
+  ['   ', ''],                               // whitespace only
+  ['Body']                                   // four characters
+]), [1, 3, 4], 'emptyPages: the image cover, the blank and the four-character page');
+assertEqual(PT3._emptyPageNumbers([[], ['Rnd 1: 6 sc in a magic ring (6)']], [7, 8]), [7],
+  'emptyPages reports the pages’ own numbers, not their positions');
+assertEqual(PT3._emptyPageNumbers([]), [], 'emptyPages of nothing is nothing');
+
+// -----------------------------------------------------------------------
+group('wave1 06 #7: Unicode hygiene');
+// -----------------------------------------------------------------------
+
+assertEqual(PT3._normUnicode('in­crease'), 'increase', 'PdfText: a soft hyphen inside a word is dropped');
+assertEqual(PT3._normUnicode('​Rnd 6﻿'), 'Rnd 6', 'PdfText: zero-width space and BOM are dropped');
+assertEqual(PT3._normUnicode('Rnd ７: ｓc around'), 'Rnd 7: sc around', 'PdfText: fullwidth digits and letters fold to ASCII');
+assertEqual(PT3._normUnicode('▪ • ‣ ◦ ·'), '- - - - -', 'PdfText: exotic bullets all become "-"');
+assertEqual(PT3._normUnicode('6 sc'), '6 sc', 'PdfText: NBSP becomes a plain space');
+assertEqual(PT3._normUnicode('“don’t” 4″'), '"don\'t" 4"', 'PdfText: curly quotes fold to straight ones');
+
+assertEqual(P.parse('Rnd 5: in­crease in each st (24)')[0].row, 5, 'Patterns: a soft hyphen does not break the row');
+assertEqual(P.parse('Rnd 5: in­crease in each st', { size: 0 })[0].computed, null,
+  'Patterns: "increase in each st" with no previous count is still honest');
+assertEqual(P.evaluate('in­crease in each st', 12), 24, 'Patterns: the de-hyphenated word evaluates as "increase"');
+assertEqual(P.parse('​Rnd 6: sc around (24)')[0].row, 6, 'Patterns: a zero-width space does not kill the ^ anchor');
+assertEqual(P.parse('▪ Rnd 7: sc around (24)')[0].row, 7, 'Patterns: a "▪" bullet reads like a "-" bullet');
+assertEqual(P.parse('Rnd ７: sc around (24)')[0].row, 7, 'Patterns: a fullwidth digit is still a row number');
+assertEqual(P.parse('Rnd 8: sc around (24) ')[0].count, 24, 'Patterns: a trailing NBSP does not hide the count');
+assertEqual(P.parse('２． 6 sc in MR (6)')[0].row, 2, 'Patterns: a whole fullwidth bare marker still reads');
+assertEqual(P.dialectHints('Ten­sion: 16 sts').uk, true, 'dialectHints normalises before it looks for tokens');
+
+// -----------------------------------------------------------------------
+group('wave1 03 #4 / #10: wrapped size lists, running heads, back matter');
+// -----------------------------------------------------------------------
+
+var wrapText =
+  'Row 1: sc across, leaving the remaining 96 (108,\n' +
+  '116) sts unworked, turn. | 88 (100,\n' +
+  '108) sts; the number of puff sts in this row are\n' +
+  'Row 2: sc in each st across (88)';
+assertEqual(rowNums(wrapText), [1, 2], 'a wrapped size list never becomes Row 108 or Row 116');
+assertEqual(P.summary(P.parse(wrapText)).maxRow, 2, '...so maxRow stays 2');
+assertEqual(P.splitSections(wrapText).length, 1, '...and a rogue number opens no second section');
+
+var jumpText =
+  'Body\n' +
+  '1. 6 sc in MR (6)\n' +
+  '2. inc x6 (12)\n' +
+  '96. more of the same yarn\n' +
+  '3. (sc, inc) x6 (18)';
+assertEqual(rowNums(jumpText), [1, 2, 3],
+  'a bare number far past the section’s last row (96 after 2) is not a round');
+assertEqual(P.summary(P.parse(jumpText)).maxRow, 3, '...and maxRow stays 3');
+
+var headText =
+  '=== PAGE 1 ===\n' +
+  'Wheat Stitch Crochet Cardigan\n' +
+  'by Briana K Designs\n' +
+  'Materials:\n' +
+  '4.5 mm hook\n' +
+  '=== PAGE 2 ===\n' +
+  'Body\n' +
+  'Row 1: sc in each st (20)\n' +
+  'Row 2: sc in each st (20)\n' +
+  '=== PAGE 3 ===\n' +
+  'Wheat Stitch Crochet Cardigan\n' +
+  'by Briana K Designs\n' +
+  'Row 3: sc in each st (20)';
+var headSecs = P.splitSections(headText);
+assertEqual(headSecs.map(function (s) { return s.name; }), ['Body'],
+  'a title/byline block names no part');
+assertTrue(headSecs[0].text.indexOf('Wheat Stitch Crochet Cardigan') < 0 &&
+  headSecs[0].text.indexOf('Briana K Designs') < 0,
+  'the running title block never reaches the pattern text');
+assertEqual(P.summary(P.parse(headSecs[0].text)).maxRow, 3,
+  '...and the rounds either side of it are still one part');
+
+var advertText =
+  'Body\n' +
+  'Row 1: sc in each st (20)\n' +
+  'Row 2: sc in each st (20)\n' +
+  'Windowpane Granny Blanket\n' +
+  'Click HERE for more information\n' +
+  'GPSR Representative: Someone, Somewhere\n' +
+  'www.etsy.com/shop/somebody';
+var advertSecs = P.splitSections(advertText);
+assertTrue(advertSecs[0].text.indexOf('Click HERE') < 0 &&
+  advertSecs[0].text.indexOf('GPSR') < 0 &&
+  advertSecs[0].text.indexOf('etsy.com') < 0,
+  'back-matter adverts are cut from the last part');
+assertEqual(P.summary(P.parse(advertSecs[0].text)).maxRow, 2, '...without touching its rounds');
+
+var midAdvert =
+  'Body\n' +
+  'Row 1: sc in each st (20)\n' +
+  'Click HERE for the video tutorial\n' +
+  'Row 2: sc in each st (20)\n' +
+  'Row 3: sc in each st (20)';
+assertEqual(P.summary(P.parse(midAdvert)).maxRow, 3,
+  'an advert line with rounds after it never truncates the pattern');
+
+// -----------------------------------------------------------------------
 var summaryEl = document.getElementById('summary');
 var finalLine = passed + ' passed, ' + failed + ' failed';
 summaryEl.textContent = finalLine;
