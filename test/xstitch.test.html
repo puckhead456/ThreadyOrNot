@@ -2126,6 +2126,276 @@ group('Size guard: toCountsMode keeps what was counted');
 })();
 
 /* =====================================================================
+ * 21. Sidebar, magazine and scan layouts  (added 2026-09-19)
+ * ===================================================================== */
+group('parseKey: cross-brand column headers');
+
+(function () {
+  var K = X._key;
+  assertSubset(K.brandColumnHeader('DMC Anchor Madeira'), { brand: 'DMC', cols: 3 },
+    'three brand words is a three-column key header');
+  assertSubset(K.brandColumnHeader('X BS DMC Name:'), { brand: 'DMC', cols: 1 },
+    'symbol captions plus one brand is a one-column header');
+  assertSubset(K.brandColumnHeader('X BS DMC Cosmo'), { brand: 'DMC', cols: 2 },
+    'DMC and Cosmo side by side');
+  assertEqual(K.brandColumnHeader('DMC'), null,
+    'a brand on its own is just a word, not a header');
+  assertEqual(K.brandColumnHeader('These designs were stitched using DMC stranded cotton'), null,
+    'a sentence that mentions DMC is not a header');
+  assertEqual(K.brandColumnHeader('Anchor 310 Black'), null,
+    'a key row is not a header');
+})();
+
+(function () {
+  var r = X.parseKey(
+    'Caterpillar cards key\n' +
+    'Cross stitch in two strands\n' +
+    'DMC Anchor Madeira\n' +
+    'Z B5200 1 2401 white\n' +
+    '2 415 398 802 grey\n' +
+    '7 437 362 2012 light tan\n' +
+    'Backstitch in one strand\n' +
+    '––––– 310 403 2400 black\n');
+  assertEqual(r.entries.length, 4, 'four rows out of a three-brand magazine key');
+  assertEqual(r.entries.map(function (e) { return e.code; }).join(','), 'B5200,415,437,310',
+    'the DMC column only; Anchor and Madeira are dropped');
+  assertEqual(r.entries.map(function (e) { return e.name; }).join('|'),
+    'white|grey|light tan|black', 'the equivalents never land in the colour name');
+  assertEqual(r.entries[1].symbol, '2', 'a bare digit in the symbol column is a symbol');
+  assertEqual(r.entries[2].symbol, '7', 'and not an impossible floss code');
+  assertEqual(r.entries[3].kind, 'back', 'the backstitch sub-block switches technique');
+  assertEqual(r.strandsDefault, 2, '"in two strands" spelled out');
+  assertEqual(r.bsStrands, 1, '"in one strand" spelled out');
+})();
+
+(function () {
+  /* '310 403 2400' is three ascending integers, which is also exactly what
+     a margin ruler looks like. The header's column count breaks the tie. */
+  var withHeader = X.parseKey('DMC Anchor Madeira\n310 403 2400\n');
+  assertEqual(withHeader.entries.length, 1, 'a bare three-brand row survives the ruler test');
+  var without = X.parseKey('Colour key\n310 403 2400 2500 2600 2700\n');
+  assertEqual(without.entries.length, 0, 'but a real ascending ruler is still thrown away');
+})();
+
+group('parseKey: "Stitches used" is a summary, not a section switch');
+
+(function () {
+  var r = X.parseKey(
+    'X BS DMC Name:\n' +
+    'Stitches used: Cross Stitch, Back Stitch\n' +
+    '310 Black\n');
+  assertEqual(r.entries[0].kind, 'cross',
+    'a line naming two techniques does not mark the key as backstitch (04 #17)');
+  assertEqual(X.parseKey('Backstitch\n310 Black\n').entries[0].kind, 'back',
+    'a line naming one technique still switches');
+})();
+
+group('parseKey: detached sidebar columns');
+
+(function () {
+  var K = X._key;
+  var lines = ['Stitches Length', '132 28.8 in.', '54 11.8 in.', '48 10.5 in.'];
+  var col = K.countColumnAt(lines, 0);
+  assertEqual(col && col.nums.join(','), '132,54,48', 'a "Stitches" column is recognised');
+  assertEqual(col && col.end, 3, 'and reports the last line it consumed');
+  assertEqual(K.countColumnAt(['Stitch Count: 35h x 49w', '1', '2'], 0), null,
+    'a stitch-count line with a size on it is not a column');
+
+  var r = X.parseKey(
+    'X BS DMC Name:\n' +
+    '453 Shell Grey LT\n' +
+    '3854 Autumn Gold MD\n' +
+    '310 Black\n' +
+    'Stitches Length\n' +
+    '132 28.8 in.\n' +
+    '54 11.8 in.\n' +
+    '79 20.2 in.\n');
+  assertEqual(r.entries.length, 3, 'the count column does not become three more colours');
+  assertEqual(r.entries.map(function (e) { return e.stitchCount; }).join(','), '132,54,79',
+    'its numbers are zipped back onto the rows they belonged to');
+})();
+
+(function () {
+  var K = X._key;
+  var col = K.nameColumnAt(['white', 'black', 'light green', '32 high x 56 wide'], 0);
+  assertEqual(col && col.names.join(','), 'white,black,light green', 'a name column is recognised');
+  assertEqual(K.nameColumnAt(['white', 'black'], 0), null, 'two lines is not a column');
+  assertEqual(K.nameColumnAt(['Backstitch', 'white', 'black'], 0), null,
+    'a technique header stops it dead');
+
+  var r = X.parseKey(
+    'DMC Anchor Madeira\n' +
+    'Z B5200 1 2401\n' +
+    'W 310 403 2400\n' +
+    '2 415 398 802\n' +
+    'white\nblack\ngrey\n');
+  assertEqual(r.entries.length, 3, 'the name column does not become three more colours');
+  assertEqual(r.entries.map(function (e) { return e.name; }).join(','), 'white,black,grey',
+    'and its words are zipped back on in order');
+})();
+
+(function () {
+  /* A column that does not line up is left alone: a wrong count is worse
+     than no count. */
+  var r = X.parseKey('Colour key\n310 Black\n3853 Gold\nStitches\n100\n200\n300\n');
+  assertEqual(r.entries.map(function (e) { return e.stitchCount; }).join(','), ',',
+    'three numbers do not fit two colours, so nothing is guessed');
+  assertTrue(r.warnings.join('|').indexOf('did not line up') >= 0, 'and the mismatch is reported');
+})();
+
+(function () {
+  var K = X._key;
+  var col = K.skeinColumnAt(['x1', 'x1', 'x2', '946'], 0);
+  assertEqual(col && col.nums.join(','), '1,1,2', 'a run of bare skein marks is a column');
+  assertEqual(col && col.end, 2, 'and reports the last line it consumed');
+  assertEqual(K.skeinColumnAt(['x1', '946'], 0), null, 'one mark on its own is not a column');
+  assertEqual(K.skeinColumnAt(['x1 722 x1', 'x1 741 x1'], 0), null,
+    'a legend row with codes on it is not a bare column');
+})();
+
+(function () {
+  var K = X._key;
+  var e = [{ n: null }, { n: 1 }, { n: null }, { n: null }];
+  assertEqual(K.openRuns(e, 'n').map(function (r) { return r.length; }).join(','), '1,2',
+    'openRuns finds each run of unset entries');
+  assertTrue(K.zipColumn(e, [7, 8], 'n'), 'a two-long column fits the two-long run');
+  assertEqual(e.map(function (x) { return x.n; }).join(','), ',1,7,8',
+    'and lands on that run, not on the first gap');
+  assertTrue(K.zipColumn(e, [5], 'n'), 'the one-long run takes the one-long column');
+  assertEqual(e[0].n, 5, 'even though it comes first in the key');
+  assertEqual(K.zipColumn(e, [1, 2], 'n'), false, 'with nothing open, nothing is zipped');
+})();
+
+(function () {
+  /* The DMC two-column legend: codes down the left, then rows that carry
+     the LEFT column's skein mark, this column's code and its own mark,
+     then the right column's codes and a detached run of marks. */
+  var r = X.parseKey(
+    'symbol colour\n' +
+    '162\n300\n312\n' +
+    'nº skeins* symbol colour nº skeins*\n' +
+    'x1 722 x1\n' +
+    'x1 741 x1\n' +
+    'x2 742 x1\n' +
+    'colour\n946\n947\n' +
+    'nº skeins*\nx1\nx1\n');
+  assertEqual(r.entries.map(function (e) { return e.code; }).join(','),
+    '162,300,312,722,741,742,946,947', 'all three blocks of codes are found');
+  assertEqual(r.entries.map(function (e) { return e.skeins; }).join(','),
+    '1,1,2,1,1,1,1,1', 'and every colour gets a skein number from its own column');
+})();
+
+group('parseKey: transposed keys with the codes glued together');
+
+(function () {
+  var K = X._key;
+  assertSubset(K.splitBrandGlued('DMCEcru3855385433473848'),
+    { brand: 'DMC' }, 'a brand-led glued run is split');
+  assertEqual(K.splitBrandGlued('DMCEcru3855385433473848').codes.join(','),
+    'Ecru,3855,3854,3347,3848', 'into the codes the DMC table knows');
+  assertEqual(K.splitBrandGlued('Anchor3132661074'), null,
+    'an Anchor run does not decompose, so the equivalents row is ignored');
+  assertEqual(K.splitBrandGlued('DMC3109999310'), null,
+    'a run with a piece we cannot resolve is left alone');
+  assertEqual(K.splitBrandGlued('56985'), null, 'a stitch count is not a glued key');
+
+  var r = X.parseKey('Anchor3873 3132661074\nDMCEcru3855385433473848\n');
+  assertEqual(r.entries.map(function (e) { return e.code; }).join(','),
+    'Ecru,3855,3854,3347,3848', 'only the row we can resolve becomes the key');
+})();
+
+group('parseKey: chart glyph soup on the key rows');
+
+(function () {
+  var K = X._key;
+  var soup = '3854 313 16-ct 4.2" x 4.2" p 222222222 ü Ê ü Ê 2222 O 2 O ' +
+    '« OO « OO « OOO « OO « OO « O p';
+  assertEqual(K.stripChartSoup(soup), '3854 313 16-ct 4.2"',
+    'the grid is cut off the end of a sidebar row');
+  assertEqual(K.stripChartSoup('▲  DMC 310    Black                 2    1,234'),
+    '▲  DMC 310    Black                 2    1,234',
+    'a key row padded out into columns is left alone');
+  assertEqual(
+    K.stripChartSoup('This is a scan of an antique book that is, to the best of our knowledge.'),
+    'This is a scan of an antique book that is, to the best of our knowledge.',
+    'and so is a sentence');
+  assertEqual(K.stripChartSoup('107 110 120 130 140 150 159 160 170 180 190 200 210 220'),
+    '107 110 120 130 140 150 159 160 170 180 190 200 210 220',
+    'a long margin ruler is not soup either');
+
+  var r = X.parseKey('X DMC Anchor\np 22222 888 ««««« p\np 3799 236 (1 strand) p ' +
+    '8888 «« 8 «« 88OOO 2 OOO888 üüü 888 üüü 8 8888888888 p\n');
+  assertEqual(r.entries.length, 1, 'a line of nothing but chart glyphs is not a key row');
+  assertEqual(r.entries[0].code, '3799', 'the one real row still reads');
+})();
+
+group('parseKey: design size with the height first');
+
+(function () {
+  assertSubset(X.parseKey('Colour key\n310 Black\nStitch Count: 35h x 49w\n').design,
+    { w: 49, h: 35 }, '"35h x 49w"');
+  assertSubset(X.parseKey('Colour key\n310 Black\nMAXIMUM STITCH COUNT 32 high x 56 wide\n').design,
+    { w: 56, h: 32 }, '"32 high x 56 wide"');
+  assertSubset(X.parseKey('Colour key\n310 Black\nStitch Count: 224 W x 288 H\n').design,
+    { w: 224, h: 288 }, 'and width-first is unchanged');
+})();
+
+group('parseKey: kind, imageOnly and the no-key case');
+
+(function () {
+  var none = X.parseKey('');
+  assertEqual(none.kind, 'none', 'nothing at all is kind "none"');
+  assertEqual(none.imageOnly, true, 'and flagged image-only');
+  assertTrue(none.warnings.join('|').indexOf('import the pages as images') >= 0,
+    'with advice a stitcher can act on');
+
+  var marker = X.parseKey('=== PAGE 1 ===\n\n=== PAGE 2 ===\n');
+  assertEqual(marker.imageOnly, true, 'page markers with no text between them count as image-only');
+
+  var alphabets = X.parseKey('Your Best Source For Cross Stitch\nFor Over 30 Years\n');
+  assertEqual(alphabets.entries.length, 0, 'a page of marketing has no colour key');
+  assertEqual(alphabets.kind, 'none', 'kind "none"');
+  assertEqual(alphabets.imageOnly, false, 'but it is not image-only: there was text');
+
+  assertEqual(X.parseKey('Colour key\n310 Black 2 1234\n').kind, 'cross-stitch', 'a real key');
+})();
+
+(function () {
+  /* An OCR'd advertisement in a public-domain scan. */
+  var r = X.parseKey('ANCHOR BRAND EMBROIDERY\n65 BROAD STREET BOSTON MASS.\n');
+  assertEqual(r.entries.length, 0,
+    'a two-digit number vouched for only by a document-level brand needs a key header');
+  var inKey = X.parseKey('Anchor colour key\n65 Dark Grey\n');
+  assertEqual(inKey.entries.length, 1, 'inside a key block the same row is a colour');
+})();
+
+group('parseOXS: ornament types Ursa Software actually writes');
+
+(function () {
+  var xml = '<?xml version="1.0"?><chart>' +
+    '<properties chartwidth="4" chartheight="4" stitchesperinch="14" palettecount="1"/>' +
+    '<palette><palette_item index="0" number="cloth" name="cloth" color="FFFFFF"/>' +
+    '<palette_item index="1" number="DMC    310" name="Black" color="000000"/></palette>' +
+    '<fullstitches><stitch x="1" y="1" palindex="1"/></fullstitches>' +
+    '<partstitches/><backstitches/>' +
+    '<ornaments_inc_knots_and_beads>' +
+    '<object x1="2" y1="2" palindex="1" objecttype="bead3mm"/>' +
+    '<object x1="3" y1="2" palindex="1" objecttype="bead2mm"/>' +
+    '<object x1="2" y1="3" palindex="1" objecttype="frenchknot"/>' +
+    '<object x1="3" y1="3" palindex="1" objecttype="knot"/>' +
+    '</ornaments_inc_knots_and_beads></chart>';
+  var r = X.parseOXS(xml);
+  assertTrue(r.ok, 'it parses');
+  assertEqual(r.data.palette[0].code, '310', '"DMC    310" splits on the padded brand');
+  assertEqual(r.data.chart.knots.length, 4, 'all four ornaments survive');
+  assertEqual(r.data.chart.knots.filter(function (k) { return k.t === 'bead'; }).length, 2,
+    'bead3mm and bead2mm are beads, not "unknown objecttype"');
+  assertEqual(r.data.chart.knots.filter(function (k) { return k.t === 'knot'; }).length, 2,
+    'frenchknot and knot are knots');
+  assertEqual(r.warnings.join('|').indexOf('unknown objecttype'), -1, 'and nothing is unknown');
+})();
+
+/* =====================================================================
  * Summary
  * ===================================================================== */
 function finish() {

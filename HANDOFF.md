@@ -19,20 +19,20 @@ Read in this order: this file → `SPEC.md` (crochet + shell contract; the "Craf
 |---|---|---|
 | `test/store-safety.test.html` | 210 | wave 1: save failures, corrupt-state quarantine, multi-tab revision/conflict, persist + backup nag, counter inverses and terminal states, import keys and targets |
 | `test/backup.test.html` | 102 | tolerant backup versions, `MIGRATIONS`, frozen v1 fixture, `previewImport` / choices / `undoImport` |
-| `test/patterns.test.html` | 578 | crochet parser, synthetic |
-| `test/patterns.fixtures.html` | 285 | real crochet PDFs in `tmp-pdf/` |
+| `test/patterns.test.html` | 665 | crochet parser, synthetic |
+| `test/patterns.fixtures.html` | 557 (572 with `?heavy=1`) | 30 crochet + 7 knit + 6 other-craft PDFs; files over 17 MB only with `?heavy=1` |
 | `test/templates.test.html` | 94 | templates carry pattern text + placement notes; createProject / templateFromProject / export round-trip |
 | `test/crafts.test.html` | 124 | Store craft plumbing |
 | `test/sw.test.html` | 27 | service-worker routing policy (dev vs production) |
 | `test/blobstore.test.html` | 46 | IndexedDB wrapper |
-| `test/xstitch.test.html` | 602 | synthetic |
-| `test/xstitch.fixtures.html` | 174 (+5 skipped) | 11 real charts, read directly from the PDFs (~1 min) |
+| `test/xstitch.test.html` | 675 | synthetic |
+| `test/xstitch.fixtures.html` | 436 (+9 skipped; 462 with `?heavy=1`) | 34 real charts + the Ursa OXS sample, read directly from the PDFs (~1 min) |
 | `test/xstitch-photo.test.html` | 131 | + visual QA panel (drop a photo) |
-| `test/sewing.test.html` | 675 | synthetic |
-| `test/sewing.fixtures.html` | 137 | 2 real booklets, read directly from the PDFs |
+| `test/sewing.test.html` | 803 | synthetic |
+| `test/sewing.fixtures.html` | 682 | 14 real booklets, sheets, quilts and bags, read directly from the PDFs |
 | `test/celebrate.test.html`, `test/diagram.test.html` | demo pages | no assertions |
 
-Fixtures: `tmp-pdf/` is gitignored and copyrighted (**never commit it**). The fixture pages extract text from `xs-*.pdf` / `sew-*.pdf` themselves via `PdfText` (sessionStorage cache; a `.txt` of the same name overrides), so adding a fixture = drop the file in and add shape assertions. `tmp-pdf/SOURCES.md` lists what is there and where it came from: 7 KG-Chart LE charts, 1 Spriter chart, 3 DMC library PDFs (one is embroidery, flagged as such), 2 Pattern Runway booklets (their cutting lists live on the pattern sheets, so "no cutting list" is correct), 9 crochet PDFs (bear, bee, cardigan, cato + snowman, turtle, fish, panda, baphomet added 2026-09-17).
+Fixtures: `tmp-pdf/` is gitignored and copyrighted (**never commit it**). The fixture pages extract text from `xs-*.pdf` / `sew-*.pdf` themselves via `PdfText` (sessionStorage cache; a `.txt` of the same name overrides), so adding a fixture = drop the file in and add shape assertions. `tmp-pdf/SOURCES.md` lists what is there and where it came from: 7 KG-Chart LE charts, 1 Spriter chart, 3 DMC library PDFs (one is embroidery, flagged as such), 2 Pattern Runway booklets (their cutting lists live on the pattern sheets, so "no cutting list" is correct), 9 crochet PDFs (bear, bee, cardigan, cato + snowman, turtle, fish, panda, baphomet added 2026-09-17), and the 2026-09-19 scouring batch of 77 files (30 crochet incl. the King Cole UK/US pair and six public-domain scans, 24 cross-stitch incl. the Ursa OXS sample, 12 sewing incl. the first quilts and bags, 7 knitting, 6 other crafts; manifest tmp-pdf/fetch-2026-09-19.txt).
 
 ## What's left
 

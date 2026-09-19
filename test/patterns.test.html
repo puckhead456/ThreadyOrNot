@@ -1315,14 +1315,31 @@ assertEqual(rib[1].count, 48, '...and agrees with the printed (48)');
 assertEqual(P.evaluate('(fpdc in next 2 sts, bpdc in next 2 sts) x12'), 48,
   '...and the same round written as a x12 group also computes 48');
 
-assertEqual(P.dialectHints('Row 4: 1 htr in each st to end, turn (32)\nTension: 16 sts'),
+// dialectHints grew `dialect` (a verdict) and `craft` in the 2026-09-19 pass,
+// so the shape tests check the subset they were written for.
+assertSubset(P.dialectHints('Row 4: 1 htr in each st to end, turn (32)\nTension: 16 sts'),
   { uk: true, us: false, tokens: ['htr', 'tension'] }, 'dialectHints: htr + tension -> UK');
-assertEqual(P.dialectHints('Rnd 1: 6 sc in MR (6)\nGauge: 4 in'),
+assertSubset(P.dialectHints('Rnd 1: 6 sc in MR (6)\nGauge: 4 in'),
   { uk: false, us: true, tokens: ['sc', 'gauge'] }, 'dialectHints: sc + gauge -> US');
-assertEqual(P.dialectHints('Row 7: miss 1 ch, 2 dtr in next ch'),
-  { uk: true, us: false, tokens: ['miss', 'dtr'] }, 'dialectHints: miss + dtr -> UK');
-assertEqual(P.dialectHints('Ch 20 and turn'), { uk: false, us: false, tokens: [] },
+assertSubset(P.dialectHints('Row 7: miss 1 ch, 2 dtr in next ch'),
+  { uk: true, us: false, tokens: ['dtr', 'miss'] }, 'dialectHints: miss + dtr -> UK');
+assertSubset(P.dialectHints('Ch 20 and turn'), { uk: false, us: false, tokens: [] },
   'dialectHints: a pattern with neither says neither');
+
+// --- the verdict and the craft guess (06 #3, #19) ---------------------
+// `uk`/`us` stay informational flags; `dialect` is the one the chip shows.
+assertEqual(P.dialectHints('Row 1: 1htr in each st. Row 2: 1htr, 1dtr, 1htr to end.').dialect,
+  'uk', 'dialectHints: htr/dtr glued to their counts still read as UK');
+assertEqual(P.dialectHints('Rnd 1: 6sc in MR. Rnd 2: 2sc in each st. Rnd 3: 12hdc.').dialect,
+  'us', 'dialectHints: sc/hdc glued to their counts still read as US');
+assertEqual(P.dialectHints('Rnd 1: 6 dc, 6 slst. Rnd 2: 12 dc.\nThis pattern is written in UK terminology.').dialect,
+  'uk', 'dialectHints: a pattern of dialect-neutral stitches goes by what it calls itself');
+assertEqual(P.dialectHints('Row 1: K2, p2 to end. Row 2: purl. Cast off. Use 4mm needles.').craft,
+  'knit', 'dialectHints: a knitting pattern is reported as knitting');
+assertEqual(P.dialectHints('Rnd 1: 6 sc in a magic ring. Rnd 2: 2 dc in each st with a 4mm hook.').craft,
+  'crochet', 'dialectHints: ...and a crochet one as crochet');
+assertEqual(P.dialectHints('Hello there, nothing crafty here at all.').craft,
+  null, 'dialectHints: and neither is claimed for ordinary prose');
 assertEqual(P.dialectHints('Tip: be careful not to miss any stitches').uk, false,
   'dialectHints: "miss" as an ordinary English verb is not a UK term');
 assertTrue(P.dialectHints('htr and sc in the same pattern').uk &&
@@ -1439,6 +1456,446 @@ assertEqual(P.summary(P.parse(midAdvert)).maxRow, 3,
   'an advert line with rounds after it never truncates the pattern');
 
 // -----------------------------------------------------------------------
+
+// =======================================================================
+
+// =======================================================================
+// 2026-09-19: one test per rule the new corpus needed
+// =======================================================================
+
+// --- ordinal row markers ("1st row:", "2nd Rnd:", "1st round-") --------
+// Yarnspirations, Stylecraft, King Cole and every Victorian magazine the
+// Antique Pattern Library scanned number their rows this way.
+(function () {
+  var ord = P.parse(
+    '1st row: (RS). 1 dc in 4th ch from hook. 1 dc in each ch to end. Turn. 98 sts.\n' +
+    '2nd row: Ch 3. 1 dc in each dc. Turn. 98 sts.\n' +
+    '3rd Rnd: 1 dc in each st around. 98 sts.\n' +
+    '21st row: Ch 3. 1 dc in each dc. Turn. 98 sts.');
+  assertEqual(ord.map(function (l) { return l.row; }), [1, 2, 3, 21],
+    'ordinal markers: 1st/2nd/3rd/21st row are rows 1, 2, 3 and 21');
+  assertEqual(ord[0].count, 98, 'ordinal markers: ...and the row still finds its count');
+
+  var dash = P.parse('1st round-Make 12 ch., 1 tr. in the circle.\n' +
+                     '2nd round-Slip-stitch up five chain.');
+  assertEqual(dash.map(function (l) { return l.row; }), [1, 2],
+    'ordinal markers: an em-dash after the keyword ("1st round-Make 12 ch.") still counts');
+
+  assertEqual(P.parse('Work 21st row of the chart before you start.')[0].row, null,
+    'ordinal markers: an ordinal in the middle of a sentence is not a marker');
+})();
+
+// --- dash-separated multi-size lists -----------------------------------
+(function () {
+  var t = '1st row: (RS). Ch 1. Work 158 (176-194-212-242-260) sc evenly across. Turn.';
+  assertEqual(P.parse(t, { size: 0 })[0].stitches, 158,
+    'dash sizes: "158 (176-194-212-242-260) sc" resolves size 0');
+  assertEqual(P.parse(t, { size: 3 })[0].stitches, 212, 'dash sizes: ...and size 3');
+  assertEqual(P.parse(t, { size: 9 })[0].stitches, 260,
+    'dash sizes: ...and an out-of-range size clamps to the last');
+  assertEqual(P.parse(t)[0].sizes, [158, 176, 194, 212, 242, 260],
+    'dash sizes: every size is kept on the line');
+
+  assertEqual(P.parse('Next row: Ch 4. X-st in each X-st. Turn. 52 (58-64-70-80-86) X-sts.')[0].count,
+    52, 'dash sizes: a unit that is not "sts" ("X-sts") still reads as a count');
+  assertEqual(P.parse('Next row: Ch 4. Turn. 88 (88-92-92-96-96) hdc at end of 6th row.')[0].count,
+    88, 'dash sizes: a size list with prose after it is still the count');
+  assertEqual(
+    P.parse('Rep last row until work measures 10 (10-10-11-12-13)" [25.5 (25.5-25.5-28-30.5-33) cm].')[0].count,
+    null, 'dash sizes: a MEASUREMENT in the same shape is not a stitch count');
+  assertEqual(P.parse('Beg at Right Sleeve edge, ch 42 (42-46-46-50-50).')[0].count, null,
+    'dash sizes: nor is a starting chain');
+})();
+
+// --- a part name, a shaping label and the first row on one line --------
+(function () {
+  var secs = P.splitSections(
+    'Right Front: Shape V-neck and armhole: 1st row: (RS). Ch 4. 1 tr in ch-1 sp. Turn. 8 sts.\n' +
+    '2nd row: Ch 4. 1 tr in ch-1 sp. Turn. 7 sts.');
+  assertEqual(secs.map(function (s) { return s.name; }), ['Right Front'],
+    'one-line headers: "Right Front: Shape V-neck and armhole: 1st row:" names the part');
+  assertEqual(P.summary(P.parse(secs[0].text)).rows, 2,
+    'one-line headers: ...and the row behind the labels is still row 1');
+
+  assertEqual(P.parse('Note: work the next two rows loosely.')[0].row, null,
+    'one-line headers: a "Note:" prefix with no row marker after it is left alone');
+})();
+
+// --- "NAME-Rnd n:" (Red Heart / Coats) ---------------------------------
+(function () {
+  var secs = P.splitSections(
+    'FIRST SQUARE: With CA, ch 4; join with a sl st to form a ring.\n' +
+    'Rnd 1: Ch 3, 15 dc in ring; join - 16 sts. Fasten off.\n' +
+    'SECOND SQUARE-Rnds 1-5: Work same as First Square.\n' +
+    'Rnd 6-Joining Rnd: Attach CB in next ch-3 sp; ch 3, 2 dc in same sp.');
+  assertEqual(secs.map(function (s) { return s.name; }), ['First Square', 'Second Square'],
+    'name-dash-rnd: "SECOND SQUARE-Rnds 1-5:" splits into a header and a range');
+  var second = P.parse(secs[1].text).filter(function (l) { return l.kind === 'row'; });
+  assertEqual([second[0].row, second[0].rowEnd], [1, 5],
+    'name-dash-rnd: ...and the range really is rounds 1 to 5');
+  var first = P.parse(secs[0].text);
+  assertEqual(first[0].kind, 'setup',
+    'name-dash-rnd: the opening chain before "Rnd 1" is the setup, not round 1');
+  assertEqual(P.summary(first).maxRow, 1, 'name-dash-rnd: ...so the part is not cut in two');
+})();
+
+// --- the dashed total with a note after it -----------------------------
+(function () {
+  var l = P.parse('Rnd 2: sc in each dc; join in back lp of first sc - 24 sc. Fasten off.')[0];
+  assertEqual(l.count, 24, 'dashed totals: "- 24 sc. Fasten off." is a count of 24');
+  assertTrue(l.notes.join(' ').indexOf('Fasten off') >= 0,
+    'dashed totals: ...and the instruction after it becomes a note');
+  assertEqual(P.parse('Rnd 1: Ch 3, 15 dc in ring; join with a sl st to top of ch-3')[0].stitches,
+    null, 'dashed totals: "top of ch-3" is a stitch name, not a total of 3');
+})();
+
+// --- counts whose unit is the stitch’s own name ----------------------
+(function () {
+  assertEqual(P.parse('Row 5: 2ch, 1htr in each st to last st, 2htr in last st. 6htr.')[0].count, 6,
+    'clause totals: "6htr." at the end of its own clause is a count');
+  assertEqual(P.parse('Row 2: Ch 3. *Dcfp around each of next 4 sts. Rep from * to last 2 hdc.')[0].count,
+    null, 'clause totals: "...to last 2 hdc." mid-instruction is not');
+  assertEqual(P.parse('Row 2: Ch 3. Rep from * to last st. 1 dc')[0].count, null,
+    'clause totals: nor is a line that wraps mid-clause');
+})();
+
+// --- Hobbii angle-bracket counts ---------------------------------------
+(function () {
+  assertEqual(P.parse('Row 2: Ch 1, hdc in first st, 3 hdc in next st. Turn. <5 sts>')[0].count, 5,
+    'angle counts: "<5 sts>" is a stitch count');
+  assertEqual(P.parse('Row 1: Hdc in second ch from hook, hdc in next 2 chs. Turn. <3\nsts>')[0].count,
+    3, 'angle counts: ...even when the bracket wraps onto the next line');
+})();
+
+// --- repeats: "last N rows", a single row, and "until ... rows" --------
+(function () {
+  var s1 = P.summary(P.parse(
+    '1st row: Ch 1. 1 sc in each ch. Turn. 10 sc.\n' +
+    '2nd row: Ch 1. 1 scbl in each sc. Turn.\n' +
+    'Rep last 2 rows 11 times more. 64 hdc.'));
+  assertEqual(s1.suggestions.repeat, { startRow: 1, endRow: 2, times: 12, untilRows: null },
+    'repeats: "Rep last 2 rows 11 times more" resolves to rows 1-2, twelve times');
+
+  var s2 = P.summary(P.parse(
+    '1st Row: Dc into 2nd ch from hook and along ch to end. (10 st)\n' +
+    '2nd Row: Turn, ch 1. Dc BLO along row to end. (10 st)\n' +
+    'Repeat Row 2 until work measures 10 inches long, approx. 44 rows.'));
+  assertEqual(s2.suggestions.targetRows, 44,
+    'repeats: "until work measures 10 inches long, approx. 44 rows" targets 44 ROWS, not 10');
+
+  var s3 = P.summary(P.parse(
+    'Row 1: Ch 3. Turn. 8 sts.\nRow 2: Ch 3. Turn. 8 sts.\n' +
+    'Rep 2nd to 5th rows for Basketweave Pat until piece measures approx 56" [142 cm].'));
+  assertEqual(s3.suggestions.repeat.startRow, 2,
+    'repeats: "Rep 2nd to 5th rows" is the ordinal spelling of a row range');
+  assertEqual(s3.suggestions.targetRows, null,
+    'repeats: ...and "until piece measures 56 inches" sets no row target');
+
+  var s4 = P.summary(P.parse(
+    'Row 1: Ch 3. Turn. 8 sts.\nRepeat 2nd Row 2 more times.'));
+  assertEqual(s4.suggestions.repeat.times, 3,
+    'repeats: "Repeat 2nd Row 2 more times" is three times in all');
+})();
+
+// --- "Next N rows" -----------------------------------------------------
+(function () {
+  var ls = P.parse('Row 1: Ch 1, sc in each ch. Turn. 76 sc.\n' +
+                   'Next 3 rows: Ch 1, turn, sc in each st across. 76 sc.');
+  assertEqual([ls[1].row, ls[1].rowEnd], [2, 4],
+    'next N rows: "Next 3 rows:" after row 1 is rows 2 to 4');
+  var one = P.parse('Row 1: Ch 1, sc in each ch. Turn. 76 sc.\nNext row: Ch 1, turn. 76 sc.');
+  assertEqual([one[1].row, one[1].rowEnd], [2, 2], 'next N rows: plain "Next row:" is one row');
+})();
+
+// --- numbered PROSE is not a round -------------------------------------
+(function () {
+  var notes = P.parse(
+    'NOTES\n' +
+    '1. Pullover is made in 4 pieces: Back, Front, and 2 Sleeves.\n' +
+    '2. Front is worked in log cabin construction; Back and Sleeves are worked in rows.\n' +
+    '3. Back is worked in a solid color and Sleeves are worked in stripes.');
+  assertEqual(P.summary(notes).rows, 0,
+    'prose steps: a numbered NOTES list makes no rows');
+  assertEqual(P.summary(P.parse('1. Work along the edge of a finished item.\n' +
+    '2. Single crochet in the first stitch.')).rows, 0,
+    'prose steps: nor does a tutorial written out in words');
+  assertEqual(P.summary(P.parse('1. 6 sc in MR (6)\n2. inc x6 (12)')).rows, 2,
+    'prose steps: ...but a numbered round written in abbreviations still is one');
+  assertEqual(P.parse('7. Rnd: If you crocheted a white belly you need to change colour')[0].row, 7,
+    'prose steps: and "7. Rnd:" is a round however prose-y the rest of it reads');
+})();
+
+// --- make-counts spelled out, and with a note in the bracket -----------
+(function () {
+  assertEqual(P.splitSections('Mitts (make two alike)\nRow 1: 3tr in 7th ch from hook. 10 sts.')[0].makeCount,
+    2, 'make counts: "(make two alike)" makes two');
+  assertEqual(P.splitSections('Cuffs (make 2 - worked lengthwise)\nRow 1: 1 sc in each ch. 13 sc.')[0].makeCount,
+    2, 'make counts: "(make 2 - worked lengthwise)" makes two');
+  assertEqual(P.splitSections('Motif (make 8)\nRnd 1: 3ch, 2tr in ring. 12 sts.')[0].makeCount,
+    8, 'make counts: "(make 8)" still makes eight');
+})();
+
+// --- reference headings are never parts --------------------------------
+(function () {
+  var text = 'SPECIAL ABBREVIATIONS\nCl: make a cluster as foll.\n' +
+    'WARNING - COPYRIGHT:\nThis publication is protected.\n' +
+    'STITCH EXPLANATION\nsc2tog - insert hook in next st.\n' +
+    'YARN REQUIREMENTS\nTwo balls.\n' +
+    'Body\nRow 1: 1 sc in each ch. 20 sts.';
+  assertEqual(P.splitSections(text).map(function (s) { return s.name; }), ['Body'],
+    'reference headings: Special Abbreviations / Warning - Copyright / Stitch Explanation / Yarn Requirements name no part');
+  assertEqual(P.splitSections('By Eleonora Tully of Coastal Crochet\nRow 1: 1 dc in each ch. 145 sts.')
+    .map(function (s) { return s.name; }), [''],
+    'reference headings: nor does a designer byline');
+})();
+
+// --- a NEW DESIGN inside one file --------------------------------------
+(function () {
+  var book =
+    'Beginner Granny Afghan\n' +
+    'By: Kathleen Sams for Red Heart Yarn\n' +
+    'Materials: RED HEART Super Saver, 3 skeins.\n' +
+    'Rnd 1: With B ch 4; 2 dc in 4th ch from hook. 12 sts.\n' +
+    'Rnd 2: Join C in any ch-3 space. 24 sts.\n' +
+    'Blush Rose Afghan\n' +
+    'By: Carol Alexander for Red Heart Yarn\n' +
+    'Materials: RED HEART Super Saver, 774 Light Raspberry.\n' +
+    'Rnd 3: Join D in any ch-1 space. 36 sts.';
+  var secs = P.splitSections(book);
+  assertEqual(secs.map(function (s) { return s.name; }),
+    ['Beginner Granny Afghan', 'Blush Rose Afghan'],
+    'multi-design: a heading followed by its own byline and materials starts a new design');
+  assertEqual(P.summary(P.parse(secs[0].text)).maxRow, 2,
+    'multi-design: ...and the first design keeps only its own rounds');
+  assertEqual(P.summary(P.parse(secs[1].text)).maxRow, 3,
+    'multi-design: ...while the second starts its own count');
+
+  var part =
+    'Body\nRnd 1: 6 sc in MR (6)\nRnd 2: inc x6 (12)\n' +
+    'Ears\nRnd 3: (sc, inc) x6 (18)';
+  assertEqual(P.splitSections(part).length, 1,
+    'multi-design: an ordinary part heading with no front matter after it does NOT start a design');
+})();
+
+// --- a name followed by nothing but a foundation chain -----------------
+(function () {
+  var ls = P.parse('WRAP: Beg at long bottom edge, ch 406.\n' +
+                   'Row 1 (RS): Sc in 2nd ch from hook and in each ch across; turn - 405 sc.');
+  assertEqual(ls[0].kind, 'setup',
+    'foundation rows: "WRAP: ... ch 406." is the setup for row 1, not row 1');
+  assertEqual(P.splitSections('WRAP: Beg at long bottom edge, ch 406.\n' +
+    'Row 1 (RS): Sc in 2nd ch from hook; turn - 405 sc.')[0].name, 'Wrap',
+    'foundation rows: ...and it still names the part');
+  var stem = P.parse('Stem: With MC, ch 40. Sl st in 2nd ch from hook and in each ch. 39 sts.');
+  assertEqual(stem[0].kind, 'row',
+    'foundation rows: a name line that carries real stitches after the chain is still row 1');
+})();
+
+// --- a row marker a neighbouring column printed in front of ------------
+(function () {
+  var ls = P.parse('WS wrong side Row 7 (RS): 4ch, miss next st, Cl in next st. 3tr.');
+  var row = ls.filter(function (l) { return l.row === 7; });
+  assertEqual(row.length, 1, 'column bleed: a row marker behind column debris is still found');
+  assertEqual(P.parse('Rep rows 8-11, 29 times more.')[0].kind, 'repeat',
+    'column bleed: ...and a repeat line is never split that way');
+  assertEqual(P.parse('Repeat Row 2 until blanket measures approximately 59".')[0].kind, 'repeat',
+    'column bleed: nor is a cross-reference to a row');
+})();
+
+// --- loop phrases between the stitch and "each" ------------------------
+(function () {
+  assertEqual(P.evaluate('hdc in back loop only of each st across', 94), 94,
+    'loop phrases: "hdc in back loop only of each st across" is the row before it');
+  assertEqual(P.evaluate('1 scbl in each sc to end of row', 10), 10,
+    'loop phrases: ...and so is "1 scbl in each sc to end of row"');
+  assertEqual(P.evaluate('sc in flo of each st around', 24), 24,
+    'loop phrases: ...and "flo of each st around"');
+})();
+
+// --- an advert line in the middle of the finishing pages ---------------
+(function () {
+  var t = 'Body\nRnd 1: 6 sc in MR (6)\nRnd 2: inc x6 (12)\n' +
+    'Eyes deepen:\nI have uploaded a video at https://youtu.be/abcdef\n' +
+    'Finish:\nUsing black yarn, embroider eyebrows on your fish.';
+  var secs = P.splitSections(t);
+  assertTrue(String(secs[0].placement || '').indexOf('embroider eyebrows') >= 0,
+    'back matter: a tutorial link does not cut off the finishing block that follows it');
+})();
+
+// =======================================================================
+// PdfText column splitting, pinned to frozen item arrays
+//
+// The splitter takes a page's pdf.js text items and decides where the
+// columns are. It has no state and no randomness, but "deterministic" is
+// worth PROVING rather than assuming: three agents reading the same
+// fixtures during one session saw the splitter give different answers, and
+// the answer was always a code change between the runs rather than the
+// splitter itself. These tests freeze the geometry so any future change of
+// answer is a failing assertion and not a rumour.
+//
+// The items are synthetic, so nothing here is copyrighted and the tests run
+// with no fixtures present.
+// =======================================================================
+(function () {
+  if (!window.PdfText || !window.PdfText._pageLines) {
+    log(false, 'PdfText geometry helpers are exposed for the column tests');
+    return;
+  }
+
+  /** One pdf.js text item: 10 pt text on a baseline, `w` wide. */
+  function item(str, x, y, w, h) {
+    return { str: str, width: w, height: h || 10, transform: [h || 10, 0, 0, h || 10, x, y] };
+  }
+  /** The same, on a page the generator set sideways (/Rotate 90). */
+  function sideItem(str, x, y, w, h) {
+    var s = h || 10;
+    return { str: str, width: w, height: s, transform: [0, s, -s, 0, x, y] };
+  }
+
+  function linesOf(items, w, h, rotate) {
+    return window.PdfText._pageLines(items, w, h, rotate).lines.map(function (l) { return l.text; });
+  }
+  function splitOf(items, w, h, rotate) {
+    return window.PdfText._pageLines(items, w, h, rotate).split;
+  }
+
+  // --- a. two columns of prose: left block then right block -------------
+  // 14 lines a side, a 40 pt gutter at the middle of a 400 pt page.
+  var twoCol = [];
+  for (var i = 0; i < 14; i++) {
+    twoCol.push(item('left' + i, 40, 700 - i * 14, 140));
+    twoCol.push(item('right' + i, 220, 700 - i * 14, 140));
+  }
+  var twoColLines = linesOf(twoCol, 400, 792);
+  assertEqual(splitOf(twoCol, 400, 792), true, 'columns: a two-column page splits');
+  assertEqual(twoColLines.slice(0, 3), ['left0', 'left1', 'left2'],
+    'columns: the left column is emitted first, top to bottom');
+  assertEqual(twoColLines.slice(14, 17), ['right0', 'right1', 'right2'],
+    'columns: ...then the whole right column');
+  assertEqual(twoColLines.length, 28, 'columns: every line survives the split');
+  // ...and the answer does not depend on the order the items arrive in.
+  var shuffled = twoCol.slice().reverse();
+  assertEqual(linesOf(shuffled, 400, 792), twoColLines,
+    'columns: the same page in reverse item order gives the same answer');
+  var interleaved = [];
+  for (i = 0; i < twoCol.length; i += 2) interleaved.push(twoCol[i]);
+  for (i = 1; i < twoCol.length; i += 2) interleaved.push(twoCol[i]);
+  assertEqual(linesOf(interleaved, 400, 792), twoColLines,
+    'columns: and so does column-major item order');
+  assertEqual(linesOf(twoCol, 400, 792), twoColLines,
+    'columns: two runs over the same items agree');
+
+  // --- b. a TABLE is not a set of columns -------------------------------
+  // Five cells a row, 30 pt wide, 15 pt apart: four clear bands inside the
+  // page, which is a comb, not a gutter (sew-sundress lost two sizes here).
+  var table = [];
+  var HEAD = ['Size', '36', '38', '40', '42'];
+  var ROWS = [['Bust', '84', '88', '92', '96'], ['Waist', '66', '70', '74', '78'],
+              ['Hip', '90', '94', '98', '102'], ['Arm', '30', '31', '32', '33'],
+              ['Back', '40', '41', '42', '43'], ['Rise', '24', '25', '26', '27'],
+              ['Leg', '70', '71', '72', '73'], ['Hem', '50', '51', '52', '53'],
+              ['Neck', '36', '37', '38', '39'], ['Cuff', '20', '21', '22', '23'],
+              ['Yoke', '15', '16', '17', '18'], ['Band', '10', '11', '12', '13']];
+  HEAD.forEach(function (c, col) { table.push(item(c, 40 + col * 45, 700, 30)); });
+  ROWS.forEach(function (cells, r) {
+    cells.forEach(function (c, col) { table.push(item(c, 40 + col * 45, 686 - r * 14, 30)); });
+  });
+  assertEqual(splitOf(table, 400, 792), false,
+    'columns: a size chart is a table, not columns, so it is never split');
+  assertEqual(linesOf(table, 400, 792)[0], 'Size 36 38 40 42',
+    'columns: ...and its header row keeps every cell');
+  assertEqual(linesOf(table, 400, 792)[1], 'Bust 84 88 92 96',
+    'columns: ...and so does every body row');
+
+  // --- c. a narrow gutter that some lines bridge is NOT a column break ---
+  // 12 pt clear, bridged by three of the fourteen lines: a table cell wall.
+  var narrow = [];
+  for (i = 0; i < 14; i++) {
+    if (i % 5 === 0) {
+      narrow.push(item('spanning line number ' + i, 40, 700 - i * 14, 320));
+    } else {
+      narrow.push(item('a' + i, 40, 700 - i * 14, 150));
+      narrow.push(item('b' + i, 202, 700 - i * 14, 158));
+    }
+  }
+  assertEqual(splitOf(narrow, 400, 792), false,
+    'columns: a 12 pt band that lines bridge is a cell wall, not a gutter');
+
+  // --- d. ...but a 12 pt gutter nothing bridges IS one -------------------
+  // (the Yarnspirations landscape pages set exactly this)
+  var tight = [];
+  for (i = 0; i < 14; i++) {
+    tight.push(item('l' + i, 40, 700 - i * 14, 150));
+    tight.push(item('r' + i, 202, 700 - i * 14, 158));
+  }
+  assertEqual(splitOf(tight, 400, 792), true,
+    'columns: a 12 pt gutter no line bridges is a real gutter');
+  assertEqual(linesOf(tight, 400, 792).slice(0, 2), ['l0', 'l1'],
+    'columns: ...and the left column still comes first');
+
+  // --- e. a page set sideways (/Rotate 90) ------------------------------
+  // Every matrix is [0,h,-h,0,x,y]: the line runs up the page in Y and the
+  // lines stack in X. Keyed on Y (as an upright page is) each printed
+  // COLUMN became a row and the pieces ran together with no spaces at all
+  // ("DMCEcru38553854" out of xs-tinymodernist-homestitchhome).
+  var side = [];
+  var SIDE_ROWS = [['DMC', 'Anchor'], ['Ecru', '387'], ['3855', '311'], ['3854', '313']];
+  SIDE_ROWS.forEach(function (cells, r) {
+    cells.forEach(function (c, col) {
+      side.push(sideItem(c, 100 + r * 14, 300 + col * 60, 40));
+    });
+  });
+  var sideLines = linesOf(side, 792, 612, 90);
+  assertEqual(sideLines, ['DMC Anchor', 'Ecru 387', '3855 311', '3854 313'],
+    'columns: a /Rotate 90 page is grouped on X and read along Y, spaces and all');
+  assertEqual(linesOf(side.slice().reverse(), 792, 612, 90), sideLines,
+    'columns: ...and that is independent of item order too');
+  // ...and the same items on a page that is NOT rotated stay upright: a
+  // Peppermint size chart is a sideways TABLE on an upright sheet, and
+  // reading the whole page along its long edge chops the chart up.
+  assertEqual(linesOf(side, 612, 792, 0), ['Anchor387311313', 'DMCEcru38553854'],
+    'columns: ...but a sideways block on an UPRIGHT page is left upright');
+
+  // --- f. the glue threshold follows the line's own tracking ------------
+  // A tracked-out heading ("C U T T I N G") has a uniform sub-space gap;
+  // a line of whole words separated by ordinary spaces must not glue.
+  // 0.2 em of tracking between the glyphs: wider than the 0.15 em that is
+  // always glue, narrower than the 0.25 em that means "this line uses real
+  // spaces", so only the line's own median can decide it.
+  var tracked = { y: 700, order: -700, items: [] };
+  'CUTTING'.split('').forEach(function (ch, n) {
+    tracked.items.push({ x: 40 + n * 13, end: 40 + n * 13 + 11, h: 10, str: ch });
+  });
+  assertEqual(window.PdfText._rowText(tracked, false), 'CUTTING',
+    'columns: a tracked-out heading is glued back into one word');
+
+  var words = { y: 700, order: -700, items: [] };
+  ['Row', '1:', 'sc', 'in', 'each', 'st'].forEach(function (w2, n) {
+    words.items.push({ x: 40 + n * 30, end: 40 + n * 30 + 22, h: 10, str: w2 });
+  });
+  assertEqual(window.PdfText._rowText(words, false), 'Row 1: sc in each st',
+    'columns: a line of whole words keeps every space');
+
+  // --- g. page stamps ---------------------------------------------------
+  assertEqual(window.PdfText._isPageStamp('CUFF TO CUFF CROCHET CARDIGAN | CROCHET 2 of 4'), true,
+    'furniture: a running head with "2 of 4" glued on is a page stamp');
+  assertEqual(window.PdfText._isPageStamp('Rnd 4: 3 dc in next 2 sc'), false,
+    'furniture: ...but a round is not');
+
+  // --- h. garbled text --------------------------------------------------
+  assertEqual(window.PdfText._garbleScore('Rnd 1: 6 sc in a magic ring (6)').garbled, false,
+    'garbled: ordinary crochet text is not garbled');
+  assertEqual(window.PdfText._garbleScore(' \b ').garbled, true,
+    'garbled: a page of glyph ids with no ToUnicode map is');
+
+  // --- i. OCR hyphenation ----------------------------------------------
+  assertEqual(window.PdfText._joinHyphenated(['at the commence-', 'ment of the round']),
+    ['at the commencement of the round'],
+    'ocr: a hyphen that only breaks a word is dropped when the line is joined');
+  assertEqual(window.PdfText._joinHyphenated(['3 dc in next ch-', 'sp, turn']),
+    ['3 dc in next ch-sp, turn'],
+    'ocr: ...but a real hyphenated crochet token keeps its hyphen');
+})();
 var summaryEl = document.getElementById('summary');
 var finalLine = passed + ' passed, ' + failed + ' failed';
 summaryEl.textContent = finalLine;
