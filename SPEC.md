@@ -457,24 +457,44 @@ Patterns.colorHex(name) → '#rrggbb' | null
 ```
 Rules: colour state flows row to row: `In Twilight :`, `In Color A`, `With MC`, `Using yellow` set the base colour (from notes attached to the row or header lines before it); `Colour change to black`, `change to Color B`, `switch to yellow` attached to row N sets the base from row N; `Fasten off Almond` ends a secondary colour; prefixes `A (Sc 5)`, `S (Dec x 12)`, `MC: sc 6`, `(in B) sc 3` colour just that group; `Rnd 5 (yellow): ...` colours the row. When a row cannot be evaluated but has a count, emit `count` × `{t:'x', c:null}`. Never throw; on any failure return `count` generic stitches. `colorHex` knows ~120 yarn colour words (black, white, cream, ivory, almond, sand, beige, tan, brown, chocolate, twilight → dark navy, navy, teal, sage, mint, forest, olive, lime, yellow, mustard, gold, orange, coral, peach, pink, blush, rose, red, burgundy, maroon, purple, lavender, lilac, plum, grey/gray, silver, charcoal, sky, baby blue, denim, turquoise, aqua, ...) and returns null for `Color A`, `MC`, `CC` and unknown words (the app maps those).
 
-**2. Renderer (`js/diagram.js`, new, `window.Diagram`) — 3D, WebGL**
+**2. Renderer (`js/diagram.js`, `window.Diagram` v1.3) — 3D, WebGL**
+
+**Model v2** (what `Store.diagramModel` returns; v1 — no `shape`, no `inc`/`dec`, no
+per-stitch `h`/`w`, no `window`/`deviation` — still renders, it just gets rings instead of
+polygons and a guessed cap):
 ```js
 Model = {
   mode: 'rounds' | 'rows',
-  rounds: [ {                      // in work order; index 0 = first round/row
+  rounds: [ {                      // in work order; index 0 = first round/row IN THE WINDOW
     count: number,                 // stitches this round will have (known or planned); 0 allowed
     done: number,                  // stitches completed so far (= count when finished)
-    stitches: [ { t, c: '#hex'|null } ],   // may be shorter than count (then repeat last / generic)
+    stitches: [ { t, c: '#hex'|null, h: number, w: number } ],   // per-stitch height/width in sc units
     color: '#hex',                 // base colour for the round
-    height: number,                // 1 = sc height
+    height: number,                // 1 = sc height (the round's dominant stitch)
     ghost: boolean,                // planned from pattern, not started
+    inc: number[], dec: number[],  // stitch indexes where this round increases / decreases
+    row: number,                   // 1-based WORK row this round draws
   } ],
   current: number,                 // index of the round being worked
   defaultColor: '#hex',
+  shape: { start: 'magic-ring'|'chain-ring'|'chain-oval'|'chain-row'|'unknown',
+           chainLen: number|null, ringCount: number|null, stuffed: boolean|null },
+  window: { first: number, total: number },     // rounds[0] is work row `first` of `total`
+  deviation: { expected: number|null, actual: number },  // the pattern's count for the
+                                 // working round vs the stitches tapped into it; `expected`
+                                 // is null when the pattern never stated one
 }
-Diagram.mount(canvas, { palette: { ghost, ink, glow, bg }, reducedMotion, interactive: false }) → handle
+Diagram.mount(canvas, {
+  palette: { ghost, ink, glow, alert, bg },
+  reducedMotion, interactive: false,
+  safeInsets: { top, right, bottom, left },   // CSS px the piece must stay out of
+  onStatus: function ({ webgl, status, message }) {}  // 'ok'|'unavailable'|'lost'|'blank'|'restored'
+}) → handle
 handle.setModel(model, { animate: 'stitch' | 'round' | 'none' })
-handle.setPalette(palette); handle.resize(); handle.destroy()
+handle.setPalette(palette); handle.resize()
+handle.setSafeInsets({ top, right, bottom, left })
+handle.isLive()                     // is there a working GL context on this canvas
+handle.destroy({ release: true })   // `release` hands the GL context back (see below)
 handle.setInteractive(true|false)   // drag to rotate, wheel/pinch to zoom, double-tap resets (the expanded viewer)
 handle.resetView()
 handle.dragStart(); handle.dragMove(dxCssPx, dyCssPx); handle.dragEnd()
@@ -482,16 +502,71 @@ handle.dragStart(); handle.dragMove(dxCssPx, dyCssPx); handle.dragEnd()
     // (the one under the stitch button is `pointer-events: none`). Works with
     // `interactive` off, shares every line of the pointer path, so the button
     // and the viewer can never disagree about direction or inertia.
-handle.getStats() → { fps, frameMs, buildMs, triangles, drawCalls, chunks, verts,
-                      yaw, pitch, userPitch, zoom, fitScale, dragging, running }
+handle.getStats() → { webgl, status, lost, fps, frameMs, submitMs, buildMs, triangles,
+                      drawCalls, chunks, verts, dpr, canvasPx, stitchPx, tex, contexts,
+                      ghostAlpha: { ghost, pending, marker }, insets,
+                      yaw, pitch, userPitch, zoom, fitScale, fitClamp, dragging, running, geo }
 ```
-Implementation: raw WebGL 1 (no dependency; ~1 vertex + 1 fragment shader, Lambert + soft rim light, vertex colours). If raw WebGL proves too slow to write well, vendoring three.js r128 UMD (`three.min.js`, cdnjs) into `js/vendor/` is acceptable; say which you chose. Canvas 2D fallback (flat shaded silhouette) when WebGL is unavailable.
+- **`frameMs` is the real frame time** — the wall-clock gap between two rendered frames while
+  something is animating, with gaps over 100 ms (a throttled or hidden tab) dropped.
+  **`submitMs` is the old `frameMs`**: the JS submit loop, which never waits on the GPU and
+  read 0.12 ms at 57k triangles. Nothing may be called a frame budget from `submitMs` again.
+- **Ghost alpha belongs to the renderer.** The host passes an **opaque** ghost colour; any
+  alpha on it is dropped. `GHOST_ALPHA` (0.20, future rounds) and `PENDING_ALPHA` (0.72, the
+  working round's unworked grid) are the only multiplication. Passing `rgba(--text, 0.35)` on
+  top of them composed to **0.070** and made future rounds invisible in the app while the test
+  page, which passes an opaque white, looked right (02 #1). `getStats().ghostAlpha` prints the
+  composed numbers so this cannot regress silently.
+- **Live GL contexts are capped.** A page gets a handful and the browser then drops the oldest
+  without a word. Every mount registers; a new mount reaps the records whose canvas has left
+  the document and releases the oldest past `MAX_LIVE` (3), telling that host through
+  `onStatus`. `destroy({ release: true })` gives the context back through
+  `WEBGL_lose_context` — pass it **only** when the `<canvas>` element itself is being thrown
+  away, because a canvas whose context was lost can never be given another one.
+- **`onStatus` makes the handle honest.** `mount` returns a handle whatever happens, so a host
+  that only checked for null showed a silent empty rectangle. A refused context
+  (`'unavailable'`, the Canvas-2D silhouette draws), a lost one (`'lost'`) and a frame that
+  submitted nothing while the model has fabric (`'blank'`) all fire once per transition.
+Implementation: raw WebGL 1 (chosen; no dependency, ~1 vertex + 1 fragment shader, vertex colours). Canvas 2D fallback (flat shaded silhouette) when WebGL is unavailable.
+
+**2b. Geometry (`js/diagram-geo.js`, `window.DiagramGeo`) — pure, no WebGL, no DOM**
+
+The layout maths lives here, not in the renderer, and `test/diagram.test.html` asserts it
+directly. The physics is `docs/brainstorm/3d/01-geometry-truth.md`: `N_flat = 2πh/w` stitches
+per round to stay flat, `dy = h·sqrt(1 − ((1−s)|dr|/h)²)` for the rise with stuffing slack
+`s`, and `r = (sum of the round's stitch widths) / 2π` for the radius — so "+6 sc lies flat",
+"no change is a cylinder" and "|dn| > N_flat ruffles" all fall out of one line. The old
+`SH = 1.5` (wrong by 57 %) and the `asin(R/Rmax)` slope heuristic are gone, and so is the
+per-round `BULGE` that made every horn a pinecone.
+```js
+DiagramGeo.classify(model) → { mode, rounds:[{ kind:'ring'|'polygon'|'oval'|'ripple'|'row',
+    corners, radius, radiusMax, perimeter, y, yTop, h, ruffle, empty, prof, … }],
+    slack, shape, closedTop, closedBottom, height, width, maxRadius, aspect,
+    equatorFrac, equatorRound, corners, ruffles, anchor }
+DiagramGeo.layout(model) → classify(model) + `bands`, one per round, ready to build:
+    rounds: { rTop, rBot, yTop, yBot, reach, prof(θ,t), sig, kind, corners, ruffle, radMax }
+    rows:   { rTop, rBot, yTop, yBot, reach, Rc, x0, width, anchor, sig }
+    `prof` is a radius MULTIPLIER (polygon / stadium / ripple cross-section), null = a circle.
+DiagramGeo.fit({ rad, ymin, ymax, halfW, halfH, cp, sp, curY, mode })
+  → { scale, base, clamp: ''|'radius'|'height', cy, radFrac, heightFrac }
+DiagramGeo.arcSlices(prof, wt, n, a0Out, awOut)   // stitch width follows ARC LENGTH
+```
+The renderer **consumes** `fit` rather than re-deriving it: `clamp: 'radius'` keeps a very long
+thin tail from being cropped to a hairline, `clamp: 'height'` lets a 405-stitch row overflow
+sideways with the worked row centred (`cy = curY`, which the ghost floor is not allowed to drag
+off). `getStats().fitClamp` reports the clamp that actually bound the final scale, with
+`+solid` appended when the ghost floor took over. `index.html` loads `js/diagram-geo.js`
+**before** `js/diagram.js`, and `sw.js` precaches it.
+
 - **Geometry, rounds mode**: ring i has radius `R_i = max(R_min, count_i * SW / 2π)` and sits at height `y_i = -Σ height_k * SH` (round 1 at the top; the piece grows downward). Between consecutive rings build a triangle strip. Each stitch of a ring occupies an angular slice; subdivide each slice into 4 segments and displace the middle vertices outward (+bump) and the slice edges inward, so the surface reads as a knobby crochet texture; `inc` slices are wider, `dec` narrower, `sl`/`ch` flat. Vertex colour = stitch colour (or the round colour). Round 0/1 stitches (magic ring) = a small cap. The ring being worked: only `done` slices are solid; the remaining slices of that ring are drawn as a translucent wireframe **grid** in `palette.ghost` at alpha 0.72 (cells waiting to be filled), and every future round as a single bare **ring** at alpha 0.20 — a full grid on every planned round reads as a cage at button size. Close the top with a cap when round 1 is a magic ring; leave the bottom open (you see inside a tube slightly, which looks right).
   The stitch bump must taper to zero at the top and bottom edge of its band. Consecutive rounds have different stitch counts and different per-stitch amplitudes, so any bump left at the shared ring makes the two bands disagree about its radius and hairline cracks of background show between every round.
 - **Rows mode**: rows stacked bottom-up as a sheet in the XZ plane tilted toward the camera, width = count × SW, row height by `height`; each stitch is a bump; odd/even rows offset half a stitch; current row partial from left (odd) or right (even); ghost rows wireframe. Gentle curvature (cylinder radius ≈ 3× width) so rotation shows depth.
 - **Camera & motion**: perspective camera, slight downward pitch (~20°), auto-rotate around the vertical axis at ~12°/s (pauses for 1.5s after each model change or drag so the new stitch is seen, then resumes **from wherever the user left the yaw**), model auto-fit so the whole solid part (ghosts capped so they can't shrink the real piece below 45% of the view) fits with 8% margin; scale and camera distance ease over 200ms. `interactive`: pointer drag rotates (inertia), wheel/pinch zooms, double-tap resets. `reducedMotion`: no auto-rotate, no scale-in, no pitch return.
 - **Rotation direction (never invert this)**: the model follows the finger like a physical ball. Drag right → the surface nearest the camera travels right (`yaw += dx·k`); drag down → the near surface travels down so more of the *top* comes into view (`userPitch += dy·k`). `k = π / canvas CSS width`, i.e. a full-width drag is half a revolution at any canvas size. Verify on screen with an identifiable feature (a colour panel, the unworked arc of the current round), never from the matrices. Flick inertia is real pointer velocity, capped at 3.5 rad/s. The user's yaw is kept; the user's pitch eases back to the default over ~1.7s once the 1.5s pause is over, so the piece never sits stuck at an awkward angle.
-- **Material**: a warm wrapped key light, a cool bounce fill, and a two-lobe sheen (broad `pow(N·H, 7)` plus a faint tight lobe) tinted halfway toward the yarn colour — wool scatters, so a white specular blob turns it to plastic. Fresnel rim at 0.30. Baked crevice AO at the slice edges (17%) and band edges (7%). Per stitch, seeded noise moves lightness ±7.5%, warm/cool ±4.5% and bump amplitude ±10%, which is the difference between "extruded plastic" and "crocheted". The **wrong side** of the fabric (`dot(N, V) < 0`, i.e. the inside of an open tube) is darkened to 42% and loses most of its rim — ramped, not stepped, or the silhouette speckles where interpolated normals cross zero.
+- **Material**: a warm wrapped key light, a cool bounce fill, and a two-lobe sheen (broad `pow(N·H, 7)` plus a faint tight lobe) tinted halfway toward the yarn colour — wool scatters, so a white specular blob turns it to plastic. A broad Fresnel in the **yarn's own** colour at 0.20 is the halo of stray fibres that says wool; the white Fresnel rim sits behind it at 0.18. Baked crevice AO at the slice edges (17%) and band edges (7%). Per stitch, seeded noise moves lightness ±7.5%, warm/cool ±4.5% and bump amplitude ±10%, which is the difference between "extruded plastic" and "crocheted". The **wrong side** of the fabric (`dot(N, V) < 0`, i.e. the inside of an open tube) is darkened to 42% and loses most of its rim — ramped, not stepped, or the silhouette speckles where interpolated normals cross zero.
+- **Tone mapping, then the real sRGB curve** (02 #3). The lighting is linear and unbounded: the default cream's key term alone reached 1.03 and clipped to a hue-less white, while a dark red crushed to near-black over half the piece. A Reinhard variant with a 0.8 white point — `c = c(1 + c/0.64)/(1 + c)` — runs **before** the encode, the key's constant term is 0.22 (was 0.17) so dark yarns lift, and the encode is the exact piecewise sRGB curve rather than `pow(c, 1/2.2)`, because the CPU-side decode is exact and a mid grey has to round-trip. One hash dither of ±0.5/255 after the encode kills the `mediump` banding on the three dark themes. Verified on cream, black, white and a saturated red across all six themes.
+- **Fabric texture lives in the fragment shader, not in the geometry** (02 #3/#22). Each vertex carries a band-local `uv` (u across one stitch, v from the top edge of the round to the bottom). The shader cuts a **crease** at both band edges — the only thing separating rounds after the per-round bulge was removed, since `AO_BAND` at 0.07 could not do it alone — and draws the stitch's **V with a bar across its top** inside each slice. Both fade out with `uTex`, computed each frame from the projected stitch size (`smoothstep(1.8, 6.5, device px per stitch)`), so the button never speckles the way sub-pixel geometric relief did. A round whose yarn differs from the round above it cuts its top crease deeper (`uSeam`), which is what makes a colour change readable at button size.
+- **The working round is marked** (05 #3): both edges of the current band are drawn as a `palette.glow` line at alpha 0.60, with the depth test on so the ring wraps the piece. Consecutive bands share a ring, so the band above's ring *is* this round's top edge — no extra geometry. **Over-count** (05 #6): when `deviation.actual > deviation.expected`, the slices past `expected` render in `palette.alert` instead of confidently closing the ring; when the count is short, the unworked grid simply stays visible. The host derives `alert` from `--danger`, falling back to `--accent-2` where `--danger` is the button colour (dragon-pixel).
 - **Grounding**: a soft elliptical contact shadow (a vertex-weighted disc, black premultiplied, drawn after the solids with `depthMask(false)`) sits on the plane where the finished piece will rest — the bottom of the whole model, which the ghost cage reaches down to — with the radius of the widest fabric that actually exists, clamped to the fitted radius so it can never be clipped. It fades in as the work grows down to that plane (`smoothstep(0.45, 0.92, grown)`) and fades out as the camera comes level with the piece, so it never appears when looking from below. Plain black, so it never clashes with a theme's `--primary`.
 - **Animation**: `animate:'stitch'` → the newest bump scales in from 0 over 140ms with slight overshoot; `'round'` → the finished ring flashes once with `palette.glow`. Redraw only via requestAnimationFrame while something changes or auto-rotating; must stay ≤ 4ms/frame for 60 rounds × 60 stitches on a mid phone (cap 160 slices per ring; subsample beyond). DPR-aware, transparent clear colour so the button colour shows through.
 - Deliver `test/diagram.test.html`: canvas + buttons for sample models (sphere 6→48→6, cone/horn, striped tube, bear head with a belly-panel colour run, a 30-row blanket), a "tap" button that advances `done` with animation, a "complete round" button, an interactive toggle, and a theme switcher for the background colour. Plus a **Gesture** panel: "Drag right/down" buttons that drive `dragStart/dragMove/dragEnd` in controlled steps and print yaw/pitch, a "Finish piece" button (the contact shadow only appears once the work reaches the ground plane) and a quadrant-coloured model whose four colour panels make the rotation direction unmistakable.
@@ -499,9 +574,13 @@ Implementation: raw WebGL 1 (no dependency; ~1 vertex + 1 fragment shader, Lambe
 **3. App integration (`js/store.js`, `js/app.js`, `index.html`, `css/app.css`, `js/tour.js`)**
 - `Part.rowStitches: number[]` (index = row number, 1-based; value = stitch count when that row was completed). `tapRow` records `part.stitch` (or the target when auto-advanced) before resetting; `untapRow` pops; `resetPart` clears; normalised on load.
 - `Project.yarnColors: { [name]: '#hex' }` with reserved key `'*'` = main yarn colour (default warm cream `#f1e3c8`).
-- `Store.diagramModel(part, project) → Model`: rows 1..max(part.row + 1, pattern maxRow, rowStitches.length); per row: if a pattern line exists → `Patterns.expand` (state carried row to row), colours resolved as `yarnColors[name] || Patterns.colorHex(name) || yarnColors['*']`; else if `rowStitches[row]` → that many generic stitches in the main colour; else if it is the current row → `count = max(part.stitch, target || 0)`; `done` from rowStitches / part.stitch; `ghost = row > current`. Cache per part (key: patternText, sizeIndex, yarnColors, row, rowStitches.length) and on the tap path only mutate the current round's `done`/`count`.
+- `Store.diagramModel(part, project) → Model`: rows 1..max(part.row + 1, pattern maxRow, rowStitches.length); per row: if a pattern line exists → `Patterns.expand` (state carried row to row), colours resolved as `yarnColors[name] || Patterns.colorHex(name) || yarnColors['*']`; else if `rowStitches[row]` → that many generic stitches in the main colour; else if it is the current row → `count = max(part.stitch, target || 0)`; `done` from rowStitches / part.stitch; `ghost = row > current`. Cache per part (key: patternText, sizeIndex, yarnColors, row, rowStitches.length, `partWorkMode`) and on the tap path only mutate the current round's `done`/`count`. It returns **Model v2**: per-stitch `h`/`w`, `inc`/`dec` positions, the round's own `row`, `shape` from `Patterns.startHint`/`stuffingHint`, a `window` of rounds anchored to the round being **worked** (not to the end of the pattern), and `deviation`.
+- **Rounds vs rows is a property of the PIECE** (05 #2). `Part.workMode: 'auto' | 'rounds' | 'rows'` (default `'auto'`, set through `updatePart`). `Store.partWorkMode(part, project)` resolves it in order: the owner's explicit `workMode`, then what `Patterns.workMode(patternText)` says, then `Project.countMode` as the tie-break. Everything that labels one part's counter goes through it — the ROW/ROUND caption, the pattern-line tag, the viewer readout — and so does `Store.diagramModel`. The part editor carries a **"Worked in: Auto / Rounds / Rows"** segmented control whose Auto row says what it resolves to for the text in the box right now ("Auto — this pattern reads as rounds."), and the 3D viewer carries the same three chips. One project-level word used to decide the shape of seven different pieces, and an amigurumi imported as `'rows'` modelled a tail that begins `R1: MR4` as a flat sheet.
+- **`Store.importPatternSections` reports `modeFlipped`** when every section reads as rounds and it moved the project off `'rows'`. The app says so once, in a toast: *"This pattern is worked in rounds — switched the project to Rounds"*. Nothing else in the UI would ever mention it, and the flip is the difference between a tail rendering as a tail and rendering as a blanket.
+- **`Store.roundDeviation(part) → { expected, actual, row, delta }`** (05 #6): the pattern's count for the round being worked against the stitches actually tapped into it. `expected` is `null` when the pattern never stated one, and is never compared against a count the store invented. When `delta > 0` the counter shows one quiet inline line under the stitch readout — *"3 more than the pattern's 24"* — and the renderer draws the surplus stitches in `palette.alert`. Never modal.
+- **The piece gets its own region of the stitch button** (05 #1). `STITCHES`, a 90 px numeral and the `TAP` pill used to run down the exact centre of the button, which is exactly where a round-worked solid of revolution is: on the 6-round Ear the whole model sat behind the `STITCHES` pill. With the live diagram on, the caption and the number are one row pinned to the **top** of the button (`.stitch-head`, numeral at 0.68 × `--counter-size`), the hint is a hairline at the bottom that fades once the piece has been counted on, and everything between belongs to the piece. `js/app.js` measures that row and passes it as `handle.setSafeInsets({top, right, bottom, left})`, so the fit box is the free area rather than the canvas and the projection is shifted to centre the piece in it. The whole button stays the tap target, and without the diagram the old centred stack is unchanged.
 - App: `<canvas id="stitch-canvas">` inside `#stitch-btn` behind the caption/number (absolute, inset 0, `pointer-events:none`; number/caption get a soft text shadow), `Diagram.mount` when the project screen renders, `setModel(..., {animate:'stitch'})` on the tap fast path, `'round'` on row completion, `setPalette` on theme change, `destroy` when leaving. The canvas is `pointer-events: none`, so the stitch button's own pointer handlers drive rotation through `handle.dragStart/dragMove/dragEnd` once the pointer passes the 12px tolerance (see "UX rules"); the handle is also parked on the canvas element as `canvas.diagram` so `getStats()` can be read from a console.
-- **Long patterns do not mount the live canvas** (13 #5). `Store.diagramModel` rebuilds the whole piece whenever the row changes, and that build walks every row looking each one up, so its cost grows with the square of the pattern length: measured in the Browser pane, a completed row cost ~1,040 ms on a 1,500-row pattern (a sixth of a second was already visible at 500 rows) while a 60-row amigurumi stays under a millisecond. Stitch taps were always cheap — the model is cached — but a row tap froze the counter, which is the one interaction that must never stutter. So App will not ask for a live model past `DIAGRAM_MAX_LIVE_ROWS` (250 rows, or any build measured over 60 ms, remembered per part): the canvas inside the tap button is not mounted, `pushDiagram` is a no-op, and the piece is built only when the user opens the 3D viewer on purpose. **The real fix belongs in `Store.diagramModel`** — build a row→line index once instead of calling `lineForRow` inside the loop — and this guard can be relaxed when that lands.
-- A **⤢ 3D view** button in the stitch actions row (never inside the tap surface — see Screens) opens the **3D viewer sheet**: full-height canvas with `interactive: true`, the part name, round/stitch readout, and a Yarn colours button. Settings toggle **Live diagram** (default on; off removes the canvas). New sheet **Yarn colours** (project overflow menu + from the viewer): Main yarn plus every name from `Patterns.colors` across the project's parts, each with `<input type="color">` and the resolved swatch; edits update the model live.
+- **Long patterns do not mount the live canvas** (13 #5). `Store.diagramModel` rebuilds the whole piece whenever the row changes, and that build walks every row looking each one up, so its cost grows with the square of the pattern length: measured in the Browser pane, a completed row cost ~1,040 ms on a 1,500-row pattern (a sixth of a second was already visible at 500 rows) while a 60-row amigurumi stays under a millisecond. Stitch taps were always cheap — the model is cached — but a row tap froze the counter, which is the one interaction that must never stutter. So App will not ask for a live model past `DIAGRAM_MAX_LIVE_ROWS`, or for any build measured over 60 ms (remembered per part): the canvas inside the tap button is not mounted, `pushDiagram` is a no-op, and the piece is built only when the user opens the 3D viewer on purpose. **That real fix has landed** — `Store.diagramModel` builds a row → line index once instead of calling `lineForRow` inside the loop, and a 1,500-row pattern now builds in under 60 ms — so `DIAGRAM_MAX_LIVE_ROWS` is **2,000**. The measured-time guard and `partIsHeavy` stay as the safety valve for whatever the row count does not predict.
+- A **⤢ 3D view** button in the stitch actions row (never inside the tap surface — see Screens) opens the **3D viewer sheet**: full-height canvas with `interactive: true`, the part name, round/stitch readout, and a Yarn colours button. Above the stage it shows **the resolved shape class and its size in stitch units** from `DiagramGeo.classify` — "Sphere · 15 rounds · 48 around", "Capsule · 42 rounds · 15 around", "Flat panel · 46 rows · 405 wide" — beside the **Auto / Rounds / Rows** chips that write `Part.workMode`. Opening the viewer **closes the button's GL context** and closing it rebuilds one, so the app never holds more than one context and repeated opens can never leave a blank canvas; if there is no piece on screen the stage carries a one-line footer ("Showing a simple outline — 3D isn't available right now") instead of a flat slab of `--primary`. Settings toggle **Live diagram** (default on; off removes the canvas). New sheet **Yarn colours** (project overflow menu + from the viewer): Main yarn plus every name from `Patterns.colors` across the project's parts, each with `<input type="color">` and the resolved swatch; edits update the model live.
 - Tour: one counter-tour step for the diagram, targeting `#stitch-3d` ("The piece inside the big button grows as you count. Tap 3D view to open it full size and spin it around."). It trims itself out when the button is absent.
-- Bump `CACHE_VERSION`, precache `./js/diagram.js` (and `three.min.js` if vendored).
+- Bump `CACHE_VERSION`, precache `./js/diagram-geo.js` and `./js/diagram.js` (in that load order — `DiagramGeo` must be on `window` before `Diagram` reads it).

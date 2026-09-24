@@ -136,12 +136,21 @@
     </button>
 
     <section class="stitch-section" aria-label="Stitch counter">
+      <!-- With the live 3D piece on, `.stitch-head` is pinned to the top of
+           the button and the piece owns everything below it (05 #1): the
+           number, the caption and a round-worked solid all used to be the same
+           column down the middle, so the piece hid behind the caption. The
+           whole button is still the tap target. -->
       <button type="button" id="stitch-btn" class="stitch-btn" aria-label="Count a stitch">
-        <span class="stitch-caption">STITCHES</span>
-        <span id="stitch-number" class="stitch-number">0</span>
-        <span class="stitch-hint">tap</span>
+        <span class="stitch-head" id="stitch-head">
+          <span class="stitch-caption">STITCHES</span>
+          <span id="stitch-number" class="stitch-number">0</span>
+        </span>
+        <span class="stitch-hint" id="stitch-hint">tap</span>
       </button>
       <div id="stitch-readout" class="readout"></div>
+      <!-- "3 more than the pattern's 24" (05 #6). Quiet, inline, never modal. -->
+      <div id="stitch-dev" class="stitch-dev" hidden></div>
       <div id="stitch-progress" class="progress slim" hidden>
         <div class="bar"><div id="stitch-bar-fill" class="bar-fill"></div></div>
         <div id="stitch-bar-label" class="bar-label"></div>
@@ -202,6 +211,7 @@
 <!-- pdf.js itself is NOT loaded here: PdfText pulls it in on first use. -->
 <script src="./js/pdftext.js"></script>
 <script src="./js/celebrate.js"></script>
+<script src="./js/diagram-geo.js"></script>
 <script src="./js/diagram.js"></script>
 <script src="./js/audio.js"></script>
 <script src="./js/store.js"></script>

@@ -627,6 +627,9 @@
   // computes as a single stitch instead of "same as the row before".
   var LOOP_PHRASE = '(?:(?:back|front)\\s+loops?\\s+only|blo|flo)\\s*(?:of|in)?\\s*';
   var R_EACH = new RegExp('^(?:(\\d+)\\s*)?(' + STITCH_ALT + ')\\s*(?:sts?|stitch(?:es)?)?\\s*(?:in|into)?\\s*(?:' + LOOP_PHRASE + ')?(?:each|every|all)\\b', 'i');
+  // ...and the same with the post-stitch preposition: "Dcfp around each of
+  // next 4 sts", "fpdc behind every st".
+  var R_EACH_AROUND = new RegExp('^(?:(\\d+)\\s*)?(' + STITCH_ALT + ')\\s*(?:sts?|stitch(?:es)?)?\\s*(?:around|over|behind|through)\\s*(?:' + LOOP_PHRASE + ')?(?:each|every|all)\\b', 'i');
   var R_AROUND = new RegExp('^(' + STITCH_ALT + ')\\s*(?:sts?|stitch(?:es)?)?\\s*(?:in|into)?\\s*(?:' + LOOP_PHRASE + ')?\\s*(?:around|across|to\\s+end)\\b', 'i');
   var R_N_IN_NEXT = new RegExp('^(\\d+)\\s*(' + STITCH_ALT + ')\\s+(?:in|into)\\s+(?:the\\s+)?(?:next|same)\\b', 'i');
   var R_N_ST = new RegExp('^(\\d+)\\s*(' + STITCH_ALT + ')\\b', 'i');
@@ -712,8 +715,13 @@
   var MULT_RE = /^\s*[,]?\s*(?:x|\u00d7|\*)\s*(\d+)|^\s*[,]?\s*(?:rep(?:eat)?(?:\s+from\s*\*)?\s*)?(\d+)\s*(more\s+)?times?\b|^\s*[,]?\s*(twice)\b/i;
   var FILL_AROUND_RE = /^[\s,]*(?:rep(?:eat)?\s+)?(?:around|across|to\s+end)\b/i;
 
+  // "(3tr, 2ch) five times in ring" - UK and translated patterns spell the
+  // multiplier out. Only the expander reads these (`rich`), so no count that
+  // parse() already computes can move.
+  var MULT_WORD_RE = /^\s*[,]?\s*(?:rep(?:eat)?\s*)?(twice|thrice|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s*(more\s+)?times?\b/i;
+
   // Scan an instruction into items: plain text runs and bracket groups.
-  function scanItems(s) {
+  function scanItems(s, rich) {
     var items = [];
     var buf = '';
     var i = 0;
@@ -738,8 +746,16 @@
           if (mm[3]) mult += 1; // "5 more times" = 6 total
         }
       } else {
-        var fm = FILL_AROUND_RE.exec(after);
-        if (fm) { filled = true; consumed = fm[0].length; }
+        var wm = rich ? MULT_WORD_RE.exec(after) : null;
+        if (wm) {
+          consumed = wm[0].length;
+          mult = wordNum(wm[1]);
+          if (!(mult > 0)) mult = 1;
+          else if (wm[2]) mult += 1;
+        } else {
+          var fm = FILL_AROUND_RE.exec(after);
+          if (fm) { filled = true; consumed = fm[0].length; }
+        }
       }
       if (buf.trim()) { items.push({ kind: 'text', text: buf }); }
       buf = '';
@@ -770,15 +786,28 @@
     '|\\brep(?:eat)?\\s+from\\s*\\*\\s*(?:across|around|to\\s+(?:the\\s+)?end)\\b' +
     '|\\bto\\s+(?:the\\s+)?end\\b', 'i');
 
+  // The subset of OPEN_FILL_RE that says outright "keep going in the stitch
+  // pattern" - a net-neutral bracket the expander must NOT try to count
+  // ("[skip the next st, sc in next, work a puff st into the skipped st] work
+  // across" eats two stitches and makes two, and reads as three). A
+  // `rep from *` is not in here: that one the expander can read stitch for
+  // stitch, and a granny round depends on it.
+  var OPEN_FILL_VAGUE_RE = new RegExp(
+    '\\bwork\\s+across\\b' +
+    '|\\bwork\\s+(?:even\\s+)?in\\s+(?:the\\s+)?(?:established\\s+)?pattern\\b' +
+    '|\\bcontinue\\s+(?:working\\s+)?in\\s+(?:the\\s+)?(?:established\\s+)?pattern\\b', 'i');
+
   function evaluate(instruction, prevCount) {
     if (instruction == null) return null;
     var prev = (typeof prevCount === 'number' && isFinite(prevCount)) ? prevCount : null;
     var s = normDashes(normUnicode(instruction));
     s = fixTypos(s);
 
-    // Drop a leading row marker if the caller passed a whole line.
+    // Drop a leading row marker if the caller passed a whole line. A bare
+    // numeral marker ("3.") leaves the keyword behind ("3. Rnd: ..."), so take
+    // that off too or the whole instruction reads as prose (03 #12).
     var mk = detectMarker(s.trim());
-    if (mk) s = mk.rest;
+    if (mk) s = stripRowKeyword(mk.rest);
     s = s.toLowerCase().trim();
     if (!s) return null;
 
@@ -1187,6 +1216,170 @@
       out.startRow = lastRow - rep.lastCount + 1;
     }
     return out;
+  }
+
+  // --- back-references: a row that only says "work an earlier row again" ---
+  //
+  // These are the bulk of every garment pattern, and until now the rows the
+  // expander read as NOTHING at all (03 #6): a 46-row Premier wrap came out as
+  // two real rows and 44 slivers, and all fifteen rounds of the Stylecraft hex
+  // socks were empty. `backRefRows` turns the sentence into the row numbers it
+  // points at; parse() stores them on the line as `repeatOf` and expand()
+  // re-runs THAT row's words against the CURRENT stitch count, so a shaping
+  // repeat keeps growing or shrinking instead of freezing.
+  //
+  // Every form is anchored at the START of the instruction, so a row that does
+  // its own work and only then says "rep rows 1-2" keeps its own words:
+  //
+  //   rep rows 4 and 5 / rows 4 & 5 / rows 4-5 / rows 4 to 5    -> [4, 5]
+  //   rep row 2 / rep rnd 3 / repeat round 3                    -> [2] / [3]
+  //   rep 2nd row / rep 2nd to 5th rows                         -> [2] / [2..5]
+  //   as row 2 / work as row 2 / same as rows 3 and 4           -> [2] / [3, 4]
+  //   rep last 2 rows / rep the last two rows / rep last row     -> the N before
+  //   continue in pattern as set / work even as established      -> the row before
+  //
+  // "work as for First Leg" names another PART, which nothing here can line up
+  // row for row, so it matches none of these and is left to the generic
+  // reading on purpose - a wrong row is worse than an honest generic one.
+  var REF_VERB = '(?:rep(?:eat)?(?:ing)?|work(?:ing|ed)?|cont(?:inue|inuing)?)';
+  var REF_AS = '(?:(?:same\\s+)?as(?:\\s+for)?)';
+  var REF_KW = '(?:rows?|rnds?|rounds?)';
+  var REF_ORD = '(?:st|nd|rd|th)';
+  // an optional "(RS)"/"(WS)" the marker left behind, then the verb and/or "as"
+  var REF_HEAD = '^(?:\\(\\s*(?:ws|rs|wrong\\s+side|right\\s+side)\\s*\\)\\s*[:.,]?\\s*)?' +
+    '(?:' + REF_VERB + '\\s+(?:' + REF_AS + '\\s+)?|' + REF_AS + '\\s+)' +
+    '(?:the\\s+)?(?:in\\s+)?';
+
+  var REF_RANGE_RE = new RegExp(REF_HEAD + REF_KW + '\\s*(\\d+)\\s*(?:-|to|&|and)\\s*(\\d+)\\b', 'i');
+  var REF_ORD_RANGE_RE = new RegExp(REF_HEAD + '(\\d+)' + REF_ORD + '\\s*(?:-|to|&|and)\\s*(\\d+)' +
+    REF_ORD + '\\s*' + REF_KW + '\\b', 'i');
+  var REF_ONE_RE = new RegExp(REF_HEAD + REF_KW + '\\s*(\\d+)\\b', 'i');
+  var REF_ORD_ONE_RE = new RegExp(REF_HEAD + '(\\d+)' + REF_ORD + '\\s+' + REF_KW + '\\b', 'i');
+  var REF_LAST_RE = new RegExp('^' + REF_VERB + '\\s+(?:the\\s+)?last\\s+(\\d+|one|two|three|four)?\\s*' +
+    REF_KW + '\\b', 'i');
+  // "Continue in pattern as set", "work even as established", "as before" - the
+  // designer means "whatever you have been doing", which is the row before.
+  var REF_SET_RE = new RegExp('^(?:' + REF_VERB + '\\s+)?(?:even\\s+)?(?:in\\s+)?' +
+    '(?:(?:the\\s+)?patt(?:ern)?\\s+)?' + REF_AS + '\\s+(?:set|established|before)\\b', 'i');
+
+  // No repeat can point at more rows than this; a bigger range is a misreading.
+  var REF_SPAN_MAX = 64;
+
+  function refRange(a, b) {
+    var out = [], i;
+    if (!(a >= 1) || !(b >= a) || b - a >= REF_SPAN_MAX) return null;
+    for (i = a; i <= b; i++) out.push(i);
+    return out;
+  }
+
+  /**
+   * The rows a back-reference points at, as absolute row numbers, or null.
+   * @param {string} instr  the row's instruction, row marker already off
+   * @param {number} row    the FIRST row the reference is worked on - what
+   *   "the last 2 rows" and "as set" are measured back from.
+   * @returns {number[]|null}
+   */
+  function backRefRows(instr, row) {
+    var t = String(instr == null ? '' : instr).replace(/^[\s,;:.-]+/, '');
+    if (!t) return null;
+    var m, rows = null;
+    if ((m = REF_RANGE_RE.exec(t)) || (m = REF_ORD_RANGE_RE.exec(t))) {
+      rows = refRange(num(m[1]), num(m[2]));
+    } else if ((m = REF_ONE_RE.exec(t)) || (m = REF_ORD_ONE_RE.exec(t))) {
+      rows = refRange(num(m[1]), num(m[1]));
+    } else if ((m = REF_LAST_RE.exec(t))) {
+      var n = m[1] ? (WORD_NUM[String(m[1]).toLowerCase()] || num(m[1]) || 1) : 1;
+      if (!(row >= 1) || n < 1 || n > REF_SPAN_MAX) return null;
+      rows = refRange(row - n, row - 1);
+    } else if (REF_SET_RE.test(t)) {
+      if (!(row >= 2)) return null;
+      rows = [row - 1];
+    }
+    if (!rows) return null;
+    // A reference must point BACKWARDS at a row that really exists; "Row 5:
+    // rep row 5" and "rep rows 4-9" written on row 4 are both nonsense.
+    for (var i = 0; i < rows.length; i++) {
+      if (!(rows[i] >= 1) || (row >= 1 && rows[i] >= row)) return null;
+    }
+    return rows;
+  }
+
+  /**
+   * The line that carries `row`, preferring the section the reference was
+   * written in. lineFor() prefers section 0 instead, which is right for the
+   * app (it asks about one part at a time) and wrong here.
+   */
+  function refLineAt(lines, section, row) {
+    var i, l, end, best = null;
+    for (i = 0; i < lines.length; i++) {
+      l = lines[i];
+      if (!l || l.row === null || l.row === undefined || l.row < 1) continue;
+      end = (l.rowEnd === null || l.rowEnd === undefined) ? l.row : l.rowEnd;
+      if (row < l.row || row > end) continue;
+      if (l.section === section) return l;
+      if (!best) best = l;
+    }
+    return best;
+  }
+
+  /**
+   * How many stitches ONE working of `row` added. A repeat of a row changes the
+   * count by the same amount the row itself did - that is what makes a hexagon
+   * a hexagon and a shawl a triangle - so this is what the repeated rows are
+   * counted with. Reading it off a range line needs the per-row `counts`, or
+   * "rep Rnd 3" written on a "Rnds 3-4" line would add the whole range's
+   * growth every round. null when the row has no count to go by.
+   */
+  function refDelta(lines, section, row) {
+    var l = refLineAt(lines, section, row);
+    if (!l) return null;
+    var before = l.prevCount, after = l.count, i;
+    if (l.counts && l.row >= 1) {
+      i = row - l.row;
+      if (i >= 1) before = l.counts[i - 1];
+      if (l.counts[i] !== undefined) after = l.counts[i];
+    }
+    if (after === null || after === undefined || before === null || before === undefined) return null;
+    return after - before;
+  }
+
+  /**
+   * One count per row of a back-referencing range, or null when none of them
+   * can be worked out. `printed` is the total the line printed, if any: it
+   * belongs to the LAST row of the range ("Row 6-55: Repeat rows 4 & 5 <57
+   * sts>" is 57 at row 55, not at row 6), so it overrides that entry only.
+   */
+  function repeatCounts(lines, section, refs, prevIn, startRow, endRow, printed) {
+    var end = (endRow === null || endRow === undefined || endRow < startRow) ? startRow : endRow;
+    if (end - startRow >= 1000) end = startRow + 999;
+    // One delta per referenced row, looked up once: a 1,000-row range over a
+    // 2,000-line document would otherwise rescan the lines a million times.
+    var deltas = [], j;
+    for (j = 0; j < refs.length; j++) deltas.push(refDelta(lines, section, refs[j]));
+    var out = [], prev = prevIn, any = false, i, d, c;
+    for (i = startRow; i <= end; i++) {
+      d = deltas[(i - startRow) % refs.length];
+      c = (d === null || prev === null || prev === undefined) ? null : prev + d;
+      if (c !== null) { any = true; prev = c; }
+      out.push(c);
+    }
+    // ...but only when the range really ended here: a range long enough to be
+    // capped above has no last row to hang the printed total on.
+    if (printed !== null && printed !== undefined && (endRow === null || endRow === undefined || end === endRow || end === startRow)) {
+      out[out.length - 1] = printed;
+      any = true;
+    }
+    return any ? out : null;
+  }
+
+  /** The count a line publishes for one row of its range. */
+  function countAt(line, row) {
+    if (!line) return null;
+    if (line.counts && line.row >= 1) {
+      var c = line.counts[row - line.row];
+      if (typeof c === 'number' && isFinite(c)) return c;
+    }
+    return (line.count === null || line.count === undefined) ? null : line.count;
   }
 
   // =====================================================================
@@ -1605,7 +1798,22 @@
       index: i, text: raw, kind: 'note',
       row: null, rowEnd: null, section: 0,
       stitches: null, sizes: null, computed: null,
-      count: null, countSource: null, notes: []
+      count: null, countSource: null, notes: [],
+      // --- back-references (03 #6) ---------------------------------------
+      // prevCount: the count this row started from, so a later "rep row N" can
+      //   see what row N added.
+      // repeatOf: the rows this one re-works, in order; row R of the range
+      //   re-works repeatOf[(R - repeatFrom) % repeatOf.length].
+      // repeatFrom/repeatTo: which rows the reference covers. On a numbered row
+      //   they are row/rowEnd; on a bare "Rep Row 2 until it measures 59\""
+      //   sentence they are filled in after the parse loop, from the section's
+      //   last written row and the repeat's own row target (null = open-ended).
+      // counts: one count per row of the range, where they can be worked out.
+      // repeatTimes/repeatUntil: what such a sentence said about how long to
+      //   keep going ("20 times more", "until there are 25 Rows"), kept only
+      //   until repeatTo can be worked out from them.
+      prevCount: null, repeatOf: null, repeatFrom: null, repeatTo: null,
+      repeatTimes: null, repeatUntil: null, counts: null
     };
   }
 
@@ -2081,6 +2289,16 @@
         }
         var rp = resolveRepeat(detectRepeat(rt, size) || cls.repeat, cur.lastRow);
         if (!suggestion && rp.startRow !== null) { suggestion = rp; suggestionSection = cur.index; }
+        // "Rep Row 2 until the blanket measures 59"" / "Repeat Rows 5-8 until
+        // there are a total of 25 Rows": a repeat with no row number of its own
+        // stands for every row after the part's last written one. Where that is
+        // cannot be known here - in a de-interleaved two-column PDF the
+        // sentence is printed ABOVE the rows it repeats (the cardigan) - so the
+        // rows it covers are filled in after the loop.
+        if (rp.startRow !== null && rp.endRow !== null) {
+          L.repeatOf = refRange(rp.startRow, rp.endRow);
+          if (L.repeatOf) { L.repeatTimes = rp.times; L.repeatUntil = rp.untilRows; }
+        }
       } else if (cls.nextRow) {
         L.row = (cur.lastRow === null ? 0 : cur.lastRow) + 1;
         L.rowEnd = L.row + (cls.nextRow.span || 1) - 1;
@@ -2175,7 +2393,21 @@
       // --- computed count -----------------------------------------------
       if (isRow || isSetup) {
         var instr = body.slice(Math.min(prefixLen, body.length));
-        L.computed = evaluate(instr, cur.prevCount);
+        L.prevCount = (cur.prevCount === undefined) ? null : cur.prevCount;
+        // "Rnds 4-15: rep Rnd 3" / "Rows 6-46: rep rows 4 and 5" / "as Row 2":
+        // the row has no words of its own, so it is counted from the row it
+        // points at rather than from evaluate(), which reads it as prose.
+        var refs = isRow ? backRefRows(instr, L.row) : null;
+        if (refs) {
+          L.repeatOf = refs;
+          L.repeatFrom = L.row;
+          L.repeatTo = L.rowEnd;
+          L.counts = repeatCounts(lines, cur.index, refs, cur.prevCount,
+            L.row, L.rowEnd, L.stitches);
+          L.computed = L.counts ? L.counts[L.counts.length - 1] : null;
+        } else {
+          L.computed = evaluate(instr, cur.prevCount);
+        }
         L.count = (L.stitches !== null) ? L.stitches : L.computed;
         L.countSource = (L.stitches !== null) ? 'explicit' : (L.computed !== null ? 'computed' : null);
         if (L.count !== null) cur.prevCount = L.count;
@@ -2212,6 +2444,29 @@
         s0.makeCount = below.makeCount;
         s0.startLine = below.line;   // the title line drops out of the text
       }
+    }
+
+    // --- which rows a bare repeat sentence covers ------------------------
+    // Now that every section's last row is known: "Rep Row 2 until the blanket
+    // measures approximately 59"" covers row 3 onwards, and "Repeat Rows 5-8
+    // until there are a total of 25 Rows" covers rows 9 to 25. `repeatTo` stays
+    // null when only a measurement is given - expand() then answers for
+    // whatever row the caller asks about, which is what the store wants.
+    for (var rq = 0; rq < lines.length; rq++) {
+      var rl = lines[rq];
+      if (rl.kind !== 'repeat' || !rl.repeatOf) continue;
+      var rsec = sections[rl.section];
+      var from = (rsec && rsec.maxRow !== null && rsec.maxRow >= 1) ? rsec.maxRow + 1 : null;
+      // every row it points at has to have been written, and before `from`
+      if (from === null || rl.repeatOf[rl.repeatOf.length - 1] >= from ||
+          !refLineAt(lines, rl.section, rl.repeatOf[0])) {
+        rl.repeatOf = null;
+        continue;
+      }
+      rl.repeatFrom = from;
+      if (rl.repeatUntil >= from) rl.repeatTo = rl.repeatUntil;
+      else if (rl.repeatTimes >= 1) rl.repeatTo = from + rl.repeatTimes * rl.repeatOf.length - 1;
+      else rl.repeatTo = null;
     }
 
     // --- note paragraphs, then attachment -------------------------------
@@ -2278,16 +2533,26 @@
     return row >= line.row && row <= end;
   }
 
+  // A back-referencing range grows or shrinks row by row ("Row 6-55: Repeat
+  // rows 4 & 5" adds two stitches every second row), so its target is read out
+  // of the line's own per-row `counts` where it has them - `count` alone is the
+  // count at the END of the range and would freeze the shape.
   function targetFor(lines, row) {
     if (!lines || !lines.length) return null;
-    var i, l;
+    var i, l, c;
     for (i = 0; i < lines.length; i++) {
       l = lines[i];
-      if (l.section === 0 && l.row >= 1 && inRange(l, row) && l.count !== null && l.count !== undefined) return l.count;
+      if (l.section === 0 && l.row >= 1 && inRange(l, row)) {
+        c = countAt(l, row);
+        if (c !== null) return c;
+      }
     }
     for (i = 0; i < lines.length; i++) {
       l = lines[i];
-      if (l.row >= 1 && inRange(l, row) && l.count !== null && l.count !== undefined) return l.count;
+      if (l.row >= 1 && inRange(l, row)) {
+        c = countAt(l, row);
+        if (c !== null) return c;
+      }
     }
     return null;
   }
@@ -2467,7 +2732,44 @@
    'place between order addition general fact case way end ends side sides top bottom ' +
    'main contrast contrasting it its you your my our their one two three four five six ' +
    'seven eight nine ten first second third last long short same time times set sets ' +
-   'photo photos left right back loops loop').split(' ').forEach(function (w) { COLOR_STOP[w] = true; });
+   'photo photos left right back loops loop ' +
+   // abbreviation-table words, so "with RS facing" / "in patt" never read as
+   // a colour (04 H, 03 #19)
+   'rs ws mm cm beg rem patt tog lp lps sp sps blo flo sk skip miss ' +
+   'facing marker markers'
+  ).split(' ').forEach(function (w) { COLOR_STOP[w] = true; });
+
+  // The abbreviation table at the top of nearly every commercial PDF is
+  // written in exactly the "X = word" shape a colour legend uses, so
+  // `ch = chain` / `sc = single crochet` were being offered to the user as
+  // yarn colours (03 #19, 04 H). A legend VALUE has to look like a colour.
+  var TERM_STOP = {};
+  ('chain,chains,stitch,stitches,crochet,double,treble,half,slip,space,spaces,' +
+   'round,rounds,row,rows,repeat,together,skip,miss,increase,increasing,decrease,decreasing,' +
+   'loop,loops,back,front,post,over,beginning,begin,remain,remaining,remainder,' +
+   'continue,continuing,following,follow,pattern,patterns,tension,gauge,approximately,' +
+   'millimeter,millimeters,millimetre,millimetres,centimeter,centimetres,inch,inches,' +
+   'gram,grams,gramme,grammes,previous,alternate,as required,' +
+   'single crochet,double crochet,half double crochet,treble crochet,slip stitch,' +
+   'half treble,double treble,triple treble,back loop,front loop,back loop only,' +
+   'front loop only,yarn over,chain space,stitch marker,right side,wrong side')
+    .split(',').forEach(function (w) { if (w) TERM_STOP[w.trim()] = true; });
+
+  // Does a legend value name a yarn colour, or an abbreviation-table term?
+  function legendColour(raw) {
+    var t = cleanName(raw);
+    if (!t || t.length < 2 || t.length > 24) return false;
+    var low = t.toLowerCase();
+    if (TERM_STOP[low]) return false;
+    if (COLOR_STOP[low]) return false;
+    if (stitchInfo(t)) return false;
+    if (/^(?:main|contrast(?:ing)?|accent|background|border)\s+colou?r$/.test(low)) return true;
+    if (/^colou?r\s+[a-z]$/.test(low)) return true;
+    if (/^(?:mc|cc)$/.test(low)) return true;
+    if (colorHex(t)) return true;
+    // an unknown but capitalised shade name: "Twilight", "Chronicle", "Sea Mist"
+    return /^[A-Z][A-Za-z'-]{2,15}(?:\s+[A-Za-z'-]{1,15})?$/.test(t);
+  }
 
   function colorHex(name) {
     if (name === null || name === undefined) return null;
@@ -2524,7 +2826,10 @@
   }
 
   var LEGEND_RE = /(?:^|[(\[,;])\s*([A-Za-z]{1,3})\s*=\s*([A-Za-z][A-Za-z '\-]{1,23}?)\s*(?=[)\]]|,|;|$)/g;
-  var C_IN = /^\s*(?:in|with|using|w\/)\b\s*(?:the\s+)?(colou?r\s+[a-z]\b|[A-Za-z][A-Za-z'-]*)/i;
+  // "In Twilight :", "With MC", and - the amigurumi idiom expand() never read -
+  // the same phrase sitting straight after the row marker: "Rnd 1: With black,
+  // ch 2, 6 sc" (04 H).
+  var C_IN = /^\s*(?:(?:rnds?|rounds?|rows?|r)?\.?\s*\d+(?:\s*[-&+]\s*\d+)?\s*(?:\([^)]{0,14}\))?\s*[:.)]\s*)?(?:in|with|using|w\/)\b\s*(?:the\s+)?(colou?r\s+[a-z]\b|[A-Za-z][A-Za-z'-]*)/i;
   var C_CHANGE = /\b(?:colou?r\s*change|change|changing|switch|switching)\s+to\s+(?:the\s+)?(colou?r\s+[a-z]\b|[A-Za-z][A-Za-z'-]*)/ig;
   var C_OFF = /\bfasten\s+off\s+(?:the\s+)?(colou?r\s+[a-z]\b|[A-Za-z][A-Za-z'-]*)/ig;
   var C_INCOLOR = /\bin\s+(colou?r\s+[a-z])\b/ig;
@@ -2602,6 +2907,8 @@
         if (!val || val.length < 2) continue;
         if (/^\d/.test(val)) continue;
         if (stitchInfo(val)) continue;
+        if (stitchInfo(key)) continue;            // "SC = single crochet"
+        if (!legendColour(val)) continue;         // "CH = chain"
         if (!legend[key]) legend[key] = val;
         legendVals[val.toLowerCase()] = true;
       }
@@ -2622,32 +2929,120 @@
 
   var FILL_MARK = { fillMark: true };
 
-  function stitchTok(word) {
-    var info = stitchInfo(word);
-    if (!info) return null;
-    var w = String(word).toLowerCase().replace(/\s+/g, ' ').trim();
-    var t = 'sc', h = 1;
-    if (/hdc/.test(w)) { t = 'hdc'; h = 1.5; }
-    else if (/dtr|treble|\btr\b/.test(w)) { t = 'tr'; h = 2.5; }
-    else if (/dc/.test(w)) { t = 'dc'; h = 2; }
-    else if (/sl\s*st|slst|slip/.test(w)) { t = 'sl'; h = 1; }
-    else if (/puff/.test(w)) { t = 'puff'; h = 1; }
-    else if (/bbl|bobble|popcorn|cluster|shell/.test(w)) { t = 'bbl'; h = 1; }
-    else if (/^ch/.test(w)) { t = 'ch'; h = 1; }
-    if (info.p === 2 && info.c === 1) t = 'inc';
-    else if (info.p === 1 && info.c === 2) t = 'dec';
-    return { p: info.p, c: info.c, t: t, h: h };
+  // --- stitch geometry (3D wave A) --------------------------------------
+  // Heights are in sc units and come from the folk "flat circle" rates:
+  // N_flat = 2*pi*h/w, so 6 sc per round flat => h/w = 6/2pi = 0.955, 8 hdc
+  // => 1.27, 12 dc => 1.91, 16 tr => 2.55. Rounded to the reference table in
+  // docs/brainstorm/3d/01-geometry-truth.md Part 1.2, which is what the
+  // renderer is measured against.
+  //
+  //   [prefix, type, US height, UK height]
+  // UK terms are one rung shorter than they read: UK dc = US sc, UK htr = US
+  // hdc, UK tr = US dc, UK dtr = US tr, UK ttr/trtr = US dtr (03 #9).
+  var STITCH_H = [
+    [/^(?:trtr|ttr|quad)/, 'dtr', 3.3, 3.3],
+    [/^dtr/, 'dtr', 3.3, 2.68],
+    [/^htr/, 'hdc', 1.34, 1.34],
+    [/^hdc/, 'hdc', 1.34, 1.34],
+    [/^(?:tr|treble)/, 'tr', 2.68, 2.01],
+    [/^dc/, 'dc', 2.01, 1],
+    [/^(?:slst|slipst|slip|sl|ss)/, 'sl', 0.3, 0.3],
+    [/^(?:fsc|sc)/, 'sc', 1, 1],
+    [/^ch/, 'ch', 0, 0]
+  ];
+  // A bobble / puff / cluster stands as tall as whatever it is made of, which
+  // the words rarely say - so it is left PENDING and resolved to the row's
+  // dominant height at the end of expand().
+  var H_PENDING = null;
+  var W_SL = 0.7;                   // a slip stitch is narrower than a stitch
+
+  // Affixes that decorate a stitch name without changing how tall it is.
+  var TOK_LEAD_RE = /^(?:inv(?:isible)?|spike|crossed|cross|foundation|standing|extended|ext|linked|back|front|reverse|rev)+/;
+  var TOK_TAIL_RE = /(?:inc(?:rease)?|incr|dec(?:rease)?|\d*tog(?:ether)?)$/;
+
+  // -> { t, h, hUk } - the geometric family of a normalised token.
+  function stitchFamily(bare) {
+    var b = bare;
+    var i;
+    if (/(?:puff)/.test(b)) return { t: 'puff', h: H_PENDING, hUk: H_PENDING };
+    if (/(?:bbl|bobble|popcorn|cluster|shell)/.test(b)) {
+      return { t: 'bbl', h: H_PENDING, hUk: H_PENDING };
+    }
+    for (i = 0; i < STITCH_H.length; i++) {
+      if (STITCH_H[i][0].test(b)) return { t: STITCH_H[i][1], h: STITCH_H[i][2], hUk: STITCH_H[i][3] };
+    }
+    b = b.replace(TOK_LEAD_RE, '').replace(TOK_TAIL_RE, '');
+    for (i = 0; i < STITCH_H.length; i++) {
+      if (STITCH_H[i][0].test(b)) return { t: STITCH_H[i][1], h: STITCH_H[i][2], hUk: STITCH_H[i][3] };
+    }
+    return { t: 'sc', h: 1, hUk: 1 };
   }
 
+  /**
+   * One stitch token, with the geometry the 3D model needs.
+   * @param {string} word    the abbreviation as written
+   * @param {boolean} [uk]   resolve heights in UK terms
+   * @returns {{p:number,c:number,t:string,h:number|null,w:number,
+   *            post:('front'|'back'|null),base:string}|null}
+   */
+  function stitchTok(word, uk) {
+    var info = stitchInfo(word);
+    if (!info) return null;
+    var bare = String(word).toLowerCase().replace(/[^a-z0-9]/g, '');
+    var post = null;
+    var pm = /^(fp|bp)(sc|hdc|dc|tr)$/.exec(bare);
+    if (pm) { post = pm[1] === 'fp' ? 'front' : 'back'; bare = pm[2]; }
+    var fam = stitchFamily(bare);
+    var t = fam.t;
+    var h = uk ? fam.hUk : fam.h;
+    if (info.p === 2 && info.c === 1) t = 'inc';
+    else if (info.p === 1 && info.c >= 2) t = 'dec';
+    return { p: info.p, c: info.c, t: t, h: h, w: t === 'sl' ? W_SL : 1, post: post, base: fam.t };
+  }
+
+  // A ceiling on one row's stitch list. A lace/granny round that is expanded
+  // from the round below grows its own `prevCount` every round, so a pattern
+  // that repeats such a round doubles the list each time - 40 rounds of it
+  // would exhaust memory. No real row is this long; anything that reaches the
+  // cap is a misreading, and a misreading must fail, not hang.
+  var MAX_STITCHES = 20000;
+
+  function cell(t, h, w) {
+    return { t: t, c: null, h: h === undefined ? 1 : h, w: w === undefined ? 1 : w };
+  }
+
+  // n produced stitches of `tok`, repeated `times`. The second and later
+  // stitches of ONE increase carry 'inc+' so a consumer can tell "one increase
+  // of two" from "two separate increases" (01 §1.4 detection rule 1).
   function emit(tok, times) {
-    var out = [], n = times * tok.p, i;
-    for (i = 0; i < n; i++) out.push({ t: tok.t, c: null, h: tok.h });
+    var out = [], i, j;
+    if (!(times > 0)) return out;
+    if (times * Math.max(1, tok.p) > MAX_STITCHES) times = Math.floor(MAX_STITCHES / Math.max(1, tok.p));
+    for (i = 0; i < times; i++) {
+      for (j = 0; j < tok.p; j++) {
+        out.push(cell(j > 0 && tok.t === 'inc' ? 'inc+' : tok.t, tok.h, tok.w));
+      }
+    }
     return out;
   }
 
+  // n stitches worked into ONE position of the round below: an increase of n.
+  // Only a plain 1-for-1 stitch becomes an increase; an `inc`/`dec` token that
+  // already says what it is keeps its own meaning.
+  function incRun(tok, n) {
+    if (!(n >= 2) || tok.p !== 1 || tok.c !== 1) return emit(tok, n > 0 ? n : 0);
+    var out = [], i;
+    for (i = 0; i < n; i++) out.push(cell(i === 0 ? 'inc' : 'inc+', tok.h, tok.w));
+    return out;
+  }
+
+  // One stitch that eats `n` positions of the round below: a decrease.
+  function decCell(tok) { return cell('dec', tok.h, tok.w); }
+
   function runOf(type, height, n) {
     var out = [], i;
-    for (i = 0; i < n; i++) out.push({ t: type, c: null, h: height });
+    if (n > MAX_STITCHES) n = MAX_STITCHES;
+    for (i = 0; i < n; i++) out.push(cell(type, height, type === 'sl' ? W_SL : 1));
     return out;
   }
 
@@ -2656,7 +3051,7 @@
     for (i = 0; i < list.length; i++) {
       var e = list[i];
       if (e === FILL_MARK) continue;
-      out.push({ t: e.t, c: e.c, h: e.h });
+      out.push({ t: e.t, c: e.c, h: e.h, w: e.w });
     }
     return out;
   }
@@ -2666,9 +3061,31 @@
     for (i = 0; i < list.length; i++) {
       var e = list[i];
       if (e === FILL_MARK) { out.push(e); continue; }
-      out.push({ t: e.t, c: colr, h: e.h });
+      out.push({ t: e.t, c: colr, h: e.h, w: e.w });
     }
     return out;
+  }
+
+  // The stitches of one bracket group all worked into a single stitch or space
+  // (a granny corner, a shell, a cluster): the first becomes the increase, the
+  // rest 'inc+'. Chain spaces inside the group keep their own type, so a
+  // `(3tr, 2ch, 3tr)` corner still reports its 2-chain gap.
+  function asIncGroup(list) {
+    var out = [], i, first = true;
+    for (i = 0; i < list.length; i++) {
+      var e = list[i];
+      if (e === FILL_MARK) { out.push(e); continue; }
+      if (e.t === 'ch') { out.push({ t: e.t, c: e.c, h: e.h, w: e.w }); continue; }
+      out.push({ t: first ? 'inc' : 'inc+', c: e.c, h: e.h, w: e.w });
+      first = false;
+    }
+    return out;
+  }
+
+  function countable(list) {
+    var n = 0, i;
+    for (i = 0; i < list.length; i++) if (list[i] !== FILL_MARK && list[i].t !== 'ch') n++;
+    return n;
   }
 
   function stripMarks(list) {
@@ -2691,74 +3108,320 @@
   }
 
   // "8 Sc into Magic Ring" / "Mr6" - n stitches of whatever kind is named.
-  function mrList(s, n) {
+  function mrList(s, n, uk) {
     var mm = /(\d+)\s*(hdc|dc|tr|sc)\b/i.exec(s);
-    var tok = mm ? stitchTok(mm[2]) : null;
+    var tok = mm ? stitchTok(mm[2], uk) : null;
     return runOf(tok ? tok.t : 'sc', tok ? tok.h : 1, n > 0 ? n : 0);
   }
 
-  // The stitch-emitting twin of parseSegment(). Same branches, same order.
+  // --- longhand / lace vocabulary (3D wave A) ---------------------------
+  // These only ever run on the expand() side. evaluate() keeps its own
+  // narrower reading, so nothing here can move a count that parse() already
+  // computes - the richer shapes below simply stop expand() from giving up.
+
+  // "Make a chain": "ch 3", "ch3", "3ch", "ch-3". NOT "ch-3 sp", which names a
+  // space in the round below rather than making one.
+  var R_CHAIN_MAKE = /^ch(?:ain)?s?\s*-?\s*(\d+)(?!\s*-?\s*(?:sp|space))|^(\d+)\s*-?\s*ch(?:ain)?s?\b(?!\s*-?\s*(?:sp|space))/i;
+  // "sc next 2 sts tog", "sc in next 3 sts together", "dc in next 2 tog"
+  var R_TOG_LONG = new RegExp('^(' + STITCH_ALT + ')\\s+(?:in\\s+)?(?:the\\s+)?next\\s+(\\d+)\\s*(?:sts?|stitches?|' +
+    STITCH_ALT + ')?\\s*tog(?:ether)?\\b', 'i');
+  // "Dcfp around each of next 4 sts", "sc in each of next 6 sts"
+  var R_NEXT_N2 = new RegExp('^(?:(\\d+)\\s*)?(' + STITCH_ALT +
+    ')\\s*(?:sts?|stitches?)?\\s*(?:in|into|around|over|behind)\\s+(?:each\\s+of\\s+)?(?:the\\s+)?next\\s+(\\d+)', 'i');
+  // "sc twice in next st", "hdc 3 times in the same st"
+  var R_TIMES_IN = new RegExp('^(' + STITCH_ALT +
+    ')\\s*(?:sts?|stitches?)?\\s+(twice|thrice|two|three|four|five|\\d+)\\s*(?:times?)?\\s+(?:in|into)\\s+(?:the\\s+)?(?:next|same|first|last)\\b', 'i');
+  // "hdc to last st", "Hdc until you have 2 sts remaining", "sc across to last st"
+  var R_TO_LAST = new RegExp('^(' + STITCH_ALT +
+    ')\\s*(?:sts?|stitches?)?\\s*(?:across\\s+|evenly\\s+)?(?:to|until|till)\\s+(?:the\\s+)?(?:last|end\\b|you\\s+have|within|\\d+\\s*(?:sts?|stitches?)\\s+rem)', 'i');
+  // "3tr cl", "4dc cluster" - n posts closed into one stitch, over one place
+  var R_CLUSTER = new RegExp('^(?:(\\d+)\\s*)?(' + STITCH_ALT + ')\\s*(?:cl|clu|cluster)\\b', 'i');
+  // "miss 3tr", "skip 2dc" - R_ST_N's `(\d+)\b` cannot match when the count is
+  // glued to a stitch name (a digit and a letter are both word characters), so
+  // "miss 3tr" was reading as ONE missed stitch instead of three, and every
+  // granny round built on it repeated three times too often.
+  var R_ST_N_UNIT = new RegExp('^(' + STITCH_ALT + ')\\s+(\\d+)\\s*(?:' + STITCH_ALT +
+    '|sts?|stitches?)?(?![a-z0-9])', 'i');
+  // "3 dc in next sc", "7 dc in ch-5 sp", "5dc in next", "3 hdc in last st"
+  var R_N_IN_ONE = new RegExp('^(\\d+)\\s*(' + STITCH_ALT + ')\\s*(?:sts?|stitches?)?\\s+(?:in|into)\\s+', 'i');
+  var IN_ONE_TARGET_RE = new RegExp('^(?:the\\s+|a\\s+|any\\s+|one\\s+)?' +
+    '(?:next|same|this|that|last|first|corner|centre|center|middle|' +
+    'ch(?:ain)?\\s*-?\\s*\\d|\\d+\\s*-?\\s*ch(?:ain)?\\s*-?\\s*(?:sp|space)|' +
+    'sp\\b|space|ring|circle|loop|lp\\b|st\\b|stitch|arch|gap)', 'i');
+  // The group / stitch goes into ONE place: "(3tr, 2ch, 3tr) in next 2ch-sp"
+  var GROUP_IN_ONE_RE = /^[\s,;]*(?:all\s+)?(?:in|into)\s+(?:the\s+|a\s+|any\s+)?(?:next|same|this|that|last|first|corner|centre|center|each\s+corner|ch(?:ain)?\s*-?\s*\d+\s*-?\s*(?:sp|space)|\d+\s*-?\s*ch(?:ain)?\s*-?\s*(?:sp|space)|ch\s*-?\s*sp|sp\b|space\b)/i;
+  var GROUP_IN_EACH_RE = /^[\s,;]*(?:all\s+)?(?:in|into)\s+(?:each|every)\b/i;
+  // How many positions of the round below a named chain space covers.
+  var CH_SP_WIDTH_RE = /(?:ch(?:ain)?\s*-?\s*(\d+)|(\d+)\s*-?\s*ch(?:ain)?)\s*-?\s*(?:sp|space)/i;
+  // Connectives that only join one instruction fragment to the next.
+  var SEG_LEAD_RE = /^(?:ending\s+with|ending|end\s+with|finishing\s+with|then|also|finally|now|next|followed\s+by|working|work\s+in|and\s+then)\s+/i;
+  // A fragment with no stitch abbreviation in it at all is commentary, not an
+  // instruction the expander has failed to read ("in next 2ch-sp", "3 per
+  // side", "end at **", "above the dc of Rnd 4").
+  var SEG_STITCHY_RE = new RegExp('(?:^|[^a-z])(?:' + STITCH_ALT + ')(?![a-z])', 'i');
+  // Positioning moves and printed asides that DO name a stitch, so the plain
+  // branches would otherwise read them as work: "Sl st across sts to next
+  // 2ch-sp" travels to the start of the round, "12 x 3tr groups" is the total
+  // the leaflet prints, "(counts as 1 tr)" describes the chain before it.
+  var SEG_MOVE_RE = [
+    /^(?:sl\s*st|slst|ss)\s*(?:es)?\s+(?:across|round|around|along)\b/i,
+    /^(?:sl\s*st|slst|ss)\s*(?:es)?\s+(?:in|into|to)\s+(?:the\s+)?(?:join|top|first|beg|corner|centre|center|marker|form)/i,
+    /^(?:sl\s*st|slst|ss)\s*(?:es)?\s+to\s+/i,
+    /^counts?\s+as\b/i,
+    /^(?:does|do|don'?t)\s+not\s+count\b/i,
+    /^\d+\s*[x×]\s*\d*\s*[a-z]*\s*groups?\b/i,
+    /^\d+\s*per\s/i
+  ];
+  var SEG_COMMENT_RE = new RegExp('^(?:' + [
+    '(?:all\\s+)?in(?:to)?\\s+', 'at\\s+', 'to\\s+', 'above\\b', 'below\\b', 'behind\\b',
+    'between\\b', 'through\\b', 'around\\b', 'across\\b', 'over\\b', 'from\\b',
+    'rep(?:eat)?\\b', 'end(?:ing)?\\b', 'join\\w*\\b', 'counts?\\s+as\\b',
+    '(?:does\\s+not|dont|don\'t)\\s+count\\b', 'sl\\s*st\\s+across\\b', 'ss\\s+across\\b',
+    'slst\\s+across\\b', '(?:sl\\s*st|ss|slst)\\s+(?:to|in(?:to)?)\\s+(?:join|top|first|beg|the\\s+top)',
+    'one\\s+side\\b', 'ch(?:ain)?\\s*-?\\s*\\d+\\s*-?\\s*(?:sp|space)', '\\*+\\s*$',
+    '\\d+\\s*(?:per|x)\\b', 'same\\b', 'corner\\b', 'sp\\b', 'space\\b', 'side\\b'
+  ].join('|') + ')', 'i');
+
+  function chSpWidth(s) {
+    var m = CH_SP_WIDTH_RE.exec(s);
+    if (!m) return 0;
+    var n = num(m[1] || m[2]);
+    return (n && n > 0 && n < 30) ? n : 0;
+  }
+
+  var WORD_N = { twice: 2, thrice: 3, two: 2, three: 3, four: 4, five: 5,
+    six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12 };
+  function wordNum(s) {
+    if (s === null || s === undefined) return null;
+    var t = String(s).toLowerCase().trim();
+    if (WORD_N[t] !== undefined) return WORD_N[t];
+    return num(t);
+  }
+
+  // The stitch-emitting twin of parseSegment(). Same branches, same order,
+  // plus the longhand/lace branches above when `ctx` is supplied.
   // -> { list, c } | { fill:{list,c} } | { abs:list } | null
-  function expandSegment(seg) {
+  function expandSegment(seg, ctx, next) {
     var s = seg.trim().replace(/\s+/g, ' ');
     if (!s) return { list: [], c: 0 };
+    var rich = !!ctx;
+    var uk = rich && ctx.uk;
+    var nx = String(next == null ? '' : next).trim();
+    // A repeat marker the scanner could not pair up (the closing `*` is on a
+    // printed line the column extractor never joined): "*Dcfp around each".
+    if (rich) { s = s.replace(/^\*+\s*/, '').replace(/\s*\*+$/, ''); if (!s) return { list: [], c: 0 }; }
 
-    var i, m, st;
+    var i, m, st, lead, n, rest;
+
+    // A chain: a turning/foundation chain before the row's first stitch (and
+    // one parked in front of a "turn") makes no ring position; a chain worked
+    // BETWEEN stitches is a space, as wide as the stitches it bridges and no
+    // taller than the fabric it spans (01 §1.2).
+    if (rich) {
+      m = R_CHAIN_MAKE.exec(s);
+      if (m) {
+        n = num(m[1] || m[2]);
+        ctx.hadChain = true;
+        if (!(n > 0)) return { list: [], c: 0 };
+        var bridges = ctx.produced || /^(?:skip|miss|sk)\b/i.test(nx);
+        if (!bridges || /^turn\b/i.test(nx)) return { list: [], c: 0 };
+        return { list: runOf('ch', 0, n), c: 0 };
+      }
+      for (i = 0; i < SEG_MOVE_RE.length; i++) {
+        if (SEG_MOVE_RE[i].test(s)) return { list: [], c: 0 };
+      }
+    }
+
     for (i = 0; i < ZERO_RES.length; i++) if (ZERO_RES[i].test(s)) return { list: [], c: 0 };
     if (WORK_EVEN_RE.test(s)) return { fill: { list: runOf('sc', 1, 1), c: 1 } };
 
-    m = MR_RE1.exec(s); if (m) return { abs: mrList(s, num(m[1])) };
-    m = MR_RE2.exec(s); if (m) return { abs: mrList(s, num(m[1])) };
+    // "8 sc into the ring": the whole row when it opens the piece, but only
+    // `n` more stitches when the row has already made some ("3ch, 2tr in
+    // ring, 2ch, (3tr, 2ch) five times in ring" is 18 tr, not 2).
+    var midRing = rich && ctx.produced;
+    m = MR_RE1.exec(s);
+    if (m) return midRing ? { list: mrList(s, num(m[1]), uk), c: 0 } : { abs: mrList(s, num(m[1]), uk) };
+    m = MR_RE2.exec(s);
+    if (m) return midRing ? { list: mrList(s, num(m[1]), uk), c: 0 } : { abs: mrList(s, num(m[1]), uk) };
 
     s = s.replace(PREFIX_RE, '');
+    if (rich) s = s.replace(SEG_LEAD_RE, '');
     for (i = 0; i < ZERO_RES.length; i++) if (ZERO_RES[i].test(s)) return { list: [], c: 0 };
-    m = MR_RE1.exec(s); if (m) return { abs: mrList(s, num(m[1])) };
+    m = MR_RE1.exec(s);
+    if (m) return midRing ? { list: mrList(s, num(m[1]), uk), c: 0 } : { abs: mrList(s, num(m[1]), uk) };
+
+    if (rich) {
+      // "sc next 2 sts tog" / "sc in next 3 sts together" -> one decrease
+      m = R_TOG_LONG.exec(s);
+      if (m) {
+        st = stitchTok(m[1], uk); if (!st) return null;
+        n = num(m[2]);
+        if (n >= 2) return { list: [decCell(st)], c: n };
+      }
+      // "Dcfp around each of next 4 sts"
+      m = R_NEXT_N2.exec(s);
+      if (m) {
+        st = stitchTok(m[2], uk); if (!st) return null;
+        lead = m[1] ? num(m[1]) : 1;
+        n = num(m[3]);
+        if (lead >= 2 && st.p === 1 && st.c === 1) {
+          var many = [];
+          for (i = 0; i < n; i++) many = many.concat(incRun(st, lead));
+          return { list: many, c: n * st.c };
+        }
+        return { list: emit(st, n * lead), c: n * st.c };
+      }
+      // "sc twice in next st" / "hdc 3 times in the same st"
+      m = R_TIMES_IN.exec(s);
+      if (m) {
+        st = stitchTok(m[1], uk); if (!st) return null;
+        n = wordNum(m[2]);
+        if (n >= 2) return { list: incRun(st, n), c: st.c };
+      }
+    }
 
     m = R_NEXT_N.exec(s);
     if (m) {
-      st = stitchTok(m[2]); if (!st) return null;
-      var lead = m[1] ? num(m[1]) : 1;
-      var n = num(m[3]);
+      st = stitchTok(m[2], uk); if (!st) return null;
+      lead = m[1] ? num(m[1]) : 1;
+      n = num(m[3]);
+      if (rich && lead >= 2 && st.p === 1 && st.c === 1) {
+        var runs = [];
+        for (i = 0; i < n; i++) runs = runs.concat(incRun(st, lead));
+        return { list: runs, c: n * st.c };
+      }
       return { list: emit(st, n * lead), c: n * st.c };
     }
     m = R_FROM_HOOK.exec(s);
-    if (m) { st = stitchTok(m[1]); return st ? { list: emit(st, 1), c: 0 } : null; }
+    if (m) { st = stitchTok(m[1], uk); return st ? { list: emit(st, 1), c: 0 } : null; }
 
     m = R_EACH.exec(s);
     if (m) {
-      st = stitchTok(m[2]); if (!st) return null;
+      st = stitchTok(m[2], uk); if (!st) return null;
       var lead2 = m[1] ? num(m[1]) : 1;
-      return { fill: { list: emit(st, lead2), c: st.c } };
+      // "3 dc in each ch-2 sp around": each repetition eats the whole 2-chain
+      // space, not one position.
+      var eachC = (rich ? chSpWidth(s) : 0) || st.c;
+      if (rich && lead2 >= 2 && st.p === 1 && st.c === 1) {
+        return { fill: { list: incRun(st, lead2), c: eachC } };
+      }
+      return { fill: { list: emit(st, lead2), c: eachC } };
+    }
+    if (rich) {
+      m = R_EACH_AROUND.exec(s);
+      if (m) {
+        st = stitchTok(m[2], uk);
+        if (st) {
+          var la = m[1] ? num(m[1]) : 1;
+          return { fill: { list: la >= 2 && st.p === 1 && st.c === 1 ? incRun(st, la) : emit(st, la),
+            c: chSpWidth(s) || st.c } };
+        }
+      }
     }
     m = R_AROUND.exec(s);
-    if (m) { st = stitchTok(m[1]); return st ? { fill: { list: emit(st, 1), c: st.c } } : null; }
+    if (m) { st = stitchTok(m[1], uk); return st ? { fill: { list: emit(st, 1), c: st.c } } : null; }
+
+    if (rich) {
+      // "hdc to last st" / "Hdc until you have 2 sts remaining" - work on to
+      // the tail the rest of the row spells out.
+      m = R_TO_LAST.exec(s);
+      if (m) {
+        st = stitchTok(m[1], uk);
+        if (st) return { fill: { list: emit(st, 1), c: st.c } };
+      }
+      // "3tr cl in next sp" - n posts closed into one stitch
+      m = R_CLUSTER.exec(s);
+      if (m) {
+        st = stitchTok(m[2], uk);
+        if (st) return { list: [cell('bbl', st.h, 1)], c: 1 };
+      }
+      // "3 dc in next sc", "7 dc in ch-5 sp", "2 hdc in first st" - n stitches
+      // into ONE position of the round below: an increase of n.
+      m = R_N_IN_ONE.exec(s);
+      if (m) {
+        rest = s.slice(m[0].length);
+        if (IN_ONE_TARGET_RE.test(rest)) {
+          st = stitchTok(m[2], uk);
+          if (st) {
+            n = num(m[1]);
+            return { list: incRun(st, n), c: (chSpWidth(rest) || st.c) };
+          }
+        }
+      }
+    }
 
     m = R_N_IN_NEXT.exec(s);
-    if (m) { st = stitchTok(m[2]); return st ? { list: emit(st, num(m[1])), c: st.c } : null; }
+    if (m) {
+      st = stitchTok(m[2], uk); if (!st) return null;
+      n = num(m[1]);
+      return { list: rich ? incRun(st, n) : emit(st, n), c: st.c };
+    }
 
     m = R_N_ST.exec(s);
-    if (m) { st = stitchTok(m[2]); return st ? { list: emit(st, num(m[1])), c: num(m[1]) * st.c } : null; }
+    if (m) { st = stitchTok(m[2], uk); return st ? { list: emit(st, num(m[1])), c: num(m[1]) * st.c } : null; }
 
     m = R_ST_X.exec(s);
-    if (m) { st = stitchTok(m[1]); return st ? { list: emit(st, num(m[2])), c: num(m[2]) * st.c } : null; }
+    if (m) { st = stitchTok(m[1], uk); return st ? { list: emit(st, num(m[2])), c: num(m[2]) * st.c } : null; }
 
     m = R_ST_N.exec(s);
-    if (m) { st = stitchTok(m[1]); return st ? { list: emit(st, num(m[2])), c: num(m[2]) * st.c } : null; }
+    if (m) { st = stitchTok(m[1], uk); return st ? { list: emit(st, num(m[2])), c: num(m[2]) * st.c } : null; }
+
+    if (rich) {
+      m = R_ST_N_UNIT.exec(s);
+      if (m) {
+        st = stitchTok(m[1], uk);
+        if (st) return { list: emit(st, num(m[2])), c: num(m[2]) * st.c };
+      }
+    }
 
     m = R_ST.exec(s);
-    if (m) { st = stitchTok(m[1]); return st ? { list: emit(st, 1), c: st.c } : null; }
+    if (m) { st = stitchTok(m[1], uk); return st ? { list: emit(st, 1), c: st.c } : null; }
+
+    // Commentary: a fragment that names no stitch at all, or one of the
+    // fixed connective openings, costs nothing rather than failing the row.
+    if (rich && (!SEG_STITCHY_RE.test(s) || SEG_COMMENT_RE.test(s))) return { list: [], c: 0 };
 
     return null;
   }
 
   // The stitch-emitting twin of sumSegments().
-  function expandSegments(list) {
+  // A `skip`/`miss` of k positions immediately followed by ONE stitch that
+  // takes one more is a decrease in disguise ("skip next st, sc in next" eats
+  // two and makes one) - unless a chain space has just bridged the gap, in
+  // which case it is a mesh and nothing has decreased.
+  function expandSegments(list, ctx) {
     var out = [], c = 0, fill = null;
+    var pendSkip = 0, lastWasCh = false;
     for (var i = 0; i < list.length; i++) {
-      var r = expandSegment(list[i]);
+      var r = expandSegment(list[i], ctx, list[i + 1]);
       if (!r) return null;
-      if (r.abs !== undefined) return { abs: r.abs };
-      if (r.fill) { if (fill) return null; fill = r.fill; out.push(FILL_MARK); continue; }
+      if (r.abs !== undefined) {
+        if (ctx && r.abs.length) ctx.produced = true;
+        return { abs: r.abs };
+      }
+      if (r.fill) {
+        if (fill) return null;
+        fill = r.fill; out.push(FILL_MARK);
+        if (ctx) ctx.produced = true;
+        pendSkip = 0; lastWasCh = false;
+        continue;
+      }
+      if (ctx) {
+        if (r.list.length === 0 && r.c > 0) { pendSkip += r.c; c += r.c; continue; }
+        if (pendSkip > 0 && !lastWasCh && !ctx.hadChain && r.list.length === 1 && r.c === 1 &&
+            r.list[0].t !== 'ch' && r.list[0].t !== 'inc') {
+          out.push(cell('dec', r.list[0].h, r.list[0].w));
+          c += r.c; pendSkip = 0; ctx.produced = true;
+          continue;
+        }
+        pendSkip = 0;
+        if (r.list.length) {
+          var hasReal = false;
+          for (var k = 0; k < r.list.length; k++) if (r.list[k].t !== 'ch') hasReal = true;
+          lastWasCh = r.list[r.list.length - 1].t === 'ch';
+          if (hasReal) ctx.produced = true;
+        }
+      }
       out = out.concat(r.list); c += r.c;
     }
     return { list: out, c: c, fill: fill };
@@ -2786,7 +3449,7 @@
   }
 
   function prefixColorFor(items, i, ctx) {
-    if (i <= 0) return null;
+    if (i <= 0 || !ctx || !ctx.legend) return null;
     var before = items[i - 1];
     if (!before || before.kind !== 'text') return null;
     var m = PREFIX_TAIL_RE.exec(before.text);
@@ -2794,15 +3457,170 @@
     return resolveColor(m[1], ctx);
   }
 
+  // The cell to pad a short row with: the row's own dominant stitch, never a
+  // hard-coded sc (03 #7 - a 98-stitch dc row was reported at sc height).
+  function padCell(list) {
+    var counts = {}, i, e, key, best = null, bestN = -1;
+    for (i = 0; i < list.length; i++) {
+      e = list[i];
+      if (e === FILL_MARK || e.t === 'ch' || e.h === H_PENDING) continue;
+      key = e.t + '|' + e.h;
+      counts[key] = counts[key] || { n: 0, t: e.t, h: e.h, w: e.w };
+      counts[key].n += 1;
+    }
+    Object.keys(counts).forEach(function (k) {
+      var v = counts[k];
+      if (v.n > bestN || (v.n === bestN && v.h > best.h)) { bestN = v.n; best = v; }
+    });
+    if (!best) return cell('sc', 1, 1);
+    var t = best.t;
+    if (t === 'inc' || t === 'inc+' || t === 'dec') {
+      t = 'sc';
+      for (var j = 0; j < STITCH_H.length; j++) {
+        if (STITCH_H[j][2] === best.h) { t = STITCH_H[j][1]; break; }
+      }
+    }
+    return cell(t, best.h, t === 'sl' ? W_SL : 1);
+  }
+
+  function padRun(list, n) {
+    var pc = padCell(list), out = [], i;
+    for (i = 0; i < n; i++) out.push({ t: pc.t, c: null, h: pc.h, w: pc.w });
+    return out;
+  }
+
+  // "3. Rnd: ..." / "12. Round - ..." - a bare-numeral marker leaves the
+  // keyword standing in front of the instruction, and every UK/translated
+  // pattern that numbers its rounds this way then failed to evaluate at all
+  // (03 #12). Strip it wherever a marker has just come off the front.
+  var ROW_KEYWORD_RE = /^\s*(?:rnds?|rounds?|rows?)\s*\d*\s*(?:\(\s*(?:ws|rs|wrong\s+side|right\s+side)\s*\))?\s*[:.)–-]\s*/i;
+  function stripRowKeyword(s) {
+    return String(s == null ? '' : s).replace(ROW_KEYWORD_RE, '');
+  }
+
+  // Pattern-wide text repairs that only the expander applies.
+  //   Dcfp/Dcbp   Yarnspirations writes the post stitches back to front
+  //   3ch (counts as 1 tr)   a turning chain that IS a stitch
+  function richNormalise(s) {
+    return s
+      .replace(/\bdc(fp|bp)\b/gi, function (all, w) { return w.toLowerCase() + 'dc'; })
+      .replace(/\b(?:sc|hdc|tr)(fp|bp)\b/gi, function (all, w) {
+        return w.toLowerCase() + all.slice(0, all.length - 2);
+      })
+      .replace(/\binvisible\s+dec(?:rease)?\b/gi, 'invdec')
+      .replace(/\binv(?:isible)?\s+dec(?:rease)?\b/gi, 'invdec')
+      .replace(/(\d+)\s*ch(?:ain)?s?\s*\(\s*counts?\s+as\s+(\d+)?\s*(sc|hdc|dc|htr|dtr|tr)\b[^)]*\)/gi,
+        function (all, ch, n, st) { return (n || '1') + ' ' + st; });
+  }
+
+  // One bracket group / comma run, expanded. Recursive, so a granny corner
+  // inside a starred repeat inside a row all come out in the right order.
+  // -> { list, c, fill } | null   (list may hold one FILL_MARK)
+  function expandBody(s, ctx, items) {
+    items = items || scanItems(s, !!ctx);
+    if (!items.length) return null;
+    var list = [], consumed = 0, fill = null;
+    var i, k;
+    for (i = 0; i < items.length; i++) {
+      var it = items[i];
+      if (it.kind === 'text') {
+        var r = expandSegments(splitSegments(it.text), ctx);
+        if (!r) return null;
+        if (r.abs !== undefined) return { list: r.abs, c: 0, fill: null, abs: true };
+        if (r.fill) { if (fill) return null; fill = r.fill; }
+        list = list.concat(r.list); consumed += r.c;
+        continue;
+      }
+      var g = ctx ? expandBody(it.text, ctx) : expandSegments(splitSegments(it.text), ctx);
+      if (!g || g.abs || g.fill) {
+        if (it.mult === 1 && !it.filled && (!g || !g.fill)) continue;
+        return null;
+      }
+      var colr = prefixColorFor(items, i, ctx);
+      var glist = colr ? paint(g.list, colr) : g.list;
+      var gc = g.c;
+      // "(3tr, 2ch, 3tr) in next 2ch-sp" / "(sc, ch 2, sc) all in ch-3 sp":
+      // the whole group lands in ONE place, so it is one increase of n and it
+      // eats only the space it is worked into.
+      var after = (items[i + 1] && items[i + 1].kind === 'text') ? items[i + 1].text : '';
+      if (ctx && after && GROUP_IN_ONE_RE.test(after) && countable(glist) >= 2) {
+        glist = asIncGroup(glist);
+        gc = chSpWidth(after) || 1;
+      }
+      if (it.filled) {
+        if (fill) return null;
+        fill = { list: glist, c: gc };
+        list.push(FILL_MARK);
+      } else {
+        for (k = 0; k < it.mult; k++) list = list.concat(cloneList(glist));
+        consumed += gc * it.mult;
+      }
+    }
+    return { list: list, c: consumed, fill: fill };
+  }
+
+  // "* UNIT ; rep from * around" / "* HEAD ** TAIL ; rep from * around, end at
+  // **" / "* UNIT ; rep from * 3 times more". Returns the pieces, or null when
+  // the line does not use the form.
+  var REP_FROM_RE = /\brep(?:eat)?\s+from\s*\*+/i;
+  // The FIRST lone `*` before `pos` - `**` is a second marker ("end at **"),
+  // never the start of the repeat.
+  function firstLoneStar(s, pos) {
+    var i = 0;
+    while (i < pos) {
+      var at = s.indexOf('*', i);
+      if (at < 0 || at >= pos) return -1;
+      if (s.charAt(at + 1) === '*') { i = at + 2; while (s.charAt(i) === '*') i++; continue; }
+      if (s.charAt(at - 1) === '*') { i = at + 1; continue; }
+      return at;
+    }
+    return -1;
+  }
+
+  function starRepeat(s) {
+    var rf = REP_FROM_RE.exec(s);
+    if (!rf) return null;
+    var star = firstLoneStar(s, rf.index);
+    if (star < 0) return null;
+    var unit = s.slice(star + 1, rf.index).replace(/[\s,;.]+$/, '');
+    if (!unit.trim()) return null;
+    var tail = s.slice(rf.index + rf[0].length);
+    var endAt = /\bend(?:ing)?\s*(?:at|with)?\s*\*\*/i.test(tail) && unit.indexOf('**') >= 0;
+    var head = unit, post = '';
+    if (unit.indexOf('**') >= 0) {
+      var cut = unit.indexOf('**');
+      head = unit.slice(0, cut).replace(/[\s,;.]+$/, '');
+      post = unit.slice(cut + 2).replace(/^[\s,;.]+/, '');
+    }
+    var times = null;
+    var tm = /^[\s,]*(?:to\s+(?:the\s+)?end|around|across|to\s+next\s+corner)\b/i.exec(tail);
+    if (!tm) {
+      var nm = /^[\s,]*(\d+)\s*(more\s+)?times?(\s+more)?\b/i.exec(tail) ||
+        /^[\s,]*(twice|three|four|five|six|seven|eight|nine|ten)\s*(more\s+)?times?(\s+more)?\b/i.exec(tail);
+      if (nm) {
+        times = wordNum(nm[1]);
+        // "2 more times" and "2 times more" both mean three in all
+        if (times !== null && (nm[2] || nm[3])) times += 1;
+      }
+    }
+    // everything the tail still says after the repeat clause ("ending with
+    // miss 3tr, sl st in top of beg 3ch")
+    var rest = tail.replace(/^[\s,]*(?:to\s+(?:the\s+)?end|around|across|to\s+next\s+corner|(?:\d+|twice|three|four|five|six|seven|eight|nine|ten)\s*(?:more\s+)?times?)\b/i, '');
+    rest = rest.replace(/^[\s,;.]*(?:end(?:ing)?\s*(?:at|with)?\s*\*+\s*[,;.]?)/i, '');
+    return { before: s.slice(0, star), head: head, post: post, endAt: endAt,
+      times: times, rest: rest };
+  }
+
   // The stitch-emitting twin of evaluate(). Returns a list or null.
   function expandInstruction(instruction, prevCount, ctx) {
     if (instruction == null) return null;
     var prev = (typeof prevCount === 'number' && isFinite(prevCount)) ? prevCount : null;
+    var rich = !!ctx;
     var s = normDashes(normUnicode(instruction));
     s = fixTypos(s);
 
     var mk = detectMarker(s.trim());
-    if (mk) s = mk.rest;
+    if (mk) s = stripRowKeyword(mk.rest);
     s = s.toLowerCase().trim();
     if (!s) return null;
 
@@ -2813,84 +3631,131 @@
       if (rcName) { ctx.rowColor = rcName; s = s.slice(rc[0].length); }
     }
 
-    if (prev !== null && OPEN_FILL_RE.test(s)) return runOf('sc', 1, prev);
+    if (prev !== null && (rich ? OPEN_FILL_VAGUE_RE : OPEN_FILL_RE).test(s)) {
+      return runOf('sc', 1, prev);
+    }
+    if (rich) { s = richNormalise(s); ctx.produced = false; ctx.hadChain = false; }
 
+    var out = rich ? expandRich(s, prev, ctx) : expandPlainBody(s, prev, ctx);
+    if (out === null && rich && prev !== null && OPEN_FILL_RE.test(s)) {
+      return runOf('sc', 1, prev);
+    }
+    return out;
+  }
+
+  // The starred-repeat / fill resolution, shared by both readings.
+  function resolveFill(list, fill, consumed, prev) {
+    if (prev == null || !fill || fill.c <= 0) return null;
+    var remaining = prev - consumed;
+    if (remaining < 0) return null;
+    var whole = Math.floor(remaining / fill.c);
+    var left = remaining - whole * fill.c;
+    if (whole * Math.max(1, fill.list.length) + left > MAX_STITCHES) return null;
+    var rep = [], k;
+    for (k = 0; k < whole; k++) rep = rep.concat(cloneList(fill.list));
+    rep = rep.concat(padRun(fill.list.length ? fill.list : list, left));
+    return spliceMark(list, rep);
+  }
+
+  function expandPlainBody(s, prev, ctx) {
     var repAround = /\b(?:rep(?:eat)?)\s+(?:around|across|to\s+end)\b/i.exec(s);
     var tailFill = false;
     if (repAround) { s = s.slice(0, repAround.index); tailFill = true; }
 
-    var items = scanItems(s);
-    if (!items.length) return null;
+    var body = expandBody(s, ctx);
+    if (!body) return null;
+    if (body.abs) return body.list;
 
-    var list = [], consumed = 0, fill = null, filledGroup = null;
     var k;
-
-    for (var i = 0; i < items.length; i++) {
-      var it = items[i];
-      if (it.kind === 'text') {
-        var r = expandSegments(splitSegments(it.text));
-        if (!r) return null;
-        if (r.abs !== undefined) return r.abs;
-        if (r.fill) { if (fill) return null; fill = r.fill; }
-        list = list.concat(r.list); consumed += r.c;
-      } else {
-        var g = expandSegments(splitSegments(it.text));
-        if (!g || g.abs !== undefined || g.fill) {
-          if (it.mult === 1 && !it.filled && (!g || !g.fill)) continue;
-          return null;
-        }
-        var colr = prefixColorFor(items, i, ctx);
-        var glist = colr ? paint(g.list, colr) : g.list;
-        if (it.filled) {
-          if (filledGroup) return null;
-          filledGroup = { list: glist, c: g.c };
-          list.push(FILL_MARK);
-        } else {
-          for (k = 0; k < it.mult; k++) list = list.concat(cloneList(glist));
-          consumed += g.c * it.mult;
-        }
-      }
-    }
-
-    if (filledGroup) {
-      var rest = (prev == null) ? null : prev - consumed;
-      if (rest == null || filledGroup.c <= 0) return null;
-      var groups = Math.floor(rest / filledGroup.c);
-      var leftover = rest - groups * filledGroup.c;
-      if (groups < 0 || leftover < 0) return null;
-      var rep = [];
-      for (k = 0; k < groups; k++) rep = rep.concat(cloneList(filledGroup.list));
-      rep = rep.concat(runOf('sc', 1, leftover));
-      return spliceMark(list, rep);
-    }
-
     if (tailFill) {
-      var plain = stripMarks(list);
-      if (!plain.length && consumed === 0) return null;
-      if (prev == null || consumed <= 0) return null;
-      var groups2 = Math.floor(prev / consumed);
-      var left2 = prev - groups2 * consumed;
-      var out2 = [];
-      for (k = 0; k < groups2; k++) out2 = out2.concat(cloneList(plain));
-      return out2.concat(runOf('sc', 1, left2));
+      var plain = stripMarks(body.list);
+      if (!plain.length && body.c === 0) return null;
+      if (prev == null || body.c <= 0) return null;
+      var groups = Math.floor(prev / body.c);
+      var left = prev - groups * body.c;
+      if (groups * Math.max(1, plain.length) + left > MAX_STITCHES) return null;
+      var out = [];
+      for (k = 0; k < groups; k++) out = out.concat(cloneList(plain));
+      return out.concat(padRun(plain, left));
     }
-
-    if (fill) {
-      if (prev == null) return null;
-      var remaining = prev - consumed;
-      if (remaining < 0) return null;
-      if (fill.c <= 0) return null;
-      var whole = Math.floor(remaining / fill.c);
-      var left = remaining - whole * fill.c;
-      var rep2 = [];
-      for (k = 0; k < whole; k++) rep2 = rep2.concat(cloneList(fill.list));
-      rep2 = rep2.concat(runOf('sc', 1, left));
-      return spliceMark(list, rep2);
-    }
-
-    var plain2 = stripMarks(list);
-    if (!plain2.length && consumed === 0) return null;
+    if (body.fill) return resolveFill(body.list, body.fill, body.c, prev);
+    var plain2 = stripMarks(body.list);
+    if (!plain2.length && body.c === 0) return null;
     return plain2;
+  }
+
+  function expandRich(s, prev, ctx) {
+    var k;
+    // "* ... ; rep from * around, end at **"
+    var sr = starRepeat(s);
+    if (sr) {
+      var pre = sr.before.trim() ? expandBody(sr.before, ctx) : { list: [], c: 0, fill: null };
+      if (!pre || pre.fill || pre.abs) pre = { list: [], c: 0, fill: null };
+      var headB = expandBody(sr.head, ctx);
+      if (!headB || headB.fill || headB.abs) return null;
+      var postB = sr.post.trim() ? expandBody(sr.post, ctx) : { list: [], c: 0, fill: null };
+      if (!postB || postB.fill || postB.abs) postB = { list: [], c: 0, fill: null };
+      var restB = sr.rest.trim() ? expandBody(sr.rest, ctx) : { list: [], c: 0, fill: null };
+      if (!restB || restB.fill || restB.abs) restB = { list: [], c: 0, fill: null };
+
+      var unitC = headB.c + postB.c;
+      var reps = sr.times, spare = 0;
+      if (reps === null) {
+        if (prev == null) return null;
+        var room = prev - pre.c - restB.c;
+        if (room < 0 || unitC <= 0) return null;
+        // "end at **": the last repeat stops before the post-** piece, so the
+        // head runs once more than the tail does.
+        reps = sr.endAt ? Math.round((room + postB.c) / unitC) : Math.floor(room / unitC);
+        if (reps < 1) reps = 1;
+        spare = room - (reps * unitC - (sr.endAt ? postB.c : 0));
+        if (spare < 0) spare = 0;
+      }
+      if (reps * Math.max(1, headB.list.length + postB.list.length) + spare > MAX_STITCHES) return null;
+      var out = pre.list.slice();
+      for (k = 0; k < reps; k++) {
+        out = out.concat(cloneList(headB.list));
+        if (!(sr.endAt && k === reps - 1)) out = out.concat(cloneList(postB.list));
+      }
+      if (spare > 0) out = out.concat(padRun(headB.list, spare));
+      out = out.concat(restB.list);
+      if (!out.length) return null;
+      return out;
+    }
+
+    // "X, Y, repeat around" - and "X, Y, rep from * around" when the opening
+    // `*` never made it through the column extractor, which is the same shape:
+    // the comma list in front is the unit.
+    var repAround = /\b(?:rep(?:eat)?)\s+(?:from\s*\*+\s*)?(?:around|across|to\s+(?:the\s+)?end)\b/i.exec(s);
+    if (repAround) {
+      var headTxt = s.slice(0, repAround.index);
+      var tailTxt = s.slice(repAround.index + repAround[0].length);
+      var hb = expandBody(headTxt, ctx);
+      if (!hb || hb.abs) return null;
+      if (hb.fill) return resolveFill(hb.list, hb.fill, hb.c, prev);
+      var tb = tailTxt.trim() ? expandBody(tailTxt, ctx) : { list: [], c: 0, fill: null };
+      if (!tb || tb.fill || tb.abs) tb = { list: [], c: 0, fill: null };
+      var plain = stripMarks(hb.list);
+      if (!plain.length && hb.c === 0) return null;
+      if (prev == null || hb.c <= 0) return null;
+      var room2 = prev - tb.c;
+      if (room2 < 0) return null;
+      var groups = Math.floor(room2 / hb.c);
+      var left2 = room2 - groups * hb.c;
+      if (groups * Math.max(1, plain.length) + left2 > MAX_STITCHES) return null;
+      var out2 = [];
+      for (k = 0; k < groups; k++) out2 = out2.concat(cloneList(plain));
+      out2 = out2.concat(padRun(plain, left2));
+      return out2.concat(tb.list);
+    }
+
+    var body = expandBody(s, ctx);
+    if (!body) return null;
+    if (body.abs) return body.list;
+    if (body.fill) return resolveFill(body.list, body.fill, body.c, prev);
+    var plain3 = stripMarks(body.list);
+    if (!plain3.length && body.c === 0) return null;
+    return plain3;
   }
 
   // --- row plumbing ------------------------------------------------------
@@ -2923,7 +3788,7 @@
     var rest = t.slice(prefixLen);
     var e = findExplicit(rest);
     if (e && e.start > 0) rest = rest.slice(0, e.start);
-    return rest;
+    return stripRowKeyword(rest);
   }
 
   function newState() {
@@ -2958,13 +3823,18 @@
     });
   }
 
+  // The dominant height of the row, ignoring chain spaces (height 0 by
+  // definition) and the bobbles whose height is still pending. A tie goes to
+  // the taller stitch.
   function dominantHeight(list) {
-    if (!list.length) return 1;
-    var counts = {}, i;
+    var counts = {}, i, any = false;
     for (i = 0; i < list.length; i++) {
-      var h = list[i].h === undefined ? 1 : list[i].h;
-      counts[h] = (counts[h] || 0) + 1;
+      var e = list[i];
+      if (e === FILL_MARK || e.t === 'ch' || e.h === H_PENDING || e.h === undefined) continue;
+      counts[e.h] = (counts[e.h] || 0) + 1;
+      any = true;
     }
+    if (!any) return 1;
     var best = 1, bestN = -1;
     Object.keys(counts).forEach(function (k) {
       var v = counts[k], hv = parseFloat(k);
@@ -2973,12 +3843,155 @@
     return best;
   }
 
+  // Reconcile the expansion with the count the pattern printed. Chain spaces
+  // are ring positions but not stitches, so they are not what the printed
+  // total counts - `target` is matched against the countable entries only, and
+  // any padding is the row's own dominant stitch rather than an sc.
   function fitTo(list, target) {
     if (target === null || target === undefined || !isFinite(target)) return list;
     if (target <= 0) return [];
-    if (list.length > target) return list.slice(0, target);
-    while (list.length < target) list.push({ t: 'sc', c: null, h: 1 });
-    return list;
+    var have = countable(list);
+    if (have === target) return list;
+    if (have < target) return list.concat(padRun(list, target - have));
+    var out = [], n = 0, i;
+    for (i = 0; i < list.length; i++) {
+      if (list[i].t === 'ch') { if (n < target) out.push(list[i]); continue; }
+      if (n >= target) break;
+      out.push(list[i]); n++;
+    }
+    return out;
+  }
+
+  // A bobble / puff / cluster is as tall as whatever it is made of, which the
+  // words almost never say - so it takes the row's dominant height.
+  function settleHeights(list, dom) {
+    var i;
+    for (i = 0; i < list.length; i++) {
+      if (list[i].h === H_PENDING || list[i].h === undefined) list[i].h = dom;
+    }
+  }
+
+  function marksOf(list) {
+    var inc = [], dec = [], i;
+    for (i = 0; i < list.length; i++) {
+      if (list[i].t === 'inc') inc.push(i);
+      else if (list[i].t === 'dec') dec.push(i);
+    }
+    return { inc: inc, dec: dec };
+  }
+
+  function textOf(parsed) {
+    if (typeof parsed === 'string') return parsed;
+    return textLines(parsed).join('\n');
+  }
+
+  // --- resolving a back-reference at expand() time ----------------------
+
+  // "Rows 20-40: rep rows 10-19" where rows 10-19 were themselves a repeat is
+  // real (Yarnspirations stacks them), but a cycle is not, so the chain is
+  // followed only this far and every hop must point at a LOWER row number.
+  var REF_DEPTH_MAX = 4;
+
+  /**
+   * The row `row` points straight at: "Rows 6-46: rep rows 4 and 5" sends row 6
+   * to row 4 and row 7 to row 5, so the parity of a two-row repeat survives.
+   * @returns {number|null}
+   */
+  function refRowOf(line, row) {
+    var refs = line.repeatOf;
+    if (!refs || !refs.length) return null;
+    var from = (typeof line.repeatFrom === 'number' && line.repeatFrom >= 1) ? line.repeatFrom : line.row;
+    if (!(from >= 1) || row < from) return null;
+    var ref = refs[(row - from) % refs.length];
+    return (ref >= 1 && ref < row) ? ref : null;
+  }
+
+  /**
+   * The line whose words row `row` actually works, following a chain of
+   * back-references down to a row that says something.
+   * @returns {Object|null} null when the chain is broken or circular.
+   */
+  function refSource(lines, line, row, depth) {
+    if (!line) return null;
+    var refs = line.repeatOf;
+    if (!refs || !refs.length) return line;
+    if (depth >= REF_DEPTH_MAX) return null;
+    var ref = refRowOf(line, row);
+    if (ref === null) return null;
+    var src = refLineAt(lines, line.section, ref);
+    if (!src || src === line) return null;
+    return refSource(lines, src, ref, depth + 1);
+  }
+
+  /**
+   * A bare "Rep Row 2 until it measures 59"" sentence carries no row number, so
+   * lineFor() finds nothing for row 7 of the blanket. This does - it is how the
+   * store gets an answer for every row it asks about past the last written one.
+   */
+  function repeatLineFor(lines, row) {
+    var i, l, best = null;
+    if (!lines || !lines.length || !(row >= 1)) return null;
+    for (i = 0; i < lines.length; i++) {
+      l = lines[i];
+      if (!l || l.kind !== 'repeat' || !l.repeatOf || !(l.repeatFrom >= 1)) continue;
+      if (row < l.repeatFrom) continue;
+      if (l.repeatTo >= l.repeatFrom && row > l.repeatTo) continue;
+      if (l.section === 0) return l;
+      if (!best) best = l;
+    }
+    return best;
+  }
+
+  // A repeat of one row cannot plausibly do this to the piece. The open-ended
+  // fills inside a granny round are read off the round below, so re-reading the
+  // same round every round compounds the misreading: unguarded, the hex socks
+  // went 133, 365, 1003, 2761, 7592 and the wrap hit the 20,000 cap by row 15.
+  var REF_GROWTH_MAX = 3;
+
+  /**
+   * How many stitches a back-referencing row should end up with. In order:
+   *   1. the count the LINE publishes for this row - the printed total at the
+   *      end of a numbered range, else the delta chain parse() worked out;
+   *   2. the referenced row's own shaping delta added to the count so far,
+   *      which is what keeps a shawl growing one edge when the repeat is a bare
+   *      sentence ("Repeat rows 2 & 3 until it measures 60 cm") that parse()
+   *      could not attach a range of counts to;
+   *   3. the referenced words read against the current count, which is "the
+   *      same as the round below" for the open-ended fills of a granny round;
+   *   4. the sanity ceiling, so a misread fill cannot compound.
+   *
+   * `target` is a number of STITCHES (fitTo ignores chain spaces); `cap` is a
+   * ceiling on the total number of ring POSITIONS, set only in cases 2 and 3,
+   * where no count is known anywhere and "as many stitches as the row below had
+   * positions" would otherwise inflate the row by its own chain spaces every
+   * time it is repeated. Both are null when the expansion speaks for itself.
+   */
+  function refTarget(lines, line, row, srcInstr, prev, raw) {
+    var out = { target: null, cap: null };
+    var c = (line.row >= 1) ? countAt(line, row) : null;
+    if (c !== null && isFinite(c)) { out.target = c; return out; }
+    var ref = refRowOf(line, row);
+    var d = (ref === null) ? null : refDelta(lines, line.section, ref);
+    if (d !== null && prev !== null && prev + d >= 0) { out.target = prev + d; return out; }
+    // A row that only says "work an earlier row again", with no count anywhere
+    // to go by, cannot hold more ring positions than the row below did. Without
+    // this the chain spaces compound: the hex socks grew 22 % a round on
+    // nothing but their own ch-2 corners, and geometrically at that.
+    if (prev !== null && prev > 0) out.cap = prev;
+    var ev = null;
+    try { ev = evaluate(srcInstr, prev); } catch (e) { ev = null; }
+    if (typeof ev === 'number' && isFinite(ev) && ev >= 0) { out.target = ev; return out; }
+    if (prev !== null && prev > 0 && raw && countable(raw) > prev * REF_GROWTH_MAX) out.target = prev;
+    return out;
+  }
+
+  function ukOf(st, parsed) {
+    if (st.uk === undefined) {
+      var d = null;
+      try { d = dialectHints(textOf(parsed)); } catch (e) { d = null; }
+      st.uk = !!(d && d.dialect === 'uk');
+    }
+    return st.uk;
   }
 
   function expand(lines, rowNumber, prevCount, state) {
@@ -2988,13 +4001,15 @@
       st = normState(state, parsed);
     } catch (e) {
       st = normState(state, []);
-      return { stitches: [], color: st.color || null, height: 1, state: st };
+      return { stitches: [], color: st.color || null, height: 1, state: st, inc: [], dec: [] };
     }
 
-    var res = { stitches: [], color: st.color || null, height: 1, state: st };
+    var res = { stitches: [], color: st.color || null, height: 1, state: st, inc: [], dec: [] };
 
     try {
-      var line = lineFor(parsed, rowNumber);
+      // A numbered line wins; failing that, a bare "Rep Row 2 until it measures
+      // 59"" sentence answers for every row after the last written one.
+      var line = lineFor(parsed, rowNumber) || repeatLineFor(parsed, rowNumber);
       if (!line) return res;
 
       // header-adjacent colour lines, once, before the first row we see
@@ -3013,31 +4028,215 @@
 
       var instr = instrOf(line);
       var prev = (typeof prevCount === 'number' && isFinite(prevCount)) ? prevCount : null;
-      var ctx = { legend: st.legend, names: st.names, rowColor: null };
+      var ctx = { legend: st.legend, names: st.names, rowColor: null,
+        uk: ukOf(st, parsed), produced: false };
 
-      var ev = null;
-      try { ev = evaluate(instr, prev); } catch (e2) { ev = null; }
+      // "With black, ch 2, 6 sc" / "Colour change to black, sc in each st" /
+      // "... changing to black in last 2 loops": a colour written on the row
+      // itself sets the row's colour, which is the common amigurumi idiom and
+      // was the one form expand() never read (04 H).
+      applyPhrases(instr, st);
 
-      var target = (line.count === null || line.count === undefined) ? ev : line.count;
+      // "Rnds 4-15: rep Rnd 3": the row's own words say nothing, so the row it
+      // points at is read again HERE, against the count this row starts from,
+      // and every stitch, increase position and per-stitch height comes out of
+      // that reading rather than out of a generic run (03 #6, proposal 9).
+      var src = line.repeatOf ? refSource(parsed, line, rowNumber, 0) : null;
+      var srcInstr = (src && src !== line) ? instrOf(src) : instr;
 
       var list = null;
-      if (ev !== null) {
-        try { list = expandInstruction(instr, prev, ctx); } catch (e3) { list = null; }
-      }
+      try { list = expandInstruction(srcInstr, prev, ctx); } catch (e3) { list = null; }
       if (ctx.rowColor) st.color = ctx.rowColor;
 
+      // The total the pattern PRINTS is the designer's word and wins. A
+      // computed total is only evaluate()'s own reading of the same words, and
+      // a coarser one - it falls back to "same as the round before" on any
+      // open-ended fill, which would crop a granny round back to a plain ring.
+      // So when nothing is printed, the expansion speaks for itself, and
+      // evaluate() is used only to size the generic run if nothing expanded.
+      // A back-reference is the exception: nothing on the line describes what
+      // it makes, so the count it is reconciled against is worked out from the
+      // row it points at - see refTarget().
+      var target = (line.countSource === 'explicit' && line.count !== null &&
+        line.count !== undefined) ? line.count : null;
+      var refCap = null;
+      if (src && src !== line) {
+        var rt = refTarget(parsed, line, rowNumber, srcInstr, prev, list);
+        target = rt.target;
+        refCap = rt.cap;
+      }
       if (list === null) {
+        var ev = null;
+        try { ev = evaluate(srcInstr, prev); } catch (e2) { ev = null; }
+        if (target === null) {
+          target = (line.count === null || line.count === undefined) ? ev : line.count;
+        }
         list = (target === null || target === undefined) ? [] : runOf('x', 1, target);
       }
+      if (list.length > MAX_STITCHES) list = list.slice(0, MAX_STITCHES);
+      // the row's height comes from what was READ, never from the padding
+      var dom = dominantHeight(list);
+      settleHeights(list, dom);
       list = fitTo(list, target);
+      if (refCap !== null && list.length > refCap) list = list.slice(0, refCap);
 
+      var marks = marksOf(list);
       res.color = st.color || null;
-      res.height = dominantHeight(list);
-      res.stitches = list.map(function (e) { return { t: e.t, c: e.c === undefined ? null : e.c }; });
+      res.height = dom;
+      res.inc = marks.inc;
+      res.dec = marks.dec;
+      res.stitches = list.map(function (e) {
+        return { t: e.t, c: e.c === undefined ? null : e.c,
+          h: e.h === undefined || e.h === H_PENDING ? dom : e.h,
+          w: e.w === undefined ? 1 : e.w };
+      });
     } catch (e4) {
       res.stitches = res.stitches || [];
+      res.inc = res.inc || [];
+      res.dec = res.dec || [];
     }
     return res;
+  }
+
+  // =====================================================================
+  // 11. Shape hints: how a piece starts, how it is worked, is it stuffed
+  // =====================================================================
+
+  // How the FIRST round/row casts on. The renderer cannot guess this from the
+  // counts: a 24-stitch ring is a closed magic-ring cap, an open chain ring or
+  // a flat row depending on words alone (01 §1.5-1.6, 03 #13).
+  var MR_WORD_RE = /\b(?:magic\s*(?:ring|circle|loop)|\bmr\b|adjustable\s+ring|magic\s+knot)/i;
+  var MR_N_RE = /(\d+)\s*(?:sc|dc|hdc|tr|sts?|stitches?)?\s*(?:in|into)\s+(?:a\s+|the\s+)?(?:mr\b|magic\s*(?:ring|circle|loop)|ring|circle)/i;
+  var MR_TIGHT_RE = /\b(?:mr|magic\s*ring|magic\s*circle)\s*(?:with\s+)?(\d+)/i;
+  // "ch 2, 6 sc in 2nd ch from hook" - the amigurumi magic ring written out
+  var MR_CH2_RE = /\bch(?:ain)?\s*\d*\s*,?\s*(?:then\s+)?(\d+)\s*(?:sc|dc|hdc|tr)\s*(?:in|into)\s+(?:the\s+)?(?:2nd|second|1st|first)\s+ch/i;
+  // ...and the translated word order: "2 ch, into the first ch: 9 sc"
+  var MR_CH2_ALT_RE = /\b(?:\d+\s*ch(?:ain)?|ch(?:ain)?\s*\d+)\s*[,:;]?\s*(?:in|into)\s+(?:the\s+)?(?:2nd|second|1st|first)\s+ch(?:ain)?\s*(?:from\s+(?:the\s+)?hook)?\s*[,:;]?\s*(\d+)\s*(?:sc|dc|hdc|tr)/i;
+  var RING_JOIN_RE = /\b(?:ch(?:ain)?\s*(\d+)|(\d+)\s*ch(?:ain)?s?)[\s\S]{0,70}?\b(?:join|sl\s*st|slst|ss)\b/i;
+  var RING_WORD_RE = /\b(?:form\s+a\s+(?:ring|circle|loop)|into\s+a\s+(?:ring|circle)|to\s+form\s+a\s+ring|in\s+(?:a\s+)?ring\b|into\s+ring\b|join\s+chain\s+into)/i;
+  var OVAL_RE = /\b(?:down|along|back\s+down|back\s+along|across)\s+(?:the\s+)?(?:opposite|other)\s+side|\b(?:opposite|other)\s+side\s+of\s+(?:the\s+)?(?:ch|chain|foundation)|\bin\s+(?:each|the)\s+ch(?:ain)?\s+(?:across|down|back)\s+(?:the\s+)?(?:other|opposite)/i;
+  var OVAL_TURN_RE = /\b\d+\s*(?:sc|dc|hdc|tr)\s*(?:inc)?\s*(?:\([^)]*\)\s*)?(?:in|into)\s+(?:the\s+)?(?:last|same|final)\s+(?:ch|chain|st)/i;
+  var FROM_HOOK2_RE = /\b(?:2nd|second)\s+ch(?:ain)?\s+from\s+(?:the\s+)?hook/i;
+  var CH_N_LOOSE_RE = /\b(?:ch(?:ain)?\s*(\d+)|(\d+)\s*ch(?:ain)?s?)\b/i;
+  var CH_N_ALL_RE = /\b(?:ch(?:ain)?\s*(\d+)|(\d+)\s*ch(?:ain)?s?)\b/ig;
+
+  // The FOUNDATION chain, not the turning chain: "Rnd 3: ch 1, sc in same st,
+  // ... join with a sl st" opens with a 1-chain that is nobody's foundation, so
+  // take the first chain long enough to be one and only fall back to the first
+  // of any length.
+  function foundationChain(s, min) {
+    var first = 0, m;
+    CH_N_ALL_RE.lastIndex = 0;
+    while ((m = CH_N_ALL_RE.exec(s)) !== null) {
+      var n = num(m[1] || m[2]) || 0;
+      if (!first) first = n;
+      if (n >= min) return n;
+      if (CH_N_ALL_RE.lastIndex > 4000) break;
+    }
+    return first;
+  }
+
+  /**
+   * @param {Array|string} lines  parsed lines or raw pattern text
+   * @returns {{start:('magic-ring'|'chain-ring'|'chain-oval'|'chain-row'|'unknown'),
+   *            chainLen:number, ringCount:number}}
+   */
+  function startHint(lines) {
+    var res = { start: 'unknown', chainLen: 0, ringCount: 0 };
+    var parsed, i, l, txt = [];
+    try { parsed = asParsed(lines); } catch (e) { return res; }
+    // the setup + the first two rows, plus any note/header before them
+    var firstRow = null;
+    for (i = 0; i < parsed.length; i++) {
+      l = parsed[i];
+      if (l.row !== null && l.row >= 1) { firstRow = l; break; }
+    }
+    for (i = 0; i < parsed.length; i++) {
+      l = parsed[i];
+      if (l.row !== null && l.row >= 3) continue;
+      if (firstRow && l.index > firstRow.index + 6) break;
+      txt.push(String(l.text || ''));
+      if (l.notes && l.notes.length) txt.push(l.notes.join(' '));
+    }
+    var s = normDashes(normUnicode(txt.join('\n')));
+    if (!s.trim()) return res;
+    var m;
+
+    // 1. an oval: a chain worked down one side and back up the other
+    if ((OVAL_RE.test(s) || (OVAL_TURN_RE.test(s) && FROM_HOOK2_RE.test(s))) &&
+        CH_N_LOOSE_RE.test(s)) {
+      var ov = foundationChain(s, 4);
+      res.start = 'chain-oval';
+      res.chainLen = Math.max(0, ov - (FROM_HOOK2_RE.test(s) ? 2 : 1));
+      return res;
+    }
+
+    // 2. a magic ring (or the "ch 2, n sc in the 2nd ch" that stands in for it)
+    if (MR_WORD_RE.test(s) || MR_TIGHT_RE.test(s) || MR_CH2_RE.test(s) || MR_CH2_ALT_RE.test(s)) {
+      res.start = 'magic-ring';
+      m = MR_TIGHT_RE.exec(s) || MR_N_RE.exec(s) || MR_CH2_RE.exec(s) || MR_CH2_ALT_RE.exec(s);
+      if (m) res.ringCount = num(m[1]) || 0;
+      return res;
+    }
+
+    // 3. a chain joined into a ring
+    var ringish = RING_JOIN_RE.test(s) || RING_WORD_RE.test(s);
+    if (ringish && CH_N_LOOSE_RE.test(s)) {
+      var cl = foundationChain(s, 3);
+      if (cl >= 3) {
+        res.start = 'chain-ring';
+        res.chainLen = cl;
+        m = MR_N_RE.exec(s);
+        if (m) res.ringCount = num(m[1]) || 0;
+        return res;
+      }
+    }
+
+    // 4. a flat foundation chain
+    if (CH_N_LOOSE_RE.test(s)) {
+      var cn = foundationChain(s, 3);
+      if (cn >= 3) {
+        res.start = 'chain-row';
+        res.chainLen = Math.max(0, FROM_HOOK2_RE.test(s) ? cn - 1 : cn);
+        return res;
+      }
+    }
+    return res;
+  }
+
+  var MODE_RND_RE = '(?:^|[^a-z])(?:rnds?|rounds?)\\.?\\s*\\d';
+  var MODE_ROW_RE = '(?:^|[^a-z])rows?\\.?\\s*\\d';
+  var MODE_R_RE = '(?:^|[^a-z])r\\s?\\d+\\s*[:.)\\-]';
+  var MODE_RND_WORDS = '\\b(?:magic\\s*ring|in\\s+the\\s+round|do\\s+not\\s+turn|join\\s+with|around\\b|spiral)';
+  var MODE_ROW_WORDS = '\\b(?:turn\\b|across\\b|turning\\s+ch)';
+
+  /** @returns {'rounds'|'rows'|null} */
+  function workMode(text) {
+    var s;
+    try { s = normUnicode(textOf(text)).toLowerCase(); } catch (e) { return null; }
+    if (!s) return null;
+    var rnd = countMatches(s, MODE_RND_RE) + countMatches(s, MODE_R_RE);
+    var row = countMatches(s, MODE_ROW_RE);
+    if (rnd > row) return 'rounds';
+    if (row > rnd) return 'rows';
+    var rw = countMatches(s, MODE_RND_WORDS);
+    var ow = countMatches(s, MODE_ROW_WORDS);
+    if (rw > ow) return 'rounds';
+    if (ow > rw) return 'rows';
+    return null;
+  }
+
+  var NO_STUFF_RE = /\b(?:do\s*(?:es)?\s*not\s+stuff|don'?t\s+stuff|no\s+stuffing|without\s+stuffing|leave\s+(?:it\s+)?unstuffed|unstuffed|not\s+stuffed)\b/i;
+  var STUFF_RE = /\b(?:stuff(?:ing|ed|s)?)\b/i;
+
+  /** @returns {true|false|null} - null = the pattern never says. */
+  function stuffingHint(text) {
+    var s;
+    try { s = normUnicode(textOf(text)); } catch (e) { return null; }
+    if (!s) return null;
+    if (NO_STUFF_RE.test(s)) return false;
+    if (STUFF_RE.test(s)) return true;
+    return null;
   }
 
   window.Patterns = {
@@ -3052,7 +4251,10 @@
     evaluate: evaluate,
     colors: colors,
     colorHex: colorHex,
-    expand: expand
+    expand: expand,
+    startHint: startHint,
+    workMode: workMode,
+    stuffingHint: stuffingHint
   };
 
 })();

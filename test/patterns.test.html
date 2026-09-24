@@ -677,19 +677,23 @@ function typesOf(instr, prev) {
     'evaluate ' + want + ', expand ' + got);
 });
 
-assertEqual(typesOf('Inc x 6', 6), 'inc,inc,inc,inc,inc,inc,inc,inc,inc,inc,inc,inc', 'inc yields TWO entries of t:"inc"');
+// Model v2: the SECOND stitch of one increase is 'inc+', so a consumer can
+// tell "one increase of two" from "two separate increases" (3D wave A).
+assertEqual(typesOf('Inc x 6', 6), 'inc,inc+,inc,inc+,inc,inc+,inc,inc+,inc,inc+,inc,inc+', 'inc yields an "inc" plus an "inc+"');
 assertEqual(typesOf('Dec x 6', 12), 'dec,dec,dec,dec,dec,dec', 'dec yields ONE entry of t:"dec"');
-assertEqual(typesOf('(Sc 1, Inc) x 3', 6), 'sc,inc,inc,sc,inc,inc,sc,inc,inc', 'a group multiplier repeats the group stitch by stitch');
+assertEqual(typesOf('(Sc 1, Inc) x 3', 6), 'sc,inc,inc+,sc,inc,inc+,sc,inc,inc+', 'a group multiplier repeats the group stitch by stitch');
 assertEqual(typesOf('Sc 2, Hdc 2, Dc 1, Tr 1', null), 'sc,sc,hdc,hdc,dc,tr', 'stitch kinds are kept');
 assertEqual(typesOf('Sl st 3', null), 'sl,sl,sl', 'slip stitches are t:"sl"');
-assertEqual(typesOf('Inc, sc, repeat around', 10), 'inc,inc,sc,inc,inc,sc,inc,inc,sc,inc,inc,sc,inc,inc,sc', '"repeat around" fills from prevCount');
+assertEqual(typesOf('Inc, sc, repeat around', 10), 'inc,inc+,sc,inc,inc+,sc,inc,inc+,sc,inc,inc+,sc,inc,inc+,sc', '"repeat around" fills from prevCount');
 assertEqual(expandOf('Sc in each st', 7).stitches.length, 7, 'a fill row follows prevCount exactly');
 
-assertEqual(expandOf('Hdc 10', null).height, 1.5, 'height 1.5 for an hdc row');
-assertEqual(expandOf('Dc 8', null).height, 2, 'height 2 for a dc row');
-assertEqual(expandOf('Tr 6', null).height, 2.5, 'height 2.5 for a tr row');
+// Heights are the reference table of docs/brainstorm/3d/01-geometry-truth.md
+// §1.2 (N_flat / 2pi), not the old round numbers.
+assertEqual(expandOf('Hdc 10', null).height, 1.34, 'height 1.34 for an hdc row');
+assertEqual(expandOf('Dc 8', null).height, 2.01, 'height 2.01 for a dc row');
+assertEqual(expandOf('Tr 6', null).height, 2.68, 'height 2.68 for a tr row');
 assertEqual(expandOf('Sc 10', null).height, 1, 'height 1 for an sc row');
-assertEqual(expandOf('Hdc 9, Sc 1', null).height, 1.5, 'height comes from the dominant stitch');
+assertEqual(expandOf('Hdc 9, Sc 1', null).height, 1.34, 'height comes from the dominant stitch');
 
 // unevaluable row + explicit count -> generic stitches
 var vague = P.expand(P.parse('1. Work the fancy wiggle thing all the way round (24)'), 1, null, null);
@@ -1896,6 +1900,590 @@ assertEqual(P.summary(P.parse(midAdvert)).maxRow, 3,
     ['3 dc in next ch-sp, turn'],
     'ocr: ...but a real hyphenated crochet token keeps its hyphen');
 })();
+
+// =======================================================================
+// 3D diagram fidelity, wave A - Model v2 on the parser side
+// =======================================================================
+
+// One row, expanded. `extra` is anything that has to sit above the row
+// (a colour note, a legend, a setup line).
+function ex(instr, prev, extra, state) {
+  var lines = P.parse((extra ? extra + '\n' : '') + '1. ' + instr);
+  return P.expand(lines, 1, prev, state || null);
+}
+function tsOf(r) { return r.stitches.map(function (s) { return s.t; }).join(','); }
+function hsOf(r) { return r.stitches.map(function (s) { return s.h; }).join(','); }
+function wsOf(r) { return r.stitches.map(function (s) { return s.w; }).join(','); }
+/** "n/ct/h/inc/dec" - a compact profile of one expanded row. */
+function profOf(r) {
+  var ct = 0;
+  r.stitches.forEach(function (s) { if (s.t !== 'ch') ct++; });
+  return r.stitches.length + '/' + ct + '/' + r.height +
+    '/[' + r.inc.join(',') + ']/[' + r.dec.join(',') + ']';
+}
+
+// -----------------------------------------------------------------------
+group('wave A 3D: the shape of expand()’s return');
+// -----------------------------------------------------------------------
+
+var shapeRow = ex('(Sc 1, Inc) x 3', 6);
+assertEqual(Object.keys(shapeRow).sort(), ['color', 'dec', 'height', 'inc', 'state', 'stitches'],
+  'expand() returns exactly { stitches, color, height, state, inc, dec }');
+assertEqual(Object.keys(shapeRow.stitches[0]).sort(), ['c', 'h', 't', 'w'],
+  'every produced stitch is exactly { t, c, h, w }');
+assertEqual(shapeRow.inc, [1, 4, 7], 'inc holds the index where each increase STARTS, in order');
+assertEqual(shapeRow.dec, [], 'dec is an empty array when the row has no decrease');
+assertEqual(ex('(Sc 3, Dec) x 6', 30).dec, [3, 7, 11, 15, 19, 23], 'dec holds the index of each decrease, in order');
+assertTrue(P.expand(null, 1, null, null).inc.length === 0 && P.expand(null, 1, null, null).dec.length === 0,
+  'expand(null) still returns empty inc/dec rather than throwing');
+assertEqual(ex('Sew it all together nicely', null).stitches, [], 'a row with nothing to read still expands to nothing');
+
+// -----------------------------------------------------------------------
+group('wave A 3D: per-stitch height and width');
+// -----------------------------------------------------------------------
+
+assertEqual(hsOf(ex('Sc 1, Hdc 1, Dc 1, Tr 1, Dtr 1, Sl st 1', null)),
+  '1,1.34,2.01,2.68,3.3,0.3', 'h per type: sc 1, hdc 1.34, dc 2.01, tr 2.68, dtr 3.3, sl 0.3');
+assertEqual(wsOf(ex('Sc 1, Sl st 1, Dc 1', null)), '1,0.7,1', 'w is 1 everywhere except a slip stitch (0.7)');
+assertEqual(hsOf(ex('Htr 3', null)), '1.34,1.34,1.34', 'htr is an hdc, not a mystery sc (03 #9)');
+assertEqual(hsOf(ex('Trtr 2', null)), '3.3,3.3', 'trtr / ttr stand as tall as a dtr');
+assertEqual(tsOf(ex('Htr 1, Dtr 1', null)), 'hdc,dtr', '...and they keep a sensible t');
+assertEqual(hsOf(ex('Dcfp in next 2 sts (2)', 2)), '2.01,2.01', 'the Yarnspirations spelling "Dcfp" is a dc, not an unreadable token (03 #10)');
+// a dec keeps the height of the stitch it was worked in
+assertEqual(hsOf(ex('Dc2tog 1', null)), '2.01', 'a dc2tog is a "dec" at dc height, not at sc height');
+assertEqual(tsOf(ex('Dc2tog 1', null)), 'dec', '...and its t is "dec"');
+// a bobble is as tall as the row it stands in
+assertEqual(hsOf(ex('Bbl 1, Dc 3', null)), '2.01,2.01,2.01,2.01', 'a bobble takes the row’s dominant height');
+assertEqual(tsOf(ex('Bbl 1, Dc 3', null)), 'bbl,dc,dc,dc', '...and keeps t:"bbl"');
+assertEqual(hsOf(ex('Sc, (Bbl, Slst)x2, Sc', null)), '1,1,0.3,1,0.3,1', 'a bobble in an sc round is 1 tall');
+
+// UK terms: one rung shorter than they read
+var ukText =
+  'This pattern uses UK terminology.\n' +
+  'Rnd 1: 6htr in a magic ring (6)\n' +
+  'Rnd 2: dc in each st (6)\n' +
+  'Rnd 3: tr in each st (6)\n' +
+  'Rnd 4: dtr in each st (6)';
+var ukLines = P.parse(ukText);
+assertEqual(P.dialectHints(ukText).dialect, 'uk', 'the UK sample reads as UK terms');
+assertEqual(P.expand(ukLines, 2, 6, null).height, 1, 'UK dc is 1 tall (it is a US sc)');
+assertEqual(P.expand(ukLines, 3, 6, null).height, 2.01, 'UK tr is 2.01 tall (it is a US dc)');
+assertEqual(P.expand(ukLines, 4, 6, null).height, 2.68, 'UK dtr is 2.68 tall (it is a US tr)');
+assertEqual(P.expand(ukLines, 1, null, null).height, 1.34, 'UK htr is 1.34 either way');
+// the same words in a US pattern stay US
+var usLines = P.parse('This pattern uses US terms and sc and hdc throughout.\nRnd 1: dc in each st (6)');
+assertEqual(P.expand(usLines, 1, 6, null).height, 2.01, 'US dc is 2.01 tall');
+// ...and a caller that knows better can seed the dialect on the state
+assertEqual(P.expand(P.parse('1. dc in each st (6)'), 1, 6, { uk: true }).height, 1,
+  'state.uk seeded by the caller overrides what the part text alone would say');
+assertEqual(P.expand(P.parse('1. dc in each st (6)'), 1, 6, { uk: false }).height, 2.01,
+  '...and state.uk:false keeps US heights');
+
+// -----------------------------------------------------------------------
+group('wave A 3D: chain spaces are ring positions, not stitches');
+// -----------------------------------------------------------------------
+
+assertEqual(tsOf(ex('Ch 2, 6 sc in second chain from hook (6)', null)), 'sc,sc,sc,sc,sc,sc',
+  'a foundation/turning chain before the first stitch makes no ring position');
+assertEqual(tsOf(ex('sc in each st around, ch 1, turn', 6)), 'sc,sc,sc,sc,sc,sc',
+  'nor does a turning chain parked in front of a "turn"');
+var chSp = ex('sc in next st, ch 3, skip 3 sts, sc in next st', 8);
+assertEqual(tsOf(chSp), 'sc,ch,ch,ch,sc', 'a ch-3 that bridges skipped stitches is THREE ch entries');
+assertEqual(hsOf(chSp), '1,0,0,0,1', '...each of height 0');
+assertEqual(wsOf(chSp), '1,1,1,1,1', '...and width 1, so the ring is as wide as what it spans');
+assertEqual(ex('sc in next st, ch 3, skip 3 sts, sc in next st', 8).height, 1,
+  'a chain space never votes on the row height');
+assertEqual(ex('Ch 3, 15 dc in ring; join with a sl st to top of ch-3 - 16 sts', null).height, 2.01,
+  'a 16-stitch dc round is 2.01 tall, not padded down to sc height (03 #7)');
+assertEqual(tsOf(ex('Ch 3, 15 dc in ring; join with a sl st to top of ch-3 - 16 sts', null)).split(',').pop(), 'dc',
+  '...and the padding to the printed total is a dc, not an sc');
+
+// -----------------------------------------------------------------------
+group('wave A 3D: longhand increases and decreases, with their positions');
+// -----------------------------------------------------------------------
+
+assertEqual(profOf(ex('(Sc in next st, 2 sc in next st) around. (18)', 12)), '18/18/1/[1,4,7,10,13,16]/[]',
+  '"2 sc in next st" inside a round-the-round group is an increase at every 3rd stitch');
+assertEqual(profOf(ex('2 sc in each st around. (12)', 6)), '12/12/1/[0,2,4,6,8,10]/[]',
+  '"2 sc in each st around" is six increases');
+assertEqual(tsOf(ex('sc twice in next st, sc in next 2 sts (4)', 3)), 'inc,inc+,sc,sc',
+  '"sc twice in next" is an increase');
+assertEqual(tsOf(ex('3 sc in next st, sc in next 2 sts (5)', 3)), 'inc,inc+,inc+,sc,sc',
+  '"3 sc in next st" is ONE increase of three - inc then two inc+');
+assertEqual(ex('3 sc in next st, sc in next 2 sts (5)', 3).inc, [0],
+  '...so it is one increase SITE, not three');
+assertEqual(tsOf(ex('Sc in next 2 sts, sc next 2 sts tog, sc in next 2 sts (5)', 6)), 'sc,sc,dec,sc,sc',
+  '"sc next 2 sts tog" is one decrease');
+assertEqual(ex('Sc in next 2 sts, sc next 2 sts tog, sc in next 2 sts (5)', 6).dec, [2],
+  '...recorded at its own index');
+assertEqual(tsOf(ex('sc3tog, sc in next 2 sts (3)', 5)), 'dec,sc,sc', 'sc3tog is one decrease');
+assertEqual(tsOf(ex('invisible decrease, sc in next 2 sts (3)', 4)), 'dec,sc,sc',
+  '"invisible decrease" spelled out is one decrease');
+assertEqual(tsOf(ex('inv dec, sc in next 2 sts (3)', 4)), 'dec,sc,sc', '...so is "inv dec"');
+assertEqual(tsOf(ex('dec, sc in next 2 sts (3)', 4)), 'dec,sc,sc', '...and plain "dec"');
+assertEqual(tsOf(ex('skip next st, sc in next, sc in next 2 sts (3)', 5)), 'dec,sc,sc',
+  '"skip next st, sc in next" eats two and makes one: a decrease for geometry');
+assertEqual(tsOf(ex('Inc x6', 6)).split(',').length, 12, '"inc x6" still works');
+assertEqual(profOf(ex('(2 sc, inc) x6 (24)', 18)), '24/24/1/[2,6,10,14,18,22]/[]',
+  'the shorthand dialect is unchanged');
+
+// -----------------------------------------------------------------------
+group('wave A 3D: row markers that used to stop evaluation dead');
+// -----------------------------------------------------------------------
+
+assertEqual(P.evaluate('3. Rnd: (2 sc, inc) x6'), 24, 'evaluate("3. Rnd: (2 sc, inc) x6") is 24, with no prevCount needed (03 #12)');
+assertEqual(P.evaluate('3. Rnd: (2 sc, inc) x6', 18), 24, 'evaluate() reads the "N. Rnd:" marker (03 #12)');
+assertEqual(P.evaluate('(2 sc, inc) x6', 18), 24, '...and the bare instruction still reads');
+assertEqual(P.evaluate('Rnd 3: (2 sc, inc) x6', 18), 24, '...as does "Rnd 3:"');
+assertEqual(P.evaluate('Row 3 (RS): (2 sc, inc) x6', 18), 24, '...and "Row 3 (RS):"');
+var fishRow = P.expand(P.parse('1. Rnd: 2 ch, into the first ch: 9 sc (9)\n2. Rnd: inc x9 (18)\n3. Rnd: (2 sc, inc) x6 (24)'), 3, 18, null);
+assertEqual(fishRow.stitches.length, 24, '"3. Rnd: (2 sc, inc) x6" expands to 24 stitches');
+assertEqual(fishRow.inc, [2, 6, 10, 14, 18, 22], '...with its six increases in the right places');
+assertTrue(fishRow.stitches.every(function (s) { return s.t !== 'x'; }), '...and not one generic "x"');
+
+// -----------------------------------------------------------------------
+group('wave A 3D: UK lace and motif vocabulary expands');
+// -----------------------------------------------------------------------
+
+var granny = ex('(3tr, 2ch, 3tr) in corner sp', 1);
+assertEqual(tsOf(granny), 'inc,inc+,inc+,ch,ch,inc+,inc+,inc+',
+  'a granny corner is ONE increase of six trebles round a 2-chain gap');
+assertEqual(granny.inc, [0], '...so it reports a single increase site');
+assertEqual(granny.height, 2.68, '...at treble height');
+assertEqual(tsOf(ex('3tr in next sp, tr in next 2 sts (5)', 3)), 'inc,inc+,inc+,tr,tr',
+  '"3tr in next sp" is a shell: one increase of three');
+assertEqual(tsOf(ex('5dc in next st, sc in next 2 sts (7)', 3)), 'inc,inc+,inc+,inc+,inc+,sc,sc',
+  '"5dc in next" is a five-stitch shell');
+assertEqual(tsOf(ex('3tr cl in next sp, tr in next 2 sts (3)', 3)), 'bbl,tr,tr',
+  '"3tr cl" is one cluster stitch');
+assertEqual(ex('3tr cl in next sp, tr in next 2 sts (3)', 3).stitches[0].h, 2.68,
+  '...as tall as the trebles it is made of');
+assertEqual(tsOf(ex('dc2tog, dc in next 2 sts (3)', 4)), 'dec,dc,dc', '"dc2tog" as a cluster still reads');
+assertEqual(tsOf(ex('2ch, miss 1 st, 1tr in next', 3)), 'ch,ch,tr',
+  '"2ch, miss 1 st, 1tr in next" is a mesh, not an empty row');
+assertEqual(tsOf(ex('1ch, miss 1', 2)), 'ch', '"1ch, miss 1" is a one-chain gap');
+assertEqual(tsOf(ex('work 12 dc into ring, ss to join', null)),
+  'dc,dc,dc,dc,dc,dc,dc,dc,dc,dc,dc,dc', '"work 12 dc into ring, ss to join" is twelve dc');
+assertEqual(tsOf(ex('3 dc in next st, picot, dc in next st', 2)), 'inc,inc+,inc+,dc',
+  'a picot costs nothing and does not stop the row');
+assertEqual(ex('3 dc in each ch-2 sp around, join', 8).stitches.length, 12,
+  '"3 dc in each ch-2 sp around" fills the round: four 2-chain spaces, three dc in each');
+assertEqual(tsOf(ex('2 dc into the ch-2 sp, ch 2, 2 dc into the ch-2 sp', 4)),
+  'inc,inc+,ch,ch,inc,inc+', '"into the ch-2 sp" anchors a group without stopping the row');
+assertEqual(tsOf(ex('tr in next 2 sts, rep from * around, join', 4)), 'tr,tr,tr,tr',
+  '"rep from * around, join" with no opening * still fills the round');
+
+// a doily-style lace round: shells anchored in chain spaces, chains between
+var doily = ex('*5 tr in next ch-3 sp, ch 3, sc in next ch-3 sp, ch 3; rep from * around; join', 24);
+assertEqual(doily.inc.length, 6, 'a lace round of shells reports one increase site per shell');
+assertEqual(doily.height, 2.68, '...at treble height');
+assertTrue(doily.stitches.length > 24, '...and its ring is wider than the round below');
+assertTrue(doily.stitches.every(function (s) { return s.t !== 'x'; }), '...with no generic stitches left');
+
+// the Persian Tiles granny round, verbatim
+var tilesR3 = ex('ch 1, sc in same sc as joining and next 2 sc, * skip next sc, ' +
+  '(3 dc, ch 3, 3 dc) all in next sc, skip next sc **, sc in next 3 sc; ' +
+  'rep from * around, end at **; join in both lps of first sc', 24);
+assertEqual(tilesR3.inc, [3, 15, 27, 39], 'the Persian Tiles corner round has FOUR corners, evenly spaced');
+assertEqual(tilesR3.stitches.length, 48, '...over 48 ring positions (36 stitches + 4 three-chain corners)');
+assertEqual(tilesR3.height, 2.01, '...at dc height');
+
+// the Stylecraft hexagon round: 6 corners, +18 trebles
+var hexR2 = ex('Sl st across sts to next 2ch-sp, 3ch, (2tr, 2ch, 3tr) in same ch-sp, ' +
+  '*miss 3tr, (3tr, 2ch, 3tr) in next 2ch-sp; rep from * to end, ending with miss 3tr, ' +
+  'sl st in top of beg 3ch. 12 x 3tr groups', 30, 'This pattern uses UK terminology and htr and dtr.');
+assertEqual(hexR2.inc.length, 6, 'the hexagon round has SIX corner increases');
+assertEqual(hexR2.stitches.filter(function (s) { return s.t !== 'ch'; }).length, 36,
+  '...and 36 trebles, which is the printed "12 x 3tr groups"');
+assertEqual(hexR2.height, 2.01, '...at UK treble height (a US dc)');
+
+// the Bernat basketweave post-stitch row
+var bwRow = ex('Ch 3. *Dcfp around each of next 4 sts. Dcbp around each of next 4 sts. ' +
+  'Rep from * to last st. 1 dc in top of turning ch 3. Turn.', 98);
+assertEqual(bwRow.stitches.length, 98, 'a whole fpdc/bpdc basketweave row expands to its 98 stitches');
+assertEqual(bwRow.height, 2.01, '...at dc height, not sc height');
+assertTrue(bwRow.stitches.every(function (s) { return s.t === 'dc'; }), '...and every one of them is a dc');
+
+// -----------------------------------------------------------------------
+group('wave A 3D: rows mode keeps the increases at the edge');
+// -----------------------------------------------------------------------
+
+var edgeEnd = ex('Ch 1 (does not count as st), hdc in first st, hdc to last st, 3 hdc in last st. Turn. <7 sts>', 5);
+assertEqual(profOf(edgeEnd), '7/7/1.34/[4]/[]', 'an increase in the LAST stitch sits at the end of the row');
+var edgeStart = ex('Ch 2, 2 hdc in first st. Hdc until you have 2 sts remaining, hdc2tog. Turn. <7 sts>', 7);
+assertEqual(profOf(edgeStart), '7/7/1.34/[0]/[6]',
+  'an increase in the FIRST stitch sits at index 0, with the decrease at the far end');
+var bothEdges = ex('Ch 1, turn, 2 sc in first st, sc across to last st, 2 sc in last st. (20)', 18);
+assertEqual(bothEdges.inc, [0, 18], 'a shawl that grows at BOTH edges reports both, at the two ends');
+var spine = ex('sc in next 4 sts, 3 dc in centre st, sc in next 4 sts (11)', 9);
+assertEqual(spine.inc, [4], 'a centre spine "3 dc in centre st" is one increase in the middle');
+
+// -----------------------------------------------------------------------
+group('wave A 3D: colour written on the row itself');
+// -----------------------------------------------------------------------
+
+var onRow = P.parse(
+  'Rnd 1: 6 sc in magic ring (6)\n' +
+  'Rnd 2: sc in each st around (6)\n' +
+  'Rnd 5: Colour change to black, sc in each st around (6)\n' +
+  'Rnd 6: sc in each st around (6)');
+var oc = [], ost = null, oprev = null;
+[1, 2, 5, 6].forEach(function (n) {
+  var r = P.expand(onRow, n, oprev, ost);
+  ost = r.state; oprev = r.stitches.length; oc.push(r.color);
+});
+assertEqual(oc, [null, null, 'black', 'black'], '"Rnd 5: Colour change to black, ..." colours round 5 onward (04 H)');
+assertEqual(ex('With black, ch 2, 6 sc in second chain from hook (6)', null).color, 'black',
+  '"With black, ch 2, 6 sc" sets the row colour');
+assertEqual(ex('sc in each st around, changing to black in last 2 loops (24)', 24).color, 'black',
+  '"changing to black in last 2 loops" sets the row colour');
+assertEqual(ex('Using Mustard, sc in each st around (24)', 24).color, 'Mustard',
+  '"Using Mustard, ..." on the row sets the row colour');
+assertEqual(ex('sc in next 2 sts, sc in each st around (24)', 24).color, null,
+  '"sc in next ..." is not a colour called "next"');
+assertEqual(ex('With right side facing, sc in each st around (24)', 24).color, null,
+  '...and "With right side facing" is not a colour');
+assertEqual(ex('With RS facing, sc in each st around (24)', 24).color, null,
+  '...nor is "With RS facing"');
+
+// an abbreviation table is not a colour legend
+var abbrevText =
+  'Terms used:\n' +
+  'CH = chain\n' +
+  'SC = single crochet\n' +
+  'DC = double crochet\n' +
+  'ST = stitch\n' +
+  'RND = round\n' +
+  'TOG = together\n' +
+  'REP = repeat\n' +
+  'Rnd 1: With black, 6 sc in magic ring (6)';
+var abbrevCols = P.colors(abbrevText);
+assertEqual(abbrevCols.legend, {}, 'an abbreviation table is NOT read as a colour legend (03 #19)');
+assertEqual(abbrevCols.names, ['black'], '...so only the real colour word reaches names');
+assertEqual(P.colors('( A = Almond )\n( S = Sand )').legend, { A: 'Almond', S: 'Sand' },
+  'a real legend still reads');
+assertEqual(P.colors('MC = Main Colour\nCC = Cream').legend, { MC: 'Main Colour', CC: 'Cream' },
+  '...including "MC = Main Colour"');
+assertEqual(P.colors('CA, CB = Color A, Color B').names.length > 0, true,
+  '...and the Red Heart "CA, CB = Color A, Color B" form');
+
+// -----------------------------------------------------------------------
+group('wave A 3D: startHint()');
+// -----------------------------------------------------------------------
+
+assertEqual(P.startHint('Head\nRnd 1: 6 sc in MR (6)\nRnd 2: inc x6 (12)'),
+  { start: 'magic-ring', chainLen: 0, ringCount: 6 }, 'startHint: "6 sc in MR" is a magic ring of 6');
+assertEqual(P.startHint('R1: MR4\nR2: Inc, 3sc (6)'),
+  { start: 'magic-ring', chainLen: 0, ringCount: 4 }, 'startHint: "MR4" is a magic ring of 4');
+assertEqual(P.startHint('Shell - brown:\nMR with 6 sc.\nRnd 1: (inc) x6 (12)'),
+  { start: 'magic-ring', chainLen: 0, ringCount: 6 }, 'startHint: "MR with 6 sc" is a magic ring of 6');
+assertEqual(P.startHint('Tail\nRnd 1: With black, ch 2, 6 sc in second chain from hook (6)'),
+  { start: 'magic-ring', chainLen: 0, ringCount: 6 },
+  'startHint: "ch 2, 6 sc in 2nd ch from hook" is the written-out magic ring');
+assertEqual(P.startHint('Create magic ring. Referring to chart, crochet 14 rounds.'),
+  { start: 'magic-ring', chainLen: 0, ringCount: 0 },
+  'startHint: a bare "magic ring" with no count still says magic-ring');
+assertEqual(P.startHint('FIRST SQUARE: With CA, ch 24; join with a sl st to form a ring.\nRnd 1: Ch 3, 15 dc in ring (16)'),
+  { start: 'chain-ring', chainLen: 24, ringCount: 15 }, 'startHint: "ch 24, join" is a chain ring of 24');
+assertEqual(P.startHint('Motif\nch 30, sl st to form ring.\n1st Rnd: 3ch, 2tr, (2ch, 3tr) 3 times').start,
+  'chain-ring', 'startHint: "ch 30, sl st to form ring" is a chain ring');
+assertEqual(P.startHint('Motif\nch 30, sl st to form ring.\n1st Rnd: 3ch, 2tr, (2ch, 3tr) 3 times').chainLen,
+  30, '...of 30');
+assertEqual(P.startHint('Using A, make 6ch and join with sl st to form a circle.\nFoundation Rnd RS: 3ch, 2tr'),
+  { start: 'chain-ring', chainLen: 6, ringCount: 0 },
+  'startHint: "make 6ch and join ... to form a circle" reads the count written before "ch"');
+assertEqual(P.startHint('Muzzle:\nR1: Ch 12, sc in 2nd ch from hook, 10 sc, 3 sc in last ch, 9 sc down opposite side, inc [24]'),
+  { start: 'chain-oval', chainLen: 10, ringCount: 0 },
+  'startHint: the chain-and-back-down oval, with its straight length');
+assertEqual(P.startHint('Scarf\nR1: Ch 41, sc in 2nd ch from hook and in each ch across, turn (40)'),
+  { start: 'chain-row', chainLen: 40, ringCount: 0 },
+  'startHint: "ch 41, sc in 2nd ch" in rows is a 40-stitch foundation row');
+assertEqual(P.startHint('Blanket\nCh 100.\n1st row: 1 dc in 4th ch from hook. Turn. 98 sts.').start,
+  'chain-row', 'startHint: a plain "Ch 100." foundation is a chain row');
+assertEqual(P.startHint('Body\nR1: 6 sc'), { start: 'unknown', chainLen: 0, ringCount: 0 },
+  'startHint: a row that says nothing about its start is "unknown", not a guess');
+assertEqual(P.startHint(''), { start: 'unknown', chainLen: 0, ringCount: 0 }, 'startHint: empty input is unknown');
+assertEqual(P.startHint(null), { start: 'unknown', chainLen: 0, ringCount: 0 }, 'startHint(null) does not throw');
+assertEqual(P.startHint(P.parse('1. 8 sc in magic ring (8)')).ringCount, 8,
+  'startHint takes parsed lines as well as raw text');
+
+// -----------------------------------------------------------------------
+group('wave A 3D: workMode() and stuffingHint()');
+// -----------------------------------------------------------------------
+
+assertEqual(P.workMode('Rnd 1: 6 sc in MR (6)\nRnd 2: inc x6 (12)'), 'rounds', 'workMode: "Rnd N" is rounds');
+assertEqual(P.workMode('Round 1: 6 sc\nRound 2: inc x6'), 'rounds', 'workMode: "Round N" is rounds');
+assertEqual(P.workMode('R1: 6 sc\nR2: inc x6 (12)'), 'rounds', 'workMode: "R1:" is rounds');
+assertEqual(P.workMode('Row 1: sc across (20)\nRow 2: sc across, turn (20)'), 'rows', 'workMode: "Row N" is rows');
+assertEqual(P.workMode('Rnd 1: 6 sc\nRnd 2: inc x6\nRow 1: sc across'), 'rounds',
+  'workMode: the markers are counted, so the majority wins');
+assertEqual(P.workMode('Sew the pieces together and weave in the ends.'), null,
+  'workMode: no markers and no round/row words at all is null');
+assertEqual(P.workMode(''), null, 'workMode: empty input is null');
+assertEqual(P.workMode(null), null, 'workMode(null) does not throw');
+assertEqual(P.workMode(P.parse('Rnd 1: 6 sc in MR (6)')), 'rounds', 'workMode takes parsed lines too');
+
+assertEqual(P.stuffingHint('Stuff firmly and close the opening.'), true, 'stuffingHint: "stuff firmly" is true');
+assertEqual(P.stuffingHint('Stuff lightly so the ear stays flat.'), true, 'stuffingHint: "stuff lightly" is true');
+assertEqual(P.stuffingHint('Start stuffing as you go.'), true, 'stuffingHint: "start stuffing" is true');
+assertEqual(P.stuffingHint('Do not stuff the tail.'), false, 'stuffingHint: "do not stuff" is false');
+assertEqual(P.stuffingHint('Don’t stuff this piece.'), false, 'stuffingHint: "don’t stuff" is false');
+assertEqual(P.stuffingHint('No stuffing is needed for the feet.'), false, 'stuffingHint: "no stuffing" is false');
+assertEqual(P.stuffingHint('Stuff the head firmly. Do not stuff the tail.'), false,
+  'stuffingHint: a "do not stuff" anywhere in the part wins - it is the surprising instruction');
+assertEqual(P.stuffingHint('Rnd 1: 6 sc in MR (6)'), null, 'stuffingHint: silence is null, not false');
+assertEqual(P.stuffingHint(''), null, 'stuffingHint: empty input is null');
+assertEqual(P.stuffingHint(null), null, 'stuffingHint(null) does not throw');
+assertEqual(P.stuffingHint(P.parse('Rnd 1: 6 sc (6)\nStuff firmly.')), true, 'stuffingHint takes parsed lines too');
+
+// -----------------------------------------------------------------------
+group('wave A 3D: nothing throws, and ranges/repeats/sizes still work');
+// -----------------------------------------------------------------------
+
+[
+  '', 'x', '(((', '***', '[[[', 'ch', 'ch ch ch', '2 sc in', 'in next', 'tog',
+  'rep from * to', '(3tr, 2ch, 3tr) in', 'skip', 'miss miss miss', '999999 sc',
+  'sc' + new Array(60).join(', sc'), '* * * rep from * around'
+].forEach(function (bad) {
+  var ok = true, r = null;
+  try { r = P.expand(P.parse('1. ' + bad + ' (6)'), 1, 6, null); } catch (e) { ok = false; }
+  log(ok && r && r.stitches.length >= 0, 'expand never throws on "' + bad.slice(0, 24) + '"');
+});
+// A granny round expanded from the round below grows its own prevCount, so a
+// pattern that repeats one must not double its list until the tab dies.
+(function () {
+  var g = [];
+  for (var j = 1; j <= 40; j++) {
+    g.push('Rnd ' + j + ': ch 1, sc in same sc, * skip next sc, (3 dc, ch 3, 3 dc) all in next sc, ' +
+      'skip next sc **, sc in next 3 sc; rep from * around, end at **; join');
+  }
+  var gl = P.parse(g.join('\n'));
+  var gs = null, gp = 24, biggest = 0, t0 = (window.performance || Date).now();
+  for (var k = 1; k <= 40; k++) {
+    var y = P.expand(gl, k, gp, gs);
+    gs = y.state;
+    if (y.stitches.length) gp = y.stitches.length;
+    if (gp > biggest) biggest = gp;
+  }
+  var ms = (window.performance || Date).now() - t0;
+  log(biggest <= 20000, 'a runaway granny repeat is capped rather than exhausting memory', 'biggest row ' + biggest);
+  log(ms < 4000, '...and 40 such rounds still expand quickly', Math.round(ms) + ' ms');
+})();
+assertEqual(P.expand(P.parse('1. 999999 sc (6)'), 1, null, null).stitches.length, 6,
+  'a nonsense "999999 sc" row is reconciled to its printed count, not built in full');
+
+var rangeLines = P.parse('R13-R42: 6 sc\nRnd 43+44: 12 sc (12)');
+assertEqual(P.expand(rangeLines, 20, 6, null).stitches.length, 6, 'a R13-R42 range still expands every round in it');
+assertEqual(P.expand(rangeLines, 44, 6, null).stitches.length, 12, '"Rnd 43+44" still expands');
+assertEqual(P.expand(P.parse('Row 1: 158 (176-194) sc'), 1, null, null).stitches.length, 158,
+  'a multi-size row still expands at the default size');
+assertEqual(P.expand(P.parse('Row 1: 158 (176-194) sc', { size: 1 }), 1, null, null).stitches.length, 176,
+  '...and at size 1');
+assertEqual(P.expand(P.parse('1. Work the fancy wiggle thing all the way round (24)'), 1, null, null)
+  .stitches.every(function (s) { return s.t === 'x' && s.h === 1 && s.w === 1; }), true,
+  'the last-resort fallback is count x {t:"x", h:1, w:1}');
+// -----------------------------------------------------------------------
+group('wave B 3D: back-references - "rep Rnd 3", "rep rows 4 and 5", "as Row 2"');
+// -----------------------------------------------------------------------
+
+/**
+ * Walk a pattern row by row exactly as the store does - each row's stitch
+ * count becomes the next row's `prevCount`, and `state` carries over.
+ * -> [{ n, sts, inc, dec, h, color, types }]
+ */
+function walkRef(text, upTo) {
+  var lines = P.parse(text);
+  var last = upTo || P.summary(lines).maxRow || 0;
+  var st = null, prev = null, rows = [], r, e;
+  for (r = 1; r <= last; r++) {
+    e = P.expand(lines, r, prev, st);
+    st = e.state;
+    if (e.stitches.length) prev = e.stitches.length;
+    rows.push({
+      n: e.stitches.length,
+      sts: e.stitches.filter(function (s) { return s.t !== 'ch'; }).length,
+      inc: e.inc, dec: e.dec, h: e.height, color: e.color,
+      types: e.stitches.map(function (s) { return s.t; }).join(',')
+    });
+  }
+  rows.lines = lines;
+  return rows;
+}
+function nsOf(rows) { return rows.map(function (r) { return r.n; }); }
+function incLenOf(rows) { return rows.map(function (r) { return r.inc.length; }); }
+
+// --- "Rnds 4-15: rep Rnd 3" - one round, re-worked twelve times ---------
+var repRnd = walkRef(
+  'Rnd 1: 6 sc in magic ring. (6)\n' +
+  'Rnd 2: inc in each st around. (12)\n' +
+  'Rnd 3: (sc, inc) x6. (18)\n' +
+  'Rnds 4-15: rep Rnd 3.\n', 15);
+assertEqual(nsOf(repRnd), [6, 12, 18, 24, 30, 36, 42, 48, 54, 60, 66, 72, 78, 84, 90],
+  'rep Rnd 3: rounds 4-15 keep adding six stitches instead of coming out empty');
+assertEqual(incLenOf(repRnd).slice(3), [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6],
+  '...each of them with six increases, not a generic run');
+assertTrue(repRnd.slice(3).every(function (r) { return r.types.indexOf('x') < 0; }),
+  '...and not one generic "x" stitch among them');
+assertEqual(repRnd[0].h, 1, 'rep Rnd 3: the repeated rounds keep the referenced round\'s sc height');
+assertEqual(repRnd.lines.filter(function (l) { return l.row === 4; })[0].repeatOf, [3],
+  'parse(): the line carries repeatOf = [3]');
+assertEqual([4, 9, 15].map(function (r) { return P.targetFor(repRnd.lines, r); }), [24, 54, 90],
+  'parse(): targetFor agrees with expand for every row of the range');
+
+assertEqual(nsOf(walkRef(
+  'Rnd 1: 6 sc in magic ring. (6)\n' +
+  'Rnd 2: inc in each st around. (12)\n' +
+  'Rnd 3: (sc, inc) x6. (18)\n' +
+  'Rnds 4-6: repeat round 3.\n', 6)), [6, 12, 18, 24, 30, 36],
+  '"repeat round 3" spelled out in full reads the same as "rep Rnd 3"');
+
+// --- a two-row repeat: the parity of the range must be preserved --------
+var twoRow = walkRef(
+  'Row 1: hdc in each of 3 ch. Turn. <3 sts>\n' +
+  'Row 2: hdc in first st, hdc in next st, 3 hdc in next st. Turn. <5 sts>\n' +
+  'Row 3: 2 hdc in first st, hdc in next 2 sts, hdc2tog. Turn. <5 sts>\n' +
+  'Rows 4-13: rep rows 2 and 3.\n', 13);
+assertEqual(nsOf(twoRow), [3, 5, 5, 7, 7, 9, 9, 11, 11, 13, 13, 15, 15],
+  'rep rows 2 and 3: the growing row and the level row alternate, two stitches every pair');
+assertEqual(twoRow.map(function (r) { return r.inc.length; }),
+  [0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+  '...every repeated row keeps its single increase');
+assertEqual(twoRow[3].dec.length, 0,
+  'row 4 re-works row 2 (no decrease), so the parity is right...');
+assertEqual(twoRow[4].dec.length, 1, '...and row 5 re-works row 3, which ends in an hdc2tog');
+assertEqual(twoRow.lines.filter(function (l) { return l.row === 4; })[0].repeatOf, [2, 3],
+  'parse(): repeatOf = [2, 3] in the order they are written');
+assertEqual(nsOf(walkRef(
+  'Row 1: hdc in each of 3 ch. Turn. <3 sts>\n' +
+  'Row 2: hdc in first st, hdc in next st, 3 hdc in next st. Turn. <5 sts>\n' +
+  'Row 3: 2 hdc in first st, hdc in next 2 sts, hdc2tog. Turn. <5 sts>\n' +
+  'Rows 4-9: repeat rows 2 & 3 changing to colour B in the last st. Turn. <11 sts>\n', 9)),
+  [3, 5, 5, 7, 7, 9, 9, 11, 11].slice(0, 9),
+  '"repeat rows 2 & 3 ... <11 sts>": the printed total belongs to the LAST row of the range');
+
+// --- "as Row 2" / "work as Row 2" --------------------------------------
+assertEqual(nsOf(walkRef(
+  'Row 1: sc in each of 10 ch. Turn. (10)\n' +
+  'Row 2: ch 1, sc in each st across. Turn. (10)\n' +
+  'Row 3: as Row 2\n' +
+  'Rows 4-8: work as Row 2\n', 8)),
+  [10, 10, 10, 10, 10, 10, 10, 10],
+  '"as Row 2" and "Rows 4-8: work as Row 2" both re-work row 2');
+assertEqual(walkRef(
+  'Row 1: sc in each of 10 ch. Turn. (10)\n' +
+  'Row 2: ch 1, 2 sc in first st, sc in each st to end. Turn. (11)\n' +
+  'Rows 3-6: same as row 2\n', 6)[5].inc, [0],
+  '"same as row 2" keeps the increase at index 0 - the growing edge (01 #53)');
+assertEqual(nsOf(walkRef(
+  'Row 1: sc in each of 10 ch. Turn. (10)\n' +
+  'Row 2: ch 1, 2 sc in first st, sc in each st to end. Turn. (11)\n' +
+  'Rows 3-6: same as row 2\n', 6)), [10, 11, 12, 13, 14, 15],
+  '...and keeps growing, one stitch a row');
+
+// --- "Rep last 2 rows" / "Rep last row" / "as set" ---------------------
+assertEqual(nsOf(walkRef(
+  'Row 1: sc in each of 10 ch. Turn. (10)\n' +
+  'Row 2: ch 1, 2 sc in first st, sc in each st to end. Turn. (11)\n' +
+  'Row 3: ch 1, sc in each st across. Turn. (11)\n' +
+  'Rows 4-9: rep last 2 rows 3 times more.\n', 9)),
+  [10, 11, 11, 12, 12, 13, 13, 14, 14],
+  '"rep last 2 rows" resolves to the two rows in front of the range');
+assertEqual(walkRef(
+  'Row 1: sc in each of 10 ch. Turn. (10)\n' +
+  'Row 2: ch 1, 2 sc in first st, sc in each st to end. Turn. (11)\n' +
+  'Rows 3-5: rep last row.\n', 5)[4].inc, [0],
+  '"rep last row" points at the row just above the range');
+assertEqual(nsOf(walkRef(
+  'Row 1: sc in each of 10 ch. Turn. (10)\n' +
+  'Row 2: ch 1, hdc in each st across. Turn. (10)\n' +
+  'Rows 3-6: Continue in pattern as set.\n', 6)), [10, 10, 10, 10, 10, 10],
+  '"Continue in pattern as set" is read as "the row before, again"');
+assertEqual(walkRef(
+  'Row 1: sc in each of 10 ch. Turn. (10)\n' +
+  'Row 2: ch 1, hdc in each st across. Turn. (10)\n' +
+  'Rows 3-6: Continue in pattern as set.\n', 6)[5].h, 1.34,
+  '...so the hdc height carries over instead of falling back to sc');
+
+// --- a bare repeat SENTENCE with no row number of its own ---------------
+var untilM = walkRef(
+  'Row 1: hdc in 3 ch from hook and in each ch across, turn - 94 sts.\n' +
+  'Row 2: Ch 2, hdc in back loop only of each st across, turn.\n' +
+  'Rep Row 2 until blanket measures approximately 59".\n', 8);
+assertEqual(nsOf(untilM), [94, 94, 94, 94, 94, 94, 94, 94],
+  '"Rep Row 2 until it measures 59\\"" answers for every row the caller asks about');
+assertEqual(P.summary(untilM.lines).maxRow, 2,
+  '...without inventing rows: an open-ended repeat adds nothing to maxRow');
+assertTrue(untilM[7].types.indexOf('x') < 0 && untilM[7].h === 1.34,
+  '...and row 8 is real hdc, not a generic run');
+
+var until4 = walkRef(
+  'Row 1: sc in each of 10 ch. Turn. (10)\n' +
+  'Row 2: ch 1, sc in each st across. Turn. (10)\n' +
+  'Row 3: ch 1, 2 sc in first st, sc in each st to end. Turn. (11)\n' +
+  'Repeat rows 2 & 3 until piece measures 60 cm.\n', 8);
+assertEqual(nsOf(until4), [10, 10, 11, 11, 12, 12, 13, 13],
+  '"Repeat rows 2 & 3 until piece measures 60 cm" keeps the two-row parity past the written rows');
+
+var untilRows = walkRef(
+  'Row 1: sc in each of 10 ch. Turn. (10)\n' +
+  'Row 2: ch 1, sc in each st across. Turn. (10)\n' +
+  'Repeat Row 2 until there are a total of 6 Rows.\n', 8);
+assertEqual(nsOf(untilRows), [10, 10, 10, 10, 10, 10, 0, 0],
+  '"until there are a total of 6 Rows" stops the repeat at row 6');
+assertEqual(nsOf(walkRef(
+  'Row 1: sc in each of 10 ch. Turn. (10)\n' +
+  'Row 2: ch 1, sc in each st across. Turn. (10)\n' +
+  'Rep last row 3 times more.\n', 8)), [10, 10, 10, 10, 10, 10, 0, 0],
+  '"Rep last row 3 times more" works row 2 four times in all - rows 3-6, and no further');
+
+// --- what must NOT be read as a back-reference -------------------------
+(function () {
+  var cross = P.parse('Row 1: sc in each of 10 ch. Turn. (10)\nRows 2-6: work as for First Leg.\n');
+  assertEqual(cross.filter(function (l) { return l.row === 2; })[0].repeatOf, null,
+    '"work as for First Leg" names another PART and is left to the generic reading');
+  var own = P.parse('Rnd 1: 6 sc in magic ring. (6)\nRnd 2: sc in each st around, rep rnd 1 if you like. (6)');
+  assertEqual(own.filter(function (l) { return l.row === 2; })[0].repeatOf, null,
+    'a row that does its own work first keeps its own words, whatever it says afterwards');
+  var fwd = P.parse('Row 1: sc in each of 10 ch. (10)\nRows 2-5: rep rows 6 and 7.\n');
+  assertEqual(fwd.filter(function (l) { return l.row === 2; })[0].repeatOf, null,
+    'a reference that points FORWARD at rows that do not exist yet is refused');
+  var self = P.parse('Row 1: sc in each of 10 ch. (10)\nRow 2: rep row 2.\n');
+  assertEqual(self.filter(function (l) { return l.row === 2; })[0].repeatOf, null,
+    '"Row 2: rep row 2" is refused rather than recursing');
+  // the forms that already worked have to go on working
+  assertEqual(nsOf(walkRef('Rows 1-2: sc in each of 12 ch. (12)\nRows 12-20: sc in each st across.\n', 20)).slice(11),
+    [12, 12, 12, 12, 12, 12, 12, 12, 12],
+    '"Rows 12-20: sc in each st across" still restates its own instruction for all nine rows');
+  assertEqual(nsOf(walkRef('Rnd 1: 12 sc in magic ring. (12)\nNext 6 rows: sc in each st around.\n', 7)),
+    [12, 12, 12, 12, 12, 12, 12],
+    '"Next 6 rows: sc across" is unaffected');
+})();
+
+// --- chains and cycles -------------------------------------------------
+assertEqual(nsOf(walkRef(
+  'Rnd 1: 6 sc in magic ring. (6)\n' +
+  'Rnd 2: (sc, inc) x3. (9)\n' +
+  'Rnds 3-4: rep Rnd 2.\n' +
+  'Rnds 5-6: rep Rnd 3.\n', 6)), [6, 9, 12, 15, 18, 21],
+  'a repeat OF a repeat follows the chain down to the round that has words');
+(function () {
+  var g = [];
+  g.push('Rnd 1: ch 1, sc in same sc, * skip next sc, (3 dc, ch 3, 3 dc) all in next sc, ' +
+    'skip next sc **, sc in next 3 sc; rep from * around; join');
+  g.push('Rnds 2-40: rep Rnd 1.');
+  var gl = P.parse(g.join('\n'));
+  var gs = null, gp = 24, biggest = 0, k, y;
+  for (k = 1; k <= 40; k++) {
+    y = P.expand(gl, k, gp, gs);
+    gs = y.state;
+    if (y.stitches.length) gp = y.stitches.length;
+    if (gp > biggest) biggest = gp;
+  }
+  log(biggest <= 20000 && gp > 0,
+    'forty repeats of a granny round stay bounded instead of doubling every round',
+    'biggest row ' + biggest);
+})();
+
 var summaryEl = document.getElementById('summary');
 var finalLine = passed + ' passed, ' + failed + ' failed';
 summaryEl.textContent = finalLine;

@@ -1,0 +1,1023 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>3D diagram visual gallery (dev only)</title>
+<style>
+  :root {
+    --bg: #14161a;
+    --panel: #1c1f25;
+    --line: #2f343d;
+    --ink: #e7e9ee;
+    --dim: #8b93a1;
+    --acc: #9cf;
+    --warn: #ffb86b;
+    --bad: #ff6b6b;
+    --ok: #7bd389;
+    --card-bg: #23272f;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font: 13px/1.45 Menlo, Consolas, ui-monospace, monospace;
+    background: var(--bg); color: var(--ink); margin: 0; padding: 14px 16px 120px;
+  }
+  h1 { font-size: 17px; margin: 0 0 6px; }
+  .note { color: var(--dim); font-size: 12px; margin: 0 0 10px; max-width: 105ch; }
+  .note code { color: var(--acc); }
+  a { color: var(--acc); }
+
+  /* ----------------------------------------------------------- top bar */
+  #bar {
+    position: sticky; top: 0; z-index: 20; background: var(--bg);
+    border-bottom: 1px solid var(--line); padding: 8px 0 10px; margin-bottom: 12px;
+  }
+  #chips { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 8px; }
+  .chip {
+    font: inherit; background: var(--panel); color: var(--ink);
+    border: 1px solid var(--line); border-radius: 12px; padding: 3px 9px; cursor: pointer;
+  }
+  .chip:hover { border-color: var(--acc); }
+  .chip.on { background: #2a3a4a; border-color: var(--acc); color: #fff; }
+  .chip.done { color: var(--ok); }
+  .chip.err { color: var(--bad); border-color: var(--bad); }
+  #globals { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; font-size: 12px; }
+  #globals label { color: var(--dim); }
+  button.act {
+    font: inherit; background: #2f3a46; color: var(--ink); border: 1px solid var(--line);
+    border-radius: 5px; padding: 3px 10px; cursor: pointer;
+  }
+  button.act:hover { border-color: var(--acc); }
+  #status { color: var(--warn); }
+
+  /* ------------------------------------------------------------- cards */
+  .fixhead {
+    font-size: 14px; color: var(--acc); margin: 22px 0 8px;
+    border-bottom: 1px solid var(--line); padding-bottom: 4px;
+  }
+  .fixhead .sub { color: var(--dim); font-size: 12px; }
+  .card {
+    display: grid; grid-template-columns: 240px 1fr 260px; gap: 12px;
+    background: var(--card-bg); border: 1px solid var(--line); border-radius: 8px;
+    padding: 10px; margin: 0 0 12px; align-items: start;
+  }
+  .card.rowsmode { border-left: 3px solid #6b7fff; }
+  .card h3 { margin: 0 0 4px; font-size: 13px; color: #ffd479; word-break: break-word; }
+  .cv-wrap { position: relative; width: 220px; height: 260px; background: #11131a; border-radius: 6px; overflow: hidden; }
+  .cv-wrap canvas { display: block; width: 100%; height: 100%; }
+  .cv-wrap .ph { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--dim); font-size: 11px; }
+  .mid { min-width: 0; }
+  table.nums { border-collapse: collapse; font-size: 11.5px; width: 100%; }
+  table.nums td { border: 1px solid var(--line); padding: 1px 5px; vertical-align: top; }
+  table.nums td.k { color: var(--dim); white-space: nowrap; width: 11ch; }
+  table.nums td.v { color: var(--ink); word-break: break-word; }
+  .seq { color: var(--ok); font-size: 11.5px; word-break: break-word; }
+  .ctl { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 6px 0; font-size: 11.5px; }
+  .ctl select, .ctl input[type=number] {
+    font: inherit; background: #11131a; color: var(--ink); border: 1px solid var(--line);
+    border-radius: 4px; padding: 2px 4px;
+  }
+  .ctl label { color: var(--dim); }
+  textarea.verdict {
+    font: inherit; width: 100%; min-height: 46px; background: #11131a; color: var(--ink);
+    border: 1px solid var(--line); border-radius: 4px; padding: 4px; resize: vertical;
+  }
+  .photos { display: flex; flex-direction: column; gap: 6px; }
+  .photos canvas, .photos img { max-width: 100%; max-height: 195px; width: auto; border-radius: 4px; background: #fff; display: block; }
+  .photos .cap { color: var(--dim); font-size: 11px; }
+  .badge { display: inline-block; border-radius: 3px; padding: 0 5px; font-size: 11px; }
+  .badge.rounds { background: #2b3b2b; color: var(--ok); }
+  .badge.rows { background: #2b2b3f; color: #9db0ff; }
+  .badge.ovr { background: #3f3524; color: var(--warn); }
+  .empty { color: var(--dim); font-style: italic; }
+  #out { max-width: 1400px; }
+  pre.export {
+    background: #11131a; border: 1px solid var(--line); border-radius: 6px; padding: 8px;
+    white-space: pre-wrap; word-break: break-all; max-height: 240px; overflow: auto; font-size: 11px;
+  }
+</style>
+</head>
+<body>
+
+<h1>3D diagram visual gallery <span class="note">(dev only &mdash; reads copyrighted PDFs from ../tmp-pdf at runtime; nothing here is committed)</span></h1>
+<p class="note">
+  For each curated fixture: fetch the PDF, <code>PdfText.extract</code>, <code>Store.splitSections</code>, then one card per
+  section with the <strong>finished</strong> piece (all rounds worked, <code>interactive:true</code>, auto-rotate on) next to the PDF's own
+  photo. Nothing is written to the app's real <code>localStorage</code>: parts live in memory, the store is pointed at
+  <code>ZD4_gallery_store</code>, and the reviewer's shape classes / verdicts live under <code>ZD4_gallery</code>.
+  Geometry numbers come from <code>DiagramGeo.classify</code>/<code>fit</code> &mdash; the same pure module the renderer
+  lays out with, asserted by <code>test/diagram.test.html</code> &mdash; so a card and its canvas can no longer drift apart.
+  Drag a canvas to rotate it; double-click resets.
+  <br>
+  <strong>Blank canvases?</strong> WebGL draws from <code>requestAnimationFrame</code>, which a browser stops in a window that
+  is minimised, occluded or not compositing (an embedded preview pane, a hidden second monitor). Bring the window forward
+  and the cards paint. PDF pages are rasterised with pdf.js <em>print</em> intent for the same reason &mdash; a display-intent
+  render task in such a window never settles.
+</p>
+
+<div id="bar">
+  <div id="chips"></div>
+  <div id="globals">
+    <label><input type="checkbox" id="ghostToggle"> show ghost/wire (piece worked to 60%, rest as wireframe)</label>
+    <label><input type="checkbox" id="photoToggle" checked> render PDF pages</label>
+    <label>max cards/fixture <input type="number" id="capInput" value="40" min="1" max="120" style="width:5em"></label>
+    <button class="act" id="exportBtn">Export JSON</button>
+    <button class="act" id="clearBtn">Clear saved verdicts</button>
+    <span id="status"></span>
+  </div>
+</div>
+
+<div id="out"></div>
+<pre class="export" id="exportOut" hidden></pre>
+
+<script src="../js/patterns.js"></script>
+<script src="../js/vendor/pdf.min.js"></script>
+<script src="../js/pdftext.js"></script>
+<script src="../js/store.js"></script>
+<script src="../js/diagram-geo.js"></script>
+<script src="../js/diagram.js"></script>
+<script>
+'use strict';
+
+/* pdftext.js points the pdf.js worker at './js/vendor/...', right for the app
+   at the repo root but wrong from /test/. Pin it, same as patterns.fixtures.html. */
+(function () {
+  if (!window.pdfjsLib || !window.pdfjsLib.GlobalWorkerOptions) return;
+  var src = '../js/vendor/pdf.worker.min.js';
+  try {
+    Object.defineProperty(window.pdfjsLib.GlobalWorkerOptions, 'workerSrc', {
+      get: function () { return src; },
+      set: function () { /* ignore pdftext's page-relative path */ },
+      configurable: true
+    });
+  } catch (e) { window.pdfjsLib.GlobalWorkerOptions.workerSrc = src; }
+})();
+
+/* Never borrow the real app state. Parts here are plain objects that no Store
+   API ever stores, but diagramModel() walks projects() when it is called
+   without a project, so keep the key it might touch out of the app's way. */
+try { window.Store.__setKeyForTests('ZD4_gallery_store'); } catch (e) { /* ignore */ }
+
+var PREF_KEY = 'ZD4_gallery';
+var out = document.getElementById('out');
+var statusEl = document.getElementById('status');
+
+function setStatus(s) { statusEl.textContent = s || ''; }
+
+/* ==================================================================== *
+ * 1. The curated fixture list
+ * ==================================================================== */
+
+var FIXTURES = [
+  { id: 'panda',      file: 'crochet-panda.pdf',                 label: 'panda' },
+  { id: 'snowman',    file: 'crochet-snowman.pdf',               label: 'snowman' },
+  { id: 'turtle',     file: 'crochet-turtle.pdf',                label: 'turtle' },
+  { id: 'fish',       file: 'crochet-fish.pdf',                  label: 'fish' },
+  { id: 'bear',       file: 'bear.pdf',                          label: 'bear' },
+  { id: 'cato',       file: 'cato.pdf',                          label: 'cato' },
+  { id: 'baphomet',   file: 'crochet-baphomet.pdf',              label: 'baphomet' },
+  { id: 'bee',        file: 'bee.pdf',                           label: 'bee' },
+  { id: 'pumpkins',   file: 'crochet-kingcole-pumpkins.pdf',     label: 'kingcole pumpkins' },
+  { id: 'persian',    file: 'crochet-redheart-persian-tiles.pdf', label: 'redheart persian tiles' },
+  { id: 'hood',       file: 'crochet-stylecraft-hood.pdf',       label: 'stylecraft hood' },
+  { id: 'cowlmitts',  file: 'crochet-stylecraft-cowl-mitts.pdf', label: 'stylecraft cowl-mitts' },
+  { id: 'hexsocks',   file: 'crochet-stylecraft-hex-socks.pdf',  label: 'stylecraft hex-socks' },
+  { id: 'sparkling',  file: 'crochet-premier-sparkling-wrap.pdf', label: 'premier sparkling wrap' },
+  { id: 'throw',      file: 'crochet-premier-simple-throw.pdf',  label: 'premier simple throw' },
+  { id: 'basketweave', file: 'crochet-bernat-basketweave.pdf',   label: 'bernat basketweave' },
+  { id: 'doily',      file: 'crochet-gosyo-lace-doily.pdf',      label: 'gosyo lace doily' },
+  { id: 'cardigan',   file: 'cardigan.pdf',                      label: 'cardigan' }
+];
+
+var SHAPE_CLASSES = [
+  '', 'sphere', 'egg', 'cylinder', 'cone', 'disc', 'cup', 'oval', 'square',
+  'hexagon', 'rectangle', 'triangle', 'trapezoid', 'ruffle'
+];
+
+/* ==================================================================== *
+ * 2. Reviewer notes, persisted under ZD4_gallery
+ * ==================================================================== */
+
+var prefs = (function () {
+  try {
+    var raw = localStorage.getItem(PREF_KEY);
+    var o = raw ? JSON.parse(raw) : null;
+    return o && typeof o === 'object' && !Array.isArray(o) ? o : {};
+  } catch (e) { return {}; }
+})();
+
+var saveTimer = 0;
+function savePrefs() {
+  if (saveTimer) clearTimeout(saveTimer);
+  saveTimer = setTimeout(function () {
+    saveTimer = 0;
+    var keep = {};
+    for (var k in prefs) {
+      if (!prefs.hasOwnProperty(k)) continue;
+      var p = prefs[k];
+      // prefFor() creates a row per card the moment it is built; only rows the
+      // reviewer actually touched are worth keeping
+      if (p && (p.shape || p.verdict || p.mode)) keep[k] = p;
+    }
+    try { localStorage.setItem(PREF_KEY, JSON.stringify(keep)); }
+    catch (e) { setStatus('could not save verdicts: ' + e.message); }
+  }, 250);
+}
+function prefFor(key) {
+  if (!prefs[key] || typeof prefs[key] !== 'object') prefs[key] = {};
+  return prefs[key];
+}
+
+/* ==================================================================== *
+ * 3. PDF text, cached in sessionStorage for the session
+ * ==================================================================== */
+
+var blobCache = {};        // file -> Blob
+var docCache = {};         // file -> PdfText.open handle (lazy)
+var pageTextCache = {};    // file -> [ '', page1, page2, ... ]
+
+function cacheGet(k) { try { return sessionStorage.getItem(k); } catch (e) { return null; } }
+function cacheSet(k, v) { try { sessionStorage.setItem(k, v); } catch (e) { /* quota */ } }
+
+function fetchBlob(file) {
+  if (blobCache[file]) return Promise.resolve(blobCache[file]);
+  return fetch('../tmp-pdf/' + file, { cache: 'no-store' }).then(function (r) {
+    if (!r.ok) throw new Error('HTTP ' + r.status + ' for ' + file);
+    return r.blob();
+  }).then(function (b) { blobCache[file] = b; return b; });
+}
+
+function extractText(file) {
+  var key = 'zd4gal.v1:' + file;
+  var hit = cacheGet(key);
+  if (hit) return Promise.resolve(hit);
+  return fetchBlob(file)
+    .then(function (b) { return window.PdfText.extract(b); })
+    .then(function (res) {
+      var text = String(res && res.text || '');
+      cacheSet(key, text);
+      return text;
+    });
+}
+
+function openDoc(file) {
+  if (docCache[file]) return docCache[file];
+  docCache[file] = fetchBlob(file).then(function (b) { return window.PdfText.open(b); });
+  return docCache[file];
+}
+
+/* `=== PAGE n ===` markers come out of PdfText.extract, so the page a chunk of
+   text came from is a marker count, not a re-read of the document. */
+function pagesOf(text) {
+  var parts = String(text).split(/^=== PAGE (\d+) ===$/m);
+  var pages = [''];
+  if (parts.length < 3) { pages.push(String(text)); return pages; }
+  for (var i = 1; i < parts.length; i += 2) {
+    var n = parseInt(parts[i], 10);
+    var body = parts[i + 1] || '';
+    while (pages.length <= n) pages.push('');
+    pages[n] = body;
+  }
+  return pages;
+}
+
+function norm(s) { return String(s || '').replace(/\s+/g, ' ').trim().toLowerCase(); }
+
+/** Which PDF page a section's text came from (1-based), or 0 when unknown. */
+function pageForSection(pages, section) {
+  var lines = String(section.text || '').split(/\r\n|\r|\n/);
+  var probes = [];
+  if (section.name) probes.push(norm(section.name));
+  for (var i = 0; i < lines.length && probes.length < 6; i++) {
+    var l = norm(lines[i]);
+    if (l.length >= 18 && !/^=== page/.test(l)) probes.push(l.slice(0, 70));
+  }
+  var normPages = [];
+  for (var p = 1; p < pages.length; p++) normPages[p] = norm(pages[p]);
+  // Longest probe first: a distinctive row line beats a two-word part name.
+  probes.sort(function (a, b) { return b.length - a.length; });
+  for (var q = 0; q < probes.length; q++) {
+    if (probes[q].length < 12) continue;
+    for (var pp = 1; pp < normPages.length; pp++) {
+      if (normPages[pp] && normPages[pp].indexOf(probes[q]) >= 0) return pp;
+    }
+  }
+  return 0;
+}
+
+/* ==================================================================== *
+ * 4. countMode guess
+ * ==================================================================== */
+
+/**
+ * rounds when `Rnd`/`Round`/`R1:` markers dominate, rows when `Row` does.
+ * Ties and silence fall back to the whole document, then to rows (the app's
+ * own default for an unknown pattern).
+ */
+function guessMode(sectionText, docText) {
+  function score(t) {
+    t = String(t || '');
+    var rnd = (t.match(/\b(?:rnd|rnds|round|rounds)\b\s*\.?\s*\d/gi) || []).length
+            + (t.match(/^\s*R\s?\d+\s*[:.)]/gim) || []).length;
+    var row = (t.match(/\b(?:row|rows)\b\s*\.?\s*\d/gi) || []).length;
+    return { rnd: rnd, row: row };
+  }
+  var s = score(sectionText);
+  if (s.rnd || s.row) {
+    return { mode: s.rnd >= s.row && s.rnd > 0 ? 'rounds' : 'rows', rnd: s.rnd, row: s.row, from: 'section' };
+  }
+  var d = score(docText);
+  return { mode: d.rnd > d.row ? 'rounds' : 'rows', rnd: d.rnd, row: d.row, from: 'document' };
+}
+
+/* ==================================================================== *
+ * 5. Geometry, from DiagramGeo
+ *
+ * These used to be copied formulas. They are not any more: the physics is a
+ * pure, unit-tested module (js/diagram-geo.js, asserted by
+ * test/diagram.test.html), and the renderer consumes the same function, so
+ * the card and the canvas cannot drift apart.
+ * ==================================================================== */
+
+var Geo = window.DiagramGeo;
+
+function geomOf(model) {
+  var cls = Geo.classify(model);
+  var kinds = {}, i, e, ruffled = [];
+  var rMaxAt = 0, rMax = 0;
+  for (i = 0; i < cls.rounds.length; i++) {
+    e = cls.rounds[i];
+    kinds[e.kind] = (kinds[e.kind] || 0) + 1;
+    if (e.ruffle) ruffled.push(i + 1);
+    var rr = cls.mode === 'rows' ? e.width / 2 : (e.radiusMax || e.radius);
+    if (rr > rMax) { rMax = rr; rMaxAt = i; }
+  }
+  var naive = 0;
+  for (i = 0; i < model.rounds.length; i++) {
+    naive += Geo.roundMetrics(model.rounds[i]).hw;
+  }
+  return {
+    mode: cls.mode, cls: cls,
+    rMax: cls.maxRadius, rMaxAt: cls.equatorRound >= 0 ? cls.equatorRound : rMaxAt,
+    width: cls.mode === 'rows' ? cls.width : 2 * cls.maxRadius,
+    height: cls.height, aspect: cls.aspect, naiveHeight: naive,
+    kinds: kinds, ruffled: ruffled
+  };
+}
+
+/** How the piece would be framed, so a hairline fit shows up as a number. */
+var FIT_FOV = 30 * Math.PI / 180, FIT_CAM = 34, FIT_PITCH = 20 * Math.PI / 180;
+function fitOf(cls) {
+  var halfH = FIT_CAM * Math.tan(FIT_FOV / 2) * 0.92;
+  var halfW = halfH * (220 / 260);        // the card canvas
+  var ymin = Infinity, ymax = -Infinity, rad = 0, i, e;
+  for (i = 0; i < cls.rounds.length; i++) {
+    e = cls.rounds[i];
+    if (e.empty) continue;
+    rad = Math.max(rad, cls.mode === 'rows' ? cls.width / 2 : (e.radiusMax || e.radius));
+    ymin = Math.min(ymin, e.y, e.yTop); ymax = Math.max(ymax, e.y, e.yTop);
+  }
+  if (!isFinite(ymin)) return null;
+  return Geo.fit({ rad: rad, ymin: ymin, ymax: ymax, halfW: halfW, halfH: halfH,
+    cp: Math.cos(FIT_PITCH), sp: Math.abs(Math.sin(FIT_PITCH)), curY: null, mode: cls.mode });
+}
+
+function n2(v) { return (Math.round(v * 100) / 100).toFixed(2); }
+
+/* ==================================================================== *
+ * 6. Part + finished model
+ * ==================================================================== */
+
+var partSeq = 0;
+
+function makePart(section, mode) {
+  partSeq++;
+  return {
+    id: 'ZD4_p' + partSeq,
+    name: section.name || '(unnamed)',
+    patternText: section.text || '',
+    row: 0,
+    stitch: 0,
+    rowStitches: [],
+    sizeIndex: 0,
+    piecesDone: 0,
+    repeat: null
+  };
+}
+
+function fakeProject(mode) {
+  return { id: 'ZD4_proj', countMode: mode === 'rounds' ? 'rounds' : 'rows', yarnColors: {} };
+}
+
+/**
+ * Store.diagramModel with `row: 0` plans the whole pattern as ghost rounds and
+ * gives every one its count / colour / height. Copy that and mark it all
+ * worked: this is the FINISHED piece, which is what a photo shows.
+ * `upto` (0..1) leaves the tail as ghost so the wireframe can be reviewed.
+ */
+function finishedModel(part, proj, upto) {
+  var src = window.Store.diagramModel(part, proj);
+  var rounds = [];
+  var i;
+  for (i = 0; i < src.rounds.length; i++) {
+    var r = src.rounds[i];
+    rounds.push({
+      count: r.count, done: r.count,
+      stitches: r.stitches && r.stitches.length ? r.stitches.slice() : [],
+      color: r.color, height: r.height, ghost: false,
+      inc: r.inc || null, dec: r.dec || null, row: r.row || (i + 1)
+    });
+  }
+  // Drop the empty tail: a pattern whose last "row" carries no count is
+  // finishing prose, not fabric, and a zero ring pinches the silhouette.
+  while (rounds.length && rounds[rounds.length - 1].count <= 0) rounds.pop();
+  var cur = rounds.length - 1;
+  if (typeof upto === 'number' && upto > 0 && upto < 1 && rounds.length > 2) {
+    cur = Math.max(0, Math.min(rounds.length - 1, Math.round(rounds.length * upto)));
+    rounds[cur].done = Math.max(1, Math.round(rounds[cur].count * 0.55));
+    for (i = cur + 1; i < rounds.length; i++) { rounds[i].ghost = true; rounds[i].done = 0; }
+  }
+  return {
+    mode: src.mode, rounds: rounds, current: Math.max(0, cur),
+    defaultColor: src.defaultColor,
+    shape: src.shape || null, window: src.window || null, deviation: src.deviation || null
+  };
+}
+
+function countSeqText(rounds) {
+  var seq = [], max = 0, i;
+  for (i = 0; i < rounds.length; i++) {
+    if (rounds[i].count > max) max = rounds[i].count;
+    if (i < 12) seq.push(rounds[i].count);
+  }
+  var tail = '';
+  if (rounds.length > 12) {
+    // the decrease tail decides whether a piece closes into a ball or gapes
+    // open like a cup, so it is worth as much as the first twelve
+    var last = [];
+    for (i = Math.max(12, rounds.length - 6); i < rounds.length; i++) last.push(rounds[i].count);
+    tail = ', … , ' + last.join(', ');
+  }
+  return seq.join(', ') + tail + '   max ' + max;
+}
+
+function colorSummary(model) {
+  var seen = {}, order = [], i;
+  for (i = 0; i < model.rounds.length; i++) {
+    var c = model.rounds[i].color;
+    if (c && !seen[c]) { seen[c] = 1; order.push(c); }
+    var st = model.rounds[i].stitches || [];
+    for (var j = 0; j < st.length; j++) {
+      if (st[j] && st[j].c && !seen[st[j].c]) { seen[st[j].c] = 1; order.push(st[j].c); }
+    }
+  }
+  return order;
+}
+
+function heightSummary(model) {
+  var seen = {}, order = [], i;
+  for (i = 0; i < model.rounds.length; i++) {
+    var h = model.rounds[i].height;
+    if (!seen[h]) { seen[h] = 0; order.push(h); }
+    seen[h]++;
+  }
+  order.sort(function (a, b) { return a - b; });
+  return order.map(function (h) { return h + '×' + seen[h]; }).join(' ');
+}
+
+/* ==================================================================== *
+ * 7. Live WebGL handles: lazy mount, LRU unmount
+ *
+ * A browser gives a page ~16 WebGL contexts and diagram.js deliberately does
+ * NOT lose the context on destroy (the app reuses its one canvas). So an
+ * unmounted card gets a brand new <canvas> element and the old one, with its
+ * context, is dropped.
+ * ==================================================================== */
+
+var MAX_LIVE = 7;
+var live = [];   // cards with a mounted handle, oldest first
+
+function unmountCard(card) {
+  if (!card.handle) return;
+  try { card.handle.destroy(); } catch (e) { /* ignore */ }
+  card.handle = null;
+  var fresh = document.createElement('canvas');
+  card.wrap.replaceChild(fresh, card.canvas);
+  card.canvas = fresh;
+  var ph = document.createElement('div');
+  ph.className = 'ph';
+  ph.textContent = 'scroll into view';
+  card.wrap.appendChild(ph);
+  card.ph = ph;
+  var ix = live.indexOf(card);
+  if (ix >= 0) live.splice(ix, 1);
+}
+
+function trimLive(keep) {
+  for (var i = live.length - 1; i >= 0 && live.length > MAX_LIVE; i--) {
+    var c = live[i];
+    if (c === keep || c.visible) continue;
+    unmountCard(c);
+  }
+  // still over budget? drop the oldest regardless of visibility
+  while (live.length > MAX_LIVE + 2) {
+    if (live[0] === keep) break;
+    unmountCard(live[0]);
+  }
+}
+
+function mountCard(card) {
+  if (card.handle) return;
+  trimLive(card);
+  if (card.ph) { card.ph.remove(); card.ph = null; }
+  var h;
+  try {
+    h = window.Diagram.mount(card.canvas, {
+      palette: { ghost: '#ffffff', ink: '#ffffff', glow: '#fff4c4', bg: null },
+      interactive: true,
+      reducedMotion: false
+    });
+  } catch (e) {
+    var ph = document.createElement('div');
+    ph.className = 'ph';
+    ph.textContent = 'mount failed: ' + e.message;
+    card.wrap.appendChild(ph);
+    return;
+  }
+  card.handle = h;
+  live.push(card);
+  applyModel(card);
+}
+
+function applyModel(card) {
+  if (!card.handle) return;
+  var ghost = document.getElementById('ghostToggle').checked;
+  var model = finishedModel(card.part, card.proj, ghost ? 0.6 : 0);
+  card.model = model;
+  card.handle.setModel(model, { animate: 'none' });
+}
+
+/* ==================================================================== *
+ * 8. Cards
+ * ==================================================================== */
+
+/* Lazy mounting is driven by a rect sweep, not only by IntersectionObserver:
+   in a background/hidden tab (which is where a reviewer's second window sits,
+   and where an agent drives this page) IO callbacks can stop firing entirely
+   and every card stays blank. The sweep is cheap — a few dozen rects — and
+   runs on scroll, on resize and on a slow timer. */
+
+var allCards = [];
+var MARGIN = 300;
+
+function sweep() {
+  var showPhotos = document.getElementById('photoToggle').checked;
+  var vh = window.innerHeight || 800;
+  for (var i = 0; i < allCards.length; i++) {
+    var card = allCards[i];
+    var r = card.el.getBoundingClientRect();
+    // a display:none card has an all-zero rect, which would otherwise read as
+    // "at the top of the viewport" and mount every card in the document
+    var vis = r.width > 0 && r.height > 0 && r.bottom > -MARGIN && r.top < vh + MARGIN;
+    card.visible = vis;
+    if (vis) {
+      mountCard(card);
+      if (showPhotos) loadPhotos(card);
+    }
+  }
+  // anything mounted but far off screen gives its WebGL context back
+  trimLive(null);
+}
+
+var sweepPending = 0;
+function scheduleSweep() {
+  if (sweepPending) return;
+  sweepPending = requestAnimationFrame(function () { sweepPending = 0; sweep(); });
+}
+window.addEventListener('scroll', scheduleSweep, { passive: true });
+window.addEventListener('resize', scheduleSweep);
+setInterval(sweep, 900);
+
+var io = { observe: function () { scheduleSweep(); } };
+
+function tag(name, cls, text) {
+  var e = document.createElement(name);
+  if (cls) e.className = cls;
+  if (text != null) e.textContent = text;
+  return e;
+}
+
+function numRow(table, k, v, cls) {
+  var tr = document.createElement('tr');
+  tr.appendChild(tag('td', 'k', k));
+  var td = tag('td', 'v ' + (cls || ''), v);
+  tr.appendChild(td);
+  table.appendChild(tr);
+  return td;
+}
+
+function buildCard(fix, section, idx, guess, page, host) {
+  var key = fix.id + ' :: ' + idx + ' :: ' + (section.name || '(unnamed)');
+  var pref = prefFor(key);
+  var mode = pref.mode || guess.mode;
+
+  var card = {
+    key: key, fix: fix, section: section, idx: idx, guess: guess, page: page,
+    handle: null, visible: false, photosDone: false
+  };
+  card.part = makePart(section, mode);
+  card.proj = fakeProject(mode);
+
+  var el = tag('div', 'card' + (mode === 'rows' ? ' rowsmode' : ''));
+  el.__card = card;
+  card.el = el;
+
+  /* ---- left: the canvas */
+  var wrap = tag('div', 'cv-wrap');
+  var canvas = document.createElement('canvas');
+  wrap.appendChild(canvas);
+  var ph = tag('div', 'ph', 'scroll into view');
+  wrap.appendChild(ph);
+  card.wrap = wrap; card.canvas = canvas; card.ph = ph;
+  el.appendChild(wrap);
+
+  /* ---- middle: name, numbers, controls */
+  var mid = tag('div', 'mid');
+  mid.appendChild(tag('h3', null, (idx + 1) + '. ' + (section.name || '(unnamed section)')
+    + (section.makeCount > 1 ? '  ×' + section.makeCount : '')));
+
+  var badges = tag('div', 'ctl');
+  var modeBadge = tag('span', 'badge ' + mode, mode);
+  badges.appendChild(modeBadge);
+  badges.appendChild(tag('span', null, 'markers Rnd ' + guess.rnd + ' / Row ' + guess.row + ' (' + guess.from + ')'));
+  if (page) badges.appendChild(tag('span', null, 'PDF p.' + page));
+  mid.appendChild(badges);
+
+  var table = document.createElement('table');
+  table.className = 'nums';
+  mid.appendChild(table);
+  card.cells = {
+    seq: numRow(table, 'counts', '…', 'seq'),
+    rounds: numRow(table, 'rounds', '…'),
+    radius: numRow(table, 'radius', '…'),
+    size: numRow(table, 'w × h', '…'),
+    aspect: numRow(table, 'aspect h/w', '…'),
+    peak: numRow(table, 'equator', '…'),
+    shape: numRow(table, 'start / stuff', '…'),
+    klass: numRow(table, 'shape class', '…'),
+    fit: numRow(table, 'fit', '…'),
+    heights: numRow(table, 'st heights', '…'),
+    colors: numRow(table, 'colours', '…')
+  };
+
+  var ctl = tag('div', 'ctl');
+  ctl.appendChild(tag('label', null, 'mode'));
+  var modeSel = document.createElement('select');
+  [['auto', 'auto (' + guess.mode + ')'], ['rounds', 'rounds'], ['rows', 'rows']].forEach(function (o) {
+    var op = document.createElement('option');
+    op.value = o[0]; op.textContent = o[1];
+    modeSel.appendChild(op);
+  });
+  modeSel.value = pref.mode || 'auto';
+  modeSel.onchange = function () {
+    pref.mode = modeSel.value === 'auto' ? '' : modeSel.value;
+    if (!pref.mode) delete pref.mode;
+    savePrefs();
+    var m = pref.mode || guess.mode;
+    card.proj.countMode = m;
+    // a new part id drops the store's per-part model + line cache
+    card.part = makePart(section, m);
+    el.classList.toggle('rowsmode', m === 'rows');
+    modeBadge.className = 'badge ' + m + (pref.mode ? ' ovr' : '');
+    modeBadge.textContent = m + (pref.mode ? ' (override)' : '');
+    applyModel(card);
+    fillNumbers(card);
+  };
+  ctl.appendChild(modeSel);
+
+  ctl.appendChild(tag('label', null, 'shape'));
+  var shapeSel = document.createElement('select');
+  SHAPE_CLASSES.forEach(function (s) {
+    var op = document.createElement('option');
+    op.value = s; op.textContent = s || '(unset)';
+    shapeSel.appendChild(op);
+  });
+  shapeSel.value = pref.shape || '';
+  shapeSel.onchange = function () {
+    if (shapeSel.value) pref.shape = shapeSel.value; else delete pref.shape;
+    savePrefs();
+  };
+  ctl.appendChild(shapeSel);
+
+  var reset = tag('button', 'act', 'reset view');
+  reset.onclick = function () { if (card.handle) card.handle.resetView(); };
+  ctl.appendChild(reset);
+
+  var stats = tag('button', 'act', 'stats');
+  stats.onclick = function () {
+    if (!card.handle) return;
+    var s = card.handle.getStats();
+    setStatus(key + ' -> ' + JSON.stringify(s));
+    if (window.console) console.log(key, s, card.model);
+  };
+  ctl.appendChild(stats);
+  mid.appendChild(ctl);
+
+  var ta = document.createElement('textarea');
+  ta.className = 'verdict';
+  ta.placeholder = 'verdict: what the photo shows vs what the render shows';
+  ta.value = pref.verdict || '';
+  ta.oninput = function () {
+    if (ta.value) pref.verdict = ta.value; else delete pref.verdict;
+    savePrefs();
+  };
+  mid.appendChild(ta);
+  el.appendChild(mid);
+
+  /* ---- right: the PDF's own pictures */
+  var photos = tag('div', 'photos');
+  photos.appendChild(tag('div', 'cap', 'photo: p.1' + (page && page !== 1 ? ' + p.' + page : '')));
+  card.photos = photos;
+  el.appendChild(photos);
+
+  host.appendChild(el);
+  allCards.push(card);
+  io.observe(el);
+  fillNumbers(card);
+  return card;
+}
+
+function fillNumbers(card) {
+  var model;
+  try { model = finishedModel(card.part, card.proj, 0); }
+  catch (e) {
+    card.cells.seq.textContent = 'model failed: ' + e.message;
+    return;
+  }
+  card.model = model;
+  var c = card.cells;
+  if (!model.rounds.length) {
+    c.seq.textContent = '(no rows with a count — prose-only section)';
+    c.rounds.textContent = '0';
+    c.radius.textContent = c.size.textContent = c.aspect.textContent = c.peak.textContent = '—';
+    c.shape.textContent = c.klass.textContent = c.fit.textContent = '—';
+    c.heights.textContent = c.colors.textContent = '—';
+    return;
+  }
+  var g = geomOf(model);
+  var cls = g.cls;
+  var sh = model.shape || {};
+  c.seq.textContent = countSeqText(model.rounds);
+  c.rounds.textContent = model.rounds.length + ' (' + model.mode + ')';
+  c.radius.textContent = 'R max ' + n2(g.rMax) + '  (R = Σ stitch widths / 2π, R_MIN 0.42)';
+  c.size.textContent = n2(g.width) + ' × ' + n2(g.height)
+    + '   [unwalked stack would be ' + n2(g.naiveHeight) + ']';
+  c.aspect.textContent = n2(g.aspect) + '   (1.0 = as tall as wide)';
+  c.peak.textContent = cls.equatorRound >= 0
+    ? ('round ' + (cls.equatorRound + 1) + ' of ' + model.rounds.length +
+       '  (' + Math.round(cls.equatorFrac * 100) + '% down; centre of the max plateau)')
+    : '—';
+  c.shape.textContent = 'start ' + (sh.start || 'unknown') +
+    (sh.chainLen ? ' ch ' + sh.chainLen : '') +
+    (sh.ringCount ? ' ring ' + sh.ringCount : '') +
+    '  ·  stuffed ' + (sh.stuffed == null ? 'null' : sh.stuffed) +
+    ' ⇒ slack ' + cls.slack +
+    '  ·  cap top ' + (cls.closedTop ? 'yes' : 'no') +
+    ', bottom ' + (cls.closedBottom ? 'yes' : 'no');
+  var kindTxt = [];
+  for (var kk in g.kinds) if (g.kinds.hasOwnProperty(kk)) kindTxt.push(kk + ' ×' + g.kinds[kk]);
+  c.klass.textContent = kindTxt.join(', ') +
+    (cls.corners ? '  ·  ' + cls.corners + ' corners' : '') +
+    (cls.ruffles ? '  ·  ' + cls.ruffles + ' ruffled (rounds ' + g.ruffled.slice(0, 8).join(',') + ')' : '') +
+    (cls.anchor ? '  ·  anchor ' + cls.anchor : '');
+  var ft = fitOf(cls);
+  c.fit.textContent = ft
+    ? ('scale ' + n2(ft.scale) + ' (honest ' + n2(ft.base) + ')' +
+       (ft.clamp ? '  CLAMPED: ' + ft.clamp : '') +
+       '  ·  on screen: radius ' + Math.round(ft.radFrac * 100) + '% of the half-width, height ' +
+       Math.round(ft.heightFrac * 100) + '%')
+    : '—';
+  c.heights.textContent = heightSummary(model);
+  var cols = colorSummary(model);
+  c.colors.textContent = cols.length + ': ' + cols.slice(0, 10).join(' ') + (cols.length > 10 ? ' ...' : '');
+  c.colors.innerHTML = c.colors.textContent.replace(/(#[0-9a-f]{6})/gi, function (m) {
+    return '<span style="display:inline-block;width:9px;height:9px;background:' + m + ';border:1px solid #555"></span>' + m;
+  });
+}
+
+/* ------------------------------------------------------------- photos
+ *
+ * pdf.js hands out ONE page proxy per page, and two render tasks on the same
+ * proxy at once simply never settle (and `page.cleanup()` from the first kills
+ * the second). Ten cards from one PDF all want page 1, so every page is
+ * rendered exactly once, through a single queue, and each card gets a copy.
+ */
+
+var pageImgCache = {};     // 'file#page' -> Promise<HTMLCanvasElement>
+var renderQueue = Promise.resolve();
+
+/**
+ * Like PdfText.renderPage, but with `intent: 'print'`. pdf.js 3.x drives a
+ * display-intent render task from `requestAnimationFrame`, so in a background
+ * or occluded window (a second monitor, a minimised app, an agent driving the
+ * page) the render promise NEVER settles and every photo stays blank. Print
+ * intent runs the same painter on a plain microtask loop.
+ */
+function rasterise(docHandle, page, maxWidth) {
+  return docHandle.doc.getPage(page).then(function (pg) {
+    var base = pg.getViewport({ scale: 1 });
+    var scale = base.width > 0 ? maxWidth / base.width : 1;
+    var vp = pg.getViewport({ scale: scale });
+    var cv = document.createElement('canvas');
+    cv.width = Math.max(1, Math.round(vp.width));
+    cv.height = Math.max(1, Math.round(vp.height));
+    var task = pg.render({ canvasContext: cv.getContext('2d'), viewport: vp, intent: 'print' });
+    return task.promise.then(function () {
+      if (typeof pg.cleanup === 'function') { try { pg.cleanup(); } catch (e) { /* ignore */ } }
+      return cv;
+    });
+  });
+}
+
+function pageImage(file, page) {
+  var key = file + '#' + page;
+  if (pageImgCache[key]) return pageImgCache[key];
+  pageImgCache[key] = renderQueue = renderQueue.then(function () {
+    return openDoc(file).then(function (doc) {
+      if (page > doc.numPages) throw new Error('only ' + doc.numPages + ' pages');
+      return rasterise(doc, page, 250);
+    });
+  });
+  // keep the queue alive even when one page fails
+  renderQueue = renderQueue.catch(function () { return null; });
+  return pageImgCache[key];
+}
+
+function copyCanvas(src) {
+  var cv = document.createElement('canvas');
+  cv.width = src.width; cv.height = src.height;
+  cv.getContext('2d').drawImage(src, 0, 0);
+  return cv;
+}
+
+function loadPhotos(card) {
+  if (card.photosDone) return;
+  card.photosDone = true;
+  var wants = [1];
+  if (card.page && card.page !== 1) wants.push(card.page);
+  wants.forEach(function (p) {
+    var slot = tag('div', 'cap', 'p.' + p + ' …');
+    card.photos.appendChild(slot);
+    pageImage(card.fix.file, p).then(function (src) {
+      slot.textContent = 'p.' + p;
+      card.photos.insertBefore(copyCanvas(src), slot);
+    }, function (e) {
+      slot.textContent = 'p.' + p + ' failed: ' + (e && e.message || e);
+    });
+  });
+}
+
+/* ==================================================================== *
+ * 9. Fixture loading
+ * ==================================================================== */
+
+var loaded = {};   // fix.id -> { host, cards }
+
+function cap() {
+  var n = parseInt(document.getElementById('capInput').value, 10);
+  return isFinite(n) && n > 0 ? n : 40;
+}
+
+function loadFixture(fix, chip) {
+  if (loaded[fix.id]) {
+    loaded[fix.id].host.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    return Promise.resolve();
+  }
+  chip.classList.add('on');
+  setStatus('reading ' + fix.file + ' …');
+  var host = tag('div');
+  var head = tag('div', 'fixhead', fix.label + '  ');
+  head.appendChild(tag('span', 'sub', fix.file + ' — reading…'));
+  host.appendChild(head);
+  out.appendChild(host);
+  loaded[fix.id] = { host: host, cards: [] };
+
+  return extractText(fix.file).then(function (text) {
+    var pages = pagesOf(text);
+    var sections = window.Store.splitSections(text) || [];
+    var limit = cap();
+    var shown = sections.slice(0, limit);
+    head.lastChild.textContent = fix.file + ' — ' + (pages.length - 1) + ' pages, '
+      + sections.length + ' sections' + (sections.length > limit ? ' (showing ' + limit + ')' : '')
+      + ', ' + text.length + ' chars';
+    var docText = text;
+    shown.forEach(function (s, i) {
+      var guess = guessMode(s.text, docText);
+      var page = pageForSection(pages, s);
+      loaded[fix.id].cards.push(buildCard(fix, s, i, guess, page, host));
+    });
+    chip.classList.add('done');
+    setStatus('');
+  }).catch(function (e) {
+    head.lastChild.textContent = fix.file + ' — FAILED: ' + e.message;
+    chip.classList.add('err');
+    setStatus(fix.file + ' failed: ' + e.message);
+  });
+}
+
+/* ==================================================================== *
+ * 10. Wiring
+ * ==================================================================== */
+
+var chips = document.getElementById('chips');
+FIXTURES.forEach(function (fix) {
+  var chip = tag('button', 'chip', fix.label);
+  chip.onclick = function () { loadFixture(fix, chip); };
+  chips.appendChild(chip);
+});
+var all = tag('button', 'chip', 'load all (slow)');
+all.onclick = function () {
+  var chain = Promise.resolve();
+  var nodes = chips.children;
+  FIXTURES.forEach(function (fix, i) {
+    chain = chain.then(function () { return loadFixture(fix, nodes[i]); });
+  });
+  chain.then(function () { setStatus('all fixtures loaded'); });
+};
+chips.appendChild(all);
+
+document.getElementById('ghostToggle').onchange = function () {
+  for (var i = 0; i < live.length; i++) applyModel(live[i]);
+};
+
+document.getElementById('photoToggle').onchange = function () {
+  if (!this.checked) return;
+  for (var k in loaded) {
+    if (!loaded.hasOwnProperty(k)) continue;
+    loaded[k].cards.forEach(function (c) { if (c.visible) loadPhotos(c); });
+  }
+};
+
+document.getElementById('exportBtn').onclick = function () {
+  var pre = document.getElementById('exportOut');
+  var payload = { key: PREF_KEY, at: new Date().toISOString(), cards: {} };
+  var k;
+  for (k in prefs) {
+    if (!prefs.hasOwnProperty(k)) continue;
+    var p = prefs[k];
+    if (p && (p.shape || p.verdict || p.mode)) payload.cards[k] = p;
+  }
+  // the numbers, so a verdict can be read without re-running the gallery
+  for (k in loaded) {
+    if (!loaded.hasOwnProperty(k)) continue;
+    loaded[k].cards.forEach(function (c) {
+      if (!c.model) return;
+      var g = c.model.rounds.length ? geomOf(c.model) : null;
+      var row = payload.cards[c.key] || (payload.cards[c.key] = {});
+      row.fixture = c.fix.label;
+      row.part = c.section.name || '(unnamed)';
+      row.mode = c.model.mode;
+      row.rounds = c.model.rounds.length;
+      row.counts = c.model.rounds.slice(0, 12).map(function (r) { return r.count; });
+      row.maxCount = c.model.rounds.reduce(function (m, r) { return Math.max(m, r.count); }, 0);
+      row.page = c.page || 1;
+      if (g) {
+        row.rMax = +n2(g.rMax); row.h = +n2(g.height); row.w = +n2(g.width);
+        row.aspect = +n2(g.aspect); row.maxRAt = g.rMaxAt + 1;
+        row.kinds = g.kinds;
+        row.corners = g.cls.corners;
+        row.ruffles = g.cls.ruffles;
+        row.slack = g.cls.slack;
+        row.equatorFrac = +n2(g.cls.equatorFrac);
+        row.capTop = g.cls.closedTop;
+        row.capBottom = g.cls.closedBottom;
+        row.anchor = g.cls.anchor || null;
+        var ft = fitOf(g.cls);
+        if (ft) { row.fitScale = +n2(ft.scale); row.fitClamp = ft.clamp; }
+      }
+    });
+  }
+  pre.hidden = false;
+  pre.textContent = JSON.stringify(payload, null, 1);
+  setStatus('exported below');
+  // writeText rejects (it does not throw) when the document is not focused
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(pre.textContent).then(function () {
+        setStatus('exported (also copied to the clipboard)');
+      }, function () { /* not focused, or no permission: the <pre> has it */ });
+    }
+  } catch (e) { /* ignore */ }
+};
+
+document.getElementById('clearBtn').onclick = function () {
+  if (!confirm('Clear every saved shape class and verdict under ' + PREF_KEY + '?')) return;
+  prefs = {};
+  try { localStorage.removeItem(PREF_KEY); } catch (e) { /* ignore */ }
+  setStatus('cleared — reload to see empty cards');
+};
+
+setStatus('pick a fixture');
+</script>
+</body>
+</html>

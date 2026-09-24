@@ -124,6 +124,33 @@
     return project && project.countMode === 'rounds' ? 'Rnd' : 'Row';
   }
 
+  /**
+   * 05 #2: rounds vs rows is a property of the PIECE, not of the project. One
+   * project-level word turned every part of an amigurumi whose every line says
+   * `MR4` / `sc around` into a flat sheet. `Store.partWorkMode` resolves the
+   * owner's explicit `Part.workMode`, then the pattern text, then the project.
+   * Anything that labels one part's counter goes through these two.
+   */
+  function partMode(project, prt) {
+    if (prt && window.Store && typeof Store.partWorkMode === 'function') {
+      try {
+        return Store.partWorkMode(prt, project) === 'rounds' ? 'rounds' : 'rows';
+      } catch (e) {
+        /* fall through to the project's own word */
+      }
+    }
+    return project && project.countMode === 'rounds' ? 'rounds' : 'rows';
+  }
+
+  function partRowWord(project, prt, caps) {
+    var w = partMode(project, prt) === 'rounds' ? 'Round' : 'Row';
+    return caps ? w.toUpperCase() : w;
+  }
+
+  function partShortRowWord(project, prt) {
+    return partMode(project, prt) === 'rounds' ? 'Rnd' : 'Row';
+  }
+
   /* ================================================================== *
    * 3. Optional collaborators (defensive)
    * ================================================================== */
@@ -201,6 +228,7 @@
     els.stitchBtn = $('#stitch-btn');
     els.stitchNumber = $('#stitch-number');
     els.stitchReadout = $('#stitch-readout');
+    els.stitchDev = $('#stitch-dev');
     els.stitchProgress = $('#stitch-progress');
     els.stitchBarFill = $('#stitch-bar-fill');
     els.stitchBarLabel = $('#stitch-bar-label');
@@ -1414,7 +1442,7 @@
   function updateCounters(p, prt) {
     if (!p || !prt) return;
 
-    els.rowLabel.textContent = rowWord(p, true);
+    els.rowLabel.textContent = partRowWord(p, prt, true);
     els.rowNumber.textContent = String(prt.row);
 
     if (prt.targetRows) {
@@ -1459,7 +1487,7 @@
     var line = Store.lineForRow(prt, ri.patternRow);
     if (line && line.text) {
       els.patternLine.hidden = false;
-      els.patternTag.textContent = shortRowWord(p) + ' ' + ri.patternRow;
+      els.patternTag.textContent = partShortRowWord(p, prt) + ' ' + ri.patternRow;
       els.patternText.textContent = line.text;
       var notes = Store.notesOf(line);
       if (els.patternNotes) {
@@ -1496,6 +1524,38 @@
       els.stitchBarLabel.textContent = prt.stitch + ' / ' + approx + target;
     } else {
       els.stitchProgress.hidden = true;
+    }
+
+    /* 05 #6 — my count vs the pattern's, in one quiet line. Tapping 29 into a
+       24-stitch round used to draw a complete, happy, correctly closed ring of
+       29 and say nothing. Never modal, and only when the pattern actually
+       stated a count for this round (`Store.roundDeviation` returns
+       expected = null otherwise). */
+    if (els.stitchDev) {
+      var dev = null;
+      try {
+        dev = Store.roundDeviation(prt);
+      } catch (e) {
+        dev = null;
+      }
+      if (dev && dev.delta > 0) {
+        els.stitchDev.hidden = false;
+        els.stitchDev.textContent =
+          dev.delta + ' more than the pattern’s ' + dev.expected;
+      } else {
+        els.stitchDev.hidden = true;
+        els.stitchDev.textContent = '';
+      }
+    }
+
+    // the "tap" hint has done its job once this piece has any stitches on it,
+    // and its strip goes back to the 3D piece with it
+    if (els.stitchBtn) {
+      var counted = prt.stitch > 0 || prt.row > 0;
+      if (els.stitchBtn.classList.contains('counted') !== counted) {
+        els.stitchBtn.classList.toggle('counted', counted);
+        syncDiagramInsets();
+      }
     }
   }
 
@@ -1873,6 +1933,8 @@
    * ================================================================== */
 
   var live = { handle: null, canvas: null, btn: null };
+  /** How many times a lost context has been rebuilt; two is plenty. */
+  var diagramRecoveries = 0;
   var viewer = { handle: null, canvas: null, readout: null, sheet: null };
 
   function prefersReducedMotion() {
@@ -1896,42 +1958,87 @@
     return diagramAvailable() && Store.settings().liveDiagram !== false;
   }
 
-  /** '#4a3728' / 'rgb(…)' → 'rgba(74,55,40,a)'. Unparseable colours pass through. */
-  function withAlpha(color, a) {
-    var c = String(color || '').trim();
-    if (!c) return 'rgba(0,0,0,' + a + ')';
-    var hex = c.charAt(0) === '#' ? c.slice(1) : null;
-    if (hex && hex.length === 3) {
-      hex = hex.charAt(0) + hex.charAt(0) + hex.charAt(1) + hex.charAt(1) + hex.charAt(2) + hex.charAt(2);
-    }
-    if (hex && /^[0-9a-fA-F]{6}$/.test(hex)) {
-      return (
-        'rgba(' + parseInt(hex.slice(0, 2), 16) + ',' + parseInt(hex.slice(2, 4), 16) + ',' +
-        parseInt(hex.slice(4, 6), 16) + ',' + a + ')'
-      );
-    }
-    var m = c.match(/^rgba?\(([^)]+)\)$/i);
-    if (m) {
-      var parts = m[1].split(',');
-      if (parts.length >= 3) {
-        return 'rgba(' + parts[0].trim() + ',' + parts[1].trim() + ',' + parts[2].trim() + ',' + a + ')';
-      }
-    }
-    return c;
-  }
-
   function cssVar(cs, name, fallback) {
     var v = (cs.getPropertyValue(name) || '').trim();
     return v || fallback;
   }
 
+  /** '#abc' / '#aabbcc' / 'rgb(…)' → [r, g, b] 0..255, or null. */
+  function rgbOf(color) {
+    var c = String(color || '').trim();
+    if (c.charAt(0) === '#') {
+      var hex = c.slice(1);
+      if (hex.length === 3) {
+        hex = hex.charAt(0) + hex.charAt(0) + hex.charAt(1) + hex.charAt(1) + hex.charAt(2) + hex.charAt(2);
+      }
+      if (!/^[0-9a-fA-F]{6}/.test(hex)) return null;
+      return [parseInt(hex.slice(0, 2), 16), parseInt(hex.slice(2, 4), 16), parseInt(hex.slice(4, 6), 16)];
+    }
+    var m = c.match(/^rgba?\(([^)]+)\)$/i);
+    if (!m) return null;
+    var parts = m[1].split(/[,\s/]+/).filter(function (x) { return x.length; });
+    if (parts.length < 3) return null;
+    return [parseFloat(parts[0]), parseFloat(parts[1]), parseFloat(parts[2])];
+  }
+
+  function relLum(color) {
+    var rgb = rgbOf(color);
+    if (!rgb) return 0;
+    var out = 0;
+    var k = [0.2126, 0.7152, 0.0722];
+    for (var i = 0; i < 3; i++) {
+      var v = Math.min(1, Math.max(0, rgb[i] / 255));
+      v = v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+      out += v * k[i];
+    }
+    return out;
+  }
+
+  /** WCAG contrast ratio between two CSS colours. */
+  function contrastRatio(a, b) {
+    var la = relLum(a), lb = relLum(b);
+    return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05);
+  }
+
+  /** Whichever candidate reads best against `bg`. */
+  function mostReadable(bg, candidates) {
+    var best = candidates[0], bestC = -1;
+    for (var i = 0; i < candidates.length; i++) {
+      if (!candidates[i]) continue;
+      var c = contrastRatio(bg, candidates[i]);
+      if (c > bestC) { bestC = c; best = candidates[i]; }
+    }
+    return best;
+  }
+
+  /**
+   * 02 #1: the ghost colour is passed OPAQUE. The renderer owns ghost alpha
+   * (GHOST_ALPHA 0.20 / PENDING_ALPHA 0.72); this used to pass
+   * rgba(--text, 0.35) on top of that, so future rounds composed to 0.070
+   * effective and were invisible in the app — while the test page, which
+   * passes an opaque white, looked right. And because `--text` on a light
+   * theme is a dark brown sitting on a mid `--primary` (barely 1.1:1), the
+   * colour is chosen by contrast against the button rather than by variable.
+   */
   function diagramPalette() {
     var cs = window.getComputedStyle(document.documentElement);
+    var primary = cssVar(cs, '--primary', '#4f9868');
+    var accent2 = cssVar(cs, '--accent-2', '#e6a23c');
+    var danger = cssVar(cs, '--danger', '#b65b5b');
     return {
-      ghost: withAlpha(cssVar(cs, '--text', '#000000'), 0.35),
+      ghost: mostReadable(primary, [
+        cssVar(cs, '--primary-text', '#ffffff'),
+        cssVar(cs, '--text', '#000000'),
+        '#ffffff'
+      ]),
       ink: cssVar(cs, '--primary-text', '#ffffff'),
-      glow: cssVar(cs, '--accent-2', '#e6a23c'),
-      bg: cssVar(cs, '--primary', '#4f9868')
+      glow: accent2,
+      /* The "you are over the pattern's count" tint (05 #6). --danger is the
+         right word in every theme, with one exception: on dragon-pixel
+         --danger IS --primary, so a surplus band would read as a hole in the
+         piece rather than as a warning. There, the warm accent takes over. */
+      alert: contrastRatio(danger, primary) < 1.3 ? (accent2 || '#d9603f') : danger,
+      bg: primary
     };
   }
 
@@ -1949,7 +2056,12 @@
    * mounted at all and the piece is only built when the user opens the 3D view
    * on purpose. Everything under the threshold is exactly as it was.
    */
-  var DIAGRAM_MAX_LIVE_ROWS = 250;
+  /* 2026-09-24: `Store.diagramModel` builds a row → line index once instead of
+     scanning every parsed line per row, so a 1,500-row pattern now builds in
+     under 60 ms where it used to cost ~1,040 ms per completed row. The row cap
+     goes 250 → 2,000; the MEASURED-time guard below stays, and `partIsHeavy`
+     stays as the safety valve for whatever the cap does not predict. */
+  var DIAGRAM_MAX_LIVE_ROWS = 2000;
   var DIAGRAM_BUDGET_MS = 60;
   /** partId -> true once this part has proved too expensive to draw live. */
   var diagramHeavy = Object.create(null);
@@ -2083,13 +2195,42 @@
         /* ignore */
       }
     });
+    syncDiagramInsets();
+  }
+
+  /**
+   * 05 #1 / 02 #16: hand the renderer the strip the number and the hint
+   * occupy, so the piece is fitted and centred in what is left instead of
+   * being drawn behind the caption. Measured, not guessed, because the head
+   * grows with the theme's --counter-size and with text zoom.
+   */
+  function syncDiagramInsets() {
+    if (!live.handle || typeof live.handle.setSafeInsets !== 'function') return;
+    var head = document.getElementById('stitch-head');
+    var hint = document.getElementById('stitch-hint');
+    var top = head ? head.offsetHeight : 0;
+    // the hint fades out once this piece has been counted on, and its strip
+    // goes back to the piece with it
+    var counted = !!(els.stitchBtn && els.stitchBtn.classList.contains('counted'));
+    var bottom = !counted && hint && !hint.hidden ? hint.offsetHeight + 10 : 0;
+    try {
+      live.handle.setSafeInsets({ top: top + 4, right: 8, bottom: bottom + 4, left: 8 });
+    } catch (e) {
+      /* ignore */
+    }
   }
 
   /** Just the canvas and its renderer; the "3D view" button stays. */
+  /**
+   * The canvas element goes too, so the GL context is RELEASED rather than
+   * left alive on a detached node. A page gets a handful of WebGL contexts and
+   * the browser drops the oldest without a word once they run out — which is
+   * how the ⤢ viewer came up blank after a few opens (05 #7).
+   */
   function destroyLiveCanvas() {
     if (live.handle) {
       try {
-        live.handle.destroy();
+        live.handle.destroy({ release: true });
       } catch (e) {
         /* ignore */
       }
@@ -2133,7 +2274,27 @@
         live.handle = window.Diagram.mount(live.canvas, {
           palette: diagramPalette(),
           reducedMotion: prefersReducedMotion(),
-          interactive: false
+          interactive: false,
+          /* The renderer tells us when there is no piece on screen (a refused
+             or lost context). In the button there is nowhere to put a message,
+             so the canvas simply goes away and the plain number is back — the
+             counter must never look broken. */
+          onStatus: function (s) {
+            /* 'unavailable' is fine here: the renderer never got a GL context
+               on this canvas, so its own Canvas-2D silhouette draws and the
+               button still shows the piece. 'lost' / 'blank' are different —
+               that canvas can never be given a context again, so throw it away
+               and let the next render mount a fresh one (on a device that has
+               simply run out of contexts, the plain number is what is left,
+               which is the counter working normally). */
+            if (!s || s.webgl || (s.status !== 'lost' && s.status !== 'blank')) return;
+            if (diagramRecoveries >= 2) return;
+            diagramRecoveries += 1;
+            window.setTimeout(function () {
+              destroyLiveCanvas();
+              if (els.project && !els.project.hidden) mountLiveDiagram();
+            }, 0);
+          }
         });
       } catch (e) {
         live.handle = null;
@@ -2149,6 +2310,7 @@
     els.stitchBtn.classList.add('has-diagram');
     resizeDiagrams();
     pushDiagram('none');
+    syncDiagramInsets();
   }
 
   /**
@@ -2185,9 +2347,75 @@
     if (!p || !prt) return '';
     var ri = Store.repeatInfo(prt);
     var target = Store.currentTarget(prt);
-    var text = shortRowWord(p) + ' ' + ri.workingRow + ' · ' + prt.stitch;
+    var text = partShortRowWord(p, prt) + ' ' + ri.workingRow + ' · ' + prt.stitch;
     text += target ? ' / ' + target : ' sts';
     return text;
+  }
+
+  /**
+   * What the geometry made of this piece, in the words a crocheter uses:
+   * "Sphere · 15 rounds · 48 around". Everything comes from
+   * `DiagramGeo.classify`, so the viewer can never claim a shape the renderer
+   * did not draw.
+   */
+  function shapeName(cls) {
+    if (!cls) return 'Piece';
+    if (cls.mode === 'rows') {
+      if (cls.anchor === 'spine') return 'Triangle';
+      if (cls.anchor === 'left' || cls.anchor === 'right') return 'Shaped panel';
+      return 'Flat panel';
+    }
+    if (cls.corners === 3) return 'Triangle motif';
+    if (cls.corners === 4) return 'Square motif';
+    if (cls.corners === 6) return 'Hexagon motif';
+    if (cls.corners === 8) return 'Octagon motif';
+    if (cls.ruffles > 1) return 'Ruffle';
+    var rounds = [];
+    var i;
+    for (i = 0; i < cls.rounds.length; i++) {
+      if (!cls.rounds[i].empty) rounds.push(cls.rounds[i].radius || 0);
+    }
+    if (!rounds.length) return 'Piece';
+    var a = cls.aspect || 0;
+    var closed = !!(cls.closedTop && cls.closedBottom);
+    var maxR = 0;
+    for (i = 0; i < rounds.length; i++) maxR = Math.max(maxR, rounds[i]);
+    var last = rounds[rounds.length - 1];
+    var shrank = maxR > 0 && last < maxR * 0.62;
+    var grew = last > rounds[0] * 1.3;
+    if (a < 0.38) return closed ? 'Bobble' : 'Flat circle';
+    if (closed && a <= 1.35) return 'Sphere';
+    if (closed) return 'Capsule';
+    if (shrank) return 'Dome';
+    if (grew) return 'Cone';
+    if (a >= 1.5) return 'Tube';
+    return 'Bowl';
+  }
+
+  /** @returns {{name:string, detail:string}|null} */
+  function shapeSummary(model) {
+    if (!model || !window.DiagramGeo || typeof DiagramGeo.classify !== 'function') return null;
+    var cls;
+    try {
+      cls = DiagramGeo.classify(model);
+    } catch (e) {
+      return null;
+    }
+    if (!cls || !cls.rounds || !cls.rounds.length) return null;
+    var wide = 0;
+    for (var i = 0; i < model.rounds.length; i++) {
+      wide = Math.max(wide, model.rounds[i].count | 0);
+    }
+    var n = model.rounds.length;
+    var bits = [];
+    if (cls.mode === 'rows') {
+      bits.push(n + ' row' + (n === 1 ? '' : 's'));
+      if (wide) bits.push(wide + ' wide');
+    } else {
+      bits.push(n + ' round' + (n === 1 ? '' : 's'));
+      if (wide) bits.push(wide + ' around');
+    }
+    return { name: shapeName(cls), detail: bits.join(' · ') };
   }
 
   function updateViewerReadout() {
@@ -2195,12 +2423,23 @@
     var p = currentProject();
     var prt = p ? Store.activePart(p) : null;
     viewer.readout.textContent = viewerReadoutText(p, prt);
+    if (viewer.shape) {
+      var sum = shapeSummary(currentModel());
+      viewer.shape.textContent = sum ? sum.name : (prt ? prt.name : '');
+      if (viewer.shapeSub) viewer.shapeSub.textContent = sum ? sum.detail : '';
+    }
   }
 
+  /**
+   * The viewer's canvas is thrown away with the sheet, so its GL context is
+   * RELEASED (05 #7). Combined with closing the button's context while the
+   * viewer is open, the app never holds more than one context at a time and
+   * the "open it ten times and it comes up blank" failure cannot happen.
+   */
   function destroyViewer() {
     if (viewer.handle) {
       try {
-        viewer.handle.destroy();
+        viewer.handle.destroy({ release: true });
       } catch (e) {
         /* ignore */
       }
@@ -2208,7 +2447,93 @@
     viewer.handle = null;
     viewer.canvas = null;
     viewer.readout = null;
+    viewer.shape = null;
+    viewer.shapeSub = null;
+    viewer.note = null;
     viewer.sheet = null;
+    // give the button its piece back
+    if (els.project && !els.project.hidden) mountLiveDiagram();
+  }
+
+  /**
+   * Build the viewer's canvas and mount the renderer on it. Called again with
+   * a FRESH canvas element if the context is lost or the first frame drew
+   * nothing: a canvas whose GL context has gone can never be given another one
+   * (and Chrome paints a broken-image glyph on it), so recovering means
+   * replacing the element — at which point either WebGL comes back or the
+   * renderer's own Canvas-2D silhouette can finally draw. One retry.
+   * @returns {boolean} whether a renderer is mounted
+   */
+  function mountViewerCanvas(stage, prt, attempt) {
+    if (viewer.canvas && viewer.canvas.parentNode) {
+      viewer.canvas.parentNode.removeChild(viewer.canvas);
+    }
+    viewer.canvas = null;
+    var canvas = document.createElement('canvas');
+    canvas.className = 'viewer-canvas';
+    canvas.setAttribute('aria-label', prt.name + ' in 3D');
+    stage.insertBefore(canvas, stage.firstChild);
+    try {
+      viewer.handle = window.Diagram.mount(canvas, {
+        palette: diagramPalette(),
+        reducedMotion: prefersReducedMotion(),
+        interactive: true,
+        /* Never render nothing (05 #7): if there is no piece on screen the
+           viewer says so in one line instead of showing a flat rectangle of
+           --primary and letting the user conclude the feature is broken. */
+        onStatus: function (s) {
+          if (!s || viewer.canvas !== canvas) return;
+          if (s.webgl) {
+            viewerNote(stage, '');
+            return;
+          }
+          viewerNote(stage, s.message || "Showing a simple outline — 3D isn't available right now.");
+          if (attempt < 1 && (s.status === 'lost' || s.status === 'blank')) {
+            window.setTimeout(function () {
+              if (viewer.canvas !== canvas) return;
+              if (viewer.handle) {
+                try { viewer.handle.destroy({ release: true }); } catch (e) { /* ignore */ }
+                viewer.handle = null;
+              }
+              mountViewerCanvas(stage, prt, attempt + 1);
+            }, 0);
+          }
+        }
+      });
+    } catch (e) {
+      viewer.handle = null;
+    }
+    if (!viewer.handle) {
+      if (canvas.parentNode) canvas.parentNode.removeChild(canvas);
+      return false;
+    }
+    viewer.canvas = canvas;
+    canvas.diagram = viewer.handle;
+    if (typeof viewer.handle.setInteractive === 'function') {
+      try {
+        viewer.handle.setInteractive(true);
+      } catch (e2) {
+        /* ignore */
+      }
+    }
+    // The sheet may still be animating in — size it once it has landed.
+    window.requestAnimationFrame(function () {
+      resizeDiagrams();
+      pushDiagram('none');
+      updateViewerReadout();
+    });
+    return true;
+  }
+
+  /** The one-line "it isn't 3D right now" footer inside the viewer stage. */
+  function viewerNote(stage, text) {
+    if (!stage) return;
+    if (!viewer.note) {
+      viewer.note = el('div', 'viewer-note', '');
+      stage.appendChild(viewer.note);
+    }
+    viewer.note.textContent = text;
+    viewer.note.hidden = !text;
   }
 
   function openViewerSheet() {
@@ -2235,44 +2560,48 @@
           body.appendChild(readout);
         }
 
+        /* What the geometry made of the piece, and the per-part rounds/rows
+           override (05 #2 / #12). The shape line is the only place the app
+           ever says out loud what it thinks it is drawing. */
+        var bar = el('div', 'viewer-bar');
+        var shapeBox = el('div', 'viewer-shape');
+        var shapeLabel = el('span', null, '');
+        var shapeSub = el('span', 'viewer-shape-sub', '');
+        shapeBox.appendChild(shapeLabel);
+        shapeBox.appendChild(shapeSub);
+        viewer.shape = shapeLabel;
+        viewer.shapeSub = shapeSub;
+        bar.appendChild(shapeBox);
+        var modeSeg = segmented(
+          [{ id: 'auto', label: 'Auto' }, { id: 'rounds', label: 'Rounds' }, { id: 'rows', label: 'Rows' }],
+          prt.workMode === 'rounds' || prt.workMode === 'rows' ? prt.workMode : 'auto',
+          function (v) {
+            Store.updatePart(p.id, prt.id, { workMode: v });
+            pushDiagram('none');
+            updateViewerReadout();
+            render();
+            fb('tap');
+          }
+        );
+        modeSeg.node.setAttribute('aria-label', 'Worked in rounds or rows');
+        bar.appendChild(modeSeg.node);
+        body.appendChild(bar);
+
         var stage = el('div', 'viewer-stage');
-        var canvas = document.createElement('canvas');
-        canvas.className = 'viewer-canvas';
-        canvas.setAttribute('aria-label', prt.name + ' in 3D');
-        stage.appendChild(canvas);
         body.appendChild(stage);
 
         if (!diagramAvailable()) {
           stage.appendChild(el('div', 'viewer-empty', 'The 3D view is not available on this device.'));
           return;
         }
-        try {
-          viewer.handle = window.Diagram.mount(canvas, {
-            palette: diagramPalette(),
-            reducedMotion: prefersReducedMotion(),
-            interactive: true
-          });
-        } catch (e) {
-          viewer.handle = null;
-        }
-        if (!viewer.handle) {
+        /* Only one live GL context at a time: the button's goes away while the
+           viewer is open and is rebuilt on close. Opening the viewer used to
+           mount a SECOND context beside it, and after a few opens the browser
+           started dropping the oldest without a word (05 #7). */
+        destroyLiveCanvas();
+        if (!mountViewerCanvas(stage, prt, 0)) {
           stage.appendChild(el('div', 'viewer-empty', 'The 3D view could not start.'));
-          return;
         }
-        viewer.canvas = canvas;
-        canvas.diagram = viewer.handle;
-        if (typeof viewer.handle.setInteractive === 'function') {
-          try {
-            viewer.handle.setInteractive(true);
-          } catch (e2) {
-            /* ignore */
-          }
-        }
-        // The sheet is still animating in — size it once it has landed.
-        window.requestAnimationFrame(function () {
-          resizeDiagrams();
-          pushDiagram('none');
-        });
       },
       footer: [
         {
@@ -2650,10 +2979,12 @@
             Store.setActiveProject(created.id);
 
             var bits = [];
+            var importRes = null;
             if (secs.length) {
               var res = Store.importPatternSections(created.id, secs, {
                 mode: 'parts', text: pdf.text(), noTargets: pdf.noTargets()
               });
+              importRes = res;
               var extra = addChecklistItems(created.id, pdf.checkedChecklist());
               var fresh = Store.project(created.id);
               bits.push(plural(fresh ? fresh.parts.length : secs.length, 'part'));
@@ -2689,6 +3020,7 @@
             if (bits.length) {
               toast('Created ' + created.name + ' · ' + bits.join(' · '), { ms: 3600 });
             }
+            modeFlipToast(importRes);
           }
         }
       ]
@@ -2891,7 +3223,7 @@
     if (!p || !prt) return;
 
     var nameInput, makeStep, targetInput, repEnable, repStart, repEnd, repTimes,
-      alertsInput, placeArea, patternArea, extras;
+      alertsInput, placeArea, patternArea, extras, modeSeg, syncModeHint;
     var repeatOn = !!prt.repeat.enabled;
     var sizeIndex = prt.sizeIndex || 0;
 
@@ -2914,7 +3246,8 @@
         alerts: parseNumberList(alertsInput.value),
         placementNotes: placeArea.value,
         patternText: patternArea.value,
-        sizeIndex: sizeIndex
+        sizeIndex: sizeIndex,
+        workMode: modeSeg ? modeSeg.get() : 'auto'
       };
     }
 
@@ -2991,6 +3324,10 @@
     }
 
     function refreshParsed() {
+      // Auto's answer follows the text in the box, so it is re-read here too.
+      if (syncModeHint) {
+        try { syncModeHint(); } catch (e) { /* ignore */ }
+      }
       if (!extras) return;
       clear(extras);
       if (!patternArea.value.trim()) {
@@ -3063,6 +3400,45 @@
 
         makeStep = stepper(prt.makeCount, 1, 20, 'make count');
         body.appendChild(field('How many', makeStep.node));
+
+        /* 05 #2 — rounds vs rows, per piece. The project has one word for the
+           whole toy, and a Baphomet imported as 'rows' modelled a tail that
+           begins `R1: MR4` as a flat sheet. Auto asks the pattern text first
+           and says which way it went, so a wrong guess is one tap from fixed. */
+        var modeHint = el('div', 'field-hint');
+        modeSeg = segmented(
+          [{ id: 'auto', label: 'Auto' }, { id: 'rounds', label: 'Rounds' }, { id: 'rows', label: 'Rows' }],
+          prt.workMode === 'rounds' || prt.workMode === 'rows' ? prt.workMode : 'auto',
+          function () { syncModeHint(); }
+        );
+        var modeWrap = el('div', 'field');
+        modeWrap.appendChild(el('div', 'field-label', 'Worked in'));
+        modeWrap.appendChild(modeSeg.node);
+        modeWrap.appendChild(modeHint);
+        body.appendChild(modeWrap);
+
+        syncModeHint = function () {
+          var pick = modeSeg.get();
+          if (pick !== 'auto') {
+            modeHint.textContent = pick === 'rounds'
+              ? 'Worked in rounds — the 3D piece is a solid of revolution.'
+              : 'Worked in rows — the 3D piece is a flat sheet.';
+            return;
+          }
+          var resolved = partMode(p, previewMode());
+          modeHint.textContent = 'Auto — this pattern reads as ' + resolved + '.';
+        };
+        /* what Auto resolves to for the text in the box right now, not for the
+           text that was saved */
+        function previewMode() {
+          var tmp = {};
+          for (var k in prt) if (prt.hasOwnProperty(k)) tmp[k] = prt[k];
+          tmp.id = prt.id + ':modepreview';
+          tmp.workMode = 'auto';
+          if (patternArea) tmp.patternText = patternArea.value;
+          return tmp;
+        }
+        syncModeHint();
 
         targetInput = numInput(prt.targetRows == null ? '' : prt.targetRows, 1, 999999, 'e.g. 40');
         body.appendChild(field('Target ' + rowWord(p).toLowerCase() + 's', targetInput, 'Leave blank for open-ended.'));
@@ -4400,10 +4776,25 @@
               msg = 'Nothing imported';
             }
             toast(msg + placingSuffix(res.placed) + checklistSuffix(extra), { ms: 3600 });
+            modeFlipToast(res);
           }
         }
       ]
     });
+  }
+
+  /**
+   * 05 #2: the import decided this whole pattern is worked in rounds and moved
+   * the project off 'rows'. Say so once — the flip is the difference between a
+   * tail rendering as a tail and rendering as a blanket, and nothing else in
+   * the UI would ever mention it. `importPatternSections` only reports it on
+   * the import that actually changed the project, so it cannot repeat.
+   */
+  function modeFlipToast(res) {
+    if (!res || !res.modeFlipped) return;
+    window.setTimeout(function () {
+      toast('This pattern is worked in rounds — switched the project to Rounds', { ms: 4200 });
+    }, 900);
   }
 
   function checklistSuffix(n) {

@@ -36,7 +36,10 @@
   var undoStack = [];
   var undoBytesTotal = 0;
   var saveTimer = null;
-  var lineCache = Object.create(null); // partId -> { key, lines }   (key = sizeIndex + ' ' + text)
+  // partId -> { text, length, size, lines, version, index }. The key is compared
+  // by REFERENCE, never rebuilt — see partLines().
+  var lineCache = Object.create(null);
+  var lineVersion = 0;
   var diagramCache = Object.create(null); // partId -> { key, model } (live 3D diagram)
 
   /* ---- Wave 1: persistence health -------------------------------------- *
@@ -72,6 +75,10 @@
   var MAIN_YARN_DEFAULT = '#f1e3c8';
   /* Never model more rounds than this — a 900-row blanket would choke the GPU. */
   var DIAGRAM_MAX_ROUNDS = 400;
+  /* How much of that window sits BEHIND the round being worked (the rest ahead). */
+  var DIAGRAM_WINDOW_BACK = 0.7;
+  /* Per-stitch records kept for one round; the count itself is never truncated. */
+  var STITCH_DETAIL_MAX = 999;
 
   /* ------------------------------------------------------------------ *
    * Small utilities
@@ -99,6 +106,11 @@
 
   function str(v, dflt) {
     return typeof v === 'string' ? v : dflt;
+  }
+
+  /** A finite, positive number (stitch height / width), else the default. */
+  function posNum(v, dflt) {
+    return typeof v === 'number' && isFinite(v) && v > 0 ? v : dflt;
   }
 
   function deepCopy(obj) {
@@ -134,6 +146,17 @@
       s = s.replace(/\s+$/, '');
     }
     return s || dflt;
+  }
+
+  /**
+   * `Part.workMode`: 'auto' (ask the pattern, then the project), or an explicit
+   * 'rounds' / 'rows' the owner picked. 05-ux-meaning #2 — one project-level
+   * word cannot be right for a round yoke AND its flat panels.
+   */
+  function normalizeWorkMode(v, dflt) {
+    var s = str(v, '').trim().toLowerCase();
+    if (s === 'rounds' || s === 'rows' || s === 'auto') return s;
+    return dflt || 'auto';
   }
 
   /** FNV-1a, base36. Short, stable, and good enough to key a PDF section. */
@@ -388,11 +411,16 @@
           name: pname,
           makeCount: clampInt(p.makeCount, 1, 99, 1),
           patternText: str(p.patternText, ''),
-          placementNotes: str(p.placementNotes, '')
+          placementNotes: str(p.placementNotes, ''),
+          // Rides along with patternText: a template drafted from an amigurumi
+          // part keeps "this piece is worked in rounds".
+          workMode: normalizeWorkMode(p.workMode, 'auto')
         });
       }
     }
-    if (!parts.length) parts = [{ name: 'Main', makeCount: 1, patternText: '', placementNotes: '' }];
+    if (!parts.length) {
+      parts = [{ name: 'Main', makeCount: 1, patternText: '', placementNotes: '', workMode: 'auto' }];
+    }
 
     var checklist = [];
     if (Array.isArray(t.checklist)) {
@@ -538,7 +566,8 @@
         name: pname,
         makeCount: Math.floor(mc),
         patternText: str(p.patternText, ''),
-        placementNotes: str(p.placementNotes, '')
+        placementNotes: str(p.placementNotes, ''),
+        workMode: normalizeWorkMode(p.workMode, 'auto')
       });
     }
     if (!parts.length) throw new Error('Add at least one part.');
@@ -612,7 +641,8 @@
           name: p.name,
           makeCount: p.makeCount,
           patternText: str(p.patternText, ''),
-          placementNotes: str(p.placementNotes, '')
+          placementNotes: str(p.placementNotes, ''),
+          workMode: normalizeWorkMode(p.workMode, 'auto')
         };
       }),
       checklist: proj.checklist
@@ -646,6 +676,8 @@
       placementNotes: '',
       patternText: '',
       sizeIndex: 0,
+      // 3D diagram: rounds vs rows for THIS piece. 'auto' asks the pattern.
+      workMode: 'auto',
       // Live diagram: index = row number (1-based), value = stitches in that row.
       rowStitches: [0]
     };
@@ -703,6 +735,8 @@
       patternText: str(p.patternText, ''),
       // v2: parts saved before multi-size support simply get size 0.
       sizeIndex: clampInt(p.sizeIndex, 0, 99, 0),
+      // v5 (3D wave A): parts saved before per-part rounds/rows ask the pattern.
+      workMode: normalizeWorkMode(p.workMode, 'auto'),
       // v3 (live diagram): saves from before it simply have nothing recorded.
       rowStitches: normalizeRowStitches(p.rowStitches, clampInt(p.row, 0, 999999, 0))
     };
@@ -1562,26 +1596,103 @@
     return prt && typeof prt.sizeIndex === 'number' && prt.sizeIndex > 0 ? Math.floor(prt.sizeIndex) : 0;
   }
 
-  function linesFor(prt) {
-    if (!prt) return [];
+  var EMPTY_ENTRY = { text: '', length: 0, size: 0, lines: [], version: 0, index: null };
+
+  /**
+   * The per-part parsed-pattern cache: `{ text, length, size, lines, version,
+   * index }`.
+   *
+   * The cache key is the text itself, compared by reference (`===` on the same
+   * string is a pointer test), and NEVER rebuilt. The old key was
+   * `size + ' ' + text`, i.e. a fresh 54 KB concatenation plus a full compare on
+   * every call, which is where a 1,500-row `buildDiagramModel` spent 312 of its
+   * 434 ms (03-model-builder finding 2 — HANDOFF 12 blamed `Patterns.lineFor`,
+   * which costs 0.004 ms).
+   *
+   * `version` is an incrementing id for "this parse", so the diagram cache can
+   * key off the pattern text without touching the text at all.
+   */
+  function partLines(prt) {
+    if (!prt) return EMPTY_ENTRY;
     var text = prt.patternText || '';
-    if (!text.replace(/\s/g, '')) return [];
     var size = sizeIndexOf(prt);
-    var key = size + ' ' + text;
     var cached = lineCache[prt.id];
-    if (cached && cached.key === key) return cached.lines;
+    if (cached && cached.size === size && cached.length === text.length && cached.text === text) {
+      return cached;
+    }
     var lines = [];
-    var api = patternsApi();
-    if (api && typeof api.parse === 'function') {
-      try {
-        var out = api.parse(text, { size: size });
-        if (Array.isArray(out)) lines = out;
-      } catch (e) {
-        lines = [];
+    if (/\S/.test(text)) {
+      var api = patternsApi();
+      if (api && typeof api.parse === 'function') {
+        try {
+          var out = api.parse(text, { size: size });
+          if (Array.isArray(out)) lines = out;
+        } catch (e) {
+          lines = [];
+        }
       }
     }
-    lineCache[prt.id] = { key: key, lines: lines };
-    return lines;
+    var entry = {
+      text: text,
+      length: text.length,
+      size: size,
+      lines: lines,
+      version: ++lineVersion,
+      index: null
+    };
+    lineCache[prt.id] = entry;
+    return entry;
+  }
+
+  function linesFor(prt) {
+    return partLines(prt).lines;
+  }
+
+  /** `Line.count` as `Patterns.targetFor` reads it: no v1 `stitches` fallback. */
+  function strictCount(line) {
+    if (!line) return null;
+    return typeof line.count === 'number' && isFinite(line.count) ? line.count : null;
+  }
+
+  /**
+   * row -> line / row -> count, built once per parse instead of scanning every
+   * line for every row. Resolution order is `Patterns.lineFor`'s, to the letter:
+   * the first line of section 0 that covers the row, then the first line of any
+   * section. `count` is resolved separately because a section-0 line WITHOUT a
+   * count does not shadow a later line that has one.
+   */
+  function buildRowIndex(lines, upTo) {
+    var line = [];
+    var count = [];
+    var pass, i, l, r, end, c;
+    for (pass = 0; pass < 2; pass++) {
+      for (i = 0; i < lines.length; i++) {
+        l = lines[i];
+        if (!l || typeof l.row !== 'number' || !isFinite(l.row) || l.row < 1) continue;
+        if (pass === 0 && l.section !== 0) continue;
+        end = typeof l.rowEnd === 'number' && isFinite(l.rowEnd) && l.rowEnd > l.row ? l.rowEnd : l.row;
+        if (end > upTo) end = upTo;
+        if (l.row > upTo) continue;
+        c = strictCount(l);
+        for (r = l.row; r <= end; r++) {
+          if (line[r] === undefined) line[r] = l;
+          if (count[r] === undefined && c !== null) count[r] = c;
+        }
+      }
+    }
+    return { upTo: upTo, line: line, count: count };
+  }
+
+  // Rows past this are looked up the slow way; buildDiagramModel never goes there.
+  var ROW_INDEX_MAX = DIAGRAM_MAX_ROUNDS * 4;
+
+  function rowIndexOf(prt) {
+    var entry = partLines(prt);
+    if (!entry.index) {
+      if (entry === EMPTY_ENTRY) return buildRowIndex([], ROW_INDEX_MAX);
+      entry.index = buildRowIndex(entry.lines, ROW_INDEX_MAX);
+    }
+    return entry.index;
   }
 
   /** v2 field with a v1 fallback: Line.count ?? Line.stitches. */
@@ -1928,8 +2039,13 @@
 
   function lineForRow(prt, rowNumber) {
     var lines = linesFor(prt);
+    if (!lines.length) return null;
+    if (typeof rowNumber === 'number' && rowNumber >= 1 && rowNumber <= ROW_INDEX_MAX) {
+      var hit = rowIndexOf(prt).line[rowNumber];
+      return hit === undefined ? null : hit;
+    }
     var api = patternsApi();
-    if (!lines.length || !api || typeof api.lineFor !== 'function') return null;
+    if (!api || typeof api.lineFor !== 'function') return null;
     try {
       return api.lineFor(lines, rowNumber) || null;
     } catch (e) {
@@ -1937,13 +2053,21 @@
     }
   }
 
+  /** Whole, positive stitch targets only — 0 and nonsense read as "no target". */
+  function usableCount(c) {
+    return typeof c === 'number' && isFinite(c) && c > 0 ? Math.floor(c) : null;
+  }
+
   function targetFor(prt, rowNumber) {
     var lines = linesFor(prt);
+    if (!lines.length) return null;
+    if (typeof rowNumber === 'number' && rowNumber >= 1 && rowNumber <= ROW_INDEX_MAX) {
+      return usableCount(rowIndexOf(prt).count[rowNumber]);
+    }
     var api = patternsApi();
-    if (!lines.length || !api || typeof api.targetFor !== 'function') return null;
+    if (!api || typeof api.targetFor !== 'function') return null;
     try {
-      var t = api.targetFor(lines, rowNumber);
-      if (typeof t === 'number' && isFinite(t) && t > 0) return Math.floor(t);
+      return usableCount(api.targetFor(lines, rowNumber));
     } catch (e) {
       /* ignore */
     }
@@ -2298,6 +2422,7 @@
         var made = makePart(p.name, p.makeCount);
         made.patternText = str(p.patternText, '');
         made.placementNotes = str(p.placementNotes, '');
+        made.workMode = normalizeWorkMode(p.workMode, 'auto');
         return made;
       }),
       checklist: tpl.checklist.map(function (t) { return { id: uid(), text: t, done: false }; }),
@@ -2496,6 +2621,11 @@
     if (typeof patch.placementNotes === 'string') prt.placementNotes = patch.placementNotes;
     if (typeof patch.patternText === 'string') prt.patternText = patch.patternText;
     if (patch.sizeIndex !== undefined) prt.sizeIndex = clampInt(patch.sizeIndex, 0, 99, prt.sizeIndex || 0);
+    // The two-chip "This piece: In rounds / In rows" control. Undoable like
+    // everything else here, because updatePart snapshotted above.
+    if (patch.workMode !== undefined) {
+      prt.workMode = normalizeWorkMode(patch.workMode, normalizeWorkMode(prt.workMode, 'auto'));
+    }
     if (patch.piecesDone !== undefined) prt.piecesDone = clampInt(patch.piecesDone, 0, prt.makeCount, prt.piecesDone);
     touch(proj);
     return prt;
@@ -2543,6 +2673,30 @@
   }
 
   /**
+   * True when every section carrying text reads as worked in rounds. A section
+   * the parser cannot place ('rows' or null) blocks the answer — flipping a
+   * project's counting label on a guess is worse than leaving it.
+   */
+  function sectionsAllRounds(sections) {
+    var api = patternsApi();
+    if (!api || typeof api.workMode !== 'function') return false;
+    var seen = 0;
+    for (var i = 0; i < sections.length; i++) {
+      var text = str(sections[i] && sections[i].text, '');
+      if (!text.replace(/\s/g, '')) continue;
+      var m = null;
+      try {
+        m = api.workMode(text);
+      } catch (e) {
+        return false;
+      }
+      if (m !== 'rounds') return false;
+      seen++;
+    }
+    return seen > 0;
+  }
+
+  /**
    * Import parsed pattern sections into a project.
    * mode 'parts'  → one part per section: a part with the same name (case
    *                 insensitive) is updated, otherwise a new part is added.
@@ -2554,12 +2708,15 @@
    * Parts are matched on their `importKey` (content) before their name, and a
    * section whose rows run 1..maxRow contiguously sets `targetRows` on the
    * part it makes (or on one that has none). `opts.noTargets` turns the
-   * second half off.
-   * @returns {{created:number, updated:number, placed:number, targeted:number}}
+   * second half off. When the import CREATES parts and every section reads as
+   * worked in rounds, a project labelled 'rows' is corrected to 'rounds' and
+   * `modeFlipped` says so.
+   * @returns {{created:number, updated:number, placed:number, targeted:number,
+   *            modeFlipped:boolean}}
    */
   function importPatternSections(projectId, sections, opts) {
     var proj = project(projectId);
-    var out = { created: 0, updated: 0, placed: 0, targeted: 0 };
+    var out = { created: 0, updated: 0, placed: 0, targeted: 0, modeFlipped: false };
     if (!proj || !Array.isArray(sections) || !sections.length) return out;
     var mode = opts && opts.mode === 'active' ? 'active' : 'parts';
     snapshot(proj);
@@ -2673,6 +2830,14 @@
         proj.parts.forEach(function (p) { if (kept.indexOf(p) < 0) delete lineCache[p.id]; });
         proj.parts = kept;
         if (!part(proj, proj.activePartId)) proj.activePartId = kept[0].id;
+      }
+      // 05-ux-meaning #2: the snowman and the baphomet both imported as 'rows'
+      // although every line reads `R12-R17: 66 sc around`, and one project-level
+      // word then modelled two spheres as a flat sheet. The parts themselves
+      // stay on 'auto' — this only corrects the project's own label.
+      if (proj.countMode !== 'rounds' && sectionsAllRounds(sections)) {
+        proj.countMode = 'rounds';
+        out.modeFlipped = true;
       }
     }
     touch(proj);
@@ -3235,7 +3400,15 @@
    * ------------------------------------------------------------------ */
 
   function emptyModel() {
-    return { mode: 'rounds', rounds: [], current: 0, defaultColor: MAIN_YARN_DEFAULT };
+    return {
+      mode: 'rounds',
+      rounds: [],
+      current: 0,
+      defaultColor: MAIN_YARN_DEFAULT,
+      shape: { start: 'unknown', chainLen: null, ringCount: null, stuffed: null },
+      window: { first: 0, total: 0 },
+      deviation: { expected: null, actual: 0 }
+    };
   }
 
   /** The project's palette, repaired in place for saves made before v3. */
@@ -3352,11 +3525,166 @@
     return r.startRow + ((row - r.startRow) % len);
   }
 
+  /**
+   * Patterns.workMode(text) → 'rounds'|'rows'|null, never throwing, memoised on
+   * the parse. `diagramKey` asks for this on every tap, and scanning 50 KB of
+   * pattern text per tap is exactly the kind of thing finding 2 was about.
+   */
+  function patternWorkMode(prt) {
+    var api = patternsApi();
+    if (!api || typeof api.workMode !== 'function') return null;
+    var text = prt && prt.patternText ? String(prt.patternText) : '';
+    // /\S/ stops at the first non-space character; `text.replace(/\s/g,'')`
+    // rebuilds the whole 52 KB, and this is on the tap path.
+    if (!/\S/.test(text)) return null;
+    var entry = partLines(prt);
+    // Keyed on the function itself, so a test page that swaps the parser out
+    // gets a fresh answer instead of a frozen one.
+    if (entry.patternModeFn === api.workMode) return entry.patternMode;
+    var out = null;
+    try {
+      var m = api.workMode(text);
+      if (m === 'rounds' || m === 'rows') out = m;
+    } catch (e) {
+      /* a parser without workMode, or a bad pattern — leave it unknown */
+    }
+    entry.patternModeFn = api.workMode;
+    entry.patternMode = out;
+    return out;
+  }
+
+  /**
+   * Rounds or rows for ONE piece, in resolution order (05-ux-meaning #2):
+   * the owner's explicit `Part.workMode`, then what the pattern text says, then
+   * the project's `countMode` as the tie-break.
+   * @returns {'rounds'|'rows'}
+   */
+  function partWorkMode(prt, proj) {
+    var explicit = normalizeWorkMode(prt && prt.workMode, 'auto');
+    if (explicit !== 'auto') return explicit;
+    var guess = patternWorkMode(prt);
+    if (guess) return guess;
+    if (proj === undefined) proj = projectOfPart(prt);
+    return proj && proj.countMode === 'rounds' ? 'rounds' : 'rows';
+  }
+
+  var START_KINDS = {
+    'magic-ring': true,
+    'chain-ring': true,
+    'chain-oval': true,
+    'chain-row': true,
+    unknown: true
+  };
+
+  function posIntOrNull(v) {
+    return typeof v === 'number' && isFinite(v) && v > 0 ? Math.floor(v) : null;
+  }
+
+  /**
+   * `Model.shape` — how the piece starts and whether it is stuffed, from
+   * `Patterns.startHint` / `Patterns.stuffingHint`. Every field degrades to
+   * 'unknown' / null, so a parser without them costs nothing but detail.
+   */
+  function partShape(prt) {
+    var out = { start: 'unknown', chainLen: null, ringCount: null, stuffed: null };
+    var api = patternsApi();
+    var lines = linesFor(prt);
+    if (api && typeof api.startHint === 'function' && lines.length) {
+      try {
+        var h = api.startHint(lines);
+        if (h && typeof h === 'object') {
+          var s = str(h.start, '').trim();
+          if (START_KINDS[s]) out.start = s;
+          out.chainLen = posIntOrNull(h.chainLen);
+          out.ringCount = posIntOrNull(h.ringCount);
+        }
+      } catch (e) {
+        /* leave it unknown */
+      }
+    }
+    if (api && typeof api.stuffingHint === 'function') {
+      try {
+        var v = api.stuffingHint(prt && prt.patternText ? String(prt.patternText) : '');
+        if (v === true || v === false) out.stuffed = v;
+      } catch (e) {
+        /* leave it null — "the pattern does not say" */
+      }
+    }
+    return out;
+  }
+
+  /**
+   * The pattern's count for the round being worked vs the stitches actually
+   * tapped into it (05-ux-meaning #12). `expected` is null when the pattern
+   * never said, and is never compared against a count the store invented.
+   * @returns {{expected:number|null, actual:number, row:number, delta:number|null}}
+   */
+  function roundDeviation(prt) {
+    if (!prt) return { expected: null, actual: 0, row: 0, delta: null };
+    var row = clampInt(prt.row, 0, 999999, 0) + 1;
+    var expected = targetFor(prt, patternRowForRow(prt, row));
+    var actual = clampInt(prt.stitch, 0, 999999, 0);
+    return {
+      expected: expected,
+      actual: actual,
+      row: row,
+      delta: expected === null ? null : actual - expected
+    };
+  }
+
+  /**
+   * Increase / decrease positions for one round. `expand`'s own index arrays
+   * win; without them the stitch types are read, collapsing the two adjacent
+   * `inc` entries of one increase (and the newer `inc` + `inc+` pair) into the
+   * single site they really are.
+   */
+  function incDecPositions(ex, stitches) {
+    var inc = [];
+    var dec = [];
+    var i, n;
+
+    function collect(raw, into) {
+      if (!Array.isArray(raw)) return false;
+      for (var k = 0; k < raw.length; k++) {
+        var v = raw[k];
+        if (typeof v === 'number' && isFinite(v) && v >= 0 && v < stitches.length) {
+          v = Math.floor(v);
+          if (into.indexOf(v) === -1) into.push(v);
+        }
+      }
+      into.sort(function (a, b) { return a - b; });
+      return true;
+    }
+
+    var gotInc = ex ? collect(ex.inc, inc) : false;
+    var gotDec = ex ? collect(ex.dec, dec) : false;
+    if (gotInc && gotDec) return { inc: inc, dec: dec };
+
+    // An increase produces TWO stitches in one place, so pair them up: six
+    // adjacent `inc` entries are six stitches at three sites, not one site.
+    // `inc+` (the newer parser's explicit continuation) closes a pair outright.
+    var open = false;
+    for (i = 0, n = stitches.length; i < n; i++) {
+      var t = stitches[i].t;
+      if (t === 'inc') {
+        if (open) open = false;
+        else { if (!gotInc) inc.push(i); open = true; }
+      } else if (t === 'inc+') {
+        open = false;
+      } else {
+        open = false;
+        if (!gotDec && t === 'dec') dec.push(i);
+      }
+    }
+    return { inc: inc, dec: dec };
+  }
+
   function buildDiagramModel(prt, proj) {
-    var mode = proj && proj.countMode === 'rounds' ? 'rounds' : 'rows';
+    var mode = partWorkMode(prt, proj === undefined ? null : proj);
     var main = mainYarn(proj);
     var resolve = makeColorResolver(proj, prt);
     var lines = linesFor(prt);
+    var rowIndex = lines.length ? rowIndexOf(prt) : null;
     var rs = Array.isArray(prt.rowStitches) ? prt.rowStitches : [];
     var api = patternsApi();
     var canExpand = !!(lines.length && api && typeof api.expand === 'function');
@@ -3366,28 +3694,44 @@
       var sum = patternSummary(prt);
       if (typeof sum.maxRow === 'number' && sum.maxRow > 0) maxRow = Math.floor(sum.maxRow);
     }
-    var workingRow = prt.row + 1;
+    var workingRow = clampInt(prt.row, 0, 999999, 0) + 1;
     var total = Math.max(workingRow, maxRow, rs.length - 1);
     if (total < 1) total = 1;
-    if (total > DIAGRAM_MAX_ROUNDS * 4) total = DIAGRAM_MAX_ROUNDS * 4;
-    // A 900-round blanket only shows its most recent rounds.
-    var start = Math.max(1, total - DIAGRAM_MAX_ROUNDS + 1);
+    if (total > ROW_INDEX_MAX) total = ROW_INDEX_MAX;
+
+    // A 900-round blanket shows a window of rounds, and that window is anchored
+    // to the round being WORKED, not to the end of the pattern
+    // (03-model-builder finding 1: at round 5 of 600 the old window returned
+    // rounds 201-600 and wrote the live stitch count onto round 600).
+    var anchor = Math.min(workingRow, total);
+    var first = 1;
+    var last = total;
+    if (total > DIAGRAM_MAX_ROUNDS) {
+      first = anchor - Math.floor(DIAGRAM_MAX_ROUNDS * DIAGRAM_WINDOW_BACK);
+      var latest = total - DIAGRAM_MAX_ROUNDS + 1;
+      if (first > latest) first = latest;
+      if (first < 1) first = 1;
+      last = Math.min(total, first + DIAGRAM_MAX_ROUNDS - 1);
+    }
 
     var rounds = [];
     var current = -1;
     var state = null;
     var prevCount = 0;
 
-    for (var row = 1; row <= total; row++) {
+    // Rows past the window are never pushed and nothing downstream reads their
+    // colour state, so the walk stops at `last`.
+    for (var row = 1; row <= last; row++) {
       var patternRow = patternRowForRow(prt, row);
-      var line = lines.length ? lineForRow(prt, patternRow) : null;
+      var line = rowIndex ? rowIndex.line[patternRow] : null;
+      if (line === undefined) line = null;
       var stitches = [];
       var count = 0;
       var height = 1;
       var color = main;
+      var ex = null;
 
       if (canExpand) {
-        var ex = null;
         try {
           ex = api.expand(lines, patternRow, prevCount, state);
         } catch (e) {
@@ -3398,11 +3742,25 @@
           if (typeof ex.height === 'number' && isFinite(ex.height) && ex.height > 0) height = ex.height;
           if (ex.color) color = resolve(ex.color);
           var list = Array.isArray(ex.stitches) ? ex.stitches : [];
-          for (var si = 0; si < list.length && si < 999; si++) {
-            var st = list[si] && typeof list[si] === 'object' ? list[si] : {};
-            stitches.push({ t: str(st.t, '') || 'x', c: st.c ? resolve(st.c) : null });
+          count = Math.min(list.length, STITCH_DETAIL_MAX);
+          // Rows before the window are walked only to carry `prevCount` and the
+          // colour state forward, so they never pay for stitch records.
+          if (row >= first) {
+            for (var si = 0; si < count; si++) {
+              var st = list[si] && typeof list[si] === 'object' ? list[si] : {};
+              // h/w per stitch: a dc bump is twice as tall as an sc, an inc
+              // wider than a dec. `expand` computed them and used to throw
+              // them away.
+              stitches.push({
+                t: str(st.t, '') || 'x',
+                c: st.c ? resolve(st.c) : null,
+                h: posNum(st.h, 1),
+                w: posNum(st.w, 1)
+              });
+            }
           }
-          count = stitches.length;
+        } else {
+          ex = null;
         }
       }
       // No expand (or it gave up): counts only, generic stitches.
@@ -3412,7 +3770,7 @@
       }
       if (!count && rs[row] > 0) count = rs[row];
       if (!count && row === workingRow) {
-        count = Math.max(prt.stitch, targetFor(prt, patternRow) || 0);
+        count = Math.max(prt.stitch, (rowIndex ? usableCount(rowIndex.count[patternRow]) : null) || 0);
       }
 
       var done;
@@ -3421,22 +3779,44 @@
       else done = 0;
       if (count < done) count = done;
 
-      if (row >= start) {
-        if (row === workingRow) current = rounds.length;
+      // A count with nothing behind it still gets one entry per stitch, so the
+      // renderer never has to guess how long the round is.
+      if (row >= first && !stitches.length && count > 0) {
+        var generic = Math.min(count, STITCH_DETAIL_MAX);
+        for (var gi = 0; gi < generic; gi++) stitches.push({ t: 'x', c: null, h: 1, w: 1 });
+      }
+
+      if (row >= first) {
+        if (row === anchor) current = rounds.length;
+        var marks = incDecPositions(ex, stitches);
         rounds.push({
           count: count,
           done: done,
           stitches: stitches,
           color: color,
           height: height,
-          ghost: row > workingRow
+          ghost: row > workingRow,
+          inc: marks.inc,
+          dec: marks.dec,
+          // 1-based pattern row this round draws (= the work row; they differ
+          // only inside a repeat, where the pattern row is reused).
+          row: row
         });
       }
       prevCount = count;
     }
 
     if (current < 0) current = rounds.length ? rounds.length - 1 : 0;
-    return { mode: mode, rounds: rounds, current: current, defaultColor: main };
+    var dev = roundDeviation(prt);
+    return {
+      mode: mode,
+      rounds: rounds,
+      current: current,
+      defaultColor: main,
+      shape: partShape(prt),
+      window: { first: rounds.length ? first : 0, total: total },
+      deviation: { expected: dev.expected, actual: dev.actual }
+    };
   }
 
   /** Cheap palette fingerprint — these objects hold a handful of keys. */
@@ -3448,34 +3828,65 @@
     return out;
   }
 
+  /**
+   * A fingerprint of `rowStitches` VALUES, not just its length, so editing a
+   * past row's count can never leave a stale model behind (finding 20). No
+   * string building: this runs on the tap path.
+   */
+  function rowStitchSerial(rs) {
+    var h = 0;
+    for (var i = 0; i < rs.length; i++) h = (h * 31 + (rs[i] | 0)) | 0;
+    return rs.length + ':' + h;
+  }
+
+  /**
+   * Everything `buildDiagramModel` reads, except `part.stitch` (the tap path
+   * mutates the live round instead). The pattern text is NOT concatenated in:
+   * `partLines().version` changes whenever the parse does, which is the same
+   * thing for a fraction of the cost.
+   */
   function diagramKey(prt, proj) {
     var rs = Array.isArray(prt.rowStitches) ? prt.rowStitches : [];
-    var text = prt.patternText || '';
+    var entry = partLines(prt);
     return (
-      sizeIndexOf(prt) + '|' + prt.row + '|' + prt.piecesDone + '|' + rs.length + '|' +
+      sizeIndexOf(prt) + '|' + prt.row + '|' + prt.piecesDone + '|' + rowStitchSerial(rs) + '|' +
       (prt.repeat && prt.repeat.enabled ? prt.repeat.startRow + '-' + prt.repeat.endRow + 'x' + prt.repeat.times : '-') +
-      '|' + (proj && proj.countMode === 'rounds' ? 'rounds' : 'rows') + '|' + yarnSerial(proj) +
-      '|' + text.length + '|' + text
+      '|' + partWorkMode(prt, proj === undefined ? null : proj) +
+      '|' + yarnSerial(proj) +
+      '|' + entry.length + '|v' + entry.version
     );
   }
 
   /**
    * The only thing that changes on the tap path: how much of the round being
    * worked is done. Mutating it in place keeps a tap off the model builder.
+   * It writes to the round the user is ACTUALLY on — `current` is built to point
+   * there, and the round's own `row` is checked before anything is written, so a
+   * model that has gone stale is left alone rather than corrupted.
    */
   function applyLiveRound(model, prt) {
-    var cur = model && model.rounds ? model.rounds[model.current] : null;
+    if (!model || !Array.isArray(model.rounds)) return model;
+    var cur = model.rounds[model.current];
     if (!cur) return model;
+    var workingRow = clampInt(prt.row, 0, 999999, 0) + 1;
+    var total = model.window && model.window.total > 0 ? model.window.total : 0;
+    if (total && workingRow > total) workingRow = total;
+    if (typeof cur.row === 'number' && cur.row !== workingRow) return model;
     cur.done = prt.stitch;
     if (cur.count < cur.done) cur.count = cur.done;
     cur.ghost = false;
+    if (model.deviation) model.deviation.actual = prt.stitch;
     return model;
   }
 
   /**
    * @param {object} prt  a part
    * @param {object} [proj]  its project (looked up when omitted)
-   * @returns {{mode:string, rounds:Array, current:number, defaultColor:string}}
+   * @returns {{mode:'rounds'|'rows', rounds:Array, current:number,
+   *           defaultColor:string,
+   *           shape:{start:string, chainLen:number|null, ringCount:number|null, stuffed:boolean|null},
+   *           window:{first:number, total:number},
+   *           deviation:{expected:number|null, actual:number}}}
    */
   function diagramModel(prt, proj) {
     if (!prt) return emptyModel();
@@ -3687,6 +4098,9 @@
 
     // live 3D diagram
     diagramModel: diagramModel,
+    partWorkMode: partWorkMode,
+    partShape: partShape,
+    roundDeviation: roundDeviation,
     yarnColorNames: yarnColorNames,
     yarnColorFor: yarnColorFor,
     hasYarnColor: hasYarnColor,

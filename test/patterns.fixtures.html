@@ -260,7 +260,11 @@ function runPdfs() {
         .catch(function (e) { log(false, name + ': extract failed - ' + (e && e.message ? e.message : e)); });
     });
   });
-  return chain.then(runGuards).then(runNewCorpus);
+  return chain.then(runGuards).then(runNewCorpus).then(function () {
+    try { runDiagramV2(); } catch (e) {
+      log(false, 'wave A diagram run threw - ' + (e && e.stack ? e.stack : e));
+    }
+  });
 }
 
 // ------------------------------------------- wave 1 (06 #6): the guards
@@ -777,6 +781,359 @@ function runDiagram(bearRaw, beeRaw, catoRaw, cardiganRaw) {
   log(threw.length === 0, 'expand() never throws on any fixture row', threw.slice(0, 3).join(' | '));
   log(mismatch.length === 0, 'expand() produces exactly `count` stitches for every counted row', mismatch.length + ' mismatches');
   mismatch.forEach(function (m) { out.appendChild(el('div', 'warn', m)); });
+}
+
+/* ------------------------------------------------------------------ *
+ * 3D diagram fidelity, wave A - Model v2 against the real PDFs
+ *
+ * These assert what `Patterns.expand` hands the model builder for the
+ * pieces docs/brainstorm/3d/01-geometry-truth.md Part 2 measures: the
+ * count per round, and WHERE the increases and decreases sit, which is
+ * the only thing that tells a sphere from a hexagon from an oval.
+ * ------------------------------------------------------------------ */
+
+/** Walk `text` row by row and return the raw expand() results. */
+function walkV2(text, upTo) {
+  var lines = P.parse(text);
+  var last = upTo || P.summary(lines).maxRow || 0;
+  var state = null, prev = null, rows = [];
+  for (var row = 1; row <= last; row++) {
+    var r = P.expand(lines, row, prev, state);
+    state = r.state;
+    if (r.stitches.length) prev = r.stitches.length;
+    rows.push(r);
+  }
+  return rows;
+}
+function countsOf(rows) { return rows.map(function (r) { return r.stitches.length; }); }
+function incsOf(rows) { return rows.map(function (r) { return r.inc.join(','); }); }
+function decsOf(rows) { return rows.map(function (r) { return r.dec.join(','); }); }
+function stitchesOnly(r) {
+  return r.stitches.filter(function (s) { return s.t !== 'ch'; }).length;
+}
+function genericIn(rows) {
+  return rows.filter(function (r) {
+    return r.stitches.some(function (s) { return s.t === 'x'; });
+  }).length;
+}
+function pdfSecs(file) {
+  var t = window.__pdfText && window.__pdfText[file];
+  return t ? P.splitSections(t) : null;
+}
+function pdfSec(file, name) {
+  var s = pdfSecs(file);
+  if (!s) return null;
+  for (var i = 0; i < s.length; i++) if (s[i].name === name) return s[i];
+  return null;
+}
+
+function runDiagramV2() {
+  h('h2', '3D WAVE A - Model v2 (expand counts, inc/dec positions, start hints)');
+  if (!window.__pdfText) { log(false, 'wave A: no extracted PDF text to work from'); return; }
+  var missing = [];
+
+  function part(file, name, label, fn) {
+    var s = name === null ? (pdfSecs(file) || [])[0] : pdfSec(file, name);
+    if (!s) { missing.push(label); log(false, 'wave A: ' + label + ' not found'); return; }
+    fn(s);
+  }
+
+  // --- panda Head: the Yarnspirations longhand dialect (03 #3) ----------
+  part('crochet-panda.pdf', 'Head', 'panda Head', function (s) {
+    var rows = walkV2(s.text, 21);
+    eq(countsOf(rows), [6, 12, 18, 24, 30, 36, 42, 48, 48, 48, 48, 48, 48, 48, 48, 48, 42, 36, 30, 24, 18],
+      'panda Head: every round counts, rounds 1-21');
+    eq(incsOf(rows).slice(1, 8), ['0,2,4,6,8,10', '1,4,7,10,13,16', '0,4,8,12,16,20',
+      '3,8,13,18,23,28', '2,8,14,20,26,32', '5,12,19,26,33,40', '3,11,19,27,35,43'],
+      'panda Head: "2 sc in next st" longhand gives six increase POSITIONS per round');
+    eq(rows[16].dec.join(','), '3,10,17,24,31,38',
+      'panda Head round 17: "sc next 2 sts tog" longhand gives six decrease positions');
+    eq(rows[20].dec.length, 6, 'panda Head round 21: six decreases');
+    eq(genericIn(rows), 0, 'panda Head: not one round falls back to generic "x" stitches');
+    eq(rows[0].color, 'white', 'panda Head: "Rnd 1: With white, ..." colours the piece white (04 H)');
+    eq(rows[0].height, 1, 'panda Head: an sc round is 1 tall');
+    eq(P.startHint(s.text), { start: 'magic-ring', chainLen: 0, ringCount: 6 },
+      'panda Head: startHint reads "ch 2, 6 sc in second chain from hook" as a magic ring of 6');
+    eq(P.workMode(s.text), 'rounds', 'panda Head: workMode is rounds');
+    eq(P.stuffingHint(s.text), true, 'panda Head: "Stuff head" is a stuffed piece');
+  });
+
+  // --- snowman body: the shorthand dialect, two spheres and a waist -----
+  part('crochet-snowman.pdf', null, 'snowman Body', function (s) {
+    var rows = walkV2(s.text, 26);
+    eq(countsOf(rows), [6, 12, 18, 24, 30, 36, 42, 48, 54, 60, 66, 66, 66, 66, 66, 66, 66,
+      60, 54, 48, 42, 36, 30, 24, 18, 24], 'snowman Body: rounds 1-26, 6 -> 66 -> 18 -> 24');
+    eq(rows[23].dec.join(','), '3,7,11,15,19,23', 'snowman Body round 24 is the waist: six decreases');
+    eq(rows[25].inc.length, 6, 'snowman Body round 26 starts the second sphere: six increases');
+    eq(genericIn(rows), 0, 'snowman Body: every round is typed');
+    eq(P.workMode(s.text), 'rounds', 'snowman Body: workMode is rounds');
+    eq(P.stuffingHint(s.text), true, 'snowman Body: it is stuffed');
+    eq(P.startHint(s.text).start, 'unknown',
+      'snowman Body: the pattern never says how it starts, so startHint says so rather than guessing');
+  });
+
+  // --- baphomet Tail and Horns: the long unstuffed whip, the curled cone -
+  part('crochet-baphomet.pdf', 'Tail', 'baphomet Tail', function (s) {
+    var rows = walkV2(s.text, 12);
+    eq(countsOf(rows), [4, 6, 7, 9, 11, 11, 13, 15, 15, 12, 9, 6],
+      'baphomet Tail: rounds 1-12 grow 4 -> 15 then close to 6');
+    eq(decsOf(rows).slice(9), ['3,7,11', '2,5,8', '1,3,5'],
+      'baphomet Tail rounds 10-12: three decreases each, with their positions');
+    eq(genericIn(rows), 0, 'baphomet Tail: every round is typed');
+    eq(P.startHint(s.text), { start: 'magic-ring', chainLen: 0, ringCount: 4 },
+      'baphomet Tail: "R1: MR4" is a magic ring of 4');
+    eq(P.stuffingHint(s.text), false, 'baphomet Tail: "do not stuff" (01 §1.3)');
+  });
+  part('crochet-baphomet.pdf', 'Horns', 'baphomet Horns', function (s) {
+    var rows = walkV2(s.text, 14);
+    eq(countsOf(rows), [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18],
+      'baphomet Horns: one stitch added on each of 13 rounds');
+    eq(incsOf(rows), ['', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0', '0'],
+      'baphomet Horns: the single increase is at the SAME angular position every round - what makes the horn curl (01 §4.1)');
+    eq(P.startHint(s.text).ringCount, 5, 'baphomet Horns: "MR5"');
+  });
+  part('crochet-baphomet.pdf', 'Muzzle', 'baphomet Muzzle', function (s) {
+    eq(P.startHint(s.text), { start: 'chain-oval', chainLen: 10, ringCount: 0 },
+      'baphomet Muzzle: the only true oval in the set - a 12-chain with a 10-stitch straight run (01 §1.5)');
+  });
+
+  // --- fish body: the "N. Rnd:" marker dialect (03 #12) -----------------
+  part('crochet-fish.pdf', 'Body', 'fish Body', function (s) {
+    var rows = walkV2(s.text, 14);
+    eq(countsOf(rows), [9, 18, 24, 30, 36, 42, 40, 34, 36, 33, 30, 24, 18, 12],
+      'fish Body: rounds 1-14 count, through the "3. Rnd:" marker form');
+    eq(rows[2].inc.join(','), '2,6,10,14,18,22', 'fish Body round 3 "(2 sc, inc) x6": six increase positions');
+    eq(rows[8].inc.join(','), '14,16,18,20',
+      'fish Body round 9 "dec, 13 sc, inc x4, 13 sc, dec": the four increases are clustered on ONE side');
+    eq(rows[8].dec.join(','), '0,35', '...with a decrease at each end - this is what makes it fish-shaped');
+    eq(rows[11].dec.join(','), '0,4,8,12,16,20', 'fish Body round 12 "(dec, 3 sc) x6": six decreases');
+    eq(genericIn(rows), 1,
+      'fish Body: 13 of 14 rounds are fully typed (round 7 is the colour-change paragraph, and stays generic)');
+    eq(P.startHint(s.text), { start: 'magic-ring', chainLen: 0, ringCount: 9 },
+      'fish Body: "2 ch, into the first ch: 9 sc" is a 9-stitch magic ring, NOT an oval (01 §1.5)');
+  });
+
+  // --- turtle belly: a flat disc at the flat rate -----------------------
+  part('crochet-turtle.pdf', 'Belly', 'turtle Belly', function (s) {
+    var rows = walkV2(s.text, 7);
+    eq(countsOf(rows), [12, 18, 24, 30, 36, 42, 48], 'turtle Belly: +6 every round - a flat disc');
+    eq(incsOf(rows), ['0,2,4,6,8,10', '1,4,7,10,13,16', '2,6,10,14,18,22', '3,8,13,18,23,28',
+      '4,10,16,22,28,34', '5,12,19,26,33,40', '6,14,22,30,38,46'],
+      'turtle Belly: six evenly spread increases every round, drifting one stitch per round');
+    eq(genericIn(rows), 0, 'turtle Belly: every round is typed');
+    eq(P.startHint(s.text).start, 'magic-ring', 'turtle Belly starts from a magic ring');
+  });
+  part('crochet-turtle.pdf', 'Feet', 'turtle Feet', function (s) {
+    eq(P.stuffingHint(s.text), false, 'turtle Feet: "do not stuff"');
+  });
+
+  // --- Red Heart Persian Tiles: a granny SQUARE, k = 4 (01 §1.4) --------
+  part('crochet-redheart-persian-tiles.pdf', 'First Square', 'Persian Tiles First Square', function (s) {
+    var rows = walkV2(s.text, 4);
+    eq(countsOf(rows).slice(0, 3), [16, 24, 48],
+      'Persian Tiles: rounds 1-3 are 16, 24 and 48 ring positions (was n = 0 for round 3)');
+    eq([rows[0].height, rows[1].height, rows[2].height], [2.01, 1, 2.01],
+      'Persian Tiles: the dc rounds are 2.01 tall and the sc round 1');
+    eq(stitchesOnly(rows[2]), 36, 'Persian Tiles round 3: 36 stitches plus four 3-chain corners');
+    eq(rows[1].inc.join(','), '1,4,7,10,13,16,19,22',
+      'Persian Tiles round 2 "[2 sc in next dc, sc in next dc] 7 times": eight evenly spread increases');
+    eq(rows[2].inc.join(','), '3,15,27,39',
+      'Persian Tiles round 3: FOUR clustered increase sites - the granny corners that make it a square');
+    log(rows[3].stitches.length > 40 && rows[3].inc.length >= 4,
+      'Persian Tiles round 4 expands with corners instead of collapsing to nothing',
+      rows[3].stitches.length + ' positions, ' + rows[3].inc.length + ' increase sites');
+    eq(genericIn(rows), 0, 'Persian Tiles rounds 1-4: no generic "x" round left');
+    eq(P.startHint(s.text), { start: 'chain-ring', chainLen: 4, ringCount: 15 },
+      'Persian Tiles: "ch 4; join with a sl st to form a ring" is a chain ring of 4');
+    eq(P.workMode(s.text), 'rounds', 'Persian Tiles: workMode is rounds');
+  });
+
+  // --- Stylecraft hex socks: a HEXAGON, k = 6, +18 tr (01 §1.4) ---------
+  part('crochet-stylecraft-hex-socks.pdf', null, 'hex socks hexagon', function (s) {
+    var rows = walkV2(s.text, 2);
+    eq(stitchesOnly(rows[0]), 18, 'hex socks round 1: 18 trebles - the printed "6 x 3tr groups"');
+    eq(rows[0].stitches.length, 30, '...over 30 ring positions (18 tr plus six 2-chain corners)');
+    eq(stitchesOnly(rows[1]), 36, 'hex socks round 2: 36 trebles - the printed "12 x 3tr groups"');
+    eq(stitchesOnly(rows[1]) - stitchesOnly(rows[0]), 18, '...which is +18 trebles on the round');
+    eq(rows[1].inc.length, 6, '...added at SIX increase positions - the hexagon corners');
+    eq(rows[1].height, 2.01, 'hex socks: a UK treble is 2.01 tall, not 2.68 (03 #9)');
+    eq(P.startHint(s.text), { start: 'chain-ring', chainLen: 4, ringCount: 2 },
+      'hex socks: "make 4ch. Join with sl st in first ch to form a ring"');
+    eq(P.workMode(s.text), 'rounds', 'hex socks: workMode is rounds');
+  });
+
+  // --- Stylecraft hood motif: a granny square in UK trebles -------------
+  part('crochet-stylecraft-hood.pdf', 'Motif', 'Stylecraft hood Motif', function (s) {
+    var rows = walkV2(s.text, 2);
+    log(rows[0].stitches.length > 0 && rows[1].stitches.length > 0,
+      'Stylecraft hood: the motif rounds expand instead of yielding an empty model (04 E)',
+      countsOf(rows).join('/'));
+    eq(rows[0].inc.length, 4, 'Stylecraft hood Foundation Rnd: four corner groups');
+    eq(P.startHint(s.text), { start: 'chain-ring', chainLen: 6, ringCount: 0 },
+      'Stylecraft hood: "make 6ch and join with sl st to form a circle"');
+  });
+
+  // --- Stylecraft cowl: the chevron cylinder ----------------------------
+  part('crochet-stylecraft-cowl-mitts.pdf', 'Cowl', 'Stylecraft Cowl', function (s) {
+    var rows = walkV2(s.text, 2);
+    log(rows[0].stitches.length > 0,
+      'Stylecraft cowl: the chevron round expands instead of yielding an empty model',
+      countsOf(rows).join('/'));
+  });
+
+  // --- Bernat basketweave: the fpdc / bpdc rows (03 #10, #5) ------------
+  part('crochet-bernat-basketweave.pdf', null, 'Bernat basketweave', function (s) {
+    var rows = walkV2(s.text, 5);
+    eq(countsOf(rows), [98, 98, 98, 98, 98],
+      'Bernat basketweave: all five rows expand to 98 stitches (rows 2-5 were 0)');
+    eq(rows.map(function (r) { return r.height; }), [2.01, 2.01, 2.01, 2.01, 2.01],
+      '...at dc height, so the blanket is no longer drawn half as tall (03 #7)');
+    eq(genericIn(rows), 0, '...and none of them is generic');
+    eq(P.startHint(s.text), { start: 'chain-row', chainLen: 100, ringCount: 0 },
+      'Bernat basketweave: "Ch 100." is a flat foundation chain');
+  });
+
+  // --- Hobbii Amarah shawl: increases at ONE edge (03 #18) --------------
+  part('crochet-hobbii-amarah-en.pdf', 'Shawl', 'Amarah Shawl', function (s) {
+    var rows = walkV2(s.text, 5);
+    eq(countsOf(rows), [3, 5, 5, 7, 7], 'Amarah Shawl: rows 1-5 are 3, 5, 5, 7, 7');
+    eq(incsOf(rows), ['', '2', '0', '4', '0'],
+      'Amarah Shawl: the increase sits at the END of rows 2 and 4 and at index 0 of rows 3 and 5 - one growing edge, so a right triangle (01 #53)');
+    eq(decsOf(rows), ['', '', '4', '', '6'],
+      '...with the balancing hdc2tog at the far end of rows 3 and 5');
+    eq(rows.map(function (r) { return r.height; }), [1.34, 1.34, 1.34, 1.34, 1.34],
+      'Amarah Shawl: an hdc row is 1.34 tall');
+    eq(P.workMode(s.text), 'rows', 'Amarah Shawl: workMode is rows');
+    eq(P.startHint(s.text), { start: 'chain-row', chainLen: 3, ringCount: 0 },
+      'Amarah Shawl: "Ch 4" then "hdc in second ch from hook" is a 3-stitch foundation row');
+  });
+
+  // --- Gosyo lace doily: a symbol chart, and nothing to invent ----------
+  part('crochet-gosyo-lace-doily.pdf', null, 'Gosyo lace doily', function (s) {
+    var lines = P.parse(s.text);
+    eq(P.summary(lines).maxRow, null,
+      'Gosyo doily: the text layer holds no written rounds at all, only "crochet 14 rounds"');
+    var rows = walkV2(s.text, 14);
+    eq(countsOf(rows), [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      'Gosyo doily: expand invents no stitches for a round it never read (01 §4.1)');
+    eq(P.startHint(s.text), { start: 'magic-ring', chainLen: 0, ringCount: 0 },
+      '...but startHint still reads "Create magic ring" off the Crochet Tips block');
+    eq(P.workMode(s.text), 'rounds', '...and workMode reads "crochet 14 rounds" as rounds');
+  });
+
+  // --- King Cole pumpkins: rows in UK terms -----------------------------
+  part('crochet-kingcole-pumpkins.pdf', null, 'King Cole pumpkin body', function (s) {
+    var rows = walkV2(s.text, 2);
+    eq(countsOf(rows), [10, 10], 'King Cole pumpkin: both written rows are 10 stitches');
+    eq(P.workMode(s.text), 'rows', 'King Cole pumpkin: workMode is rows');
+    // The "UK terminology" note lives outside the part, so the part text alone
+    // cannot see it - the caller seeds state.uk when it knows better.
+    eq(P.dialectHints(window.__pdfText['crochet-kingcole-pumpkins.pdf']).dialect, 'uk',
+      'King Cole pumpkin: the WHOLE document reads as UK terms');
+    var seeded = P.expand(P.parse(s.text), 1, null, { uk: true });
+    eq(seeded.height, 1, '...so with state.uk seeded, "Dc" is a US single crochet: 1 tall (03 #9)');
+  });
+
+  /* --------------------------------------------------------------- *
+   * wave B - back-references (03 #6, proposal 9)
+   *
+   * Every one of these pieces is mostly made of rows that say only
+   * "work an earlier row again". Before this they expanded to nothing:
+   * all 15 hex-sock rounds were empty, the 46-row wrap was two rows
+   * and 44 slivers, and the shawl froze at row 6. The counts below are
+   * the before/after that matters.
+   * --------------------------------------------------------------- */
+  h('h3', 'wave B: rows that only say "rep Rnd 3" / "rep rows 4 and 5"');
+
+  // --- Stylecraft hex socks: Rnds 4-15 are all "Rep Rnd 3" ------------
+  part('crochet-stylecraft-hex-socks.pdf', null, 'hex socks back-references', function (s) {
+    var rows = walkV2(s.text, 15);
+    var back = rows.slice(3);
+    log(back.every(function (r) { return r.stitches.length > 0; }),
+      'hex socks: rounds 4-15 all expand - every one of them used to be cnt=0 (03 #6)',
+      countsOf(rows).join('/'));
+    eq(back.map(function (r) { return stitchesOnly(r); }),
+      [109, 109, 109, 109, 109, 109, 109, 109, 109, 109, 109, 109],
+      '...each of them re-working round 3\'s own reading, 109 trebles');
+    eq(back.every(function (r) { return r.height === 2.01; }), true,
+      '...at UK treble height, not at the sc height of a generic run');
+    eq(back.every(function (r) { return r.inc.length >= 6; }), true,
+      '...with the corner increases of the hexagon, never an untyped round',
+      'inc lengths ' + back.map(function (r) { return r.inc.length; }).join('/'));
+    eq(genericIn(rows), 0, 'hex socks: not one generic "x" round in the whole hexagon');
+    // The counts stay level because round 3's own granny fill over-reads
+    // (109 trebles where the print says 54) and the repeat can only be as
+    // good as the round it points at - a separate gap, 03 proposal 5.
+    log(Math.max.apply(null, countsOf(rows)) <= 200,
+      '...and the repeat does not compound round 3\'s misread fill (was 133, 365, 1003, 2761, 7592)',
+      'biggest round ' + Math.max.apply(null, countsOf(rows)));
+  });
+
+  // --- Hobbii Amarah shawl: "Row 6-55: Repeat rows 4 & 5" -------------
+  part('crochet-hobbii-amarah-en.pdf', 'Shawl', 'Amarah Shawl back-references', function (s) {
+    var rows = walkV2(s.text, 20);
+    eq(countsOf(rows), [3, 5, 5, 7, 7, 9, 9, 11, 11, 13, 13, 15, 15, 17, 17, 19, 19, 21, 21, 23],
+      'Amarah Shawl: rows 6-20 keep growing two stitches every pair (they all used to be 57)');
+    eq(incsOf(rows).slice(5, 10), ['6', '0', '8', '0', '10'],
+      '...with the increase still alternating between the two ends - one growing edge');
+    eq(decsOf(rows).slice(5, 10), ['', '8', '', '10', ''],
+      '...and the hdc2tog of row 5 only on the rows that re-work row 5, so the parity holds');
+    eq(rows.slice(5).every(function (r) { return r.height === 1.34; }), true,
+      '...at hdc height throughout');
+    eq(genericIn(rows), 0, 'Amarah Shawl: no generic round in rows 1-20');
+    var ls = P.parse(s.text);
+    eq([6, 7, 20, 55].map(function (r) { return P.targetFor(ls, r); }), [9, 9, 23, 57],
+      'Amarah Shawl: targetFor grows with the rows, and the printed <57 sts> still lands on row 55');
+    eq(rowOf(ls, 30).count, 57, '...and the line still publishes 57 as its total');
+  });
+
+  // --- Premier sparkling wrap: "Rows 5-44: Rep Rows 3 and 4" ----------
+  part('crochet-premier-sparkling-wrap.pdf', 'Wrap', 'sparkling wrap back-references', function (s) {
+    var rows = walkV2(s.text, 46);
+    log(rows.every(function (r) { return r.stitches.length > 0; }),
+      'sparkling wrap: all 46 rows expand - rows 5-45 were empty, a comb instead of a sheet',
+      'smallest row ' + Math.min.apply(null, countsOf(rows)));
+    eq(rows.slice(4, 45).map(function (r) { return stitchesOnly(r); }),
+      [405, 405, 405, 405, 405, 405, 405, 405, 405, 405, 405, 405, 405, 405, 405, 405, 405,
+       405, 405, 405, 405, 405, 405, 405, 405, 405, 405, 405, 405, 405, 405, 405, 405, 405,
+       405, 405, 405, 405, 405, 405, 405],
+      '...rows 5-45 at the wrap\'s printed 405 stitches, alternating rows 3 and 4');
+    eq(genericIn(rows), 0, 'sparkling wrap: no generic row');
+    var ls = P.parse(s.text);
+    eq([5, 20, 44, 45].map(function (r) { return P.targetFor(ls, r); }), [405, 405, 405, 405],
+      'sparkling wrap: targetFor answers 405 for every repeated row');
+  });
+
+  // --- Premier simple throw: "Rep Row 2 until it measures 59\"" -------
+  part('crochet-premier-simple-throw.pdf', null, 'simple throw back-references', function (s) {
+    var rows = walkV2(s.text, 46);
+    eq(countsOf(rows).length, 46, 'simple throw: the caller can ask for 46 rows...');
+    eq(rows.every(function (r) { return r.stitches.length === 94; }), true,
+      '...and every one of them is 94 stitches - "Rep Row 2 until blanket measures 59"" has no row count at all');
+    eq(rows.every(function (r) { return r.height === 1.34; }), true, '...at hdc height');
+    eq(genericIn(rows), 0, 'simple throw: no generic row');
+    eq(P.summary(P.parse(s.text)).maxRow, 2,
+      '...while maxRow stays 2: an open-ended repeat answers for a row without inventing one');
+  });
+
+  // --- the cardigan: "Repeat Rows 5-8 until there are 25 Rows" --------
+  part('cardigan.pdf', 'First Section', 'cardigan First Section back-references', function (s) {
+    var ls = P.parse(s.text);
+    eq(P.summary(ls).rows, 8, 'cardigan First Section: 8 written rows, as before');
+    var rows = walkV2(s.text, 26);
+    eq(countsOf(rows).slice(0, 8), [184, 184, 184, 184, 184, 184, 184, 184],
+      'cardigan First Section: the eight written rows are unchanged');
+    eq(countsOf(rows).slice(8, 25),
+      [184, 184, 184, 184, 184, 184, 184, 184, 184, 184, 184, 184, 184, 184, 184, 184, 184],
+      '...and rows 9-25 come out of "Repeat Rows 5-8 ... until there are a total of 25 Rows"');
+    eq(rows[25].stitches.length, 0,
+      '...which stops at 25: row 26 is past the part and expands to nothing');
+    eq(genericIn(rows), 0, 'cardigan First Section: rows 1-26 hold no generic stitch');
+  });
+
+  if (missing.length) {
+    out.appendChild(el('div', 'warn', 'wave A: parts not found - ' + missing.join(', ')));
+  }
 }
 
 function run(bee, cardigan) {

@@ -675,6 +675,14 @@ p { margin: 0 0 0.6em; }
   65% { background: var(--primary); }
 }
 
+/* Without the 3D piece this is just the old centred stack. */
+.stitch-head {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+}
 .stitch-caption {
   font-family: var(--font-display);
   font-size: 13px;
@@ -702,36 +710,70 @@ p { margin: 0 0 0.6em; }
   border-radius: inherit;
   pointer-events: none;
 }
-/* The piece is behind the text, so the text needs its own edge. A halo in the
-   button colour works for every theme: the text was designed to contrast with
-   --primary, so a --primary halo always separates it from the yarn. */
-.stitch-btn.has-diagram .stitch-caption,
-.stitch-btn.has-diagram .stitch-number,
-.stitch-btn.has-diagram .stitch-hint {
+/* 05 #1 — get the piece out from under the number.
+   `STITCHES`, a 90 px numeral and the `TAP` pill used to run straight down the
+   vertical axis of the button, which is exactly where a round-worked solid of
+   revolution is: on the 6-round Ear the whole model sat behind the `STITCHES`
+   pill. Now the readout is a single row pinned to the TOP of the button and
+   everything below it belongs to the piece (app.js measures this row and hands
+   the renderer matching `safeInsets`, so the fit box is the free area, not the
+   canvas). The number stays the biggest, most legible thing on screen. */
+.stitch-btn.has-diagram {
+  justify-content: flex-start;
+  gap: 0;
+}
+.stitch-btn.has-diagram .stitch-head {
   position: relative;
   z-index: 1;
+  flex: 0 0 auto;
+  flex-direction: row;
+  align-items: baseline;
+  justify-content: center;
+  gap: 10px;
+  width: 100%;
+  padding: 6px 14px 2px;
 }
 .stitch-btn.has-diagram .stitch-number {
+  /* Smaller, because it no longer has to hold a whole button on its own: it
+     is a pinned readout with the piece under it, not a backdrop. At 375 px
+     this is still a ~65 px numeral — the largest thing on the screen after
+     the round number — and it buys the piece 60 % more room. */
+  font-size: calc(var(--counter-size) * 0.68);
   text-shadow:
     0 0 2px var(--primary),
     0 0 6px var(--primary),
     0 0 14px var(--primary),
-    0 0 28px var(--primary),
     0 2px 3px rgba(0, 0, 0, 0.35);
 }
-.stitch-btn.has-diagram .stitch-caption,
-.stitch-btn.has-diagram .stitch-hint {
-  opacity: 1;
-  padding: 3px 10px;
-  border-radius: var(--radius-sm);
-  background: var(--primary);
-  background: color-mix(in srgb, var(--primary) 82%, transparent);
-  -webkit-backdrop-filter: blur(6px);
-  backdrop-filter: blur(6px);
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.18);
+.stitch-btn.has-diagram .stitch-caption {
+  font-size: 11px;
+  letter-spacing: 2px;
+  opacity: 0.9;
+  text-shadow: 0 0 6px var(--primary), 0 0 12px var(--primary);
 }
-.stitch-btn.has-diagram .stitch-caption { margin-bottom: 6px; }
-.stitch-btn.has-diagram .stitch-hint { margin-top: 6px; }
+/* The hint is a hairline at the very bottom, out of the piece's way. */
+.stitch-btn.has-diagram .stitch-hint {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 6px;
+  z-index: 1;
+  opacity: 0.55;
+  font-size: 11px;
+  text-shadow: 0 0 6px var(--primary), 0 0 12px var(--primary);
+  pointer-events: none;
+}
+/* Once counting has started the hint has done its job. */
+.stitch-btn.has-diagram.counted .stitch-hint { opacity: 0; }
+
+/* The deviation cue (05 #6): quiet, inline, under the stitch readout. */
+.stitch-dev {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--danger);
+  text-align: center;
+  padding: 0 4px;
+}
 
 /* 02 #8 / 07 #7–#8: out of the tap surface and into the actions row. It is a
    plain .btn now, so its colours come from --surface-2 / --text and pass
@@ -786,6 +828,46 @@ dialog.sheet.sheet-viewer .sheet-body {
   text-align: center;
   color: var(--primary-text);
   opacity: 0.85;
+}
+/* What the geometry made of this piece: "Sphere · 15 rounds · 48 around"
+   (05 #2 / 12), plus the Rounds/Rows override that writes Part.workMode. */
+.viewer-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px var(--pad);
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+  flex-wrap: wrap;
+}
+.viewer-shape {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+  min-width: 0;
+}
+.viewer-shape .viewer-shape-sub {
+  display: block;
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.viewer-bar .seg { flex: 0 0 auto; }
+.viewer-bar .seg button { font-size: 12px; padding: 5px 9px; }
+/* "Showing a simple outline — 3D isn't available right now." */
+.viewer-note {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 2;
+  padding: 8px var(--pad);
+  font-size: 12px;
+  text-align: center;
+  color: var(--primary-text);
+  background: rgba(0, 0, 0, 0.35);
 }
 dialog.sheet.sheet-viewer .sheet-inner { height: 92dvh; }
 @media (min-width: 700px) {

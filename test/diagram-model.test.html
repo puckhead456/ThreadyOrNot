@@ -1,0 +1,1162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Diagram Model v2 (Store) tests</title>
+<style>
+  body { font: 14px/1.4 Menlo, Consolas, monospace; background:#111; color:#eee; padding:16px; }
+  .pass { color:#7bd389; }
+  .fail { color:#ff6b6b; background:#2a1414; }
+  .group { margin-top:18px; font-weight:bold; color:#9cf; border-bottom:1px solid #333; padding-bottom:4px; }
+  #summary { margin-top:20px; font-size:18px; font-weight:bold; }
+  #summary.ok { color:#7bd389; }
+  #summary.bad { color:#ff6b6b; }
+  .note { color:#aaa; }
+  .perf { color:#ffd479; }
+  pre { background:#181818; border:1px solid #333; padding:8px; overflow:auto; max-height:320px; color:#cfe; }
+</style>
+</head>
+<body>
+<h1>Diagram Model v2 test suite</h1>
+<p class="note">
+  <code>Store.diagramModel(part, project)</code> against the Model v2 contract of
+  <code>docs/brainstorm/3d/03-model-builder.md</code>: per-stitch <code>h</code>/<code>w</code>,
+  increase and decrease positions, a window anchored to the round being worked, rounds-vs-rows per
+  PART, the shape hint, the my-count-vs-the-pattern deviation, cache invalidation and the build
+  budget. Synthetic patterns only — no fixture PDFs.
+</p>
+<p class="note">
+  The page runs against the CURRENT parser and against the wave-A one: anything that needs
+  <code>Patterns.expand</code>'s new per-stitch fields, <code>startHint</code>,
+  <code>workMode</code> or <code>stuffingHint</code> is asserted twice — once through whatever
+  <code>js/patterns.js</code> offers today, and once through a stub that pins the exact shape the
+  store must pass through. It uses its own localStorage key
+  (<code>Store.__setKeyForTests</code>) and never touches the real one.
+</p>
+<div id="out"></div>
+<div id="summary"></div>
+<h2>Model v2, exactly as produced (mini sphere 6 &rarr; 12 &rarr; 6)</h2>
+<pre id="dump"></pre>
+<h2>Perf</h2>
+<pre id="perf"></pre>
+
+<script src="../js/patterns.js"></script>
+<script src="../js/store.js"></script>
+<script>
+'use strict';
+
+var out = document.getElementById('out');
+var passed = 0;
+var failed = 0;
+var perfLines = [];
+
+function log(ok, label, detail) {
+  if (ok) { passed++; } else { failed++; }
+  var line = (ok ? 'PASS' : 'FAIL') + ' - ' + label + (detail ? '  (' + detail + ')' : '');
+  var div = document.createElement('div');
+  div.className = ok ? 'pass' : 'fail';
+  div.textContent = line;
+  out.appendChild(div);
+  if (ok) { console.log(line); } else { console.error(line); }
+}
+
+function group(title) {
+  var div = document.createElement('div');
+  div.className = 'group';
+  div.textContent = title;
+  out.appendChild(div);
+  console.log('== ' + title + ' ==');
+}
+
+function note(text) {
+  var div = document.createElement('div');
+  div.className = 'note';
+  div.textContent = '     ' + text;
+  out.appendChild(div);
+}
+
+function perf(text) {
+  perfLines.push(text);
+  var div = document.createElement('div');
+  div.className = 'perf';
+  div.textContent = '     ' + text;
+  out.appendChild(div);
+  console.log(text);
+}
+
+function deepEqual(a, b) {
+  if (a === b) return true;
+  if (a === null || b === null) return a === b;
+  if (typeof a !== typeof b) return false;
+  if (typeof a !== 'object') return a === b;
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  var ak = Object.keys(a), bk = Object.keys(b);
+  if (ak.length !== bk.length) return false;
+  for (var i = 0; i < ak.length; i++) {
+    if (!deepEqual(a[ak[i]], b[ak[i]])) return false;
+  }
+  return true;
+}
+
+function assertEqual(actual, expected, label) {
+  var ok = deepEqual(actual, expected);
+  log(ok, label, ok ? '' : ('expected ' + JSON.stringify(expected) + ' got ' + JSON.stringify(actual)));
+}
+
+function assertTrue(cond, label, detail) { log(!!cond, label, cond ? '' : (detail || '')); }
+
+function ms() {
+  return (window.performance && window.performance.now) ? window.performance.now() : Date.now();
+}
+
+/* ---------------------------------------------------------------------- *
+ * Own storage key, own state
+ * ---------------------------------------------------------------------- */
+
+var TEST_KEY = 'stitchkeeper.diagram-model.test';
+Store.__setKeyForTests(TEST_KEY);
+
+function fresh() {
+  try { window.localStorage.removeItem(TEST_KEY); } catch (e) { /* private mode */ }
+  Store.load();
+}
+
+function cleanup() {
+  try {
+    Store.flush();
+    window.localStorage.removeItem(TEST_KEY);
+  } catch (e) { /* ignore */ }
+}
+
+/* ---------------------------------------------------------------------- *
+ * Parser feature detection + stubbing
+ * ---------------------------------------------------------------------- */
+
+var REAL_PATTERNS = window.Patterns;
+var HAS_WORKMODE = !!(REAL_PATTERNS && typeof REAL_PATTERNS.workMode === 'function');
+var HAS_STARTHINT = !!(REAL_PATTERNS && typeof REAL_PATTERNS.startHint === 'function');
+var HAS_STUFFING = !!(REAL_PATTERNS && typeof REAL_PATTERNS.stuffingHint === 'function');
+
+/**
+ * Run `fn` with window.Patterns replaced by a copy carrying `overrides`
+ * (a null value deletes that function). Always put the real one back.
+ */
+function withPatterns(overrides, fn) {
+  var fake = {};
+  var keys = Object.keys(REAL_PATTERNS);
+  var i;
+  for (i = 0; i < keys.length; i++) fake[keys[i]] = REAL_PATTERNS[keys[i]];
+  var ok = Object.keys(overrides);
+  for (i = 0; i < ok.length; i++) {
+    if (overrides[ok[i]] === null) delete fake[ok[i]];
+    else fake[ok[i]] = overrides[ok[i]];
+  }
+  window.Patterns = fake;
+  try {
+    fn();
+  } finally {
+    window.Patterns = REAL_PATTERNS;
+  }
+}
+
+/* ---------------------------------------------------------------------- *
+ * Project / part helpers
+ * ---------------------------------------------------------------------- */
+
+var seq = 0;
+
+function mkProject(name, countMode) {
+  var p = Store.createProject({ name: name + ' ' + (++seq) });
+  if (countMode) Store.updateProject(p.id, { countMode: countMode });
+  return Store.project(p.id);
+}
+
+/** A part with a pattern, a working row and a tapped-stitch history. */
+function mkPart(proj, text, opts) {
+  opts = opts || {};
+  var prt = proj.parts[0];
+  Store.updatePart(proj.id, prt.id, { patternText: text });
+  if (opts.workMode) Store.updatePart(proj.id, prt.id, { workMode: opts.workMode });
+  prt.row = typeof opts.row === 'number' ? opts.row : 0;
+  prt.stitch = typeof opts.stitch === 'number' ? opts.stitch : 0;
+  prt.rowStitches = [0];
+  if (Array.isArray(opts.rowStitches)) {
+    prt.rowStitches = [0].concat(opts.rowStitches);
+  } else if (opts.fillRowStitches) {
+    // Every completed row finished on the pattern's count.
+    for (var r = 1; r <= prt.row; r++) prt.rowStitches[r] = Store.targetFor(prt, r) || 0;
+  }
+  return prt;
+}
+
+function counts(model) {
+  return model.rounds.map(function (r) { return r.count; });
+}
+
+function rowsOf(model) {
+  return model.rounds.map(function (r) { return r.row; });
+}
+
+/** Increase SITES grouped into clusters: [0,2,6,8] = two clusters of two. */
+function clusters(list) {
+  var out = [];
+  for (var i = 0; i < list.length; i++) {
+    if (i === 0 || list[i] - list[i - 1] > 2) out.push([list[i]]);
+    else out[out.length - 1].push(list[i]);
+  }
+  return out;
+}
+
+function everyStitchWellFormed(model) {
+  for (var i = 0; i < model.rounds.length; i++) {
+    var r = model.rounds[i];
+    for (var j = 0; j < r.stitches.length; j++) {
+      var s = r.stitches[j];
+      if (!s || typeof s !== 'object') return 'round ' + i + ' stitch ' + j + ' is not an object';
+      if (typeof s.t !== 'string' || !s.t) return 'round ' + i + ' stitch ' + j + ' has no type';
+      if (!(s.c === null || (typeof s.c === 'string' && /^#[0-9a-f]{6}$/.test(s.c)))) {
+        return 'round ' + i + ' stitch ' + j + ' colour is ' + JSON.stringify(s.c);
+      }
+      if (!(typeof s.h === 'number' && isFinite(s.h) && s.h > 0)) return 'round ' + i + ' stitch ' + j + ' h';
+      if (!(typeof s.w === 'number' && isFinite(s.w) && s.w > 0)) return 'round ' + i + ' stitch ' + j + ' w';
+    }
+  }
+  return '';
+}
+
+/* ---------------------------------------------------------------------- *
+ * Patterns
+ * ---------------------------------------------------------------------- */
+
+var SPHERE =
+  'R1: 6 sc in magic ring (6)\n' +
+  'R2: inc x6 (12)\n' +
+  'R3: (sc, inc) x6 (18)\n' +
+  'R4: (2 sc, inc) x6 (24)\n' +
+  'R5: (3 sc, inc) x6 (30)\n' +
+  'R6: (4 sc, inc) x6 (36)\n' +
+  'R7: (5 sc, inc) x6 (42)\n' +
+  'R8: (6 sc, inc) x6 (48)\n' +
+  'R9-R12: sc in each st around (48)\n' +
+  'R13: (6 sc, dec) x6 (42)\n' +
+  'R14: (5 sc, dec) x6 (36)\n' +
+  'R15: (4 sc, dec) x6 (30)\n' +
+  'R16: (3 sc, dec) x6 (24)\n' +
+  'R17: (2 sc, dec) x6 (18)\n' +
+  'R18: (sc, dec) x6 (12)\n' +
+  'R19: dec x6 (6)\n' +
+  'Stuff firmly and close the last round.\n';
+
+var MINI_SPHERE =
+  'R1: 6 sc in magic ring (6)\n' +
+  'R2: inc x6 (12)\n' +
+  'R3: dec x6 (6)\n';
+
+var GRANNY =
+  'Rnd 1: 16 sc in magic ring (16)\n' +
+  'Rnd 2: (inc, inc, 2 sc) x4 (24)\n' +
+  'Rnd 3: (inc, inc, 4 sc) x4 (32)\n';
+
+var OVAL =
+  'R1: Ch 12, start in 2nd ch from hook: 10 sc, 3 sc in last ch, 10 sc down the other side,' +
+  ' 2 sc in the same ch (25)\n' +
+  'R2-R5: sc in each st around (25)\n';
+
+var TUBE =
+  'Rnd 1: Ch 6, join with a sl st to form a ring. 12 dc in ring (12)\n' +
+  'Rnd 2: dc in each st around (12)\n' +
+  'Rnd 3: dc in each st around (12)\n' +
+  'Rnd 4: dc in each st around (12)\n';
+
+var SHAWL =
+  'Row 1: Ch 19, sc in 2nd ch from hook and in each ch across (18)\n' +
+  'Row 2: Ch 1, turn, 2 sc in first st, sc in each st to last st, 2 sc in last st (20)\n' +
+  'Row 3: Ch 1, turn, 2 sc in first st, sc in each st to last st, 2 sc in last st (22)\n' +
+  'Row 4: Ch 1, turn, sc in each st across (22)\n';
+
+var LONG_600 =
+  'Rnd 1: 48 sc in magic ring (48)\n' +
+  'Rnd 2-600: sc in each st around (48)\n';
+
+function bigPattern(rows) {
+  var parts = ['Rnd 1: 48 sc in magic ring (48)'];
+  for (var i = 2; i <= rows; i++) parts.push('Rnd ' + i + ': sc in each st around (48)');
+  return parts.join('\n') + '\n';
+}
+
+note('parser: workMode ' + (HAS_WORKMODE ? 'present' : 'absent') +
+     ' · startHint ' + (HAS_STARTHINT ? 'present' : 'absent') +
+     ' · stuffingHint ' + (HAS_STUFFING ? 'present' : 'absent'));
+
+/* ====================================================================== */
+group('1. A sphere: counts, per-stitch h/w, increase and decrease positions');
+/* ====================================================================== */
+
+(function () {
+  fresh();
+  var proj = mkProject('ZD Sphere', 'rounds');
+  var prt = mkPart(proj, SPHERE, { row: 3, stitch: 5, fillRowStitches: true });
+  var m = Store.diagramModel(prt, proj);
+
+  assertEqual(m.mode, 'rounds', 'a magic-ring sphere is modelled in rounds');
+  assertEqual(m.rounds.length, 19, 'nineteen rounds, the R9-R12 range expanded');
+  assertEqual(counts(m),
+    [6, 12, 18, 24, 30, 36, 42, 48, 48, 48, 48, 48, 42, 36, 30, 24, 18, 12, 6],
+    'the 6 -> 48 -> 6 profile');
+  assertEqual(rowsOf(m).slice(0, 5), [1, 2, 3, 4, 5], 'every round names its 1-based pattern row');
+  assertEqual(m.window, { first: 1, total: 19 }, 'a short pattern is its own window');
+  assertEqual(m.current, 3, 'current is the round being worked (row 4)');
+  assertEqual(m.rounds[3].row, 4, 'and that round is row 4');
+  assertEqual(m.rounds[3].done, 5, 'five stitches tapped into it');
+  assertEqual(m.rounds[3].ghost, false, 'the working round is not a ghost');
+  assertEqual(m.rounds[4].ghost, true, 'the round after it is');
+  assertEqual(m.rounds[2].done, m.rounds[2].count, 'a finished round is fully done');
+
+  assertEqual(everyStitchWellFormed(m), '', 'every stitch carries t, c, h and w');
+  assertEqual(m.rounds[0].stitches.length, 6, 'round 1 has one record per stitch');
+
+  // R2 `inc x6` — twelve produced stitches at SIX increase sites.
+  assertEqual(m.rounds[1].inc.length, 6, 'R2 inc x6 is six increase sites, not twelve');
+  assertEqual(m.rounds[1].inc, [0, 2, 4, 6, 8, 10], 'evenly spaced, in work order');
+  assertEqual(m.rounds[1].dec, [], 'and no decreases');
+
+  // R3 `(sc, inc) x6` — one increase per repeat of three.
+  assertEqual(m.rounds[2].inc.length, 6, 'R3 has six increase sites');
+  assertEqual(clusters(m.rounds[2].inc).length, 6, 'spread, not clustered — this is a sphere');
+  assertEqual(m.rounds[2].inc[0], 1, 'the first one is the second stitch of the round');
+
+  // R19 `dec x6`.
+  assertEqual(m.rounds[18].dec.length, 6, 'R19 dec x6 is six decreases');
+  assertEqual(m.rounds[18].inc, [], 'and no increases');
+  assertEqual(m.rounds[8].inc, [], 'a straight round has neither');
+  assertEqual(m.rounds[8].dec, [], 'a straight round has neither (dec)');
+
+  var heights = m.rounds.map(function (r) { return r.height; });
+  assertTrue(heights.every(function (h) { return typeof h === 'number' && h > 0; }),
+    'every round has a positive dominant height');
+
+  // The dump for the handoff: small enough to read whole.
+  var dproj = mkProject('ZD Dump', 'rounds');
+  var dprt = mkPart(dproj, MINI_SPHERE, { row: 1, stitch: 4, fillRowStitches: true });
+  var dm = Store.diagramModel(dprt, dproj);
+  document.getElementById('dump').textContent = JSON.stringify(dm, null, 1);
+  assertEqual(counts(dm), [6, 12, 6], 'the dump case is the same shape in miniature');
+})();
+
+/* ====================================================================== */
+group('2. Per-stitch fields pass through exactly (stubbed expand)');
+/* ====================================================================== */
+
+(function () {
+  fresh();
+  // A parser that returns the wave-A shape: per-stitch h/w, inc/dec arrays,
+  // 'inc' on the first stitch of an increase and 'inc+' on the rest.
+  var stub = function (lines, row) {
+    if (row === 1) {
+      return {
+        stitches: [
+          { t: 'dc', c: null, h: 2, w: 1 },
+          { t: 'inc', c: 'Almond', h: 2, w: 1.4 },
+          { t: 'inc+', c: 'Almond', h: 2, w: 1.4 },
+          { t: 'dec', c: null, h: 2, w: 0.7 }
+        ],
+        inc: [1],
+        dec: [3],
+        color: 'Sand',
+        height: 2,
+        state: null
+      };
+    }
+    return { stitches: [], color: null, height: 1, state: null };
+  };
+
+  withPatterns({ expand: stub }, function () {
+    var proj = mkProject('ZD Passthrough', 'rounds');
+    Store.setYarnColor(proj.id, 'Almond', '#eeddcc');
+    Store.setYarnColor(proj.id, 'Sand', '#c2b280');
+    var prt = mkPart(proj, 'Rnd 1: whatever (4)\nRnd 2: whatever (4)\n', { row: 0, stitch: 0 });
+    var m = Store.diagramModel(prt, proj);
+    var r = m.rounds[0];
+
+    assertEqual(r.stitches.length, 4, 'four stitch records');
+    assertEqual(r.stitches.map(function (s) { return s.t; }), ['dc', 'inc', 'inc+', 'dec'],
+      'the types are passed through untouched, including inc+');
+    assertEqual(r.stitches.map(function (s) { return s.h; }), [2, 2, 2, 2], 'per-stitch heights survive');
+    assertEqual(r.stitches.map(function (s) { return s.w; }), [1, 1.4, 1.4, 0.7], 'per-stitch widths survive');
+    assertEqual(r.stitches[1].c, '#eeddcc', 'a per-stitch colour name is resolved to a hex');
+    assertEqual(r.stitches[0].c, null, 'and a stitch with no colour of its own stays null');
+    assertEqual(r.color, '#c2b280', 'the row colour is resolved too');
+    assertEqual(r.height, 2, 'the dominant height is the parser\'s');
+    assertEqual(r.inc, [1], 'expand\'s own inc array wins');
+    assertEqual(r.dec, [3], 'and so does its dec array');
+
+    // Round 2: expand gave nothing, but the line prints a count.
+    var r2 = m.rounds[1];
+    assertEqual(r2.count, 4, 'a round expand could not read keeps its printed count');
+    assertEqual(r2.stitches.length, 4, 'and still gets one record per stitch');
+    assertEqual(r2.stitches[0], { t: 'x', c: null, h: 1, w: 1 }, 'generic stitches are x / null / 1 / 1');
+    assertEqual(r2.inc, [], 'with no increases');
+    assertEqual(r2.dec, [], 'and no decreases');
+  });
+
+  // Same store, a parser with no h/w at all (today's expand).
+  withPatterns({
+    expand: function () {
+      return { stitches: [{ t: 'sc', c: null }, { t: 'sc', c: null }], color: null, height: 1, state: null };
+    }
+  }, function () {
+    var proj = mkProject('ZD Nohw', 'rounds');
+    var prt = mkPart(proj, 'Rnd 1: sc (2)\n', { row: 0, stitch: 0 });
+    var m = Store.diagramModel(prt, proj);
+    assertEqual(m.rounds[0].stitches[0], { t: 'sc', c: null, h: 1, w: 1 },
+      'a parser without h/w degrades to 1 / 1 rather than undefined');
+  });
+
+  // A parser with no expand at all.
+  withPatterns({ expand: null }, function () {
+    var proj = mkProject('ZD Noexpand', 'rounds');
+    var prt = mkPart(proj, 'Rnd 1: sc in each st (9)\n', { row: 0, stitch: 2 });
+    var m = Store.diagramModel(prt, proj);
+    assertEqual(m.rounds[0].count, 9, 'with no expand the printed count still builds a round');
+    assertEqual(m.rounds[0].stitches.length, 9, 'nine generic stitches');
+    assertEqual(m.rounds[0].done, 2, 'and the taps still land');
+  });
+})();
+
+/* ====================================================================== */
+group('3. A granny square: clustered increases');
+/* ====================================================================== */
+
+(function () {
+  fresh();
+  var proj = mkProject('ZD Granny', 'rounds');
+  var prt = mkPart(proj, GRANNY, { row: 1, stitch: 0, fillRowStitches: true });
+  var m = Store.diagramModel(prt, proj);
+
+  assertEqual(counts(m), [16, 24, 32], 'the corner-increase count profile');
+  assertEqual(m.rounds[1].inc.length, 8, 'Rnd 2 has eight increase sites');
+  assertEqual(clusters(m.rounds[1].inc).length, 4, 'in four clusters — the corners of a square');
+  assertEqual(m.rounds[1].inc, [0, 2, 6, 8, 12, 14, 18, 20], 'at the corner positions, in work order');
+  assertEqual(clusters(m.rounds[2].inc).length, 4, 'Rnd 3 still has four corners');
+  assertEqual(m.rounds[2].inc, [0, 2, 8, 10, 16, 18, 24, 26], 'a round further out, same four corners');
+  assertTrue(m.rounds[1].inc.length !== m.rounds[1].count,
+    'the increases are positions, not a count of stitches');
+})();
+
+/* ====================================================================== */
+group('4. Shape: oval start, chain-ring tube, stuffing');
+/* ====================================================================== */
+
+(function () {
+  fresh();
+  var proj = mkProject('ZD Oval', 'rounds');
+  var prt = mkPart(proj, OVAL, { row: 0, stitch: 0 });
+  var m = Store.diagramModel(prt, proj);
+
+  assertTrue(!!m.shape, 'every model carries a shape');
+  assertTrue(!!START_OK(m.shape.start), 'the start is one of the five kinds', m.shape.start);
+  assertTrue(m.shape.chainLen === null || m.shape.chainLen > 0, 'chainLen is a positive number or null');
+  assertTrue(m.shape.ringCount === null || m.shape.ringCount > 0, 'ringCount is a positive number or null');
+  assertTrue(m.shape.stuffed === null || m.shape.stuffed === true || m.shape.stuffed === false,
+    'stuffed is true, false or null — never undefined');
+  note('real parser, oval R1: shape = ' + JSON.stringify(m.shape));
+  if (!HAS_STARTHINT) {
+    assertEqual(m.shape.start, 'unknown', 'a parser without startHint reads as unknown');
+    assertEqual(m.shape.chainLen, null, 'with no chain length');
+  }
+  if (!HAS_STUFFING) assertEqual(m.shape.stuffed, null, 'and a parser without stuffingHint says null');
+
+  var tube = mkProject('ZD Tube', 'rounds');
+  var tprt = mkPart(tube, TUBE, { row: 2, stitch: 3, fillRowStitches: true });
+  var tm = Store.diagramModel(tprt, tube);
+  assertEqual(counts(tm), [12, 12, 12, 12], 'a chain-ring tube is a straight wall');
+  assertEqual(tm.current, 2, 'working round 3 of the tube');
+  assertEqual(tm.rounds[2].done, 3, 'three stitches into it');
+  assertEqual(everyStitchWellFormed(tm), '', 'the tube\'s stitches are well formed');
+  note('real parser, chain-ring tube: shape = ' + JSON.stringify(tm.shape) +
+       ' heights = ' + JSON.stringify(tm.rounds.map(function (r) { return r.height; })));
+
+  // The hints, pinned exactly through a stub.
+  withPatterns({
+    startHint: function () { return { start: 'chain-oval', chainLen: 12, ringCount: null }; },
+    stuffingHint: function () { return false; }
+  }, function () {
+    var p = mkProject('ZD OvalStub', 'rounds');
+    var prt2 = mkPart(p, OVAL, { row: 0, stitch: 0 });
+    var m2 = Store.diagramModel(prt2, p);
+    assertEqual(m2.shape, { start: 'chain-oval', chainLen: 12, ringCount: null, stuffed: false },
+      'an oval start with its chain length, and "do not stuff"');
+  });
+
+  withPatterns({
+    startHint: function () { return { start: 'chain-ring', chainLen: 6, ringCount: 12 }; },
+    stuffingHint: function () { return true; }
+  }, function () {
+    var p = mkProject('ZD TubeStub', 'rounds');
+    var prt2 = mkPart(p, TUBE, { row: 0, stitch: 0 });
+    var m2 = Store.diagramModel(prt2, p);
+    assertEqual(m2.shape, { start: 'chain-ring', chainLen: 6, ringCount: 12, stuffed: true },
+      'a chain ring keeps both the chain length and the ring count');
+  });
+
+  // Junk from the parser is refused rather than passed on.
+  withPatterns({
+    startHint: function () { return { start: 'banana', chainLen: -3, ringCount: 'six' }; },
+    stuffingHint: function () { return 'yes'; }
+  }, function () {
+    var p = mkProject('ZD Junk', 'rounds');
+    var prt2 = mkPart(p, OVAL, { row: 0, stitch: 0 });
+    var m2 = Store.diagramModel(prt2, p);
+    assertEqual(m2.shape, { start: 'unknown', chainLen: null, ringCount: null, stuffed: null },
+      'an unknown start kind, a negative chain and a string all normalise away');
+  });
+
+  // A parser that throws must not take the model down with it.
+  withPatterns({
+    startHint: function () { throw new Error('nope'); },
+    stuffingHint: function () { throw new Error('nope'); }
+  }, function () {
+    var p = mkProject('ZD Throws', 'rounds');
+    var prt2 = mkPart(p, OVAL, { row: 0, stitch: 0 });
+    var m2 = Store.diagramModel(prt2, p);
+    assertEqual(m2.shape.start, 'unknown', 'a throwing startHint leaves the shape unknown');
+    assertEqual(m2.shape.stuffed, null, 'a throwing stuffingHint leaves stuffed null');
+    assertEqual(m2.rounds.length, 5, 'and the rounds are still built');
+  });
+})();
+
+function START_OK(s) {
+  return s === 'magic-ring' || s === 'chain-ring' || s === 'chain-oval' || s === 'chain-row' || s === 'unknown';
+}
+
+/* ====================================================================== */
+group('5. The window is anchored to the round being worked (finding 1)');
+/* ====================================================================== */
+
+(function () {
+  fresh();
+  var proj = mkProject('ZD Long', 'rounds');
+  var prt = mkPart(proj, LONG_600, { row: 4, stitch: 7, fillRowStitches: true });
+  var m = Store.diagramModel(prt, proj);
+
+  assertEqual(m.window.total, 600, 'the pattern is 600 rounds long');
+  assertEqual(m.rounds.length, 400, 'and 400 of them are modelled');
+  assertEqual(m.window.first, 1, 'at round 5 the window starts at round 1, not round 201');
+  assertEqual(m.rounds[0].row, 1, 'the first modelled round IS pattern round 1');
+  assertEqual(m.rounds[399].row, 400, 'and the last is round 400');
+  assertEqual(m.current, 4, 'current points at round 5');
+  assertEqual(m.rounds[m.current].row, 5, 'which is the round being worked');
+  assertEqual(m.rounds[m.current].done, 7, 'and it wears the seven tapped stitches');
+  assertEqual(m.rounds[m.current].ghost, false, 'the worked round is solid');
+  assertEqual(m.rounds[399].done, 0, 'round 400 is untouched — the old build put the taps here');
+  assertEqual(m.rounds[399].ghost, true, 'and is a ghost');
+  assertEqual(m.rounds[3].done, 48, 'round 4 is finished');
+
+  // applyLiveRound writes to round 5 on the cached-model path.
+  prt.stitch = 11;
+  var m2 = Store.diagramModel(prt, proj);
+  assertTrue(m2 === m, 'a stitch tap reuses the cached model');
+  assertEqual(m2.rounds[4].done, 11, 'and applyLiveRound writes to round 5');
+  assertEqual(m2.rounds[399].done, 0, 'never to the end of the pattern');
+  assertEqual(m2.deviation.actual, 11, 'the deviation follows the taps');
+
+  // Mid-pattern: the window brackets the working round.
+  prt.row = 299;
+  prt.stitch = 0;
+  var m3 = Store.diagramModel(prt, proj);
+  assertEqual(m3.window.first, 20, 'at round 300 the window runs 20..419');
+  assertEqual(m3.rounds.length, 400, 'still 400 rounds');
+  assertEqual(m3.rounds[0].row, 20, 'first modelled round is 20');
+  assertEqual(m3.rounds[399].row, 419, 'last is 419');
+  assertEqual(m3.current, 280, 'current is the working round\'s index');
+  assertEqual(m3.rounds[m3.current].row, 300, 'i.e. round 300');
+  assertTrue(m3.window.first <= 300 && 300 <= m3.window.first + m3.rounds.length - 1,
+    'the working round is inside the window');
+
+  // Near the end the window stops at the last round rather than running past it.
+  prt.row = 599;
+  var m4 = Store.diagramModel(prt, proj);
+  assertEqual(m4.window.first, 201, 'at round 600 the window is the last 400 rounds');
+  assertEqual(m4.rounds[399].row, 600, 'ending on round 600');
+  assertEqual(m4.current, 399, 'and current is the last one');
+  assertEqual(m4.rounds[m4.current].row, 600, 'which is round 600');
+
+  // A short pattern keeps every round.
+  var shortProj = mkProject('ZD Short', 'rounds');
+  var sp = mkPart(shortProj, SPHERE, { row: 18, stitch: 2, fillRowStitches: true });
+  var sm = Store.diagramModel(sp, shortProj);
+  assertEqual(sm.window, { first: 1, total: 19 }, 'nothing is windowed out of a 19-round part');
+  assertEqual(sm.current, 18, 'and the last round is the current one');
+})();
+
+/* ====================================================================== */
+group('6. Rows mode with edge increases');
+/* ====================================================================== */
+
+(function () {
+  fresh();
+  var proj = mkProject('ZD Shawl', 'rows');
+  var prt = mkPart(proj, SHAWL, { row: 2, stitch: 6, workMode: 'rows', fillRowStitches: true });
+  var m = Store.diagramModel(prt, proj);
+
+  assertEqual(m.mode, 'rows', 'a turned shawl is modelled in rows');
+  assertEqual(counts(m), [18, 20, 22, 22], 'growing by two a row, then straight');
+  assertEqual(m.current, 2, 'working row 3');
+  assertEqual(m.rounds[2].row, 3, 'which is pattern row 3');
+  assertEqual(m.rounds[2].done, 6, 'six stitches in');
+  assertEqual(everyStitchWellFormed(m), '', 'the rows\' stitches are well formed');
+  note('real parser: row 3 increase sites = ' + JSON.stringify(m.rounds[2].inc));
+
+  // Pinned through a stub: the two edge increases keep their positions.
+  withPatterns({
+    expand: function (lines, row) {
+      var n = row === 1 ? 18 : 20;
+      var list = [];
+      for (var i = 0; i < n; i++) list.push({ t: 'sc', c: null, h: 1, w: 1 });
+      if (row === 1) return { stitches: list, inc: [], dec: [], color: null, height: 1, state: null };
+      list[0] = { t: 'inc', c: null, h: 1, w: 1.4 };
+      list[1] = { t: 'inc+', c: null, h: 1, w: 1.4 };
+      list[18] = { t: 'inc', c: null, h: 1, w: 1.4 };
+      list[19] = { t: 'inc+', c: null, h: 1, w: 1.4 };
+      return { stitches: list, inc: [0, 18], dec: [], color: null, height: 1, state: null };
+    }
+  }, function () {
+    var p = mkProject('ZD ShawlStub', 'rows');
+    var prt2 = mkPart(p, SHAWL, { row: 1, stitch: 0, workMode: 'rows' });
+    var m2 = Store.diagramModel(prt2, p);
+    assertEqual(m2.mode, 'rows', 'still rows');
+    assertEqual(m2.rounds[1].inc, [0, 18], 'both edges of row 2 are marked');
+    assertEqual(m2.rounds[1].count, 20, 'and the row is two stitches wider');
+    assertEqual(m2.rounds[0].inc, [], 'the foundation row has no increases');
+  });
+
+  // The same thing without the index arrays: types alone must still find the edges.
+  withPatterns({
+    expand: function (lines, row) {
+      var n = row === 1 ? 18 : 20;
+      var list = [];
+      for (var i = 0; i < n; i++) list.push({ t: 'sc', c: null, h: 1 });
+      if (row !== 1) {
+        list[0] = { t: 'inc', c: null, h: 1 };
+        list[1] = { t: 'inc', c: null, h: 1 };
+        list[18] = { t: 'inc', c: null, h: 1 };
+        list[19] = { t: 'inc', c: null, h: 1 };
+      }
+      return { stitches: list, color: null, height: 1, state: null };
+    }
+  }, function () {
+    var p = mkProject('ZD ShawlPair', 'rows');
+    var prt2 = mkPart(p, SHAWL, { row: 1, stitch: 0, workMode: 'rows' });
+    var m2 = Store.diagramModel(prt2, p);
+    assertEqual(m2.rounds[1].inc, [0, 18],
+      'two adjacent inc entries are ONE increase, so the edges come out as two sites');
+  });
+})();
+
+/* ====================================================================== */
+group('7. partWorkMode resolution order');
+/* ====================================================================== */
+
+(function () {
+  fresh();
+  var proj = mkProject('ZD Mode', 'rows');
+  var prt = mkPart(proj, SPHERE, { row: 0, stitch: 0 });
+
+  assertEqual(Store.part(Store.project(proj.id), prt.id).workMode, 'auto', 'a new part is on auto');
+
+  // 1. The explicit field wins over everything.
+  Store.updatePart(proj.id, prt.id, { workMode: 'rounds' });
+  assertEqual(Store.partWorkMode(prt, proj), 'rounds', 'an explicit "rounds" beats a rows project');
+  Store.updatePart(proj.id, prt.id, { workMode: 'rows' });
+  assertEqual(Store.partWorkMode(prt, proj), 'rows', 'and an explicit "rows" beats everything else');
+  withPatterns({ workMode: function () { return 'rounds'; } }, function () {
+    assertEqual(Store.partWorkMode(prt, proj), 'rows', 'including the pattern\'s own opinion');
+  });
+
+  // 2. On auto, the pattern decides.
+  Store.updatePart(proj.id, prt.id, { workMode: 'auto' });
+  withPatterns({ workMode: function () { return 'rounds'; } }, function () {
+    assertEqual(Store.partWorkMode(prt, proj), 'rounds', 'on auto the pattern beats the project');
+  });
+  withPatterns({ workMode: function () { return 'rows'; } }, function () {
+    var rp = mkProject('ZD Mode rounds', 'rounds');
+    var rprt = mkPart(rp, SHAWL, { row: 0, stitch: 0 });
+    assertEqual(Store.partWorkMode(rprt, rp), 'rows', 'and the other way round');
+  });
+
+  // 3. The project is the tie-break when the pattern cannot tell.
+  withPatterns({ workMode: function () { return null; } }, function () {
+    assertEqual(Store.partWorkMode(prt, proj), 'rows', 'a null answer falls back to the project');
+    var rp = mkProject('ZD Mode tie', 'rounds');
+    var rprt = mkPart(rp, SPHERE, { row: 0, stitch: 0 });
+    assertEqual(Store.partWorkMode(rprt, rp), 'rounds', 'both ways');
+  });
+  withPatterns({ workMode: null }, function () {
+    assertEqual(Store.partWorkMode(prt, proj), 'rows', 'a parser with no workMode at all uses the project');
+  });
+  withPatterns({ workMode: function () { throw new Error('nope'); } }, function () {
+    assertEqual(Store.partWorkMode(prt, proj), 'rows', 'a throwing workMode uses the project');
+  });
+  withPatterns({ workMode: function () { return 'spiral'; } }, function () {
+    assertEqual(Store.partWorkMode(prt, proj), 'rows', 'and so does a nonsense answer');
+  });
+
+  // 4. The project can be found without being passed in.
+  withPatterns({ workMode: null }, function () {
+    assertEqual(Store.partWorkMode(prt), 'rows', 'partWorkMode(part) looks the project up');
+  });
+
+  // 5. Normalisation and undo.
+  Store.updatePart(proj.id, prt.id, { workMode: '  ROUNDS ' });
+  assertEqual(Store.part(Store.project(proj.id), prt.id).workMode, 'rounds', 'case and space are normalised');
+  Store.updatePart(proj.id, prt.id, { workMode: 'sideways' });
+  assertEqual(Store.part(Store.project(proj.id), prt.id).workMode, 'rounds', 'nonsense leaves it alone');
+  Store.undo();
+  assertEqual(Store.part(Store.project(proj.id), prt.id).workMode, 'rounds', 'undo walks the no-op back');
+  Store.updatePart(proj.id, prt.id, { workMode: 'rows' });
+  assertEqual(Store.part(Store.project(proj.id), prt.id).workMode, 'rows', 'set to rows');
+  Store.undo();
+  assertEqual(Store.part(Store.project(proj.id), prt.id).workMode, 'rounds', 'and undo puts rounds back');
+
+  // 6. It survives a save / load round trip.
+  Store.updatePart(proj.id, prt.id, { workMode: 'rows' });
+  Store.flush();
+  Store.load();
+  assertEqual(Store.part(Store.project(proj.id), prt.id).workMode, 'rows', 'and a reload');
+
+  // 7. Templates carry it, like patternText.
+  var tpl = Store.templateFromProject(proj.id);
+  assertEqual(tpl.parts[0].workMode, 'rows', 'a template drafted from the project carries it');
+  var saved = Store.saveTemplate({ name: 'ZD mode tpl', parts: tpl.parts, checklist: [], countMode: 'rounds' });
+  assertEqual(saved.parts[0].workMode, 'rows', 'saveTemplate keeps it');
+  var made = Store.createProject({ name: 'ZD from tpl', templateId: saved.id });
+  assertEqual(made.parts[0].workMode, 'rows', 'and a project made from it starts there');
+  assertEqual(Store.partWorkMode(made.parts[0], made), 'rows', 'so the model follows the template');
+
+  // A template part with no workMode at all is auto, not undefined.
+  var plain = Store.saveTemplate({ name: 'ZD plain tpl', parts: [{ name: 'Main', makeCount: 1 }], checklist: [] });
+  assertEqual(plain.parts[0].workMode, 'auto', 'a template part without one is auto');
+})();
+
+/* ====================================================================== */
+group('8. Import: rounds sections flip a rows project (05 #2)');
+/* ====================================================================== */
+
+var AMI_SECTIONS = [
+  {
+    name: 'Body',
+    makeCount: 1,
+    text: 'Rnd 1: 6 sc in magic ring (6)\nRnd 2: inc x6 around (12)\nRnd 3: (sc, inc) x6 around (18)',
+    placement: ''
+  },
+  {
+    name: 'Ear',
+    makeCount: 2,
+    text: 'Rnd 1: 6 sc in magic ring (6)\nRnd 2: sc in each st around (6)',
+    placement: 'Sew to rnds 5-7.'
+  }
+];
+
+var ROW_SECTIONS = [
+  {
+    name: 'Panel',
+    makeCount: 1,
+    text: 'Row 1: Ch 19, sc across, turn (18)\nRow 2: Ch 1, sc across, turn (18)',
+    placement: ''
+  }
+];
+
+(function () {
+  var byText = function (text) {
+    if (/\brnd\b|\bround\b|around|magic ring/i.test(text)) return 'rounds';
+    if (/\brow\b|turn/i.test(text)) return 'rows';
+    return null;
+  };
+
+  withPatterns({ workMode: byText }, function () {
+    fresh();
+    var proj = mkProject('ZD Import ami', 'rows');
+    var res = Store.importPatternSections(proj.id, AMI_SECTIONS, { mode: 'parts' });
+    assertEqual(res.created, 2, 'both amigurumi sections became parts');
+    assertEqual(res.modeFlipped, true, 'and the result says the mode was flipped');
+    assertEqual(Store.project(proj.id).countMode, 'rounds',
+      'a rows project whose every section is worked in rounds becomes a rounds project');
+    assertEqual(Store.project(proj.id).parts[0].workMode, 'auto',
+      'the parts themselves stay on auto — the import decides nothing per part');
+    var prt = Store.project(proj.id).parts[0];
+    assertEqual(Store.diagramModel(prt, Store.project(proj.id)).mode, 'rounds',
+      'so the model comes out in rounds');
+
+    // Re-importing changes nothing: no parts were created.
+    var proj2 = mkProject('ZD Import twice', 'rows');
+    Store.importPatternSections(proj2.id, AMI_SECTIONS, { mode: 'parts' });
+    Store.updateProject(proj2.id, { countMode: 'rows' });
+    var again = Store.importPatternSections(proj2.id, AMI_SECTIONS, { mode: 'parts' });
+    assertEqual(again.created, 0, 'the second import creates nothing');
+    assertEqual(again.modeFlipped, false, 'so it does not touch the mode the owner just set');
+    assertEqual(Store.project(proj2.id).countMode, 'rows', 'which stays rows');
+
+    // Rows sections never flip anything.
+    var proj3 = mkProject('ZD Import rows', 'rows');
+    var r3 = Store.importPatternSections(proj3.id, ROW_SECTIONS, { mode: 'parts' });
+    assertEqual(r3.created, 1, 'the panel became a part');
+    assertEqual(r3.modeFlipped, false, 'a rows pattern leaves a rows project alone');
+    assertEqual(Store.project(proj3.id).countMode, 'rows', 'still rows');
+
+    // One rows section among rounds blocks the flip.
+    var proj4 = mkProject('ZD Import mixed', 'rows');
+    var r4 = Store.importPatternSections(proj4.id, AMI_SECTIONS.concat(ROW_SECTIONS), { mode: 'parts' });
+    assertEqual(r4.created, 3, 'three parts');
+    assertEqual(r4.modeFlipped, false, 'a mixed import is never flipped — a garment is both');
+    assertEqual(Store.project(proj4.id).countMode, 'rows', 'so the project keeps its own word');
+
+    // A project already in rounds reports no flip.
+    var proj5 = mkProject('ZD Import rounds', 'rounds');
+    var r5 = Store.importPatternSections(proj5.id, AMI_SECTIONS, { mode: 'parts' });
+    assertEqual(r5.modeFlipped, false, 'nothing to flip on a rounds project');
+    assertEqual(Store.project(proj5.id).countMode, 'rounds', 'which stays rounds');
+
+    // mode:'active' reports the field too, and never flips.
+    var proj6 = mkProject('ZD Import active', 'rows');
+    var r6 = Store.importPatternSections(proj6.id, AMI_SECTIONS, { mode: 'active' });
+    assertEqual(r6.modeFlipped, false, 'the active-part import creates no parts, so no flip');
+    assertEqual(Store.project(proj6.id).countMode, 'rows', 'and the project is untouched');
+
+    // Undo puts the whole thing back.
+    var proj7 = mkProject('ZD Import undo', 'rows');
+    Store.importPatternSections(proj7.id, AMI_SECTIONS, { mode: 'parts' });
+    assertEqual(Store.project(proj7.id).countMode, 'rounds', 'flipped');
+    Store.undo();
+    assertEqual(Store.project(proj7.id).countMode, 'rows', 'and undone');
+  });
+
+  // Without Patterns.workMode nothing is ever flipped.
+  withPatterns({ workMode: null }, function () {
+    fresh();
+    var proj = mkProject('ZD Import noapi', 'rows');
+    var res = Store.importPatternSections(proj.id, AMI_SECTIONS, { mode: 'parts' });
+    assertEqual(res.created, 2, 'the sections still import');
+    assertEqual(res.modeFlipped, false, 'a parser without workMode flips nothing');
+    assertEqual(Store.project(proj.id).countMode, 'rows', 'and the project keeps its label');
+  });
+
+  withPatterns({ workMode: function () { throw new Error('nope'); } }, function () {
+    fresh();
+    var proj = mkProject('ZD Import throws', 'rows');
+    var res = Store.importPatternSections(proj.id, AMI_SECTIONS, { mode: 'parts' });
+    assertEqual(res.modeFlipped, false, 'and a throwing workMode flips nothing either');
+    assertEqual(Store.project(proj.id).countMode, 'rows', 'still rows');
+  });
+})();
+
+/* ====================================================================== */
+group('9. Deviation: my count vs the pattern\'s (05 #12)');
+/* ====================================================================== */
+
+(function () {
+  fresh();
+  var proj = mkProject('ZD Dev', 'rounds');
+  // Working round 4 of the sphere, which the pattern says is 24 stitches.
+  var prt = mkPart(proj, SPHERE, { row: 3, stitch: 29, fillRowStitches: true });
+  var m = Store.diagramModel(prt, proj);
+
+  assertEqual(m.deviation, { expected: 24, actual: 29 }, 'the pattern says 24, the needle says 29');
+  assertEqual(Store.roundDeviation(prt),
+    { expected: 24, actual: 29, row: 4, delta: 5 }, 'roundDeviation spells out the gap');
+  assertEqual(m.rounds[m.current].count, 29, 'the round itself grows to what was tapped');
+
+  prt.stitch = 20;
+  var m2 = Store.diagramModel(prt, proj);
+  assertEqual(m2.deviation, { expected: 24, actual: 20 }, 'under-counting reads the other way');
+  assertEqual(Store.roundDeviation(prt).delta, -4, 'with a negative delta');
+
+  prt.stitch = 24;
+  assertEqual(Store.roundDeviation(prt).delta, 0, 'and zero when they agree');
+
+  // A row the pattern never counted has no expectation at all.
+  var np = mkProject('ZD Dev none', 'rounds');
+  var nprt = mkPart(np, 'Rnd 1: 6 sc in magic ring (6)\nRnd 2: work as you like\n', { row: 1, stitch: 4 });
+  var nm = Store.diagramModel(nprt, np);
+  assertEqual(nm.deviation, { expected: null, actual: 4 }, 'no printed count means no expectation');
+  assertEqual(Store.roundDeviation(nprt).delta, null, 'and no delta to report');
+
+  // A part with no pattern at all.
+  var bp = mkProject('ZD Dev bare', 'rounds');
+  var bprt = mkPart(bp, '', { row: 2, stitch: 9, rowStitches: [12, 12] });
+  var bm = Store.diagramModel(bprt, bp);
+  assertEqual(bm.deviation, { expected: null, actual: 9 }, 'a freehand part deviates from nothing');
+  assertEqual(counts(bm), [12, 12, 9], 'and is built from what was tapped');
+  assertEqual(bm.current, 2, 'on the row being worked');
+  assertEqual(bm.window, { first: 1, total: 3 }, 'covering every row it has');
+
+  // A part on row 0 with nothing tapped.
+  var zp = mkProject('ZD Dev zero', 'rounds');
+  var zprt = mkPart(zp, SPHERE, { row: 0, stitch: 0 });
+  assertEqual(Store.roundDeviation(zprt), { expected: 6, actual: 0, row: 1, delta: -6 },
+    'a fresh part is six short of round 1');
+  assertEqual(Store.roundDeviation(null), { expected: null, actual: 0, row: 0, delta: null },
+    'and roundDeviation(null) never throws');
+})();
+
+/* ====================================================================== */
+group('10. Cache: a yarn colour edit can never leave a stale model');
+/* ====================================================================== */
+
+(function () {
+  fresh();
+  var proj = mkProject('ZD Cache', 'rounds');
+  var prt = mkPart(proj, SPHERE, { row: 3, stitch: 5, fillRowStitches: true });
+
+  var m1 = Store.diagramModel(prt, proj);
+  assertEqual(m1.defaultColor, Store.MAIN_YARN_DEFAULT, 'the main yarn starts at the warm cream');
+  assertEqual(m1.rounds[0].color, Store.MAIN_YARN_DEFAULT, 'and so does round 1');
+  assertTrue(Store.diagramModel(prt, proj) === m1, 'an unchanged part hands back the same object');
+
+  Store.setYarnColor(proj.id, Store.MAIN_YARN, '#112233');
+  var m2 = Store.diagramModel(prt, Store.project(proj.id));
+  assertTrue(m2 !== m1, 'editing the main yarn rebuilds the model');
+  assertEqual(m2.defaultColor, '#112233', 'the new main colour is in the model');
+  assertEqual(m2.rounds[0].color, '#112233', 'and on every round that had no colour of its own');
+
+  // A named colour, pinned through a stub so it does not depend on the parser's
+  // colour rules: the round says 'Almond', the sheet decides what Almond is.
+  withPatterns({
+    expand: function () {
+      return {
+        stitches: [{ t: 'sc', c: 'Almond', h: 1, w: 1 }, { t: 'sc', c: null, h: 1, w: 1 }],
+        color: 'Sand',
+        height: 1,
+        state: null
+      };
+    }
+  }, function () {
+    var p = mkProject('ZD Cache named', 'rounds');
+    var prt2 = mkPart(p, 'Rnd 1: A sc, sc (2)\n', { row: 0, stitch: 0 });
+    Store.setYarnColor(p.id, 'Almond', '#eeddcc');
+    Store.setYarnColor(p.id, 'Sand', '#c2b280');
+    var a = Store.diagramModel(prt2, Store.project(p.id));
+    assertEqual(a.rounds[0].stitches[0].c, '#eeddcc', 'the stitch is Almond');
+    assertEqual(a.rounds[0].color, '#c2b280', 'the row is Sand');
+
+    Store.setYarnColor(p.id, 'Almond', '#00ff00');
+    var b = Store.diagramModel(prt2, Store.project(p.id));
+    assertTrue(b !== a, 'recolouring Almond rebuilds');
+    assertEqual(b.rounds[0].stitches[0].c, '#00ff00', 'and the stitch follows');
+    assertEqual(b.rounds[0].color, '#c2b280', 'while Sand is left alone');
+
+    Store.setYarnColor(p.id, 'Sand', '#ff00ff');
+    var c = Store.diagramModel(prt2, Store.project(p.id));
+    assertEqual(c.rounds[0].color, '#ff00ff', 'recolouring Sand moves the row colour');
+  });
+
+  // Everything else the build reads is in the key too.
+  var kp = mkProject('ZD Cache keys', 'rounds');
+  var kprt = mkPart(kp, SPHERE, { row: 2, stitch: 1, fillRowStitches: true });
+  var base = Store.diagramModel(kprt, kp);
+
+  kprt.rowStitches[1] = 99;   // a VALUE change at constant length (finding 20)
+  var afterValue = Store.diagramModel(kprt, kp);
+  assertTrue(afterValue !== base, 'editing a past row\'s count rebuilds');
+  assertEqual(afterValue.rounds[0].count, 99, 'and the round grows to the count the owner typed');
+  assertEqual(afterValue.rounds[0].done, 99, 'done follows it');
+
+  Store.updatePart(kp.id, kprt.id, { workMode: 'rows' });
+  var afterMode = Store.diagramModel(kprt, kp);
+  assertTrue(afterMode !== afterValue, 'changing the part\'s work mode rebuilds');
+  assertEqual(afterMode.mode, 'rows', 'into rows');
+
+  Store.updatePart(kp.id, kprt.id, { patternText: MINI_SPHERE, workMode: 'auto' });
+  var afterText = Store.diagramModel(kprt, kp);
+  assertEqual(afterText.rounds.length, 3, 'a new pattern text rebuilds');
+  Store.updatePart(kp.id, kprt.id, { patternText: SPHERE });
+  assertEqual(Store.diagramModel(kprt, kp).rounds.length, 19, 'and back again');
+
+  kprt.row = 5;
+  var afterRow = Store.diagramModel(kprt, kp);
+  assertEqual(afterRow.current, 5, 'completing a row rebuilds and moves current');
+  kprt.piecesDone = 1;
+  assertTrue(Store.diagramModel(kprt, kp) !== afterRow, 'finishing a piece rebuilds');
+})();
+
+/* ====================================================================== */
+group('11. Odds and ends');
+/* ====================================================================== */
+
+(function () {
+  fresh();
+  assertEqual(Store.diagramModel(null).rounds.length, 0, 'diagramModel(null) is an empty model');
+  var em = Store.diagramModel(null);
+  assertEqual(em.window, { first: 0, total: 0 }, 'with an empty window');
+  assertEqual(em.deviation, { expected: null, actual: 0 }, 'and no deviation');
+  assertEqual(em.shape, { start: 'unknown', chainLen: null, ringCount: null, stuffed: null },
+    'and an unknown shape');
+
+  var proj = mkProject('ZD Odds', 'rounds');
+  var prt = mkPart(proj, '', { row: 0, stitch: 0 });
+  var m = Store.diagramModel(prt, proj);
+  assertEqual(m.rounds.length, 1, 'a brand-new part still has one round to draw');
+  assertEqual(m.rounds[0].count, 0, 'with nothing in it');
+  assertEqual(m.rounds[0].stitches, [], 'and no stitch records');
+  assertEqual(m.current, 0, 'current is that round');
+  assertEqual(m.rounds[0].row, 1, 'which is row 1');
+
+  // A repeat maps rounds onto the pattern rows they reuse.
+  var rp = mkProject('ZD Repeat', 'rounds');
+  var rprt = mkPart(rp, MINI_SPHERE, { row: 4, stitch: 0 });
+  Store.updatePart(rp.id, rprt.id, { repeat: { enabled: true, startRow: 2, endRow: 3, times: 3 } });
+  var rm = Store.diagramModel(rprt, rp);
+  assertEqual(counts(rm).slice(0, 5), [6, 12, 6, 12, 6], 'rows 2-3 repeat three times');
+  assertEqual(rm.current, 4, 'and current still points at the round being worked');
+  assertEqual(rm.rounds[4].row, 5, 'which is work row 5');
+
+  // The stitch-record cap: the count is honest even when the detail is capped.
+  var bp = mkProject('ZD Big row', 'rows');
+  var bprt = mkPart(bp, 'Row 1: sc in each ch across (1200)\n', { row: 0, stitch: 0, workMode: 'rows' });
+  var bm = Store.diagramModel(bprt, bp);
+  assertTrue(bm.rounds[0].stitches.length <= 999, 'a 1200-stitch row caps its stitch records');
+  assertTrue(bm.rounds[0].count >= 999, 'without reporting fewer stitches than it has');
+})();
+
+/* ====================================================================== */
+group('12. Build budget: 1,500 rows');
+/* ====================================================================== */
+
+(function () {
+  fresh();
+  var proj = mkProject('ZD Perf', 'rounds');
+  var text = bigPattern(1500);
+  var prt = mkPart(proj, text, { row: 4, stitch: 7 });
+  perf('pattern: 1500 rows, ' + text.length + ' chars');
+
+  // Cold: parse + build.
+  var t0 = ms();
+  var m0 = Store.diagramModel(prt, proj);
+  var cold = ms() - t0;
+  perf('cold (Patterns.parse + build): ' + cold.toFixed(1) + ' ms');
+  assertEqual(m0.window.total, 1500, 'the whole pattern is measured');
+  assertEqual(m0.rounds.length, 400, 'and 400 rounds modelled');
+  assertEqual(m0.current, 4, 'with the user on round 5');
+
+  // Warm: the parse is cached, which is what a row tap pays. Each iteration
+  // changes the yarn palette so the diagram cache misses every time.
+  var runs = 5;
+  var best = Infinity;
+  var total = 0;
+  for (var i = 0; i < runs; i++) {
+    Store.setYarnColor(proj.id, 'probe' + i, '#0102' + (10 + i));
+    var p2 = Store.project(proj.id);
+    var t1 = ms();
+    var mm = Store.diagramModel(prt, p2);
+    var dt = ms() - t1;
+    if (mm.rounds.length !== 400) log(false, 'perf run built 400 rounds', 'got ' + mm.rounds.length);
+    total += dt;
+    if (dt < best) best = dt;
+  }
+  var mean = total / runs;
+  perf('warm build (parse cached), ' + runs + ' runs: best ' + best.toFixed(1) +
+       ' ms, mean ' + mean.toFixed(1) + ' ms');
+  assertTrue(best < 60, 'a 1,500-row part builds in under 60 ms', best.toFixed(1) + ' ms');
+
+  // The tap path must not rebuild at all.
+  var t2 = ms();
+  for (var k = 0; k < 200; k++) {
+    prt.stitch = k;
+    Store.diagramModel(prt, Store.project(proj.id));
+  }
+  var per = (ms() - t2) / 200;
+  perf('cached model (a stitch tap): ' + per.toFixed(4) + ' ms per call');
+  assertTrue(per < 1, 'a stitch tap stays under a millisecond', per.toFixed(4) + ' ms');
+
+  // The pattern bridge itself, 1,500 calls each — this is what HANDOFF 12 blamed.
+  var t3 = ms();
+  for (var a = 1; a <= 1500; a++) Store.linesFor(prt);
+  var linesMs = ms() - t3;
+  var t4 = ms();
+  for (var b = 1; b <= 1500; b++) Store.lineForRow(prt, b);
+  var lineForMs = ms() - t4;
+  var t5 = ms();
+  for (var c = 1; c <= 1500; c++) Store.targetFor(prt, c);
+  var targetMs = ms() - t5;
+  perf('Store.linesFor x1500: ' + linesMs.toFixed(1) + ' ms · lineForRow x1500: ' +
+       lineForMs.toFixed(1) + ' ms · targetFor x1500: ' + targetMs.toFixed(1) + ' ms');
+  assertTrue(linesMs < 10, 'linesFor x1500 is under 10 ms (was 312 ms)', linesMs.toFixed(1) + ' ms');
+  assertTrue(lineForMs < 10, 'lineForRow x1500 is under 10 ms (was 303 ms)', lineForMs.toFixed(1) + ' ms');
+  assertTrue(targetMs < 10, 'targetFor x1500 is under 10 ms (was 330 ms)', targetMs.toFixed(1) + ' ms');
+
+  // The row index must agree with the parser it replaces, row for row.
+  var lines = Store.linesFor(prt);
+  var mismatch = 0;
+  for (var r = 1; r <= 1500; r++) {
+    if (Store.lineForRow(prt, r) !== Patterns.lineFor(lines, r)) mismatch++;
+    var mine = Store.targetFor(prt, r);
+    var theirs = Patterns.targetFor(lines, r);
+    theirs = (typeof theirs === 'number' && isFinite(theirs) && theirs > 0) ? Math.floor(theirs) : null;
+    if (mine !== theirs) mismatch++;
+  }
+  assertEqual(mismatch, 0, 'the row index resolves every one of 1,500 rows exactly as Patterns does');
+
+  // And on the sphere, where ranges and sections are in play.
+  var sp = mkProject('ZD Index', 'rounds');
+  var sprt = mkPart(sp, SPHERE, { row: 0, stitch: 0 });
+  var slines = Store.linesFor(sprt);
+  var m2 = 0;
+  for (var q = 1; q <= 25; q++) {
+    if (Store.lineForRow(sprt, q) !== Patterns.lineFor(slines, q)) m2++;
+    var mt = Store.targetFor(sprt, q);
+    var tt = Patterns.targetFor(slines, q);
+    tt = (typeof tt === 'number' && isFinite(tt) && tt > 0) ? Math.floor(tt) : null;
+    if (mt !== tt) m2++;
+  }
+  assertEqual(m2, 0, 'including the R9-R12 range and the trailing note line');
+
+  /** Best of three rebuilds with the part parked on `row`. */
+  function buildAt(row, tag) {
+    prt.row = row - 1;
+    prt.stitch = 0;
+    var b = Infinity;
+    var last = null;
+    for (var n = 0; n < 3; n++) {
+      Store.setYarnColor(proj.id, 'probe-' + tag + '-' + n, '#0103' + (10 + n));
+      var t = ms();
+      last = Store.diagramModel(prt, Store.project(proj.id));
+      var d = ms() - t;
+      if (d < b) b = d;
+    }
+    return { ms: b, model: last };
+  }
+
+  // Row 700 of 1,500 — the scenario 03-model-builder measured at 434 ms.
+  var midRun = buildAt(700, 'mid');
+  var mid = midRun.model;
+  var midMs = midRun.ms;
+  perf('row 700 of 1500 (the doc\'s 434 ms case), best of 3: ' + midMs.toFixed(1) + ' ms');
+  assertEqual(mid.window.first, 420, 'the window brackets row 700');
+  assertEqual(mid.rounds[mid.current].row, 700, 'and current is row 700');
+  assertTrue(midMs < 60, 'row 700 of a 1,500-row part builds in under 60 ms', midMs.toFixed(1) + ' ms');
+
+  // A long part at the far end of the pattern is the worst case for the walk:
+  // 1,100 rows of lead-in just to carry prevCount and the colour state.
+  var deepRun = buildAt(1500, 'end');
+  var deep = deepRun.model;
+  perf('worst case (on row 1500 of 1500, 1100 rows of lead-in), best of 3: ' +
+       deepRun.ms.toFixed(1) + ' ms');
+  assertEqual(deep.rounds.length, 400, 'still 400 rounds at the end of the pattern');
+  assertEqual(deep.window.first, 1101, 'windowed onto the last 400 rows');
+})();
+
+/* ---------------------------------------------------------------------- */
+
+document.getElementById('perf').textContent = perfLines.join('\n');
+
+cleanup();
+
+var summaryEl = document.getElementById('summary');
+var finalLine = passed + ' passed, ' + failed + ' failed';
+summaryEl.textContent = finalLine;
+summaryEl.className = failed === 0 ? 'ok' : 'bad';
+console.log(finalLine);
+
+window.setTimeout(cleanup, 400);
+</script>
+</body>
+</html>

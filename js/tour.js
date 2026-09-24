@@ -809,8 +809,9 @@
             target: '#stitch-3d',
             title: 'Your piece, in 3D',
             body:
-              'The piece inside the big button grows as you count. Tap 3D view to open it ' +
-              'full size and spin it around.'
+              'The piece under the number grows as you count — a bright ring marks the round ' +
+              'you are on and the faint rings below are what is still to come. Tap 3D view to ' +
+              'open it full size and spin it around.'
           },
           {
             target: '#stitch-readout',

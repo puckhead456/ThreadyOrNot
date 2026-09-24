@@ -21,9 +21,32 @@
          its own pointer events (the one under the stitch button is
          `pointer-events: none`). Same code path as the viewer's own pointer
          handlers, so both agree on direction and inertia.
-     handle.getStats()   -> { fps, frameMs, buildMs, triangles, drawCalls,
+     handle.setSafeInsets({ top, right, bottom, left })   // CSS px
+         Margins the piece must stay out of. The stitch button's number and
+         pills own the middle of the canvas, and a round-worked solid is also a
+         column down the middle, so the piece used to hide behind the caption
+         (05 #1 / 02 #16). The fit box shrinks to what is left and the
+         projection is shifted so the piece is centred in the free area.
+     handle.isLive()     -> is there a working GL context on this canvas
+     handle.getStats()   -> { fps, frameMs, submitMs, buildMs, triangles,
+                              drawCalls, ghostAlpha, status, contexts,
                               yaw, pitch, zoom, ... }
-     handle.destroy()
+         frameMs is the real rAF-to-rAF gap while animating; submitMs is the
+         old `frameMs` — JS submit time only, which never waits on the GPU.
+     handle.destroy({ release: true })
+         `release` hands the GL context back to the browser. Pass it only when
+         the <canvas> is being thrown away: a canvas whose context was lost can
+         never be given another one. A page gets a handful of contexts, so the
+         host closes the button's while the full-screen viewer is open.
+
+   mount options: { palette: { ghost, ink, glow, alert, bg }, reducedMotion,
+                    interactive, safeInsets, onStatus }
+     onStatus({ webgl, status, message }) fires once per transition
+     ('ok' | 'unavailable' | 'lost' | 'blank' | 'restored') so the host can put
+     a one-line fallback message up instead of showing an empty rectangle.
+     GHOST ALPHA IS THE RENDERER'S: pass an OPAQUE ghost colour. Any alpha on
+     it is dropped, because the renderer multiplies by GHOST_ALPHA /
+     PENDING_ALPHA and the two multiplications composed to 0.070 (02 #1).
 
    Rotation direction: the model follows the finger like a physical ball.
    Drag right -> the surface nearest the camera travels right (yaw += dx);
@@ -50,6 +73,16 @@
    - a soft elliptical contact shadow sits under the piece so it is not
      floating in the middle of the button. It fades out as the camera comes
      level with the piece, and never reaches past the fitted radius.
+   - the surface is tone-mapped (a Reinhard variant, white point 0.8) before a
+     real sRGB encode, so a cream keeps its hue instead of clipping to white
+     and a near-black keeps its detail (02 #3).
+   - rounds are separated by a procedural crease and each stitch carries a V
+     with a bar across its top, both in the FRAGMENT shader off a band-local uv
+     (02 #3/#22). They fade out below ~2 device px per stitch, so the button
+     never speckles. Nothing was added to the geometry.
+   - the working round wears a highlight ring in `palette.glow` (05 #3), and
+     stitches past the pattern's own count for that round render in
+     `palette.alert` rather than confidently closing the ring (05 #6).
    ========================================================================== */
 
 (function (global) {
@@ -58,9 +91,12 @@
   /* ---------------------------------------------------------------- tuning */
 
   var SW = 1.0;            // stitch width, world units
-  var SH = 1.5;            // stitch height for height === 1
+  /* Stitch HEIGHTS, ring radii, shape classes, caps and the fit clamps all
+     live in js/diagram-geo.js now (window.DiagramGeo). The old SH = 1.5 was
+     wrong by 57% (01 §1.2) and the asin(R/Rmax) slope heuristic that went
+     with it is gone; see `geoLayout` below. */
   var BUMP = 0.20;         // outward bump at stitch centre, fraction of SW
-  var BULGE = 0.09;        // mid-band outward bulge / inter-round groove
+  var GROOVE = 0.03;       // inter-round crease, inward only (02 #2)
   var DIP = 0.17;          // vertical scallop ("v" shape) as a fraction of row height
   var R_MIN = 0.42;        // smallest ring radius
   var MAX_SLICES = 160;    // per-ring slice cap (subsample beyond)
@@ -80,11 +116,23 @@
   var TIDX_THICK = TPS_THICK * 3;                          // 168 indices
   var THICK = 0.55;                // fabric thickness, fraction of SW
   var BACK_BUMP = 0.45;            // how much of the face texture the back keeps
-  var FLOATS = 13;         // anchor3 + offset3 + normal3 + colour3 + slice1
+  var FLOATS = 15;         // anchor3 + offset3 + normal3 + colour3 + slice1 + uv2
 
   var AO_EDGE = 0.17;      // darkening at slice edges
   var AO_BAND = 0.07;      // darkening at band edges
   var AO_DESAT = 0.22;     // desaturation mixed in at the crevices
+
+  /* Procedural stitch / round texture (02 #3 + a light #22). The per-round
+     BULGE is gone, so AO_BAND alone had to separate rounds and it did not: a
+     tube read as one smooth sausage. These are FRAGMENT-shader amounts, keyed
+     off the band-local uv the builder now emits, and they fade out with the
+     projected stitch size so nothing aliases at button size. */
+  var TEX_GROOVE = 0.30;   // inter-round crease darkening at the band edges
+  var TEX_V = 0.20;        // the stitch's V legs + top bar
+  var TEX_LIFT = 0.13;     // highlight just inside the crease, so it reads as relief
+  var TEX_SEAM = 0.85;     // extra crease where the yarn colour changes
+  var TEX_PX_OFF = 1.8;    // device px per stitch below which the texture is gone
+  var TEX_PX_ON = 6.5;     // ... and above which it is at full strength
 
   /* Hand-made irregularity. Dyed yarn is never one flat colour and no two
      stitches are pulled to the same tension; a few percent of seeded noise per
@@ -117,6 +165,7 @@
 
   var GHOST_ALPHA = 0.20;    // future rounds: a calm ring each
   var PENDING_ALPHA = 0.72;  // the current round's unworked slices: full grid
+  var MARKER_ALPHA = 0.60;   // the working round's highlight ring (05 #3)
 
   var SHADOW_SEGS = 30;
   var SHADOW_ALPHA = 0.38;   // centre of the contact shadow
@@ -129,6 +178,7 @@
     ghost: '#ffffff',
     ink: '#ffffff',
     glow: '#fff4c4',
+    alert: '#d9603f',
     bg: null
   };
   var DEFAULT_YARN = '#f1e3c8';
@@ -138,6 +188,7 @@
   var TAU = Math.PI * 2;
 
   function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
+  function r3(v) { return typeof v === 'number' && isFinite(v) ? Math.round(v * 1000) / 1000 : v; }
   function lerp(a, b, t) { return a + (b - a) * t; }
   function easeOutCubic(t) { var u = 1 - t; return 1 - u * u * u; }
   function smoothstep(a, b, x) {
@@ -232,6 +283,7 @@
     'attribute vec3 aNormal;',
     'attribute vec3 aColor;',
     'attribute float aSlice;',
+    'attribute vec2 aUV;',
     'uniform mat4 uProj;',
     'uniform mat4 uView;',
     'uniform mat3 uNormalMat;',
@@ -240,6 +292,7 @@
     'varying vec3 vNormal;',
     'varying vec3 vColor;',
     'varying vec3 vView;',
+    'varying vec2 vUV;',
     'void main() {',
     '  float s = abs(aSlice - uAnimSlice) < 0.5 ? uAnimScale : 1.0;',
     '  vec3 p = aAnchor + aOffset * s;',
@@ -247,16 +300,23 @@
     '  vView = vp.xyz;',
     '  vNormal = uNormalMat * aNormal;',
     '  vColor = aColor;',
+    '  vUV = aUV;',
     '  gl_Position = uProj * vp;',
     '  gl_PointSize = 2.0;',
     '}'
   ].join('\n');
+
+  function glsl(v) {
+    var s = String(v);
+    return s.indexOf('.') < 0 && s.indexOf('e') < 0 ? s + '.0' : s;
+  }
 
   var FRAG_SRC = [
     'precision mediump float;',
     'varying vec3 vNormal;',
     'varying vec3 vColor;',
     'varying vec3 vView;',
+    'varying vec2 vUV;',
     'uniform float uWire;',
     'uniform float uAlpha;',
     'uniform float uGlow;',
@@ -264,6 +324,18 @@
     'uniform vec3 uFlat;',
     'uniform vec3 uGlowColor;',
     'uniform vec3 uRimColor;',
+    /* Surplus stitches (05 #6 / 05-ux #12): the slices past the pattern's own
+       count for this round are drawn in the alert tint instead of confidently
+       closing the ring. uTintMix is 0 for every other draw. */
+    'uniform vec3 uTint;',
+    'uniform float uTintMix;',
+    /* 0 when a stitch is too small on screen to texture (button size), 1 when
+       it is big enough to read. Computed once per frame from the fit. */
+    'uniform float uTex;',
+    /* 1 on a round whose yarn colour differs from the round above it: the
+       crease at its top edge is cut deeper so the change reads at button
+       size instead of washing out (02 #7). */
+    'uniform float uSeam;',
     'void main() {',
     // contact shadow: vColor.r carries the falloff weight, ink is plain black
     '  if (uShadow > 0.5) {',
@@ -274,6 +346,7 @@
     '  if (uWire > 0.5) {',
     '    c = uFlat;',
     '  } else {',
+    '    vec3 base = mix(vColor, uTint, uTintMix);',
     '    vec3 N = normalize(vNormal);',
     '    vec3 V = normalize(-vView);',
     '    float facing = dot(N, V);',
@@ -295,17 +368,50 @@
     '    float nh = max(dot(N, H), 0.0);',
     // Wool scatters, so the sheen is broad and carries the yarn colour; the
     // tight lobe is only a hint, otherwise the piece turns to plastic.
-    '    float sheen = pow(nh, 7.0) * 0.15 + pow(nh, 44.0) * 0.045;',
-    '    vec3 specTint = mix(vec3(1.0), vColor * 1.6, 0.5);',
-    '    c = vColor * vec3(1.06, 0.99, 0.88) * (0.17 + 0.94 * wrap);',   // warm key
-    '    c += vColor * vec3(0.44, 0.54, 0.76) * 0.30 * fill;',           // cool bounce
-    '    c += specTint * sheen * wrap;',
-    '    c += uRimColor * rim * 0.30 * (1.0 - 0.75 * inside);',
+    '    float sheen = pow(nh, 7.0) * 0.13 + pow(nh, 44.0) * 0.022;',
+    '    vec3 specTint = mix(vec3(1.0), base * 1.6, 0.5);',
+    /* Fabric texture, in the fragment shader so it costs no geometry and
+       filters itself out when a stitch is smaller than a couple of pixels.
+       vUV.y = 0 at the top edge of the round, 1 at the bottom; vUV.x runs
+       across one stitch. What real crochet has here is a CREASE between
+       rounds and, inside each round, a V with a bar across its top. */
+    '    float u = vUV.x, vv = vUV.y;',
+    '    float crease = smoothstep(0.30, 0.0, vv) + smoothstep(0.70, 1.0, vv);',
+    '    crease += smoothstep(0.42, 0.0, vv) * uSeam * ' + glsl(TEX_SEAM) + ';',
+    '    float legs = abs(abs(u - 0.5) * 2.0 - vv);',
+    '    float bar = smoothstep(0.17, 0.0, abs(vv - 0.86));',
+    '    float vtex = smoothstep(0.26, 0.0, legs) * 0.62 + bar * 0.38;',
+    '    float ridge = smoothstep(0.30, 0.52, vv) * (1.0 - smoothstep(0.52, 0.74, vv));',
+    '    float shade = 1.0 - uTex * (' + glsl(TEX_GROOVE) + ' * min(crease, 1.4) +' +
+    ' ' + glsl(TEX_V) + ' * vtex);',
+    '    shade += uTex * ' + glsl(TEX_LIFT) + ' * ridge;',
+    '    c = base * vec3(1.06, 0.99, 0.88) * (0.22 + 0.86 * wrap) * shade;',   // warm key
+    '    c += base * vec3(0.44, 0.54, 0.76) * 0.30 * fill * shade;',           // cool bounce
+    '    c += specTint * sheen * wrap * shade;',
+    // a broad Fresnel in the yarn's OWN colour: the halo of stray fibres that
+    // says "wool" rather than "plastic egg" (02 #18a). The white rim drops to
+    // compensate, so a light yarn no longer reads as a shiny bead.
+    '    c += base * pow(1.0 - nv, 1.6) * 0.20 * (1.0 - 0.6 * inside);',
+    '    c += uRimColor * rim * 0.18 * (1.0 - 0.75 * inside);',
     '    c *= mix(1.0, 0.42, inside);',
     '    c = mix(c, uGlowColor, uGlow);',
     '  }',
     '  c = max(c, vec3(0.0));',
-    '  c = pow(c, vec3(0.45454545));',          // linear -> sRGB
+    /* Tone map BEFORE the encode (02 #3). Without it the default cream's key
+       term alone reached 1.03 linear and clipped to a hue-less white, while a
+       dark red crushed to black over half the piece. A Reinhard variant with a
+       0.8 white point leaves mid-tones essentially where they were and rolls
+       the top off, so light yarns keep their hue and dark ones keep detail. */
+    '  c = c * (1.0 + c / 0.64) / (1.0 + c);',
+    /* the real sRGB curve, not pow(1/2.2): the CPU-side decode uses the exact
+       piecewise formula, so with the approximation a mid grey did not
+       round-trip through the renderer. */
+    '  vec3 hi = 1.055 * pow(c, vec3(0.41666667)) - 0.055;',
+    '  c = mix(hi, c * 12.92, step(c, vec3(0.0031308)));',
+    /* mediump (fp16) linear lighting + a gamma stretch of the darks bands
+       badly on the three dark themes; one ordered-ish dither kills it. */
+    '  c += (fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453) - 0.5) / 255.0;',
+    '  c = clamp(c, 0.0, 1.0);',
     '  gl_FragColor = vec4(c * uAlpha, uAlpha);', // premultiplied
     '}'
   ].join('\n');
@@ -392,7 +498,11 @@
       var c = (st && st.c) || base;
       amp[i] = (STITCH_AMP[t] != null ? STITCH_AMP[t] : 1.0) *
         (1 + noise11(seed, i * 3) * JIT_AMP);
-      wt[i] = STITCH_W[t] != null ? STITCH_W[t] : 1.0;
+      /* Model v2 carries the stitch's real width; fall back to the type table
+         (which also widens an `inc` slice a little for emphasis). */
+      wt[i] = (st && typeof st.w === 'number' && isFinite(st.w) && st.w > 0)
+        ? st.w
+        : (STITCH_W[t] != null ? STITCH_W[t] : 1.0);
       var lin = linearOf(c, DEFAULT_YARN);
       // hand-dyed wobble: a little lightness, a little warm/cool
       var kl = 1 + noise11(seed, i * 3 + 1) * JIT_LIGHT;
@@ -419,72 +529,125 @@
     var def = m.defaultColor || DEFAULT_YARN;
     var prevRounds = (prev && prev.mode === mode) ? prev.rounds : null;
     var rounds = [];
+    var raw = [];      // the same rounds, unprepared, for DiagramGeo
     for (var i = 0; i < src.length; i++) {
       if (!src[i]) continue;
       rounds.push(prepRound(src[i], def, prevRounds ? prevRounds[rounds.length] : null, rounds.length));
+      raw.push(src[i]);
     }
     var current = clamp(m.current == null ? rounds.length - 1 : m.current | 0, 0,
       Math.max(0, rounds.length - 1));
-    return { mode: mode, rounds: rounds, current: current, defaultColor: def };
+    /* `raw` is index-aligned with `rounds` (both skip falsy entries), so the
+       geometry and the render attributes can never disagree about band i.
+       The layout does not depend on `done`, and the tap path hands back the
+       very same round objects with only `done` moved, so reuse it — a 60x60
+       piece costs ~0.9 ms to classify and a tap must not pay that. */
+    var shape = m.shape || null;
+    var geo = (prev && sameGeoInput(prev, mode, raw, shape))
+      ? prev.geo
+      : geoLayout({
+        mode: mode, rounds: raw, current: current, defaultColor: def,
+        shape: shape, window: m.window || null, deviation: m.deviation || null
+      });
+    /* A round whose yarn differs from the round above it gets a hard seam in
+       the shader (02 #7 / 05 #6): at button size a colour change used to wash
+       out into a soft gradient, which is exactly the moment an amigurumi
+       pattern most wants you to see. */
+    for (i = 1; i < rounds.length; i++) {
+      rounds[i].seam = rounds[i].base !== rounds[i - 1].base ? 1 : 0;
+    }
+    if (rounds.length) rounds[0].seam = 0;
+    return {
+      mode: mode, rounds: rounds, current: current, defaultColor: def,
+      shape: shape, geo: geo, geoRaw: raw, geoShape: shape,
+      geoCounts: countsOf(raw),
+      deviation: m.deviation && typeof m.deviation === 'object' ? m.deviation : null
+    };
+  }
+
+  function countsOf(raw) {
+    var c = new Int32Array(raw.length);
+    for (var i = 0; i < raw.length; i++) c[i] = raw[i].count | 0;
+    return c;
+  }
+
+  /* Does this model describe the same GEOMETRY as the last one? `done` is
+     deliberately not part of it: it is the only thing a tap moves, and it
+     never changes the shape. Stitch arrays are compared by identity (Store
+     hands the same array back), so this is O(rounds), never O(stitches) — a
+     60 x 60 piece costs ~0.9 ms to classify and a tap must not pay that. */
+  function sameGeoInput(prev, mode, raw, shape) {
+    if (!prev.geo || prev.mode !== mode || !prev.geoRaw) return false;
+    if (prev.geoShape !== shape) return false;
+    if (prev.geoRaw.length !== raw.length) return false;
+    var counts = prev.geoCounts;
+    if (!counts || counts.length !== raw.length) return false;
+    for (var i = 0; i < raw.length; i++) {
+      var a = prev.geoRaw[i], b = raw[i];
+      if (counts[i] !== (b.count | 0)) return false;
+      if (a === b) continue;
+      if (a.height !== b.height) return false;
+      if (a.stitches !== b.stitches || a.inc !== b.inc || a.dec !== b.dec) return false;
+    }
+    return true;
   }
 
   /* ----------------------------------------------------------- band layout */
 
-  /* rounds mode.
-     Ring radius comes straight from the stitch count. The vertical step is the
-     interesting part: a literal arc-length walk (dy = sqrt(reach^2 - dR^2))
-     turns "increase 6 every round" into a perfect cone, because in flat
-     geometry that IS a cone. Real fabric cups, so instead we take the slope
-     the same radius would have on a sphere of the piece's widest radius:
-     phi = asin(R / Rmax). The step then has to cover dR horizontally, so
-     its length is max(reach, dR / cos phi) — stuffing stretches the rounds
-     near the equator exactly like that. Spheres read as balls, tubes stay
-     straight, and a cone keeps its taper with a softly rounded tip. */
-  var MAX_STRETCH = 2.6;
+  /* All of it lives in js/diagram-geo.js: ring radius from the SUM of the
+     per-stitch widths, the arc-length walk with an explicit stuffing slack
+     (dy = h·sqrt(1 − ((1−s)|dr|/h)²), so "+6 lies flat" and "0 change is a
+     cylinder" are exact), polygon / stadium / ripple cross-sections, the
+     magic-ring test for the cap, and the rows anchor.
 
-  function layoutRounds(rounds) {
-    var i, n = rounds.length;
-    var R = new Float64Array(n);
-    var rMax = R_MIN;
-    for (i = 0; i < n; i++) {
-      R[i] = Math.max(R_MIN, rounds[i].count * SW / TAU);
-      if (R[i] > rMax) rMax = R[i];
+     DiagramGeo is a separate file, so index.html and sw.js have to load and
+     precache it. Until they do, `fallbackGeo` keeps the app rendering with the
+     same physics minus the shape classification — never with the old SH. */
+  function geoOf() { return global.DiagramGeo || null; }
+
+  function geoLayout(model) {
+    var Geo = geoOf();
+    if (Geo) {
+      try { return Geo.layout(model); } catch (e) { /* fall through */ }
     }
-    var bands = [];
-    var prevR = n ? R[0] * 0.34 : 0, prevY = 0;
-    for (i = 0; i < n; i++) {
-      var reach = rounds[i].height * SH;
-      var dR = Math.abs(R[i] - prevR);
-      var t = clamp(((prevR + R[i]) / 2) / rMax, 0, 0.9995);
-      var phi = Math.asin(t);
-      var dy = Math.max(reach * Math.sin(phi), dR * Math.tan(phi));
-      dy = clamp(dy, 0.06 * reach, MAX_STRETCH * reach);
-      var y = prevY - dy;
-      bands.push({ rTop: prevR, rBot: R[i], yTop: prevY, yBot: y, reach: reach });
-      prevR = R[i]; prevY = y;
-    }
-    return bands;
+    return fallbackGeo(model);
   }
 
-  /* rows mode: a gently curved sheet, rows stacked bottom-up. Flat fabric is
-     not stretched over stuffing, so a row is only as tall as the stitch. */
-  var SH_ROWS = 1.05;
-  var SHEET_CURVE = 3;    // bend radius as a multiple of the sheet width
-
-  function layoutRows(rounds) {
-    var maxCount = 1, i;
-    for (i = 0; i < rounds.length; i++) maxCount = Math.max(maxCount, rounds[i].count);
-    var width = maxCount * SW;
-    var Rc = Math.max(width * SHEET_CURVE, 8);
-    var bands = [];
-    var y = 0;
-    for (i = 0; i < rounds.length; i++) {
-      var r = rounds[i];
-      var reach = r.height * SH_ROWS;
-      bands.push({ rTop: Rc, rBot: Rc, yTop: y + reach, yBot: y, reach: reach, Rc: Rc });
-      y += reach;
+  var FB_SH_SC = 0.95;
+  var FB_SLACK = 0.2;
+  function fallbackGeo(model) {
+    var mode = model && model.mode === 'rows' ? 'rows' : 'rounds';
+    var src = (model && model.rounds) || [];
+    var bands = [], i, h, y = 0, w, maxW = 0;
+    if (mode === 'rows') {
+      for (i = 0; i < src.length; i++) maxW = Math.max(maxW, (src[i].count | 0) * SW);
+      var Rc = Math.max(maxW * 3, 8);
+      for (i = 0; i < src.length; i++) {
+        h = (src[i].height > 0 ? src[i].height : 1) * FB_SH_SC;
+        w = (src[i].count | 0) * SW;
+        bands.push({ rTop: Rc, rBot: Rc, yTop: y + h, yBot: y, reach: h, Rc: Rc,
+          x0: -w / 2, width: w, anchor: 'center', prof: null, sig: 0, radMax: maxW / 2 });
+        y += h;
+      }
+      return { mode: mode, bands: bands, rounds: [], closedTop: false, closedBottom: false,
+        height: y, width: maxW, maxRadius: maxW / 2, aspect: maxW > 0 ? y / maxW : 0,
+        equatorFrac: 0, corners: 0, ruffles: 0, slack: 0 };
     }
-    return bands;
+    var r0 = src.length ? Math.max(R_MIN, (src[0].count | 0) * SW / TAU) : 0;
+    var prevR = Math.min(0.30 * SW, r0 * 0.34), maxR = 0;
+    for (i = 0; i < src.length; i++) {
+      h = (src[i].height > 0 ? src[i].height : 1) * FB_SH_SC;
+      var R = Math.max(R_MIN, (src[i].count | 0) * SW / TAU);
+      var q = h > 0 ? Math.min(1, (1 - FB_SLACK) * Math.abs(R - prevR) / h) : 1;
+      var dy = Math.max(0.02 * h, h * Math.sqrt(Math.max(0, 1 - q * q)));
+      bands.push({ rTop: prevR, rBot: R, yTop: y, yBot: y - dy, reach: h,
+        prof: null, sig: 0, radMax: Math.max(prevR, R), kind: 'ring', corners: 0, ruffle: false });
+      prevR = R; y -= dy;
+      if (R > maxR) maxR = R;
+    }
+    return { mode: mode, bands: bands, rounds: [], closedTop: true, closedBottom: false,
+      height: -y, width: 2 * maxR, maxRadius: maxR, aspect: maxR > 0 ? -y / (2 * maxR) : 0,
+      equatorFrac: 0, corners: 0, ruffles: 0, slack: FB_SLACK };
   }
 
   /* ---------------------------------------------------------- band builder */
@@ -523,8 +686,15 @@
          its own row of V's with a groove between, like real fabric. */
       FT[t] = Math.sin(Math.PI * tt);
       DFT[t] = Math.PI * Math.cos(Math.PI * tt);
-      BLG[t] = BULGE * SW * (1.35 * Math.sin(Math.PI * tt) - 0.42);
-      DBLG[t] = BULGE * SW * 1.35 * Math.PI * Math.cos(Math.PI * tt);
+      /* The per-round BULGE is gone (02 #2). It put the band's mid-height at
+         +0.084 SW and both its edges at −0.038 SW — a 0.12 SW radial swing at
+         every round boundary, which is what made a horn read as a pinecone.
+         What is left is a crease: zero through the middle of the band, dipping
+         GROOVE inward at both edges. Both edges dip by the SAME amount, which
+         is what keeps consecutive rounds watertight (see the note above), and
+         the profile never swings outward at all. */
+      BLG[t] = -GROOVE * SW * (1 - Math.sin(Math.PI * tt));
+      DBLG[t] = GROOVE * SW * Math.PI * Math.cos(Math.PI * tt);
       DIPT[t] = Math.sin(Math.PI * tt);
       DDIPT[t] = Math.PI * Math.cos(Math.PI * tt);
     }
@@ -532,7 +702,10 @@
 
   /* Builds one band (one round / one row) into typed arrays.
      opts: n, a0[], aw[], amp[], col[], rBase[3], drdt, yBase[3], dydt, zOff,
-           dipScale, anchorCol, thick
+           dipScale, anchorCol, thick, prof
+     `prof(theta, t)` is an optional radius MULTIPLIER from DiagramGeo — the
+     cross-section of a polygon motif, an oval/stadium or a ripple. Absent (the
+     usual case) the ring is a circle and this costs nothing.
      `thick` > 0 extrudes the bump surface inward by that much and closes the
      four sides, so flat fabric has a real edge and never vanishes when it
      turns side-on. Rounds mode is a closed solid already and passes 0. */
@@ -549,6 +722,8 @@
     var rB = o.rBase, yB = o.yBase, drdt = o.drdt, dydt = o.dydt;
     var zOff = o.zOff, dipScale = o.dipScale;
     var anchorCol = o.anchorCol;
+    var prof = o.prof || null;
+    var PROF_EPS = 1e-3;
     var cosA = new Float64Array(COLS), sinA = new Float64Array(COLS);
     var px = new Float64Array(VPS), py = new Float64Array(VPS), pz = new Float64Array(VPS);
     var nx = new Float64Array(VPS), ny = new Float64Array(VPS), nz = new Float64Array(VPS);
@@ -556,15 +731,19 @@
     var bz = thick ? new Float64Array(VPS) : null;
     var j, k, t, vi, p, idx;
 
+    var angA = new Float64Array(COLS);
+    var blend = !!(prof && prof.blend);
     for (j = 0; j < n; j++) {
       var A = amp[j] * BUMP * SW;
       var aStart = a0[j], aWidth = aw[j];
       for (k = 0; k < COLS; k++) {
-        var ang = aStart + aWidth * (k / SEGS);
-        cosA[k] = Math.cos(ang); sinA[k] = Math.sin(ang);
+        var ang0 = aStart + aWidth * (k / SEGS);
+        angA[k] = ang0;
+        cosA[k] = Math.cos(ang0); sinA[k] = Math.sin(ang0);
       }
       for (t = 0; t < VROWS; t++) {
         var ft = FT[t], dft = DFT[t];
+        var ttv = t / ROWS;
         var rowR = rB[t] + BLG[t];
         var rowY = yB[t];
         var dr_dt_row = drdt + DBLG[t];
@@ -572,18 +751,32 @@
         for (k = 0; k < COLS; k++) {
           vi = t * COLS + k;
           var ca = cosA[k], sa = sinA[k];
-          var r = rowR + A * CU[k] * ft;
+          /* non-circular cross-section: scale the base radius, and carry the
+             profile's slope into both tangents or the normals go wrong at a
+             polygon corner */
+          var pm = 1, dpm_dth = 0, dpm_dt = 0;
+          if (prof) {
+            var ang = angA[k];
+            pm = prof(ang, ttv);
+            dpm_dth = (prof(ang + PROF_EPS, ttv) - prof(ang - PROF_EPS, ttv)) / (2 * PROF_EPS);
+            if (blend) {
+              var t1 = ttv < 1 ? ttv + 0.05 : 1, t0 = ttv > 0 ? ttv - 0.05 : 0;
+              dpm_dt = t1 > t0 ? (prof(ang, t1) - prof(ang, t0)) / (t1 - t0) : 0;
+            }
+          }
+          var rowRp = prof ? rB[t] * pm + BLG[t] : rowR;
+          var r = rowRp + A * CU[k] * ft;
           var y = rowY + dipScale * DIPU[k] * dipT;
           px[vi] = r * ca;
           py[vi] = y;
           pz[vi] = r * sa + zOff;
           // tangents
-          var dr_du = A * DCU[k] * ft;
+          var dr_du = A * DCU[k] * ft + (prof ? rB[t] * dpm_dth * aWidth : 0);
           var dy_du = dipScale * DDIPU[k] * dipT;
           var tux = dr_du * ca - r * aWidth * sa;
           var tuy = dy_du;
           var tuz = dr_du * sa + r * aWidth * ca;
-          var dr_dt = dr_dt_row + A * CU[k] * dft;
+          var dr_dt = (prof ? drdt * pm + rB[t] * dpm_dt + DBLG[t] : dr_dt_row) + A * CU[k] * dft;
           var tvx = dr_dt * ca;
           var tvy = dydt + dipScale * DIPU[k] * ddipT;
           var tvz = dr_dt * sa;
@@ -595,7 +788,7 @@
           if (Nx * ca + Nz * sa < 0) { Nx = -Nx; Ny = -Ny; Nz = -Nz; }
           nx[vi] = Nx; ny[vi] = Ny; nz[vi] = Nz;
           if (thick) {
-            var rb = rowR - thick + A * CU[k] * ft * BACK_BUMP;
+            var rb = rowRp - thick + A * CU[k] * ft * BACK_BUMP;
             bx[vi] = rb * ca;
             bz[vi] = rb * sa + zOff;
           }
@@ -612,8 +805,10 @@
 
       for (t = 0; t < VROWS; t++) {
         var edgeT = (t === 0 || t === VROWS - 1) ? 1 : 0;
+        var uvV = t / ROWS;
         for (k = 0; k < COLS; k++) {
           vi = t * COLS + k;
+          var uvU = k / SEGS;
           var ao = EDGE[k] * AO_EDGE + edgeT * AO_BAND;
           var mixv = ao * (AO_DESAT / (AO_EDGE + AO_BAND));
           var dark = 1 - ao;
@@ -626,6 +821,7 @@
           verts[p + 6] = nx[vi]; verts[p + 7] = ny[vi]; verts[p + 8] = nz[vi];
           verts[p + 9] = fr; verts[p + 10] = fg; verts[p + 11] = fb;
           verts[p + 12] = j;
+          verts[p + 13] = uvU; verts[p + 14] = uvV;
           if (thick) {
             // the wrong side of the fabric: darker and flatter
             p = (base + VPS + vi) * FLOATS;
@@ -636,6 +832,9 @@
             verts[p + 10] = lerp(fg, lum * 0.45, 0.38) * 0.52;
             verts[p + 11] = lerp(fb, lum * 0.45, 0.38) * 0.52;
             verts[p + 12] = j;
+            // the wrong side keeps the crease but not the V: you are looking at
+            // the back of the stitch, where the bar does not show
+            verts[p + 13] = 0.5; verts[p + 14] = uvV;
           }
         }
       }
@@ -700,13 +899,15 @@
     return { verts: verts, tri: tri, lin: lin, ring: ring, n: n, tps: tidx, lps: LIDX, gps: GIDX };
   }
 
-  /* Small domed cap for the magic ring at the top of a round-worked piece. */
-  function buildCap(radius, y, color) {
+  /* Small domed cap: the magic ring at the top of a round-worked piece
+     (`dir` = 1), or the gathered close at the bottom (`dir` = −1). */
+  function buildCap(radius, y, color, dir) {
     var n = 18;
+    var d = dir < 0 ? -1 : 1;
     var verts = new Float32Array((n + 1) * FLOATS);
     var tri = new Uint16Array(n * 3);
     var lin = new Uint16Array(n * 2);
-    var dome = radius * 0.55;
+    var dome = radius * 0.55 * d;
     var lum = 0.2126 * color[0] + 0.7152 * color[1] + 0.0722 * color[2];
     function put(i, x, yy, z, nxv, nyv, nzv, shade) {
       var p = i * FLOATS;
@@ -717,12 +918,14 @@
       verts[p + 10] = lerp(color[1], lum * 0.62, (1 - shade) * 0.5) * shade;
       verts[p + 11] = lerp(color[2], lum * 0.62, (1 - shade) * 0.5) * shade;
       verts[p + 12] = -7;
+      // mid-stitch, mid-band: no crease and no V on a gathered cap
+      verts[p + 13] = 0.5; verts[p + 14] = 0.5;
     }
-    put(0, 0, y + dome, 0, 0, 1, 0, 1);
+    put(0, 0, y + dome, 0, 0, d, 0, 1);
     for (var i = 0; i < n; i++) {
       var a = i / n * TAU;
       var ca = Math.cos(a), sa = Math.sin(a);
-      put(i + 1, radius * ca, y, radius * sa, ca * 0.55, 0.83, sa * 0.55, 0.86);
+      put(i + 1, radius * ca, y, radius * sa, ca * 0.55, 0.83 * d, sa * 0.55, 0.86);
       tri[i * 3] = 0; tri[i * 3 + 1] = 1 + i; tri[i * 3 + 2] = 1 + ((i + 1) % n);
       lin[i * 2] = 1 + i; lin[i * 2 + 1] = 1 + ((i + 1) % n);
     }
@@ -747,6 +950,7 @@
       verts[p + 6] = 0; verts[p + 7] = 1; verts[p + 8] = 0;
       verts[p + 9] = w; verts[p + 10] = w; verts[p + 11] = w;
       verts[p + 12] = -9;
+      verts[p + 13] = 0.5; verts[p + 14] = 0.5;
     }
     put(0, 0, 0, 1);
     for (var i = 0; i < n; i++) {
@@ -771,10 +975,18 @@
     if (total <= 0) total = n;
 
     if (mode === 'rounds') {
-      var acc = 0;
-      for (j = 0; j < n; j++) {
-        var w = round.wt[j] / total * TAU;
-        a0[j] = acc; aw[j] = w; acc += w;
+      /* A stitch is a fixed amount of fabric, so on a non-circular ring its
+         angular width has to follow ARC LENGTH — otherwise a granny square's
+         corner stitches stretch and its side stitches bunch. */
+      var Geo = geoOf();
+      if (band.prof && Geo && Geo.arcSlices) {
+        Geo.arcSlices(band.prof, round.wt, n, a0, aw);
+      } else {
+        var acc = 0;
+        for (j = 0; j < n; j++) {
+          var w = round.wt[j] / total * TAU;
+          a0[j] = acc; aw[j] = w; acc += w;
+        }
       }
       return buildBand({
         n: n, a0: a0, aw: aw, amp: round.amp, col: round.col,
@@ -784,7 +996,8 @@
         dydt: band.yBot - band.yTop,
         zOff: 0,
         dipScale: band.reach * (band.yBot < band.yTop ? 1 : -1),
-        anchorCol: 0
+        anchorCol: 0,
+        prof: band.prof || null
       });
     }
     /* rows: a cylinder segment about a vertical axis behind the sheet, so
@@ -793,11 +1006,15 @@
        Slice 0 starts at the left on even rows and at the right on odd rows,
        which is the direction that row is worked — the in-progress row then
        fills from alternating ends with nothing but a draw-range change. */
+    /* The row's extent comes from DiagramGeo: width = SUM of the stitch
+       widths, and x0 from the part's anchor, so a shawl that increases at one
+       edge only gets one straight edge instead of a symmetric wedge. */
     var Rc = band.Rc;
-    var totalW = n * SW;
+    var totalW = band.width > 0 ? band.width : n * SW;
+    var left = band.x0 != null ? band.x0 : -totalW / 2;
     var rtl = (index & 1) === 1;
     var shift = rtl ? 0.25 * SW : -0.25 * SW;
-    var x = (rtl ? totalW / 2 : -totalW / 2) + shift;
+    var x = (rtl ? left + totalW : left) + shift;
     var HALF_PI = Math.PI / 2;
     for (j = 0; j < n; j++) {
       var sw = round.wt[j] / total * totalW;
@@ -819,6 +1036,56 @@
   }
 
   /* ============================================================ WebGL core */
+
+  /* ---- live GL contexts, module-wide (05 #7) ----
+     A page gets a small number of WebGL contexts (8–16 in Chrome) and past
+     that the browser silently drops the OLDEST one. That is exactly how the ⤢
+     viewer came up blank after a handful of opens: every open mounted a second
+     context beside the stitch button's, viewer canvases were detached without
+     their context ever being released, and a canvas whose context has been
+     taken away can never be given another one. So every mount registers here;
+     a new mount first reaps the records whose canvas has left the document, and
+     past MAX_LIVE the oldest is released explicitly — with the host told about
+     it through `onStatus` — instead of dying at random. */
+  var LIVE = [];
+  var MAX_LIVE = 3;
+
+  function attached(c) {
+    if (!c) return false;
+    if (typeof c.isConnected === 'boolean') return c.isConnected;
+    var doc = c.ownerDocument;
+    return !!(doc && doc.body && doc.body.contains(c));
+  }
+
+  function reapContexts(keep) {
+    var i, rec;
+    for (i = LIVE.length - 1; i >= 0; i--) {
+      rec = LIVE[i];
+      if (rec === keep) continue;
+      if (rec.dead || !attached(rec.canvas)) {
+        LIVE.splice(i, 1);
+        try { rec.release('detached'); } catch (e) { /* ignore */ }
+      }
+    }
+    while (LIVE.length > MAX_LIVE) {
+      rec = LIVE.shift();
+      if (rec === keep) { LIVE.push(rec); break; }
+      try { rec.release('evicted'); } catch (e) { /* ignore */ }
+    }
+  }
+
+  function unregisterLive(rec) {
+    var i = LIVE.indexOf(rec);
+    if (i >= 0) LIVE.splice(i, 1);
+  }
+
+  var STATUS_MSG = {
+    ok: '',
+    unavailable: "Showing a simple outline — 3D isn't available on this device.",
+    lost: "Showing a simple outline — 3D stopped and had to be released.",
+    blank: "Showing a simple outline — 3D isn't available right now.",
+    restored: ''
+  };
 
   function createGL(canvas) {
     var attrs = {
@@ -854,6 +1121,7 @@
     gl.bindAttribLocation(p, 2, 'aNormal');
     gl.bindAttribLocation(p, 3, 'aColor');
     gl.bindAttribLocation(p, 4, 'aSlice');
+    gl.bindAttribLocation(p, 5, 'aUV');
     gl.linkProgram(p);
     gl.deleteShader(vs); gl.deleteShader(fs);
     if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
@@ -875,7 +1143,11 @@
         shadow: gl.getUniformLocation(p, 'uShadow'),
         flat: gl.getUniformLocation(p, 'uFlat'),
         glowColor: gl.getUniformLocation(p, 'uGlowColor'),
-        rimColor: gl.getUniformLocation(p, 'uRimColor')
+        rimColor: gl.getUniformLocation(p, 'uRimColor'),
+        tint: gl.getUniformLocation(p, 'uTint'),
+        tintMix: gl.getUniformLocation(p, 'uTintMix'),
+        tex: gl.getUniformLocation(p, 'uTex'),
+        seam: gl.getUniformLocation(p, 'uSeam')
       }
     };
   }
@@ -894,17 +1166,39 @@
       model: normalizeModel(null),
       chunks: [],          // per band GPU chunk
       capChunk: null,
+      botChunk: null,      // the gathered close at the bottom, when there is one
+      botHash: 0,
+      botBand: -1,
       shadowChunk: null,
       shadowHash: 0,
       shadowFade: 0,
       hashes: [],
       bands: [],
+      geo: null,
+      fitClamp: '',
       destroyed: false,
       gl: null,
       prog: null,
       fallback2d: null,
       dpr: 1,
       w: 0, h: 0,
+      /* CSS-pixel margins the piece must keep clear: the stitch button's
+         number and pills live there (02 #16 / 05 #1). The fit box shrinks to
+         what is left and the projection shifts so the piece is centred in it,
+         rather than behind the caption. */
+      insets: {
+        top: Math.max(0, (opts.safeInsets && opts.safeInsets.top) || 0),
+        right: Math.max(0, (opts.safeInsets && opts.safeInsets.right) || 0),
+        bottom: Math.max(0, (opts.safeInsets && opts.safeInsets.bottom) || 0),
+        left: Math.max(0, (opts.safeInsets && opts.safeInsets.left) || 0)
+      },
+      lost: false,          // the GL context went away and has not come back
+      /* 'init' until the first frame proves one way or the other, so a host
+         that put a fallback message up is always told when the piece is
+         actually on screen again. */
+      status: 'init',
+      onStatus: typeof opts.onStatus === 'function' ? opts.onStatus : null,
+      tex: 1,               // stitch-texture strength for this frame (LOD)
       // camera
       yaw: -0.35, pitch: PITCH,
       spinVel: 0,
@@ -922,8 +1216,11 @@
       lastT: 0,
       dirty: true,
       // stats
-      stats: { fps: 0, frameMs: 0, buildMs: 0, triangles: 0, drawCalls: 0, chunks: 0, verts: 0 },
-      frameAcc: 0, frameN: 0, fpsT0: 0, fpsFrames: 0
+      stats: { fps: 0, frameMs: 0, submitMs: 0, buildMs: 0, triangles: 0,
+        drawCalls: 0, chunks: 0, verts: 0 },
+      frameAcc: 0, frameN: 0, fpsT0: 0, fpsFrames: 0,
+      // real frame time: the rAF delta while something is actually animating
+      deltaAcc: 0, deltaN: 0, lastDrawT: 0
     };
 
     var proj = mat4(), view = mat4();
@@ -938,10 +1235,19 @@
       pal.ghost = src.ghost || DEFAULT_PALETTE.ghost;
       pal.ink = src.ink || DEFAULT_PALETTE.ink;
       pal.glow = src.glow || DEFAULT_PALETTE.glow;
+      pal.alert = src.alert || DEFAULT_PALETTE.alert;
       pal.bg = src.bg || DEFAULT_PALETTE.bg;
       state.palette = pal;
       state.ghostLin = linearOf(pal.ghost, '#ffffff');
+      /* THE RENDERER OWNS GHOST ALPHA (02 #1). The host used to pass
+         rgba(--text, 0.35) and pass 2 multiplied it by GHOST_ALPHA again, so
+         future rounds composed to 0.070 and were invisible in the app while
+         the test page — which passes an opaque white — looked right. Any alpha
+         on the supplied colour is dropped here; GHOST_ALPHA / PENDING_ALPHA are
+         the only multiplication. */
+      state.ghostLin = [state.ghostLin[0], state.ghostLin[1], state.ghostLin[2], 1];
       state.glowLin = linearOf(pal.glow, '#fff4c4');
+      state.alertLin = linearOf(pal.alert, DEFAULT_PALETTE.alert);
       var g = state.glowLin;
       // rim: mostly white, warmed by the glow colour
       state.rimLin = [lerp(1, g[0], 0.35), lerp(1, g[1], 0.35), lerp(1, g[2], 0.35)];
@@ -976,10 +1282,14 @@
       if (gl) {
         for (var i = 0; i < state.chunks.length; i++) freeChunk(state.chunks[i]);
         freeChunk(state.capChunk);
+        freeChunk(state.botChunk);
         freeChunk(state.shadowChunk);
       }
       state.chunks = [];
       state.capChunk = null;
+      state.botChunk = null;
+      state.botHash = 0;
+      state.botBand = -1;
       state.shadowChunk = null;
       state.shadowHash = 0;
       state.hashes = [];
@@ -1027,8 +1337,10 @@
       var t0 = now();
       var mode = model.mode;
       var rounds = model.rounds;
-      var bands = mode === 'rows' ? layoutRows(rounds) : layoutRounds(rounds);
+      var geo = model.geo || geoLayout({ mode: mode, rounds: [] });
+      var bands = geo.bands || [];
       state.bands = bands;
+      state.geo = geo;
 
       var gl = state.gl;
       var i;
@@ -1043,11 +1355,15 @@
       for (i = 0; i < rounds.length; i++) {
         var r = rounds[i];
         var b = bands[i];
+        if (!b) { freeChunk(state.chunks[i]); state.chunks[i] = null; state.hashes[i] = 0; continue; }
         var h = r.hash;
         h = hashNum(h, b.rTop * 97); h = hashNum(h, b.rBot * 97);
         h = hashNum(h, b.yTop * 97); h = hashNum(h, b.yBot * 97);
         h = hashNum(h, mode === 'rows' ? 2 : 1);
         h = hashNum(h, i & 1);
+        // the cross-section class, so a ring that becomes a polygon rebuilds
+        h = hashNum(h, b.sig || 0);
+        h = hashNum(h, (b.x0 || 0) * 97);
         if (state.hashes[i] === h && state.chunks[i]) continue;
         var geo = buildRoundBand(mode, r, b, i);
         if (!geo) { freeChunk(state.chunks[i]); state.chunks[i] = null; state.hashes[i] = h; continue; }
@@ -1056,18 +1372,41 @@
         built++;
       }
 
-      // magic-ring cap
-      if (mode === 'rounds' && rounds.length && rounds[0].count > 0) {
+      /* The cap. 04 defect D: the old condition was `rounds[0].count > 0` —
+         the comment said "magic ring", the code said "has any stitches", so
+         every sock, cuff, sleeve and muzzle grew a spike. DiagramGeo decides
+         now, from Model.shape.start. A piece that decreases to a handful of
+         stitches and stops is gathered shut at the bottom as well. */
+      if (mode === 'rounds' && rounds.length && geo.closedTop && bands[0] && rounds[0].count > 0) {
         var c0 = rounds[0];
         var capCol = [c0.col[0], c0.col[1], c0.col[2]];
         var capHash = hashNum(hashNum(c0.hash, bands[0].rTop * 997), capCol[0] * 255);
         if (state.capHash !== capHash || !state.capChunk) {
-          state.capChunk = uploadChunk(buildCap(bands[0].rTop, bands[0].yTop, capCol), state.capChunk);
+          state.capChunk = uploadChunk(buildCap(bands[0].rTop, bands[0].yTop, capCol, 1), state.capChunk);
           state.capHash = capHash;
           built++;
         }
       } else if (state.capChunk) {
         freeChunk(state.capChunk); state.capChunk = null; state.capHash = 0;
+      }
+
+      var lastSolid = -1;
+      for (i = rounds.length - 1; i >= 0; i--) {
+        if (rounds[i].count > 0) { lastSolid = i; break; }
+      }
+      if (mode === 'rounds' && geo.closedBottom && lastSolid >= 0 && bands[lastSolid]) {
+        var cN = rounds[lastSolid];
+        var bN = bands[lastSolid];
+        var botCol = [cN.col[0], cN.col[1], cN.col[2]];
+        var botHash = hashNum(hashNum(cN.hash, bN.rBot * 991), lastSolid * 7 + 1);
+        if (state.botHash !== botHash || !state.botChunk) {
+          state.botChunk = uploadChunk(buildCap(bN.rBot, bN.yBot, botCol, -1), state.botChunk);
+          state.botHash = botHash;
+          built++;
+        }
+        state.botBand = lastSolid;
+      } else if (state.botChunk) {
+        freeChunk(state.botChunk); state.botChunk = null; state.botHash = 0; state.botBand = -1;
       }
 
       /* contact shadow: a disc just under the lowest band, no wider than the
@@ -1121,21 +1460,64 @@
     function bandExtent(i, out) {
       var r = state.model.rounds[i], b = state.bands[i];
       if (!b || !r || r.count <= 0) return null;
-      out.rad = state.model.mode === 'rows'
-        ? r.n * SW / 2 + THICK * SW
-        : Math.max(b.rTop, b.rBot) + BUMP * SW;
+      if (state.model.mode === 'rows') {
+        var w = b.width > 0 ? b.width : r.n * SW;
+        var x0 = b.x0 != null ? b.x0 : -w / 2;
+        out.rad = Math.max(Math.abs(x0), Math.abs(x0 + w)) + THICK * SW;
+      } else {
+        out.rad = (b.radMax > 0 ? b.radMax : Math.max(b.rTop, b.rBot)) + BUMP * SW;
+      }
       out.ymin = Math.min(b.yTop, b.yBot);
       out.ymax = Math.max(b.yTop, b.yBot);
+      // the caps are geometry too, and the fit must not clip them
+      if (i === 0 && state.capChunk) out.ymax += Math.abs(b.rTop) * 0.55;
+      if (i === state.botBand && state.botChunk) out.ymin -= Math.abs(b.rBot) * 0.55;
       return out;
     }
 
     var _ext = { rad: 0, ymin: 0, ymax: 0 };
     var _half = { w: 1, h: 1, cp: 1, sp: 0, scale: 1, cy: 0 };
+    var _box = { fw: 1, fh: 1, ndcX: 0, ndcY: 0 };
+
+    /* The fraction of the canvas the piece may use, and where the centre of
+       that free area sits in NDC. Everything else about the camera is
+       unchanged, so a host that passes no insets renders exactly as before. */
+    function insetBox() {
+      var cssW = state.dpr > 0 ? state.w / state.dpr : state.w;
+      var cssH = state.dpr > 0 ? state.h / state.dpr : state.h;
+      _box.fw = 1; _box.fh = 1; _box.ndcX = 0; _box.ndcY = 0;
+      if (!(cssW > 0) || !(cssH > 0)) return _box;
+      var ins = state.insets;
+      // never let the insets squeeze the piece below a third of the canvas
+      var l = clamp(ins.left || 0, 0, cssW * 0.5);
+      var r = clamp(ins.right || 0, 0, cssW * 0.5);
+      var tp = clamp(ins.top || 0, 0, cssH * 0.5);
+      var b = clamp(ins.bottom || 0, 0, cssH * 0.5);
+      if (l + r > cssW * 0.66) { var kx = cssW * 0.66 / (l + r); l *= kx; r *= kx; }
+      if (tp + b > cssH * 0.66) { var ky = cssH * 0.66 / (tp + b); tp *= ky; b *= ky; }
+      _box.fw = (cssW - l - r) / cssW;
+      _box.fh = (cssH - tp - b) / cssH;
+      _box.ndcX = (l - r) / cssW;
+      _box.ndcY = (b - tp) / cssH;
+      return _box;
+    }
+
+    function setSafeInsets(ins) {
+      var s = ins || {};
+      var cur = state.insets;
+      var t = Math.max(0, s.top || 0), r = Math.max(0, s.right || 0);
+      var b = Math.max(0, s.bottom || 0), l = Math.max(0, s.left || 0);
+      if (cur.top === t && cur.right === r && cur.bottom === b && cur.left === l) return;
+      state.insets = { top: t, right: r, bottom: b, left: l };
+      applyFit(computeFit(), false);
+      kick();
+    }
 
     /* Refreshed once per frame; frameFade then costs a handful of multiplies. */
     function updateFrameMetrics() {
-      _half.h = CAM_DIST * Math.tan(FOV / 2);
-      _half.w = _half.h * (state.h > 0 ? state.w / state.h : 1);
+      var box = insetBox();
+      _half.h = CAM_DIST * Math.tan(FOV / 2) * box.fh;
+      _half.w = CAM_DIST * Math.tan(FOV / 2) * (state.h > 0 ? state.w / state.h : 1) * box.fw;
       var pitch = state.pitch + state.userPitch;
       _half.cp = Math.cos(pitch);
       _half.sp = Math.abs(Math.sin(pitch));
@@ -1174,15 +1556,37 @@
       if (!sAny) { sR = aR; sYmin = aYmin; sYmax = aYmax; }
 
       var aspect = state.h > 0 ? state.w / state.h : 1;
-      var halfH = CAM_DIST * Math.tan(FOV / 2) * FIT_MARGIN;
-      var halfW = halfH * aspect;
+      var box = insetBox();
+      var halfH = CAM_DIST * Math.tan(FOV / 2) * FIT_MARGIN * box.fh;
+      var halfW = CAM_DIST * Math.tan(FOV / 2) * FIT_MARGIN * aspect * box.fw;
       var cp = Math.cos(state.pitch), sp = Math.abs(Math.sin(state.pitch));
 
-      function fitScale(rad, ymin, ymax) {
-        var hy = (ymax - ymin) / 2;
-        var sW = halfW / Math.max(rad, 1e-4);
-        var sH = halfH / Math.max(hy * cp + rad * sp, 1e-4);
-        return Math.min(sW, sH);
+      /* y of the round being worked, so a clamped wide sheet stays centred on
+         the row the user is actually counting. */
+      var curY = null;
+      var cb = state.bands[clamp(state.model.current, 0, Math.max(0, state.bands.length - 1))];
+      if (cb) curY = (cb.yTop + cb.yBot) / 2;
+
+      /* DiagramGeo.fit owns the two clamps: (a) a 42-round tail fits by height
+         but must keep a visible silhouette, (b) a 405-stitch row must not be
+         fitted to a hairline — it overflows sideways with the worked row
+         centred. The renderer's job is to consume the answer honestly,
+         including `clamp` and `cy`, instead of re-deriving either. */
+      function geoFit(rad, ymin, ymax) {
+        var Geo = geoOf();
+        var spec = { rad: rad, ymin: ymin, ymax: ymax, halfW: halfW, halfH: halfH,
+          cp: cp, sp: sp, curY: curY, mode: state.model.mode };
+        var f = null;
+        if (Geo && Geo.fit) {
+          try { f = Geo.fit(spec); } catch (e) { f = null; }
+        }
+        if (!f || !(f.scale > 0)) {
+          var hy = (ymax - ymin) / 2;
+          f = { scale: Math.min(halfW / Math.max(rad, 1e-4),
+            halfH / Math.max(hy * cp + rad * sp, 1e-4)), base: 0, clamp: '',
+            cy: (ymin + ymax) / 2 };
+        }
+        return f;
       }
       /* Baseline: the WHOLE model (solids + ghosts) fits with the 8% margin.
          The minimum size guaranteed to the solid part then ramps with
@@ -1194,11 +1598,19 @@
       var progress = allH > 1e-6 ? clamp((sYmax - sYmin) / allH, 0, 1) : 1;
       var floor = GHOST_FLOOR * smoothstep(FLOOR_FROM, FLOOR_TO, progress);
 
-      var sAll = fitScale(aR, aYmin, aYmax);
-      var sSolid = fitScale(sR, sYmin, sYmax);
-      var scale = Math.max(sAll, sSolid * floor);
-      var k = sAll > 0 ? clamp((scale / sAll - 1) * 2, 0, 1) : 0;
-      var cy = lerp((aYmin + aYmax) / 2, (sYmin + sYmax) / 2, k);
+      var allFit = geoFit(aR, aYmin, aYmax);
+      var solidFit = geoFit(sR, sYmin, sYmax);
+      var floorScale = solidFit.scale * floor;
+      var scale = Math.max(allFit.scale, floorScale);
+      var k = allFit.scale > 0 ? clamp((scale / allFit.scale - 1) * 2, 0, 1) : 0;
+      var cy = lerp(allFit.cy, (sYmin + sYmax) / 2, k);
+      /* A sheet the geometry clamped by height overflows sideways on purpose,
+         and the one thing that must stay on screen is the row being counted —
+         so the ghost floor is not allowed to drag the centre off it. */
+      if (allFit.clamp === 'height' && curY != null) cy = curY;
+      state.fitClamp = floorScale > allFit.scale
+        ? (allFit.clamp ? allFit.clamp + '+solid' : 'solid')
+        : (allFit.clamp || '');
       return { scale: scale, cx: 0, cy: cy, cz: 0 };
     }
 
@@ -1265,7 +1677,8 @@
       { loc: 1, size: 3, off: 12 },
       { loc: 2, size: 3, off: 24 },
       { loc: 3, size: 3, off: 36 },
-      { loc: 4, size: 1, off: 48 }
+      { loc: 4, size: 1, off: 48 },
+      { loc: 5, size: 2, off: 52 }
     ];
 
     function bindChunk(gl, c) {
@@ -1290,6 +1703,23 @@
       perspective(proj, FOV, state.h > 0 ? state.w / state.h : 1, 0.5, CAM_DIST * 6);
       buildView();
       updateFrameMetrics();
+      /* Shift the whole projection so the piece sits in the middle of the free
+         area rather than in the middle of the canvas. clip.w = -z here, so
+         proj[8] / proj[9] add a constant NDC offset at any depth. */
+      var box = insetBox();
+      proj[8] = -box.ndcX;
+      proj[9] = -box.ndcY;
+      /* Stitch texture LOD: below ~2 device px per stitch the V and the crease
+         are sampled under Nyquist and read as dirt, so they fade out and the
+         piece keeps only its per-stitch colour. */
+      var pxPerUnit = state.h / (2 * CAM_DIST * Math.tan(FOV / 2));
+      var stitchPx = SW * state.fit.scale * state.zoom * pxPerUnit;
+      state.tex = smoothstep(TEX_PX_OFF, TEX_PX_ON, stitchPx);
+      state.stitchPx = stitchPx;
+      gl.uniform1f(u.tex, state.tex);
+      gl.uniform1f(u.seam, 0);
+      gl.uniform1f(u.tintMix, 0);
+      gl.uniform3f(u.tint, state.alertLin[0], state.alertLin[1], state.alertLin[2]);
       gl.uniformMatrix4fv(u.proj, false, proj);
       gl.uniformMatrix4fv(u.view, false, view);
       gl.uniformMatrix3fv(u.nrm, false, nrm);
@@ -1301,6 +1731,19 @@
 
       var rounds = state.model.rounds;
       var draws = 0, tris = 0;
+
+      /* The working round, and how much of it the pattern actually asked for.
+         Slices past that are the stitches the counter is over by: they render
+         in the alert tint instead of confidently closing the ring (05 #6). */
+      var cur = clamp(state.model.current, 0, Math.max(0, rounds.length - 1));
+      var dev = state.model.deviation;
+      var expSlices = -1;
+      if (dev && typeof dev.expected === 'number' && dev.expected > 0 && rounds[cur]) {
+        var rcur = rounds[cur];
+        if (rcur.count > dev.expected && rcur.n > 0) {
+          expSlices = clamp(Math.round(dev.expected / rcur.count * rcur.n), 0, rcur.n);
+        }
+      }
 
       // animation uniforms
       var animBand = -1, animSlice = -1, animScale = 1;
@@ -1335,6 +1778,18 @@
         gl.drawElements(gl.TRIANGLES, cc.triCount, gl.UNSIGNED_SHORT, 0);
         draws++; tris += cc.triCount / 3;
       }
+      /* the gathered close at the bottom, once that round is actually worked */
+      if (state.botChunk && state.botBand >= 0 && rounds[state.botBand] &&
+          !rounds[state.botBand].ghost && rounds[state.botBand].doneSlices >= rounds[state.botBand].n) {
+        var bc = state.botChunk;
+        bindChunk(gl, bc);
+        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, bc.tbo);
+        gl.uniform1f(u.animSlice, -1);
+        gl.uniform1f(u.animScale, 1);
+        gl.uniform1f(u.glow, glowBand === state.botBand ? glowAmt : 0);
+        gl.drawElements(gl.TRIANGLES, bc.triCount, gl.UNSIGNED_SHORT, 0);
+        draws++; tris += bc.triCount / 3;
+      }
 
       for (i = 0; i < state.chunks.length; i++) {
         var c = state.chunks[i];
@@ -1348,9 +1803,23 @@
         gl.uniform1f(u.animSlice, animBand === i ? animSlice : -1);
         gl.uniform1f(u.animScale, animBand === i ? animScale : 1);
         gl.uniform1f(u.glow, glowBand === i ? glowAmt : 0);
-        gl.drawElements(gl.TRIANGLES, solid * c.tps, gl.UNSIGNED_SHORT, 0);
-        draws++; tris += solid * c.tps / 3;
+        gl.uniform1f(u.seam, r.seam ? 1 : 0);
+        if (i === cur && expSlices >= 0 && solid > expSlices) {
+          if (expSlices > 0) {
+            gl.drawElements(gl.TRIANGLES, expSlices * c.tps, gl.UNSIGNED_SHORT, 0);
+            draws++; tris += expSlices * c.tps / 3;
+          }
+          gl.uniform1f(u.tintMix, 0.8);
+          gl.drawElements(gl.TRIANGLES, (solid - expSlices) * c.tps, gl.UNSIGNED_SHORT,
+            expSlices * c.tps * 2);
+          gl.uniform1f(u.tintMix, 0);
+          draws++; tris += (solid - expSlices) * c.tps / 3;
+        } else {
+          gl.drawElements(gl.TRIANGLES, solid * c.tps, gl.UNSIGNED_SHORT, 0);
+          draws++; tris += solid * c.tps / 3;
+        }
       }
+      gl.uniform1f(u.seam, 0);
 
       /* pass 1b: contact shadow. It lies on a horizontal plane, so it only
          makes sense while the camera is above the piece; it fades out as the
@@ -1403,6 +1872,34 @@
         gl.drawElements(gl.LINES, (cw.n - start) * per, gl.UNSIGNED_SHORT, start * per * 2);
         draws++;
       }
+
+      /* pass 2b: the working round's bracelet (05 #3). A crocheter's first
+         question at any zoom is "which round am I on", and the solid/ghost
+         step is a 4 px feature halfway down a featureless tube. Both edges of
+         the current band get a glow line — consecutive bands share a ring, so
+         the band above's ring IS this round's top edge — and the line is drawn
+         with the depth test on, so it wraps the piece instead of floating over
+         it. No geometry: the ring index buffers already exist. */
+      if (rounds.length && state.chunks[cur]) {
+        gl.uniform3f(u.flat, state.glowLin[0], state.glowLin[1], state.glowLin[2]);
+        gl.uniform1f(u.alpha, MARKER_ALPHA);
+        var cb2 = state.chunks[cur];
+        var doneN = Math.min(rounds[cur].doneSlices, cb2.n);
+        if (doneN > 0) {
+          bindChunk(gl, cb2);
+          gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, cb2.rbo);
+          gl.drawElements(gl.LINES, doneN * cb2.gps, gl.UNSIGNED_SHORT, 0);
+          draws++;
+        }
+        var above = cur > 0 ? state.chunks[cur - 1] : null;
+        if (above && rounds[cur - 1] && !rounds[cur - 1].ghost) {
+          bindChunk(gl, above);
+          gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, above.rbo);
+          gl.drawElements(gl.LINES, above.n * above.gps, gl.UNSIGNED_SHORT, 0);
+          draws++;
+        }
+        gl.uniform3f(u.flat, state.ghostLin[0], state.ghostLin[1], state.ghostLin[2]);
+      }
       gl.depthMask(true);
 
       for (i = 0; i < ATTRS.length; i++) gl.disableVertexAttribArray(ATTRS[i].loc);
@@ -1413,9 +1910,34 @@
       st.triangles = tris | 0;
       state.frameAcc += dt; state.frameN++;
       if (state.frameN >= 12) {
-        st.frameMs = state.frameAcc / state.frameN;
+        // JS submit time only: it never waits on the GPU, so it is NOT frame time
+        st.submitMs = state.frameAcc / state.frameN;
         state.frameAcc = 0; state.frameN = 0;
       }
+      /* A real frame-time estimate: the wall-clock gap between two rendered
+         frames while something is animating. `submitMs` read 0.12 ms at 57k
+         triangles and every claim about this renderer's cost was made from it
+         (02 #20); this is the number that can be compared with a 16.7 ms
+         budget. Gaps over 100 ms are a throttled or backgrounded tab, not a
+         slow frame, so they are dropped. */
+      var wall = now();
+      if (state.lastDrawT) {
+        var gap = wall - state.lastDrawT;
+        if (gap > 0 && gap < 100) {
+          state.deltaAcc += gap; state.deltaN++;
+          if (state.deltaN >= 10) {
+            st.frameMs = state.deltaAcc / state.deltaN;
+            state.deltaAcc = 0; state.deltaN = 0;
+          }
+        }
+      }
+      state.lastDrawT = wall;
+    }
+
+    function modelHasFabric() {
+      var r = state.model.rounds;
+      for (var i = 0; i < r.length; i++) if (r[i].count > 0) return true;
+      return false;
     }
 
     function overshoot(u) {
@@ -1449,8 +1971,8 @@
         if (!b || r.count <= 0) continue;
         var frac = r.count > 0 ? r.done / r.count : 0;
         if (mode === 'rows') {
-          var w = r.n * SW;
-          var x0 = -w / 2, x1 = w / 2;
+          var w = b.width > 0 ? b.width : r.n * SW;
+          var x0 = b.x0 != null ? b.x0 : -w / 2, x1 = x0 + w;
           if (!r.ghost && frac > 0) {
             var fw = w * frac;
             var lx = (i & 1) ? x1 - fw : x0;
@@ -1552,6 +2074,13 @@
       state.dirty = false;
       render(t);
 
+      /* An honest handle (05 #7): a frame that submitted nothing while the
+         model has fabric in it means there is no piece on screen, whatever
+         `mount` returned. The host puts its one-line fallback message up. */
+      if (state.gl && state.w > 0) {
+        report(state.stats.drawCalls === 0 && modelHasFabric() ? 'blank' : 'ok');
+      }
+
       // fps
       state.fpsFrames++;
       if (!state.fpsT0) state.fpsT0 = t;
@@ -1589,6 +2118,17 @@
 
     /* ----------------------------------------------------------- resize */
 
+    /* The viewer sheet mounts before its layout has settled, so the very first
+       resize() found a 0-sized box, bailed, and the canvas stayed at its HTML
+       default of 300 x 150 — the "blank viewer" of 05 #7 whenever nothing else
+       ever nudged it. Retry on the next few frames until the box is real. */
+    function ensureSize(tries) {
+      if (state.destroyed || state.w > 0) return;
+      resize();
+      if (state.w > 0 || (tries || 0) >= 20) return;
+      global.requestAnimationFrame(function () { ensureSize((tries || 0) + 1); });
+    }
+
     function resize() {
       if (state.destroyed) return;
       var dpr = Math.min(global.devicePixelRatio || 1, 2);
@@ -1615,30 +2155,76 @@
 
     /* ------------------------------------------------------ context loss */
 
+    /* The host gets told, once per transition, whether there is a 3D piece on
+       screen at all. `mount` used to return a handle whatever happened, so the
+       app's "The 3D view could not start." copy never fired and the user saw a
+       silent empty rectangle (05 #7). */
+    function report(status) {
+      if (state.status === status) return;
+      state.status = status;
+      var cb = state.onStatus;
+      if (!cb) return;
+      try {
+        cb({ webgl: !!state.gl, status: status, message: STATUS_MSG[status] || '' });
+      } catch (e) { /* a host that throws must not stop the renderer */ }
+    }
+
     function onLost(e) {
-      e.preventDefault();
+      if (e && e.preventDefault) e.preventDefault();
       state.gl = null;
       state.prog = null;
       state.chunks = [];
       state.capChunk = null;
+      state.botChunk = null;
       state.shadowChunk = null;
       state.shadowHash = 0;
       state.hashes = [];
+      state.lost = true;
       if (state.rafId) { global.cancelAnimationFrame(state.rafId); state.rafId = 0; }
       state.running = false;
+      if (handle) handle.webgl = false;
+      if (!state.destroyed) report('lost');
     }
     function onRestored() {
       if (state.destroyed) return;
       state.fallback2d = null;
       if (initGL()) {
+        state.lost = false;
         state.hashes = [];
+        if (handle) handle.webgl = true;
         rebuild(state.model);
         applyFit(computeFit(), true);
+        report('restored');
         kick();
       }
     }
     canvas.addEventListener('webglcontextlost', onLost, false);
     canvas.addEventListener('webglcontextrestored', onRestored, false);
+
+    /* Hand the context back to the browser. Called for a mount that is being
+       thrown away (destroy({ release: true })), and by `reapContexts` for one
+       whose canvas has left the document. */
+    function releaseContext(reason) {
+      liveRec.dead = true;
+      var gl = state.gl;
+      if (!gl) return;
+      disposeChunks();
+      if (state.prog) {
+        try { gl.deleteProgram(state.prog.program); } catch (e) { /* ignore */ }
+      }
+      state.prog = null;
+      state.gl = null;
+      state.lost = true;
+      if (handle) handle.webgl = false;
+      if (state.rafId) { global.cancelAnimationFrame(state.rafId); state.rafId = 0; }
+      state.running = false;
+      try {
+        var ext = gl.getExtension('WEBGL_lose_context');
+        if (ext) ext.loseContext();
+      } catch (e) { /* ignore */ }
+      if (reason !== 'destroy' && !state.destroyed) report('lost');
+    }
+    var liveRec = { canvas: canvas, dead: false, release: releaseContext };
 
     /* ------------------------------------------------------- interaction */
 
@@ -1811,9 +2397,20 @@
       kick();
     }
 
-    function destroy() {
-      if (state.destroyed) return;
+    /**
+     * @param {{release:boolean}} [o] `release: true` hands the GL context back
+     *   to the browser (WEBGL_lose_context). Pass it when the <canvas> element
+     *   itself is being thrown away — a canvas whose context has been lost can
+     *   never get another one, so the app must NOT pass it for a canvas it
+     *   intends to reuse.
+     */
+    function destroy(o) {
+      if (state.destroyed) {
+        if (o && o.release) { try { releaseContext('destroy'); } catch (e) { /* ignore */ } }
+        return;
+      }
       state.destroyed = true;
+      state.onStatus = null;
       if (state.rafId) global.cancelAnimationFrame(state.rafId);
       state.rafId = 0;
       if (state.resumeTimer) { global.clearTimeout(state.resumeTimer); state.resumeTimer = 0; }
@@ -1823,6 +2420,13 @@
       global.removeEventListener('resize', onWinResize);
       if (ro) { try { ro.disconnect(); } catch (e) { /* ignore */ } }
       disposeChunks();
+      unregisterLive(liveRec);
+      liveRec.dead = true;
+      if (o && o.release) {
+        releaseContext('destroy');
+        state.fallback2d = null;
+        return;
+      }
       var gl = state.gl;
       if (gl && state.prog) gl.deleteProgram(state.prog.program);
       if (gl) {
@@ -1840,9 +2444,17 @@
     /* ------------------------------------------------------------- start */
 
     var ok = initGL();
+    LIVE.push(liveRec);
+    reapContexts(liveRec);
     resize();
+    ensureSize(0);
     if (state.interactive) bindInteraction(true);
     kick();
+    if (!ok) {
+      /* asynchronously, so the host has its handle (and its DOM) before it is
+         told to put a message up */
+      global.setTimeout(function () { if (!state.destroyed) report('unavailable'); }, 0);
+    }
 
     var handle = {
       webgl: ok,
@@ -1865,6 +2477,12 @@
         kick();
       },
       resetView: resetView,
+      /* CSS-pixel margins the piece must stay out of (the stitch button's
+         number and pills). The fit box shrinks to what is left and the
+         projection shifts so the piece is centred in the free area. */
+      setSafeInsets: setSafeInsets,
+      /** true while there is a working GL context on this canvas. */
+      isLive: function () { return !!state.gl; },
       /* Host-driven rotation for a canvas that cannot see pointers itself.
          Works whether or not `interactive` is on. */
       dragStart: function () { if (!state.destroyed) dragBegin(); },
@@ -1874,8 +2492,15 @@
         var s = state.stats;
         return {
           webgl: !!state.gl,
+          status: state.status,
+          lost: !!state.lost,
           fps: Math.round(s.fps * 10) / 10,
+          /* Real frame time: the wall-clock gap between rendered frames while
+             something is animating (02 #20). `submitMs` is the old `frameMs` —
+             the JS submit loop, which never waits on the GPU and read 0.12 ms
+             at 57k triangles. Both are here so nobody confuses them again. */
           frameMs: Math.round(s.frameMs * 100) / 100,
+          submitMs: Math.round(s.submitMs * 100) / 100,
           buildMs: Math.round(s.buildMs * 100) / 100,
           rebuilt: s.rebuilt || 0,
           triangles: s.triangles,
@@ -1883,28 +2508,80 @@
           chunks: s.chunks,
           verts: s.verts,
           running: state.running,
+          dpr: state.dpr,
+          canvasPx: state.w + 'x' + state.h,
+          stitchPx: r3(state.stitchPx || 0),
+          tex: r3(state.tex),
+          contexts: LIVE.length,
+          /* the composed alpha future rounds and the pending grid actually
+             render at — the number 02 #1 was about */
+          ghostAlpha: {
+            ghost: r3(GHOST_ALPHA * (state.ghostLin[3] == null ? 1 : state.ghostLin[3])),
+            pending: r3(PENDING_ALPHA * (state.ghostLin[3] == null ? 1 : state.ghostLin[3])),
+            marker: MARKER_ALPHA
+          },
+          insets: {
+            top: state.insets.top, right: state.insets.right,
+            bottom: state.insets.bottom, left: state.insets.left
+          },
           // camera, so a test can assert direction without reading pixels
           yaw: Math.round(state.yaw * 1000) / 1000,
           pitch: Math.round((state.pitch + state.userPitch) * 1000) / 1000,
           userPitch: Math.round(state.userPitch * 1000) / 1000,
           zoom: Math.round(state.zoom * 1000) / 1000,
           fitScale: Math.round(state.fit.scale * 1000) / 1000,
-          dragging: !!state.dragging
+          fitClamp: state.fitClamp || '',
+          dragging: !!state.dragging,
+          /* geometry, so a test or the gallery can assert the reference table
+             without re-deriving it (01 ranked change 14) */
+          geo: state.geo ? {
+            height: r3(state.geo.height),
+            width: r3(state.geo.width),
+            maxRadius: r3(state.geo.maxRadius),
+            aspect: r3(state.geo.aspect),
+            equatorFrac: r3(state.geo.equatorFrac),
+            corners: state.geo.corners || 0,
+            ruffles: state.geo.ruffles || 0,
+            slack: state.geo.slack,
+            closedTop: !!state.geo.closedTop,
+            closedBottom: !!state.geo.closedBottom,
+            anchor: state.geo.anchor || null
+          } : null
         };
       }
     };
     return handle;
   }
 
+  /* The inter-round profile, as numbers a test can assert: the old BULGE put
+     the mid-band at +0.084 SW and the edges at −0.038 SW. */
+  var BLG_MAX = -Infinity, BLG_MIN = Infinity;
+  (function () {
+    for (var t = 0; t < VROWS; t++) {
+      if (BLG[t] > BLG_MAX) BLG_MAX = BLG[t];
+      if (BLG[t] < BLG_MIN) BLG_MIN = BLG[t];
+    }
+  }());
+
   global.Diagram = {
     mount: mount,
-    version: '1.1.0',
+    version: '1.3.0',
     // exposed for tests / tuning
     _consts: {
-      SW: SW, SH: SH, MAX_SLICES: MAX_SLICES, BUMP: BUMP,
+      SW: SW, SH_SC: (global.DiagramGeo ? global.DiagramGeo.SH_SC : FB_SH_SC),
+      MAX_SLICES: MAX_SLICES, BUMP: BUMP,
+      GROOVE: GROOVE,
+      BLG_MAX: Math.round(BLG_MAX * 1e6) / 1e6,
+      BLG_MIN: Math.round(BLG_MIN * 1e6) / 1e6,
+      BLG_EDGES_EQUAL: Math.abs(BLG[0] - BLG[VROWS - 1]) < 1e-12,
       GHOST_ALPHA: GHOST_ALPHA, PENDING_ALPHA: PENDING_ALPHA,
+      MARKER_ALPHA: MARKER_ALPHA,
+      TEX_GROOVE: TEX_GROOVE, TEX_V: TEX_V, TEX_SEAM: TEX_SEAM,
+      MAX_LIVE: MAX_LIVE,
+      FLOATS: FLOATS,
       SHADOW_ALPHA: SHADOW_ALPHA, JIT_LIGHT: JIT_LIGHT, JIT_AMP: JIT_AMP,
-      PITCH_RETURN: PITCH_RETURN, ROT_PAUSE: ROT_PAUSE
+      PITCH_RETURN: PITCH_RETURN, ROT_PAUSE: ROT_PAUSE,
+      geo: global.DiagramGeo ? global.DiagramGeo.version : null
     }
   };
 
