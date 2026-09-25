@@ -151,6 +151,53 @@
     return partMode(project, prt) === 'rounds' ? 'Rnd' : 'Row';
   }
 
+  /* ---- Which way up a piece was worked (3D wave C) ---- */
+
+  var ORIENT_OPTIONS = [
+    { id: 'auto', label: 'Auto' },
+    { id: 'top-down', label: 'Top-down' },
+    { id: 'bottom-up', label: 'Bottom-up' }
+  ];
+
+  /** The chip's own value — never a guess. @returns {'auto'|'top-down'|'bottom-up'} */
+  function partOrientation(prt) {
+    var v = prt && prt.orientation;
+    return v === 'top-down' || v === 'bottom-up' ? v : 'auto';
+  }
+
+  /**
+   * What Auto reads out of the pattern text for this piece, with the chip taken
+   * out of the way. `Store.partShape` is the SAME resolver the model carries to
+   * the renderer, so the hint can never promise a way up the geometry did not
+   * draw (05 #2's lesson, applied to orientation).
+   * @returns {boolean} whether the text reads as worked from the bottom
+   */
+  function autoUpsideDown(prt) {
+    if (!prt || !window.Store || typeof Store.partShape !== 'function') return false;
+    var tmp = {};
+    for (var k in prt) if (prt.hasOwnProperty(k)) tmp[k] = prt[k];
+    // A separate id: the Store memoises per part, and this is not that part.
+    tmp.id = (prt.id || 'part') + ':orientpreview';
+    tmp.orientation = 'auto';
+    try {
+      return !!Store.partShape(tmp).upsideDown;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /**
+   * The one line under / beside the orientation chips. Auto says which way it
+   * went and where that came from; an explicit pick says what it means for the
+   * 3D piece.
+   * @param {'auto'|'top-down'|'bottom-up'} pick
+   */
+  function orientationHint(pick, prt) {
+    if (pick === 'bottom-up') return 'Worked bottom-up — round 1 sits at the bottom.';
+    if (pick === 'top-down') return 'Worked top-down — round 1 sits at the top.';
+    return autoUpsideDown(prt) ? 'Auto — bottom-up from the pattern' : 'Auto — top-down';
+  }
+
   /* ================================================================== *
    * 3. Optional collaborators (defensive)
    * ================================================================== */
@@ -1935,7 +1982,10 @@
   var live = { handle: null, canvas: null, btn: null };
   /** How many times a lost context has been rebuilt; two is plenty. */
   var diagramRecoveries = 0;
-  var viewer = { handle: null, canvas: null, readout: null, sheet: null };
+  var viewer = {
+    handle: null, canvas: null, readout: null, sheet: null,
+    orientSeg: null, orientHint: null
+  };
 
   function prefersReducedMotion() {
     try {
@@ -2498,13 +2548,32 @@
       if (corners > 0) bits.push(corners + ' corner' + (corners === 1 ? '' : 's'));
       if (wide) bits.push(wide + ' around');
     }
+    /* Which way up the renderer really drew it (3D wave C). `model.shape` is
+       what went to the geometry, chip or pattern text, so the line cannot claim
+       an orientation the piece was not built with. */
+    if (model.shape && model.shape.upsideDown) bits.push('worked bottom-up');
     return { name: shapeName(cls, corners), detail: bits.join(' · ') };
+  }
+
+  /**
+   * Put the viewer's orientation chips and their hint back in step with the
+   * STORE, so an Undo (or a chip tapped in the part editor) moves them too.
+   */
+  function syncViewerOrientation() {
+    if (!viewer.orientSeg) return;
+    var p = currentProject();
+    var prt = p ? Store.activePart(p) : null;
+    if (!prt) return;
+    var pick = partOrientation(prt);
+    viewer.orientSeg.set(pick);
+    if (viewer.orientHint) viewer.orientHint.textContent = orientationHint(pick, prt);
   }
 
   function updateViewerReadout() {
     if (!viewer.readout) return;
     var p = currentProject();
     var prt = p ? Store.activePart(p) : null;
+    syncViewerOrientation();
     viewer.readout.textContent = viewerReadoutText(p, prt);
     if (viewer.shape) {
       var sum = shapeSummary(currentModel());
@@ -2532,6 +2601,8 @@
     viewer.readout = null;
     viewer.shape = null;
     viewer.shapeSub = null;
+    viewer.orientSeg = null;
+    viewer.orientHint = null;
     viewer.note = null;
     viewer.sheet = null;
     // give the button its piece back
@@ -2682,6 +2753,27 @@
         );
         modeSeg.node.setAttribute('aria-label', 'Worked in rounds or rows');
         bar.appendChild(modeSeg.node);
+
+        /* Which way up (3D wave C). Second row of the bar so 375 still fits:
+           the chips write `Part.orientation` and the hint says what Auto read
+           out of the pattern, the same resolution the model carries. */
+        var orientRow = el('div', 'viewer-bar-row');
+        var orientHint = el('div', 'viewer-bar-hint', '');
+        var orientSeg = segmented(ORIENT_OPTIONS, partOrientation(prt), function (v) {
+          Store.updatePart(p.id, prt.id, { orientation: v });
+          syncViewerOrientation();
+          pushDiagram('none');
+          updateViewerReadout();
+          render();
+          fb('tap');
+        });
+        orientSeg.node.setAttribute('aria-label', 'Worked top-down or bottom-up');
+        orientRow.appendChild(orientSeg.node);
+        orientRow.appendChild(orientHint);
+        bar.appendChild(orientRow);
+        viewer.orientSeg = orientSeg;
+        viewer.orientHint = orientHint;
+        syncViewerOrientation();
         body.appendChild(bar);
 
         var stage = el('div', 'viewer-stage');
@@ -3320,7 +3412,8 @@
     if (!p || !prt) return;
 
     var nameInput, makeStep, targetInput, repEnable, repStart, repEnd, repTimes,
-      alertsInput, placeArea, patternArea, extras, modeSeg, syncModeHint;
+      alertsInput, placeArea, patternArea, extras, modeSeg, syncModeHint,
+      orientSeg, syncOrientHint;
     var repeatOn = !!prt.repeat.enabled;
     var sizeIndex = prt.sizeIndex || 0;
 
@@ -3344,7 +3437,8 @@
         placementNotes: placeArea.value,
         patternText: patternArea.value,
         sizeIndex: sizeIndex,
-        workMode: modeSeg ? modeSeg.get() : 'auto'
+        workMode: modeSeg ? modeSeg.get() : 'auto',
+        orientation: orientSeg ? orientSeg.get() : 'auto'
       };
     }
 
@@ -3424,6 +3518,9 @@
       // Auto's answer follows the text in the box, so it is re-read here too.
       if (syncModeHint) {
         try { syncModeHint(); } catch (e) { /* ignore */ }
+      }
+      if (syncOrientHint) {
+        try { syncOrientHint(); } catch (e) { /* ignore */ }
       }
       if (!extras) return;
       clear(extras);
@@ -3536,6 +3633,26 @@
           return tmp;
         }
         syncModeHint();
+
+        /* 3D wave C — which way up, per piece. A Baphomet body whose round 1 is
+           its neck is worked from the BOTTOM, and drawing it the other way up
+           stood the toy on its head. Auto reads the pattern text and says which
+           way it went, so a wrong guess is one tap from fixed. */
+        var orientHint = el('div', 'field-hint');
+        orientSeg = segmented(ORIENT_OPTIONS, partOrientation(prt), function () {
+          syncOrientHint();
+        });
+        orientSeg.node.setAttribute('aria-label', 'Worked top-down or bottom-up');
+        var orientWrap = el('div', 'field');
+        orientWrap.appendChild(el('div', 'field-label', 'Orientation'));
+        orientWrap.appendChild(orientSeg.node);
+        orientWrap.appendChild(orientHint);
+        body.appendChild(orientWrap);
+
+        syncOrientHint = function () {
+          orientHint.textContent = orientationHint(orientSeg.get(), previewMode());
+        };
+        syncOrientHint();
 
         targetInput = numInput(prt.targetRows == null ? '' : prt.targetRows, 1, 999999, 'e.g. 40');
         body.appendChild(field('Target ' + rowWord(p).toLowerCase() + 's', targetInput, 'Leave blank for open-ended.'));

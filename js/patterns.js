@@ -105,6 +105,11 @@
     ['inc', 2, 1],
     ['fsc', 1, 0],
     ['spike\\s*(?:sc|hdc|dc|tr)?', 1, 1],
+    // A STANDING stitch is an ordinary stitch begun on a fresh loop instead of
+    // a turning chain - "1 standing tr in any 2ch sp" is how every Stylecraft
+    // motif joins a new colour, and it is one stitch made for one consumed.
+    // Without this the whole segment failed to tokenise and the round lost it.
+    ['standing\\s*(?:sc|hdc|dc|htr|dtr|trtr|ttr|tr)', 1, 1],
     ['crossed\\s+(?:dc|tr)', 2, 2],
     ['x[- ]?st(?:itch)?', 2, 2],
     ['v[- ]?st(?:itch)?', 2, 1],
@@ -1136,6 +1141,243 @@
     return !!t && t.length <= 220 && NOTE_KEY_RE.test(t);
   }
 
+  // --- gauge: sts and rows per 10 cm / 4 in -----------------------------
+  //
+  // A pattern that says "work until it measures 59"" has told you the row count
+  // too - in the gauge box, two pages earlier. Every house writes it
+  // differently and some leave the rows out:
+  //
+  //   GAUGE                                  (the label on its own line)
+  //   9 hdc and 6 rows = 4"                  Premier
+  //   GAUGE: 12 sts and 8 rows = 4" in hdc   Red Heart / Yarnspirations
+  //   Tension: 16 sts x 20 rows to 10 cm over pattern     UK
+  //   14 sc and 16 rows = 4 inches
+  //   12 dc = 4"                             ...no rows at all
+  //
+  // The last form is finished off from the stitch's own height. The folk
+  // flat-circle rates (N_flat = 2*pi*h/w, "+6 sc lies flat") put one sc row at
+  // 0.95 stitch widths, an hdc at 1.27, a dc at 1.91 and a tr at 2.55 - the
+  // same table section 10 lays the 3D stitches out with, scaled so that sc is
+  // 0.95 rather than 1 - so n stitches to the inch is n / ratio ROWS to the
+  // inch.
+  //
+  // 4" and 10 cm are converted properly (4" = 10.16 cm) rather than treated as
+  // the same swatch: a pattern measured in cm and a gauge printed over 4" are
+  // both common, and 1.6% of a 60 cm blanket is most of a row.
+  var SC_ROW_RATIO = 0.95;     // one sc row, in stitch widths (2*pi*0.95 = 6)
+  var IN_PER_CM = 0.393700787;
+  var CM_PER_IN = 2.54;
+  // With no gauge anywhere, one sc row is about 5 mm in the worsted/aran weight
+  // most of the corpus is written for. Everything estimated from this is
+  // flagged `estimated`, because it is an assumption and not a measurement.
+  var SC_ROW_MM = 5;
+
+  /** The row height of a stitch in stitch widths ("dc" -> 1.91), or null. */
+  function rowRatio(name, uk) {
+    var bare = String(name == null ? '' : name).toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (!bare || /^(?:sts?|stitches?)$/.test(bare)) return null;
+    var fam = stitchFamily(bare);
+    var h = uk ? fam.hUk : fam.h;
+    if (h === H_PENDING || !(h > 0)) return null;
+    return Math.round(h * SC_ROW_RATIO * 100) / 100;
+  }
+
+  var GAUGE_LABEL_RE = /\b(?:gauge|tension)\b/i;
+  var GAUGE_LABEL_ONLY_RE = /^(?:gauges?|tension)\b[\s:.–-]*$/i;
+  var G_NUM = '(\\d+(?:[.,]\\d+)?)';
+  var G_UNIT = '("|\'\'|in(?:ch(?:es)?|s)?\\b|cms?\\b|centimet(?:re|er)s?\\b|mm\\b)';
+  var G_STW = '(?:sts?|stitches?|' + STITCH_ALT + ')';
+  var G_ROWW = '(?:rows?|rnds?|rounds?)';
+  var G_EQ = '(?:=|:|\\bto\\b|\\bper\\b|\\bin\\b|\\bover\\b|\\bequals?\\b)';
+  // "9 hdc and 6 rows = 4"" / "16 sts x 20 rows to 10 cm"
+  var GAUGE_BOTH_RE = new RegExp(
+    G_NUM + '\\s*(' + G_STW + ')?\\s*(?:and|&|x|×|by|,)\\s*' + G_NUM +
+    '\\s*' + G_ROWW + '\\s*' + G_EQ + '?\\s*' + G_NUM + '\\s*' + G_UNIT, 'i');
+  // "20 rows to 10 cm" on its own ("6 rnds to 16cm" - Stylecraft's motif)
+  var GAUGE_ROWS_RE = new RegExp(
+    G_NUM + '\\s*' + G_ROWW + '\\s*' + G_EQ + '\\s*' + G_NUM + '\\s*' + G_UNIT, 'i');
+  // "12 dc = 4"" / "16 sts to 10 cm"
+  var GAUGE_STS_RE = new RegExp(
+    G_NUM + '\\s*(' + G_STW + ')\\s*' + G_EQ + '\\s*' + G_NUM + '\\s*' + G_UNIT, 'i');
+  // the stitch the swatch is worked in, written after the measurement
+  var GAUGE_OVER_RE = new RegExp('\\b(?:in|over|of|using)\\s+(?:the\\s+)?(' + STITCH_ALT + ')' + TAIL, 'i');
+
+  function gaugeUnit(word) {
+    var w = String(word).toLowerCase();
+    if (w === '"' || w === "''" || /^in/.test(w)) return 'in';
+    if (/^mm/.test(w)) return 'mm';
+    return 'cm';
+  }
+
+  /** The span of the swatch in inches, whatever it was written in. */
+  function gaugeInches(value, unit) {
+    if (!(value > 0)) return 0;
+    if (unit === 'in') return value;
+    if (unit === 'mm') return value / 10 * IN_PER_CM;
+    return value * IN_PER_CM;
+  }
+
+  function gaugeNum(s) {
+    var n = parseFloat(String(s).replace(',', '.'));
+    return isFinite(n) && n > 0 ? n : 0;
+  }
+
+  /** "hdc" names a stitch; "sts" and "stitches" name none. */
+  function namedStitch(word) {
+    if (!word) return null;
+    return /^(?:sts?|stitches?)$/i.test(String(word).trim()) ? null : word;
+  }
+
+  /**
+   * The gauge a pattern prints, in both of the units the world uses.
+   *
+   * @param {string|Array} text  the pattern text (or parsed lines)
+   * @returns {{stsPer10cm:number|null, rowsPer10cm:number|null,
+   *            stsPer4in:number|null, rowsPer4in:number|null,
+   *            stitch:string|null, source:string|null, estimated:boolean}}
+   *          Every field is null when the pattern prints no gauge at all;
+   *          `estimated` is true when the ROWS were worked out from the
+   *          stitch's height rather than read off the page.
+   */
+  function gauge(text) {
+    var empty = { stsPer10cm: null, rowsPer10cm: null, stsPer4in: null,
+      rowsPer4in: null, stitch: null, source: null, estimated: false };
+    var s;
+    try { s = normUnicode(fixTypos(textOf(text))); } catch (e) { return empty; }
+    if (!s) return empty;
+    var uk = false;
+    try { uk = dialectHints(s).dialect === 'uk'; } catch (e) { uk = false; }
+    var raws = s.split(/\r\n|\r|\n/);
+    var best = null, i, labelled = 0, m = null;
+    for (i = 0; i < raws.length; i++) {
+      var t = trimLine(raws[i]);
+      if (!t) continue;
+      if (GAUGE_LABEL_ONLY_RE.test(t)) { labelled = 3; continue; }
+      var near = GAUGE_LABEL_RE.test(t) || labelled > 0;
+      if (labelled > 0) labelled--;
+      // A measurement that names neither a gauge nor a tension could be the
+      // finished size ("Afghan measures approximately 46" x 51""), so only a
+      // line carrying the label - or sitting just under a label of its own -
+      // is read. One exception: the sts-AND-rows form says what it is.
+      var hit = null;
+      m = GAUGE_BOTH_RE.exec(t);
+      if (m) {
+        hit = { sts: gaugeNum(m[1]), stitch: namedStitch(m[2]), rows: gaugeNum(m[3]),
+          span: gaugeNum(m[4]), unit: gaugeUnit(m[5]), rank: 3 };
+      } else if (near) {
+        m = GAUGE_STS_RE.exec(t);
+        if (m) {
+          hit = { sts: gaugeNum(m[1]), stitch: namedStitch(m[2]), rows: 0,
+            span: gaugeNum(m[3]), unit: gaugeUnit(m[4]), rank: 2 };
+        } else {
+          m = GAUGE_ROWS_RE.exec(t);
+          if (m) {
+            hit = { sts: 0, stitch: null, rows: gaugeNum(m[1]),
+              span: gaugeNum(m[2]), unit: gaugeUnit(m[3]), rank: 1 };
+          }
+        }
+      }
+      if (!hit || !(hit.span > 0)) continue;
+      if (!hit.stitch) {
+        var ov = GAUGE_OVER_RE.exec(t.slice(m.index + m[0].length)) || GAUGE_OVER_RE.exec(t);
+        if (ov) hit.stitch = ov[1];
+      }
+      hit.source = t;
+      if (near) hit.rank += 3;
+      if (!best || hit.rank > best.rank) best = hit;
+      if (best.rank >= 6 && best.rows > 0) break;
+    }
+    if (!best) return empty;
+
+    var inches = gaugeInches(best.span, best.unit);
+    if (!(inches > 0)) return empty;
+    var stitch = null, ratio = null;
+    if (best.stitch) {
+      ratio = rowRatio(best.stitch, uk);
+      if (ratio !== null) stitch = String(best.stitch).toLowerCase().replace(/\s+/g, '');
+    }
+    var stsPerIn = best.sts > 0 ? best.sts / inches : null;
+    var rowsPerIn = best.rows > 0 ? best.rows / inches : null;
+    var estimated = false;
+    // "12 dc = 4"": no rows printed, so they come out of the stitch's height.
+    if (rowsPerIn === null && stsPerIn !== null && ratio) {
+      rowsPerIn = stsPerIn / ratio;
+      estimated = true;
+    }
+    function per(v, span) { return v === null ? null : Math.round(v * span * 1e4) / 1e4; }
+    return {
+      stsPer10cm: per(stsPerIn, 10 * IN_PER_CM),
+      rowsPer10cm: per(rowsPerIn, 10 * IN_PER_CM),
+      stsPer4in: per(stsPerIn, 4),
+      rowsPer4in: per(rowsPerIn, 4),
+      stitch: stitch,
+      source: best.source,
+      estimated: estimated
+    };
+  }
+
+  /** Rows per inch / cm / mm from a gauge record, or null when it has none. */
+  function rowsPerUnit(g, unit) {
+    if (!g) return null;
+    if (unit === 'cm') return g.rowsPer10cm > 0 ? g.rowsPer10cm / 10 : null;
+    if (unit === 'mm') return g.rowsPer10cm > 0 ? g.rowsPer10cm / 100 : null;
+    return g.rowsPer4in > 0 ? g.rowsPer4in / 4 : null;
+  }
+
+  // A length target resolves to at most this many rows. 59" of sc at 5 mm a row
+  // is 300; a 144 cm scarf is 288. Anything past this is a misread measurement
+  // (a yardage, a hook size), and inventing 40,000 rows from one is worse than
+  // leaving the repeat open-ended.
+  var ROW_TARGET_MAX = 2000;
+
+  var DOM_ST_G = new RegExp('(?:^|[^a-z])(' + STITCH_ALT + ')(?![a-z])', 'ig');
+
+  /**
+   * The row height of the stitch the repeated rows are mostly made of, in
+   * stitch widths. Read off the words of the rows the repeat points at, because
+   * that is the fabric the tape is measuring - not the foundation chain and not
+   * the edging.
+   * @returns {number|null}
+   */
+  function dominantRatio(lines, repeatLine, uk) {
+    var refs = repeatLine.repeatOf || [];
+    var counts = {}, i, j, hit, best = null, bestN = 0;
+    for (i = 0; i < refs.length; i++) {
+      var src = refLineAt(lines, repeatLine.section, refs[i]);
+      if (!src) continue;
+      var t = String(src.text == null ? '' : src.text);
+      DOM_ST_G.lastIndex = 0;
+      while ((hit = DOM_ST_G.exec(t)) !== null) {
+        var r = rowRatio(hit[1], uk);
+        if (r === null) continue;
+        counts[r] = (counts[r] || 0) + 1;
+      }
+    }
+    var keys = Object.keys(counts);
+    for (j = 0; j < keys.length; j++) {
+      // a tie goes to the taller stitch: the row is as tall as what carries it
+      if (counts[keys[j]] > bestN ||
+          (counts[keys[j]] === bestN && +keys[j] > best)) {
+        bestN = counts[keys[j]]; best = +keys[j];
+      }
+    }
+    return best;
+  }
+
+  /**
+   * Rows per unit with no gauge to go by: one sc row is about 5 mm, and a
+   * taller stitch is taller in the same proportion. `ratio` is the row height
+   * of the dominant stitch in stitch widths (1.27 for hdc).
+   */
+  function estRowsPerUnit(ratio, unit) {
+    var r = (ratio > 0) ? ratio : SC_ROW_RATIO;
+    var mm = SC_ROW_MM * r / SC_ROW_RATIO;
+    if (!(mm > 0)) return null;
+    if (unit === 'mm') return 1 / mm;
+    if (unit === 'cm') return 10 / mm;
+    return CM_PER_IN * 10 / mm;
+  }
+
   // --- repeat lines -----------------------------------------------------
 
   var REPEAT_RE = /\b(?:rep|repeat)\s+(?:rows?|rnds?|rounds?)\s*(\d+)\s*(?:-|to|&|and)\s*(\d+)/i;
@@ -1150,6 +1392,15 @@
   var REPEAT_LAST_RE = /\b(?:rep|repeat)\s+(?:the\s+)?last\s+(\d+|two|three|four)?\s*(?:rows?|rnds?|rounds?)\b/i;
   var REPEAT_ONE_RE = /\b(?:rep|repeat)\s+(?:rows?|rnds?|rounds?)\s*(\d+)\b(?!\s*(?:-|to|&|and)\s*\d)/i;
   var REPEAT_ONE_ORD_RE = /\b(?:rep|repeat)\s+(\d+)\s*(?:st|nd|rd|th)\s*(?:rows?|rnds?|rounds?)\b/i;
+  // "Continue until work measures 25 in from beginning", "Work even until the
+  // piece measures 18"": no row number anywhere, so the block being repeated is
+  // the row just worked - the same reading "Rep last row" gets. The match stops
+  // just before "until" so the clause after it is read exactly as it is for
+  // every other form. Only taken when that clause really does carry a length or
+  // a row count: "continue until you run out of yarn" sets no target, and is
+  // better left as the note it is.
+  var REPEAT_CONT_RE = /^(?:then\s+)?(?:cont(?:inue|inuing|inued)?|work(?:ing)?|keep\s+(?:working|going))\b[^.;]*?(?=\buntil\b)/i;
+  var CONT_ROWS_RE = /(\d+)\s*(?:total\s+)?rows?\b/i;
   var WORD_NUM = { two: 2, twice: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
 
   function detectRepeat(t, size) {
@@ -1163,16 +1414,28 @@
       }
     }
     if (!m) m = REPEAT_ONE_RE.exec(t) || REPEAT_ONE_ORD_RE.exec(t);
+    if (!m) {
+      var mc = REPEAT_CONT_RE.exec(t);
+      if (mc) {
+        var seg0 = t.slice(mc.index + mc[0].length)
+          .replace(/^\s*until\b/i, '').split(/\.(?!\d)/)[0];
+        if (detectUntilLength(seg0, size) || CONT_ROWS_RE.test(seg0)) {
+          m = mc;
+          lastCount = 1;
+        }
+      }
+    }
     if (!m) return null;
     var startRow = lastCount === null ? num(m[1]) : null;
     var endRow = lastCount === null ? (m[2] === undefined ? startRow : num(m[2])) : null;
     var after = t.slice(m.index + m[0].length);
-    var untilRows = null, times = null;
+    var untilRows = null, times = null, untilLength = null;
 
     var u = /until\b([\s\S]*)$/i.exec(after);
     if (u) {
       var segAll = u[1];
       var seg = segAll.split(/\.(?!\d)/)[0];
+      untilLength = detectUntilLength(seg, size);
       // A number that SAYS it counts rows wins wherever it is in the sentence:
       // "until work measures 10 inches long, approx. 44 rows." is 44 rows, not
       // 10 (King Cole's pumpkins), and "until there are a total of 25 (29, 33)
@@ -1206,7 +1469,42 @@
       }
     }
     return { startRow: startRow, endRow: endRow, times: times, untilRows: untilRows,
-             lastCount: lastCount };
+             untilLength: untilLength, lastCount: lastCount };
+  }
+
+  // "until blanket measures approximately 59"", "until piece measures 60 cm",
+  // "continue until work measures 25 in from beginning", "until sleeve measures
+  // 18" or desired length", "Rep 2nd to 5th rows until piece measures approx
+  // 56 (58, 60)"". Only the LENGTH is taken: "from beginning" and "from
+  // underarm" say where the tape starts, which changes nothing about how many
+  // rows the tape covers, and "or desired length" is the designer being polite.
+  var UNTIL_LEN_UNIT = '("|\'\'|in(?:ch(?:es)?|s)?\\b|cms?\\b|centimet(?:re|er)s?\\b|mm\\b)';
+  var UNTIL_LEN_MULTI = new RegExp(MULTI_SRC + '\\s*' + UNTIL_LEN_UNIT, 'i');
+  var UNTIL_LEN_RE = new RegExp('(\\d+(?:[.,]\\d+)?)\\s*' + UNTIL_LEN_UNIT, 'i');
+  // "[142 cm]" / "(152 cm)" - the same length again in the other unit, which
+  // must not be read as a second, longer piece.
+  var UNTIL_LEN_ALT_RE = /[([]\s*\d+(?:[.,]\d+)?\s*(?:cm|mm|in|")/i;
+
+  function detectUntilLength(seg, size) {
+    var s = String(seg == null ? '' : seg);
+    // a row count beats a measurement, and "measures 10 inches, approx 44 rows"
+    // is handled by the caller - this only reads the tape.
+    var ml = UNTIL_LEN_MULTI.exec(s);
+    var value = null, unit = null;
+    if (ml) {
+      value = pickSize(flattenMulti(ml), size);
+      unit = gaugeUnit(ml[4]);
+    } else {
+      var one = UNTIL_LEN_RE.exec(s);
+      if (!one) return null;
+      // the bracketed metric echo of an imperial length is the same length
+      if (UNTIL_LEN_ALT_RE.test(s) && UNTIL_LEN_ALT_RE.exec(s).index < one.index) return null;
+      value = gaugeNum(one[1]);
+      unit = gaugeUnit(one[2]);
+    }
+    if (!(value > 0) || !unit) return null;
+    if (unit === 'mm') { value = value / 10; unit = 'cm'; }
+    return { value: value, unit: unit };
   }
 
   /**
@@ -1216,7 +1514,8 @@
    */
   function resolveRepeat(rep, lastRow) {
     var out = { startRow: rep.startRow, endRow: rep.endRow,
-                times: rep.times, untilRows: rep.untilRows };
+                times: rep.times, untilRows: rep.untilRows,
+                untilLength: rep.untilLength || null };
     if (rep.lastCount && typeof lastRow === 'number' && lastRow >= rep.lastCount) {
       out.endRow = lastRow;
       out.startRow = lastRow - rep.lastCount + 1;
@@ -2303,7 +2602,16 @@
         // rows it covers are filled in after the loop.
         if (rp.startRow !== null && rp.endRow !== null) {
           L.repeatOf = refRange(rp.startRow, rp.endRow);
-          if (L.repeatOf) { L.repeatTimes = rp.times; L.repeatUntil = rp.untilRows; }
+          if (L.repeatOf) {
+            L.repeatTimes = rp.times;
+            L.repeatUntil = rp.untilRows;
+            // "until it measures 59"" - turned into rows after the loop, where
+            // the gauge and the rows being repeated are both known. `repeatRec`
+            // is the same record summary() offers as a suggestion, so resolving
+            // the length fills that in too.
+            L.repeatLength = rp.untilLength;
+            L.repeatRec = rp;
+          }
         }
       } else if (cls.nextRow) {
         L.row = (cur.lastRow === null ? 0 : cur.lastRow) + 1;
@@ -2458,6 +2766,16 @@
     // until there are a total of 25 Rows" covers rows 9 to 25. `repeatTo` stays
     // null when only a measurement is given - expand() then answers for
     // whatever row the caller asks about, which is what the store wants.
+    // The row-height table a length target is resolved with (sc 0.95, hdc 1.27,
+    // dc 1.91, tr 2.55 widths a row) is a CROCHET table, and a knitting pattern
+    // handed to a crochet counter must not grow rows nobody can work: the
+    // negative half of the corpus asks for exactly that, and "no phantom rows"
+    // outranks a length target here.
+    var docHints = null;
+    try { docHints = dialectHints(String(text)); } catch (eUk) { docHints = null; }
+    var docUk = !!(docHints && docHints.dialect === 'uk');
+    var docCrochet = !(docHints && docHints.craft === 'knit');
+    var docGauge = docCrochet ? gauge(text) : null;
     for (var rq = 0; rq < lines.length; rq++) {
       var rl = lines[rq];
       if (rl.kind !== 'repeat' || !rl.repeatOf) continue;
@@ -2470,9 +2788,59 @@
         continue;
       }
       rl.repeatFrom = from;
+      // "Rep Row 2 until blanket measures 59"": the gauge says how many rows
+      // that is (9 hdc and 6 rows = 4" -> 1.5 rows to the inch -> 89). With no
+      // gauge anywhere the rows are estimated from the height of the stitch the
+      // repeated rows are worked in, at 5 mm per sc row, and SAY they are.
+      var fromLength = false;
+      if (!(rl.repeatUntil >= 1) && rl.repeatLength && docCrochet) {
+        var rpu = rowsPerUnit(docGauge, rl.repeatLength.unit);
+        var est = false;
+        if (rpu === null) {
+          rpu = estRowsPerUnit(dominantRatio(lines, rl, docUk), rl.repeatLength.unit);
+          est = true;
+        }
+        if (rpu > 0) {
+          var n = Math.round(rl.repeatLength.value * rpu);
+          if (n >= from && n <= ROW_TARGET_MAX) {
+            rl.repeatUntil = n;
+            fromLength = true;
+            rl.repeatEstimated = est || !!(docGauge && docGauge.estimated);
+            rl.repeatGauge = est ? null : (docGauge ? docGauge.source : null);
+            if (rl.repeatRec) {
+              rl.repeatRec.untilRows = n;
+              rl.repeatRec.estimated = rl.repeatEstimated;
+            }
+          }
+        }
+      }
       if (rl.repeatUntil >= from) rl.repeatTo = rl.repeatUntil;
       else if (rl.repeatTimes >= 1) rl.repeatTo = from + rl.repeatTimes * rl.repeatOf.length - 1;
       else rl.repeatTo = null;
+      // How far the PIECE goes, which is what summary().maxRow reports - as
+      // against `rows`, which stays the number of rows WRITTEN.
+      //
+      // Two forms earn it, and both are the pattern telling you the length
+      // outright: a measurement resolved against the gauge ("Rep Row 2 until
+      // blanket measures 59"" -> 89), and a flat count of repeats ("Rep 3rd Rnd
+      // 3 times" -> the Stylecraft motif's six rounds, which its own tension box
+      // confirms at "6 rnds to 16cm").
+      //
+      // A row count written inside the prose of an "until" clause does NOT:
+      // "until work measures 10 inches long, approx. 44 rows" and "until you
+      // have at least 14 total rows" are the designer's approximation of a
+      // condition the maker judges at the hook, and they are already offered as
+      // `suggestions.targetRows` for the maker to accept. Promoting those to
+      // maxRow as well would change what a third of the corpus counts up to -
+      // a bigger decision than this one, and not this file's alone to take.
+      //
+      // Knitting gets neither: the negative half of the corpus asks that a knit
+      // pattern handed to a crochet counter grow no row past the markers it
+      // prints, and the row-height table behind the first form is a crochet one.
+      if (docCrochet && rl.repeatTo >= rl.repeatFrom &&
+          (fromLength || rl.repeatTimes >= 1)) {
+        rl.repeatRows = rl.repeatTo;
+      }
     }
 
     // --- note paragraphs, then attachment -------------------------------
@@ -2560,6 +2928,17 @@
         if (c !== null) return c;
       }
     }
+    // ...and past the last written row, the count of the row the open-ended
+    // repeat sends this one to (row 40 of the throw is row 2's 94 stitches).
+    var rl = repeatLineFor(lines, row);
+    if (rl) {
+      var ref = refRowOf(rl, row);
+      var src = (ref === null) ? null : refLineAt(lines, rl.section, ref);
+      if (src) {
+        c = countAt(src, ref);
+        if (c !== null) return c;
+      }
+    }
     return null;
   }
 
@@ -2574,7 +2953,10 @@
       l = lines[i];
       if (l.row >= 1 && inRange(l, row)) return l;
     }
-    return null;
+    // A written row always wins; failing that, the bare "Rep Row 2 until the
+    // blanket measures 59"" sentence covers rows 3 to 89 and is the line that
+    // answers for them.
+    return repeatLineFor(lines, row);
   }
 
   function summary(lines) {
@@ -2587,6 +2969,13 @@
           var end = (l.rowEnd === null || l.rowEnd === undefined) ? l.row : l.rowEnd;
           rows += (end - l.row + 1);
           if (maxRow === null || end > maxRow) maxRow = end;
+        }
+        // "Rep Row 2 until the blanket measures 59"" owns rows 3-89 without
+        // being a numbered row itself, so it lifts `maxRow` (how far the piece
+        // goes) without lifting `rows` (how many rows are WRITTEN).
+        if (l.kind === 'repeat' && l.repeatRows >= 1 &&
+            (maxRow === null || l.repeatRows > maxRow)) {
+          maxRow = l.repeatRows;
         }
         if (l.count !== null && l.count !== undefined) hasTargets = true;
         if (l.stitches !== null && l.stitches !== undefined) anyExplicit = true;
@@ -2606,7 +2995,11 @@
       sections: secs,
       suggestions: {
         targetRows: sug ? sug.untilRows : null,
-        repeat: sug ? { startRow: sug.startRow, endRow: sug.endRow, times: sug.times, untilRows: sug.untilRows } : null
+        repeat: sug ? { startRow: sug.startRow, endRow: sug.endRow, times: sug.times, untilRows: sug.untilRows } : null,
+        // "until it measures 59"" - the tape as written, and whether the rows it
+        // came to were read off a gauge or assumed at 5 mm per sc row.
+        untilLength: sug && sug.untilLength ? sug.untilLength : null,
+        estimated: !!(sug && sug.estimated)
       }
     };
   }
@@ -2648,9 +3041,41 @@
       }];
     }
     distributePlacement(out, lines, meta);
+    carryGauge(out, lines, text);
     return out.map(function (s) {
       return { name: s.name, makeCount: s.makeCount, text: s.text, placement: s.placement };
     });
+  }
+
+  /**
+   * A part whose last instruction is "work until it measures 59"" cannot be
+   * read on its own: the gauge that turns 59" into 89 rows is printed in the
+   * front matter, two pages above the part, and `text` is the only thing that
+   * travels with a part into the app. So the gauge line is copied onto the end
+   * of exactly those parts that need it - the ones holding a length target that
+   * resolved to nothing - and nowhere else. It reads as a note; parse() finds it
+   * the next time the part is read.
+   */
+  function carryGauge(out, lines, text) {
+    var g;
+    try {
+      if (dialectHints(String(text)).craft === 'knit') return;
+      g = gauge(text);
+    } catch (e) { return; }
+    if (!g || !g.source || !(g.rowsPer4in > 0)) return;
+    var line = GAUGE_LABEL_RE.test(g.source) ? g.source : 'GAUGE: ' + g.source;
+    for (var s = 0; s < out.length; s++) {
+      var sec = out[s], want = false;
+      if (!sec || !sec.lines || !sec.text) continue;
+      if (GAUGE_LABEL_RE.test(sec.text) && gauge(sec.text).source) continue;
+      for (var i = 0; i < sec.lines.length; i++) {
+        var l = sec.lines[i];
+        // `repeatUntil` is already resolved here, because THIS parse saw the
+        // whole document. The part on its own will not, which is the point.
+        if (l.kind === 'repeat' && l.repeatOf && l.repeatLength) want = true;
+      }
+      if (want) sec.text = sec.text + '\n' + line;
+    }
   }
 
   /** The placing notes splitSections() would hand each section, on their own. */
@@ -3057,7 +3482,11 @@
     for (i = 0; i < list.length; i++) {
       var e = list[i];
       if (e === FILL_MARK) continue;
-      out.push({ t: e.t, c: e.c, h: e.h, w: e.w, g: e.g });
+      // `free` and `loop` travel with the clone: a starred corner is expanded
+      // ONCE and cloned once per corner, and every clone's chains stand beside
+      // the anchor the same way the original's do (markCornerChains) - and
+      // every clone of `[ch 3, sc in next sp]` is the same slack loop.
+      out.push({ t: e.t, c: e.c, h: e.h, w: e.w, g: e.g, free: e.free, loop: e.loop });
     }
     return out;
   }
@@ -3067,7 +3496,7 @@
     for (i = 0; i < list.length; i++) {
       var e = list[i];
       if (e === FILL_MARK) { out.push(e); continue; }
-      out.push({ t: e.t, c: colr, h: e.h, w: e.w, g: e.g });
+      out.push({ t: e.t, c: colr, h: e.h, w: e.w, g: e.g, free: e.free, loop: e.loop });
     }
     return out;
   }
@@ -3127,21 +3556,158 @@
 
   function closeShare(ctx) { if (ctx) ctx.share = null; }
 
+  /**
+   * A granny corner - "(3tr, 2ch, 3tr) in next 2ch sp" - is a group with a
+   * chain run in the MIDDLE of it, and the chain run is the corner space the
+   * NEXT round will work into. That new space is not part of the old one: it is
+   * fabric this round added, one position per chain (01 §1.2), and it is the
+   * whole reason a granny square lies flat while its stitch count grows by only
+   * twelve a round. So the trebles divide the 2-wide space between them and the
+   * new 2 chains stand beside it: the corner is 4 wide, not 2.
+   *
+   * Marked here, honoured in applyShares - and only for a MOTIF, which is what
+   * `cornerGroups` between three and eight means. The Premier wrap's shell row
+   * puts the same shape (sc, ch 3, tr, dc, hdc, sc) into every one of 101 ch-3
+   * spaces across a flat row, and 101 of them is not a corner: there the whole
+   * unit divides the space it sits in, which is what keeps the wrap 405 wide.
+   */
+  function markCornerChains(ctx, cells) {
+    if (!ctx || !ctx.share || !cells) return;
+    var rec = ctx.shares[ctx.share], i, seen = 0, freed = 0;
+    // stitches before the chain run, chains, then stitches after it
+    var chFrom = -1, chTo = -1;
+    for (i = 0; i < cells.length; i++) {
+      if (!cells[i] || cells[i] === FILL_MARK) continue;
+      if (cells[i].t === 'ch') { if (chFrom < 0) chFrom = i; chTo = i; }
+      else if (chFrom < 0) seen++;
+      else if (chTo === i - 1 || freed) freed++;
+    }
+    if (chFrom < 0 || !seen || !freed) return;
+    for (i = chFrom; i <= chTo; i++) {
+      if (!cells[i] || cells[i].t !== 'ch' || !cells[i].g) continue;
+      cells[i].free = true;
+      rec.free = (rec.free || 0) + 1;
+    }
+  }
+
+  /**
+   * How wide one chain of a LOOP is.
+   *
+   * 01 §1.2 gives a made chain two readings and only two: a chain that bridges
+   * `k` skipped stitches is `k` wide (one per skipped stitch, because it has to
+   * reach across them), and a chain that sits INSIDE the anchor the fragment
+   * before it worked into divides that anchor (joinShare). It says nothing
+   * about the third thing a chain run does, which is most of open lace: a run
+   * made BETWEEN two consecutive anchors and closed by one stitch in the next
+   * one - `ch 3, sc in next ch-3 sp`. That is a LOOP, and a loop is slack. Its
+   * two ends are a stitch apart in the round below and the chains arch over the
+   * gap, so the width it adds to the fabric is its CHORD, not its length: pull
+   * it taut and it spans about three quarters of the chains it is made of.
+   *
+   * Measured against Red Heart's Persian Tiles First Square, whose rounds 4-6
+   * are nothing but these loops (round 5 is twenty ch-3 loops and twenty sc).
+   * Reading every loop chain as a full stitch made round 5 grow by 29 in one
+   * round - twice the rate a dc-height square can lie flat at (01 §1.4 puts a
+   * k=4 motif in dc at 2pi*1.91*1.273 = 15.3 a round) - so the square came out
+   * ruffled at the round that should have been its flattest.
+   *
+   * 0.75 is a calibration, not a theorem: it is the one number that brings the
+   * Persian rounds' growth back inside the flat band without moving any round
+   * whose width is already pinned by what it consumed (see applyLoopWidths).
+   * Exported on `Patterns` so the geometry owner reads the same constant.
+   */
+  var LOOP_CHAIN_W = 0.75;
+
+  /**
+   * The loop calibration, applied to a whole row at once - and only if it can
+   * be applied without lying about the fabric.
+   *
+   * A row worked right across the row below spends every anchor it is given,
+   * and the width of what it spent is a floor its own width cannot go under: a
+   * slack loop may add less than a stitch, but a row of them cannot end up
+   * narrower than the fabric they are worked into. The Premier wrap's mesh rows
+   * are exactly that case - `Ch 6, sc in 3rd ch of next ch-3 sp, * ch 3, sc in
+   * next ch-3 sp; rep from * across` is 101 loops across a 404-wide row below,
+   * and scaling them would report a 74"-long wrap as 328 stitches wide at every
+   * other row. So consumption wins: a row whose Sigma w is pinned that way
+   * keeps its loop chains a full stitch wide, and the calibration is a no-op.
+   *
+   * Red Heart's Persian Tiles round 4 is the same guard seen from the other
+   * side: its two ch-3 runs per repeat are not closed by a single stitch (one
+   * runs into the `(sc, ch 2, sc)` corner group, the other into `dc in next 3
+   * sc`), so they are never marked as loops at all - and even if they were, the
+   * floor would refuse to make round 4 narrower than round 3.
+   *
+   * @param {Array} list    cells, after applyShares
+   * @param {number} belowW Sigma w of the round below, 0 when unknown
+   * @returns {void}
+   */
+  function applyLoopWidths(list, belowW) {
+    var i, e, loops = [], total = 0;
+    if (!list || !list.length) return;
+    for (i = 0; i < list.length; i++) {
+      e = list[i];
+      if (!e || e === FILL_MARK) continue;
+      total += (typeof e.w === 'number' && isFinite(e.w)) ? e.w : 1;
+      if (e.loop) { if (e.t === 'ch') loops.push(e); else delete e.loop; }
+    }
+    if (!loops.length) return;
+    var shrunk = total;
+    for (i = 0; i < loops.length; i++) {
+      if (loops[i].w > LOOP_CHAIN_W) shrunk -= loops[i].w - LOOP_CHAIN_W;
+    }
+    var pinned = belowW > 0 && shrunk < belowW - 1e-9;
+    for (i = 0; i < loops.length; i++) {
+      if (!pinned && loops[i].w > LOOP_CHAIN_W) loops[i].w = LOOP_CHAIN_W;
+      delete loops[i].loop;
+    }
+  }
+
+  // A motif has three to eight corners; see roundStruct's CORNERS_MIN/MAX.
+  function cornerGroupCount(list) {
+    var n = 0, i, inGroup = false, hasCh = false, after = false;
+    for (i = 0; i < list.length; i++) {
+      var e = list[i];
+      if (!e || e === FILL_MARK) continue;
+      // a fresh 'inc' both closes the group before it and opens the next one:
+      // in a granny round the corners sit shoulder to shoulder
+      if (e.t === 'inc') {
+        if (inGroup && hasCh && after) n++;
+        inGroup = true; hasCh = false; after = false;
+        continue;
+      }
+      if (!inGroup) continue;
+      if (e.t === 'ch') { hasCh = true; continue; }
+      if (e.t === 'inc+') { if (hasCh) after = true; continue; }
+      if (hasCh && after) n++;
+      inGroup = false;
+    }
+    if (inGroup && hasCh && after) n++;
+    return n;
+  }
+
   /** Divide each anchor between the cells worked into it. A stitch is never
    *  made WIDER this way - a lone sc in a ch-3 space gathers the space, it
    *  does not become three stitches wide. */
   function applyShares(list, shares) {
     var i, e, rec, w;
     if (!list || !shares) return;
+    var k = cornerGroupCount(list);
+    var motif = k >= CORNERS_MIN && k <= CORNERS_MAX;
     for (i = 0; i < list.length; i++) {
       e = list[i];
       if (!e || e === FILL_MARK || !e.g) continue;
       rec = shares[e.g];
-      if (rec && rec.n > 0) {
-        w = rec.w / rec.n;
-        if (w < e.w) e.w = w;
+      if (motif && e.free) { delete e.g; delete e.free; continue; }
+      if (rec) {
+        var denom = rec.n - (motif ? (rec.free || 0) : 0);
+        if (denom > 0) {
+          w = rec.w / denom;
+          if (w < e.w) e.w = w;
+        }
       }
       delete e.g;
+      if (e.free) delete e.free;
     }
   }
 
@@ -3176,6 +3742,51 @@
       any = true;
     }
     return any;
+  }
+
+  // Did this fragment make exactly ONE stitch? That is what closes a chain run
+  // into a loop: `ch 3, sc in next ch-3 sp` lands one stitch in the next anchor,
+  // while `dc in next 3 sc` or a bracket group starts a new block of fabric and
+  // the chains that reached it were pulled taut getting there.
+  function oneStitch(list) {
+    var i, n = 0;
+    if (!list) return false;
+    for (i = 0; i < list.length; i++) {
+      if (!list[i] || list[i] === FILL_MARK) continue;
+      if (list[i].t === 'ch') return false;
+      if (++n > 1) return false;
+    }
+    return n === 1;
+  }
+
+  var SKIP_LEAD_RE = /^[\s,;*]*(?:skip|miss|sk)\b/i;
+
+  /**
+   * Where a list's TRAILING run of made chains begins, or -1 when it does not
+   * end in one.
+   *
+   * A repeat unit that ends in a chain run is closed across a SEAM the reader
+   * crosses once and the fabric crosses every repeat: `[sc in next sp, ch 3]
+   * twice` closes each copy's run with the next copy's own single stitch, and
+   * `* ... ch 3 ** sc in next dc` closes the head's run with the tail's. Only
+   * the copies that really are followed by that stitch count - the last one runs
+   * into whatever comes after the repeat, which the reader has already judged -
+   * which is why a round of loops can come out a fraction short of a whole
+   * number of stitch widths.
+   */
+  function trailingChainAt(list) {
+    var i = list ? list.length - 1 : -1, at = -1;
+    while (i >= 0 && list[i] && list[i] !== FILL_MARK && list[i].t === 'ch') { at = i; i--; }
+    return at;
+  }
+
+  /** Mark the chain run from `from` to the end of `cells` as a slack loop. */
+  function markSeamLoop(cells, from) {
+    var i;
+    if (from < 0 || !cells) return;
+    for (i = from; i < cells.length; i++) {
+      if (cells[i] && cells[i] !== FILL_MARK && cells[i].t === 'ch') cells[i].loop = true;
+    }
   }
 
   // The stitches of one bracket group all worked into a single stitch or space
@@ -3217,14 +3828,19 @@
    * circularly, because a round has no ends) are the side spaces the next
    * round works into.
    *
+   * `width` is the round's own Sigma w, kept here because it is the floor the
+   * next round's loop calibration is measured against (applyLoopWidths).
+   *
    * @param {Array} list  cells as expand() hands them out
    * @returns {{spaces:number, sizes:Object, spaceW:number, groups:number,
-   *            corners:number, cornerW:number, between:number, perSide:number}}
+   *            corners:number, cornerW:number, between:number, perSide:number,
+   *            width:number}}
    */
   function roundStruct(list) {
     var res = { spaces: 0, sizes: {}, spaceW: 0, groups: 0, corners: 0,
-      cornerW: 0, between: 0, perSide: 0 };
+      cornerW: 0, between: 0, perSide: 0, width: 0 };
     if (!list || !list.length) return res;
+    res.width = sumWidth(list);
     var n = list.length, i, j, runs = [], groups = [];
     for (i = 0; i < n; ) {
       if (list[i] && list[i].t === 'ch') {
@@ -3519,6 +4135,11 @@
   // The stitch-emitting twin of parseSegment(). Same branches, same order,
   // plus the longhand/lace branches above when `ctx` is supplied.
   // -> { list, c } | { fill:{list,c} } | { abs:list } | null
+  // "with RS facing", "with wrong side facing", "RS facing", "with RS of work
+  // facing" - and nothing else: a bare "RS" or "(RS)" is left alone, because the
+  // marker reader has its own business with those.
+  var SIDE_FACING_RE = /^(?:with\s+)?(?:the\s+)?(?:rs|ws|right\s+side|wrong\s+side)(?:\s+of\s+(?:the\s+)?\w+)?\s+facing\s*[,:]?\s*/i;
+
   function expandSegment(seg, ctx, next) {
     var s = seg.trim().replace(/\s+/g, ' ');
     if (!s) return { list: [], c: 0 };
@@ -3528,6 +4149,13 @@
     // A repeat marker the scanner could not pair up (the closing `*` is on a
     // printed line the column extractor never joined): "*Dcfp around each".
     if (rich) { s = s.replace(/^\*+\s*/, '').replace(/\s*\*+$/, ''); if (!s) return { list: [], c: 0 }; }
+    // "with RS facing 1 standing tr in any 2ch sp" - which way up you are
+    // holding the work says nothing about the stitch, and every Stylecraft and
+    // King Cole motif round opens with it. Left in, the whole segment read as
+    // prose and the stitch after it was lost (the hood's motif came out one
+    // treble short in every round).
+    s = s.replace(SIDE_FACING_RE, '');
+    if (!s) return { list: [], c: 0 };
 
     var i, m, st, lead, n, rest;
 
@@ -3748,6 +4376,9 @@
   function expandSegments(list, ctx, tail) {
     var out = [], c = 0, fill = null;
     var pendSkip = 0, lastWasCh = false;
+    // §8c: the chain run of the fragment just read, waiting to find out whether
+    // the fragment after it CLOSES it into a loop (see LOOP_CHAIN_W).
+    var pendLoop = null;
     for (var i = 0; i < list.length; i++) {
       var r = expandSegment(list[i], ctx, list[i + 1]);
       if (!r) return null;
@@ -3775,6 +4406,33 @@
         } else {
           openShare(ctx, anchorWidth(segT));
           joinShare(ctx, cells);
+        }
+      }
+      // §8c LOOP CHAINS. A run of made chains is a LOOP when the fragment
+      // right after it closes it with exactly ONE stitch in the next anchor -
+      // `ch 3, sc in next ch-3 sp`, the whole of an open lace round. Which
+      // fragment comes next is the only thing that tells a loop from the other
+      // two readings, so the run is parked here and judged one fragment later:
+      //   * a `skip`/`miss` next ⇒ the run BRIDGES those positions and keeps a
+      //     full stitch per chain (it has to reach across them); a skip makes
+      //     no cells, so `oneStitch` already refuses it,
+      //   * a group or a run of several stitches next ⇒ not a loop between two
+      //     consecutive anchors but a chain from the end of one block to the
+      //     start of the next, which is taut,
+      //   * chains that went INTO the anchor before them (joinShare, `.g`) or
+      //     that sit inside a corner group (markCornerChains) never get here,
+      //   * a run that ends a bracket has no next fragment of its own, so it is
+      //     left alone: `(3tr, 2ch) five times` is a corner space, not a loop.
+      if (ctx && r.abs === undefined) {
+        var lcells = r.fill ? r.fill.list : r.list;
+        if (pendLoop) {
+          if (!r.fill && oneStitch(lcells)) {
+            for (var lp = 0; lp < pendLoop.length; lp++) pendLoop[lp].loop = true;
+          }
+          pendLoop = null;
+        }
+        if (!r.fill && ctx.produced && !pendSkip && allChain(lcells) && !lcells[0].g) {
+          pendLoop = lcells;
         }
       }
       // A fragment that works into (or skips) a SPACE of the round below eats
@@ -3988,6 +4646,11 @@
           openShare(ctx, (ga && ga.w > 1) ? ga.w : anchorWidth(aft));
           joinShare(ctx, glist);
         }
+        // "(3tr, 2ch, 3tr) in next 2ch sp": the 2 chains in the middle are the
+        // NEXT round's corner space, fabric this round added - they stand beside
+        // the space rather than dividing it (honoured only for a motif; see
+        // markCornerChains).
+        markCornerChains(ctx, glist);
         if (ga && ga.n > 1) {
           var gone = glist, grep = [];
           for (k = 0; k < ga.n; k++) grep = grep.concat(cloneList(gone));
@@ -4003,7 +4666,22 @@
         fill = { list: glist, c: gc };
         list.push(FILL_MARK);
       } else {
-        for (k = 0; k < it.mult; k++) list = list.concat(cloneList(glist));
+        // §8c: a bracket worked more than once closes its own seam - see
+        // trailingChainAt. The run has to hang off exactly ONE stitch for the
+        // copies to read as a loop each: `(3tr, 2ch) five times` is a corner
+        // space behind three trebles, not a loop.
+        var seamAt = -1;
+        if (ctx && it.mult > 1) {
+          var sa = trailingChainAt(glist);
+          if (sa > 0 && oneStitch(glist.slice(0, sa))) seamAt = sa;
+        }
+        for (k = 0; k < it.mult; k++) {
+          var cl = cloneList(glist);
+          if (seamAt >= 0 && k < it.mult - 1 && cl.length === glist.length) {
+            markSeamLoop(cl, seamAt);
+          }
+          list = list.concat(cl);
+        }
         consumed += gc * it.mult;
         // a bracket worked `mult` times eats its anchors `mult` times over,
         // but the words inside it were only read once
@@ -4192,10 +4870,19 @@
         if (spare < 0) spare = 0;
       }
       if (reps * Math.max(1, headB.list.length + postB.list.length) + spare > MAX_STITCHES) return null;
+      // §8c: `* ... ch 3 ** sc in next dc` - the head's last chain run is a loop
+      // closed by the tail's single stitch, on every repeat that HAS a tail.
+      var headSeam = (oneStitch(postB.list) && !SKIP_LEAD_RE.test(sr.post)) ?
+        trailingChainAt(headB.list) : -1;
       var out = pre.list.slice();
       for (k = 0; k < reps; k++) {
-        out = out.concat(cloneList(headB.list));
-        if (!(sr.endAt && k === reps - 1)) out = out.concat(cloneList(postB.list));
+        var hc = cloneList(headB.list);
+        var withPost = !(sr.endAt && k === reps - 1);
+        if (headSeam >= 0 && withPost && hc.length === headB.list.length) {
+          markSeamLoop(hc, headSeam);
+        }
+        out = out.concat(hc);
+        if (withPost) out = out.concat(cloneList(postB.list));
       }
       if (spare > 0) out = out.concat(padRun(headB.list, spare));
       out = out.concat(restB.list);
@@ -4645,6 +5332,10 @@
       // width between its stitches (§8c) - the row's WIDTH, which is what the
       // geometry sums for a perimeter, rather than its stitch count
       applyShares(list, ctx.shares);
+      // ...and every chain run that hangs as a slack LOOP between two anchors
+      // spans its chord rather than its length (§8c LOOP_CHAIN_W) - unless the
+      // row's width is pinned by what it consumed, which wins.
+      applyLoopWidths(list, ctx.struct ? ctx.struct.width : 0);
       // what this round leaves for the next one to work into
       rememberStruct(st, rowNumber, list);
 
@@ -4817,10 +5508,13 @@
     placement: placement,
     detectSizes: detectSizes,
     dialectHints: dialectHints,
+    gauge: gauge,
     evaluate: evaluate,
     colors: colors,
     colorHex: colorHex,
     expand: expand,
+    // §8c: how wide one chain of a slack loop is, for the geometry owner
+    LOOP_CHAIN_W: LOOP_CHAIN_W,
     startHint: startHint,
     workMode: workMode,
     stuffingHint: stuffingHint

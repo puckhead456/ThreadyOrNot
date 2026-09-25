@@ -1487,12 +1487,19 @@
          every sock, cuff, sleeve and muzzle grew a spike. DiagramGeo decides
          now, from Model.shape.start. A piece that decreases to a handful of
          stitches and stops is gathered shut at the bottom as well. */
+      /* Orientation: `geo.closedTop` / `closedBottom` always describe the
+         ROUND-1 end and the LAST-round end of the fabric (the geometry leaves
+         them unswapped on purpose). A piece worked bottom-up is laid out
+         with round 1 at the bottom, so the round-1 cap then points DOWN and
+         the last-round cap points UP; the band each cap sits on never moves. */
+      var flip = !!geo.upsideDown;
+      state.flipped = flip;
       if (mode === 'rounds' && rounds.length && geo.closedTop && bands[0] && rounds[0].count > 0) {
         var c0 = rounds[0];
         var capCol = [c0.col[0], c0.col[1], c0.col[2]];
-        var capHash = hashNum(hashNum(c0.hash, bands[0].rTop * 997), capCol[0] * 255);
+        var capHash = hashNum(hashNum(hashNum(c0.hash, bands[0].rTop * 997), capCol[0] * 255), flip ? 3 : 5);
         if (state.capHash !== capHash || !state.capChunk) {
-          state.capChunk = uploadChunk(buildCap(bands[0].rTop, bands[0].yTop, capCol, 1), state.capChunk);
+          state.capChunk = uploadChunk(buildCap(bands[0].rTop, bands[0].yTop, capCol, flip ? -1 : 1), state.capChunk);
           state.capHash = capHash;
           built++;
         }
@@ -1508,9 +1515,9 @@
         var cN = rounds[lastSolid];
         var bN = bands[lastSolid];
         var botCol = [cN.col[0], cN.col[1], cN.col[2]];
-        var botHash = hashNum(hashNum(cN.hash, bN.rBot * 991), lastSolid * 7 + 1);
+        var botHash = hashNum(hashNum(hashNum(cN.hash, bN.rBot * 991), lastSolid * 7 + 1), flip ? 3 : 5);
         if (state.botHash !== botHash || !state.botChunk) {
-          state.botChunk = uploadChunk(buildCap(bN.rBot, bN.yBot, botCol, -1), state.botChunk);
+          state.botChunk = uploadChunk(buildCap(bN.rBot, bN.yBot, botCol, flip ? 1 : -1), state.botChunk);
           state.botHash = botHash;
           built++;
         }
@@ -1582,8 +1589,13 @@
       out.ymin = Math.min(b.yTop, b.yBot);
       out.ymax = Math.max(b.yTop, b.yBot);
       // the caps are geometry too, and the fit must not clip them
-      if (i === 0 && state.capChunk) out.ymax += Math.abs(b.rTop) * 0.55;
-      if (i === state.botBand && state.botChunk) out.ymin -= Math.abs(b.rBot) * 0.55;
+      // (a bottom-up piece has its round-1 cap pointing down and its last cap up)
+      if (i === 0 && state.capChunk) {
+        if (state.flipped) out.ymin -= Math.abs(b.rTop) * 0.55; else out.ymax += Math.abs(b.rTop) * 0.55;
+      }
+      if (i === state.botBand && state.botChunk) {
+        if (state.flipped) out.ymax += Math.abs(b.rBot) * 0.55; else out.ymin -= Math.abs(b.rBot) * 0.55;
+      }
       return out;
     }
 

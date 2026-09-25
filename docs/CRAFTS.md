@@ -67,6 +67,15 @@ Template.craftData: object|null                        // seed craftData for pro
   `craft` wins when `opts.craft` is missing. For non-crochet crafts `parts` is
   still created (one part named `Main`) so nothing in the shell that expects
   `parts.length >= 1` breaks, but the craft UI may ignore parts entirely.
+- **`Part.workMode`, `Part.orientation` and `Part.dialect` are crochet-only**
+  (added by the 3D diagram work; see SPEC.md). They are normalised on load for
+  every project whatever its craft, because `Part` is one shape shell-wide and a
+  missing field would be `undefined` rather than `'auto'` — but nothing outside
+  the crochet paths reads them: they only feed `Store.diagramModel` /
+  `DiagramGeo`, and the part editor's chips for the first two sit with the other
+  crochet-only fields the craft UIs hide (`dialect` has no UI at all yet). A
+  craft module must not repurpose
+  them; per-craft state belongs in `craftData`.
 - `Store.templates(craft?)` filters by craft when given. Built-in templates
   for the new crafts are declared by the craft module via
   `Store.registerCraft({ ..., templates: Template[] })` and seeded with the same

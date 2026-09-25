@@ -261,7 +261,9 @@ var noMarkers = window.Patterns.parse('Just some notes\nMore notes, no rows here
 assertSubset(window.Patterns.summary(noMarkers), { rows: 0, maxRow: null, hasTargets: false }, 'summary with no row markers at all: rows=0, maxRow=null, hasTargets=false');
 assertSubset(window.Patterns.summary([]), { rows: 0, maxRow: null, hasTargets: false }, 'summary of empty array');
 assertEqual(window.Patterns.summary([]).sections, [], 'summary of empty array: no sections');
-assertEqual(window.Patterns.summary([]).suggestions, { targetRows: null, repeat: null }, 'summary of empty array: empty suggestions');
+assertEqual(window.Patterns.summary([]).suggestions,
+  { targetRows: null, repeat: null, untilLength: null, estimated: false },
+  'summary of empty array: empty suggestions');
 assertEqual(window.Patterns.targetFor([], 1), null, 'targetFor on empty array -> null');
 assertEqual(window.Patterns.lineFor([], 1), null, 'lineFor on empty array -> null');
 
@@ -486,12 +488,79 @@ assertEqual(cuffLines[cuffLines.length - 1].kind, 'repeat', '"Next Rows: Rep Row
 assertEqual(P.summary(cuffLines).suggestions.repeat, { startRow: 1, endRow: 2, times: null, untilRows: null }, '"Rep Rows 1-2" -> times/untilRows null');
 
 assertEqual(P.summary(P.parse('Row 1: sc across\nRepeat Rows 1-4 until you have at least 14 total rows')).suggestions,
-  { targetRows: 14, repeat: { startRow: 1, endRow: 4, times: null, untilRows: 14 } }, '"until you have at least 14 total rows"');
+  { targetRows: 14, repeat: { startRow: 1, endRow: 4, times: null, untilRows: 14 },
+    untilLength: null, estimated: false }, '"until you have at least 14 total rows"');
 assertEqual(P.summary(P.parse('Row 1: sc across\nRepeat Rows 5-8 six times')).suggestions.repeat,
   { startRow: 5, endRow: 8, times: 6, untilRows: null }, '"Repeat Rows 5-8 six times" -> times 6');
 assertEqual(P.summary(P.parse('Row 1: sc across\nRepeat Rows 5-8 x6')).suggestions.repeat.times, 6, '"Repeat Rows 5-8 x6" -> times 6');
 assertEqual(P.summary(P.parse('Row 1: sc across\nRepeat Rows 5-8 6 more times')).suggestions.repeat.times, 7, '"6 more times" -> times 7');
 assertEqual(P.parse('Rnd 6-10: sc around (30)')[0].kind, 'row', '"Rnd 6-10" is a range, not a repeat');
+
+// -----------------------------------------------------------------------
+group('v2: gauge() - sts and rows per 4" / per 10 cm');
+
+// The label may sit on its own line above the numbers (Premier), on the same
+// line (Red Heart), or be the British "Tension".
+assertEqual(pick(P.gauge('GAUGE\n9 hdc and 6 rows = 4"\nSave time, check your gauge.'),
+  ['stsPer4in', 'rowsPer4in', 'stitch', 'estimated']),
+  { stsPer4in: 9, rowsPer4in: 6, stitch: 'hdc', estimated: false },
+  'gauge(): the label on its own line, "9 hdc and 6 rows = 4""');
+assertEqual(pick(P.gauge('GAUGE: 12 sts and 8 rows = 4" in hdc'),
+  ['stsPer4in', 'rowsPer4in', 'stitch']),
+  { stsPer4in: 12, rowsPer4in: 8, stitch: 'hdc' },
+  'gauge(): "12 sts and 8 rows = 4" in hdc" - the stitch is written after the measurement');
+assertEqual(pick(P.gauge('Tension: 16 sts x 20 rows to 10 cm over pattern'),
+  ['stsPer10cm', 'rowsPer10cm']), { stsPer10cm: 16, rowsPer10cm: 20 },
+  'gauge(): "Tension: 16 sts x 20 rows to 10 cm over pattern"');
+// 4" is 10.16 cm, so a gauge printed over 10 cm is 1.6% finer over 4".
+assertEqual(P.gauge('Tension: 16 sts x 20 rows to 10 cm').rowsPer4in, 20.32,
+  '...and 20 rows to 10 cm is 20.32 rows to 4 inches, not 20');
+assertEqual(pick(P.gauge('GAUGE: 14 sc and 16 rows = 4 inches'),
+  ['stsPer4in', 'rowsPer4in', 'stitch']), { stsPer4in: 14, rowsPer4in: 16, stitch: 'sc' },
+  'gauge(): "14 sc and 16 rows = 4 inches"');
+// No rows printed: they come off the stitch's own height. A dc row is 1.91
+// stitch widths, so 12 dc (3 to the inch) is 3/1.91 = 1.57 rows to the inch.
+assertEqual(pick(P.gauge('GAUGE: 12 dc = 4"'), ['stsPer4in', 'stitch', 'estimated']),
+  { stsPer4in: 12, stitch: 'dc', estimated: true },
+  'gauge(): "12 dc = 4"" prints no rows, so they are estimated from dc height');
+assertTrue(Math.abs(P.gauge('GAUGE: 12 dc = 4"').rowsPer4in - 6.28) < 0.02,
+  '...12 / 1.91 = 6.28 dc rows to 4 inches');
+assertEqual(P.gauge('Afghan measures approximately 46" x 51".').source, null,
+  'gauge(): a finished measurement is not a gauge');
+assertEqual(P.gauge('').source, null, 'gauge(): empty text reads no gauge');
+assertEqual(P.gauge('Row 1: sc in each ch across - 94 sts.').source, null,
+  'gauge(): a row is not a gauge either');
+
+// -----------------------------------------------------------------------
+group('v2: a length target becomes rows');
+
+function lenRows(text) { return P.summary(P.parse(text)).suggestions; }
+var GA = 'GAUGE: 10 sts and 10 rows = 4"\n';   // 2.5 rows to the inch, 9.84 per 10 cm
+assertEqual(lenRows(GA + 'Row 4: sc across\nRow 5: sc across\n' +
+  'Repeat rows 4 and 5 until piece measures 60 cm').targetRows, 59,
+  '"until piece measures 60 cm" at 9.84 rows / 10 cm -> 59 rows');
+assertEqual(lenRows(GA + 'Row 1: sc across\nRow 2: sc across\n' +
+  'continue until work measures 25 in from beginning').targetRows, 63,
+  '"25 in from beginning" -> 63 rows; "from beginning" says where the tape starts, not how long it is');
+assertEqual(lenRows(GA + 'Row 1: sc across\nRow 2: sc across\n' +
+  'Rep row 2 until sleeve measures 18" or desired length').targetRows, 45,
+  '"18" or desired length" -> 45 rows; the politeness is ignored');
+assertEqual(lenRows(GA + 'Row 1: sc across\nRow 2: sc across\n' +
+  'Rep row 2 until piece measures approx 56" [142 cm].').untilLength,
+  { value: 56, unit: 'in' },
+  'the bracketed metric echo is the SAME length, not a second, longer piece');
+assertEqual(lenRows(GA + 'Row 1: sc across\nRow 2: sc across\n' +
+  'Rep row 2 until work measures 10 inches long, approx. 44 rows.').targetRows, 44,
+  'a printed row count still wins over the tape');
+assertEqual(lenRows('Row 1: sc across\nRow 2: sc across\n' +
+  'Rep row 2 until it measures 10 in').estimated, true,
+  'with no gauge the rows are estimated, and summary() says so');
+assertEqual(lenRows('Row 1: sc across\nRow 2: sc across\n' +
+  'Rep row 2 until it measures 10 in').targetRows, 51,
+  '...10" of sc at 5 mm a row is 51 rows');
+assertEqual(lenRows(GA + 'Row 1: sc across\nRow 2: sc across\n' +
+  'Rep row 2 until it looks long enough').untilLength, null,
+  'a repeat that names no measurement resolves to nothing');
 
 // -----------------------------------------------------------------------
 group('v2: explicit count formats (multi-size, trailing, no unit)');
@@ -2048,6 +2117,62 @@ assertEqual(wsOf(shellUnit), '0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5',
 assertEqual(shellUnit.width, 4, '...so the unit is 4 wide: eight positions, four stitch widths');
 
 // -----------------------------------------------------------------------
+group('wave 1 3D: chain LOOPS are slack (§8c LOOP_CHAIN_W)');
+// -----------------------------------------------------------------------
+// 01 §1.2 gives a made chain two readings: a run that BRIDGES k skipped
+// stitches is k wide, and a run that goes INTO the anchor beside it divides
+// that anchor. Open lace is neither: `ch 3, sc in next ch-3 sp` hangs a LOOP
+// between two consecutive anchors, and a loop pulled taut spans about three
+// quarters of the chains it is made of - its chord, not its length.
+
+assertEqual(P.LOOP_CHAIN_W, 0.75,
+  'Patterns exports LOOP_CHAIN_W = 0.75, the width of one chain of a slack loop');
+
+// (1) A LOOP ROW: every chain run is closed by ONE stitch in the next anchor.
+var loopRow = ex('sc in next dc, ch 3, sc in next ch-3 sp, ch 3, sc in next ch-3 sp', 7);
+assertEqual(tsOf(loopRow), 'sc,ch,ch,ch,sc,ch,ch,ch,sc',
+  'a ch-3 loop row makes three chain entries per loop, as any chain run does');
+assertEqual(wsOf(loopRow), '1,0.75,0.75,0.75,1,0.75,0.75,0.75,1',
+  '...but each chain of a LOOP is 0.75 wide - the loop spans its chord');
+assertEqual(loopRow.width, 7.5,
+  '...so the row is 7.5 wide, not the 9 that reading every chain as a stitch gave');
+assertEqual(hsOf(loopRow), '1,0,0,0,1,0,0,0,1',
+  '...and a loop chain is still a space: no height at all');
+
+// (2) A BRIDGING-CHAIN ROW is untouched: it has to reach across what it skips.
+var bridgeRow = ex('sc in next st, ch 3, skip 3 sts, sc in next st', 8);
+assertEqual(wsOf(bridgeRow), '1,1,1,1,1',
+  'a ch-3 that bridges 3 skipped stitches keeps a full stitch per chain');
+assertEqual(bridgeRow.width, 5, '...so the row still spans the 5 positions it ate');
+assertEqual(wsOf(ex('sc in next sc, ch 1, sk next st, sc in next sc, ch 1, sk next st', 6)),
+  '1,1,1,1', '...and a ch-1 mesh over single skipped stitches is 1 per chain too');
+
+// (3) A CORNER GROUP: the chains inside a granny corner are the NEXT round's
+// corner space, fabric this round added - never a loop between two anchors.
+var cornerRow = ex('(3 dc, ch 3, 3 dc) all in next sc', 1);
+assertEqual(wsOf(cornerRow), '1,1,1,1,1,1,1,1,1',
+  'a granny corner worked into one stitch fans: its chains are a corner space, not a loop');
+assertEqual(cornerRow.width, 9, '...so the corner is still 9 wide');
+assertEqual(wsOf(ex('sc in ch-3 sp, ch 3, (tr, dc, hdc, sc) in same ch-3 sp, sk next st', 4)),
+  '0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5',
+  'a chain run that goes back INTO the space beside it divides that space (joinShare), not its chord');
+
+// A repeat unit that ENDS in a chain run is closed across the seam by the next
+// copy's own stitch - on every copy but the last one.
+var seamRow = ex('sc in next sp, [sc in next sp, ch 3] twice, sc in next sp', 12);
+assertEqual(wsOf(seamRow), '1,1,0.75,0.75,0.75,1,1,1,1,1',
+  '"[sc in next sp, ch 3] twice": the first copy\'s run closes onto the second copy\'s sc, the last copy\'s does not');
+
+// CONSUMPTION WINS. A row that spends the whole row below cannot end up
+// narrower than it, however slack its loops are: the Premier wrap's mesh row is
+// 101 ch-3 loops across a 404-wide row, and it is 404 wide.
+var meshInstr = 'Ch 6, sc in 3rd ch of next ch-3 sp, * ch 3, sc in next ch-3 sp; rep from * across; turn';
+assertTrue(ex(meshInstr, 405).width < ex(meshInstr, 405).stitches.length,
+  'read on its own, a ch-3 mesh row scales its loops down');
+assertEqual(ex(meshInstr, 405, null, { structs: { 0: { width: 404, spaces: 101, corners: 0 } } }).width, 404,
+  '...but with the 404-wide row below on record, consumption pins it and the loops stay 1 wide');
+
+// -----------------------------------------------------------------------
 group('wave A 3D: longhand increases and decreases, with their positions');
 // -----------------------------------------------------------------------
 
@@ -2460,10 +2585,35 @@ var untilM = walkRef(
   'Rep Row 2 until blanket measures approximately 59".\n', 8);
 assertEqual(nsOf(untilM), [94, 94, 94, 94, 94, 94, 94, 94],
   '"Rep Row 2 until it measures 59\\"" answers for every row the caller asks about');
-assertEqual(P.summary(untilM.lines).maxRow, 2,
-  '...without inventing rows: an open-ended repeat adds nothing to maxRow');
+// With no gauge in the text, the rows come out of the stitch's own height: one
+// sc row is about 5 mm, an hdc row is 1.27/0.95 of that (6.68 mm), so an inch
+// holds 3.8 hdc rows and 59" is 224 of them - an ASSUMPTION, and flagged as one.
+assertEqual(P.summary(untilM.lines).maxRow, 224,
+  '...and 59" of hdc is 224 rows, estimated at 5 mm per sc row');
+assertEqual(P.summary(untilM.lines).suggestions.estimated, true,
+  '...which summary() says out loud, because no gauge was printed');
+assertEqual(P.summary(untilM.lines).suggestions.untilLength, { value: 59, unit: 'in' },
+  '...over the length the repeat really named, 59 inches');
+assertEqual(P.summary(untilM.lines).rows, 2,
+  '...while `rows` stays 2: two rows are WRITTEN, however far the blanket runs');
 assertTrue(untilM[7].types.indexOf('x') < 0 && untilM[7].h === 1.34,
   '...and row 8 is real hdc, not a generic run');
+
+// The same blanket WITH its gauge box: 6 rows to 4" is 1.5 rows to the inch, so
+// 59" is 88.5 -> 89 rows, and nothing is being assumed any more.
+var untilG = walkRef(
+  'GAUGE: 9 hdc and 6 rows = 4"\n' +
+  'Row 1: hdc in 3 ch from hook and in each ch across, turn - 94 sts.\n' +
+  'Row 2: Ch 2, hdc in back loop only of each st across, turn.\n' +
+  'Rep Row 2 until blanket measures approximately 59".\n', 3);
+assertEqual(P.summary(untilG.lines).maxRow, 89,
+  'with the gauge printed, 59" of blanket is 89 rows (6 rows / 4" = 1.5 to the inch)');
+assertEqual(P.summary(untilG.lines).suggestions.estimated, false,
+  '...measured, not estimated');
+assertEqual(P.targetFor(untilG.lines, 60), 94,
+  '...and targetFor answers 94 stitches for row 60');
+assertEqual(P.gauge('GAUGE: 9 hdc and 6 rows = 4"').rowsPer4in, 6,
+  'gauge(): "9 hdc and 6 rows = 4"" is 6 rows to 4 inches');
 
 var until4 = walkRef(
   'Row 1: sc in each of 10 ch. Turn. (10)\n' +

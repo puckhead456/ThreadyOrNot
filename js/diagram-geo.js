@@ -139,6 +139,59 @@
    took the stuffed slack and then kept an open hole where the pattern says
    `pull to close` (the baphomet Body/Head at 8, the cato Head at 9).
 
+   FOUR MORE IN 1.3.0 — "make a stuffed amigurumi READ as stuffed".
+
+   (7) THE STUFFED PROFILE IS NOT A DRUM (06 defect 7, and defect 2 finished).
+   With the ruffle gate and the dome loft in, the baphomet Body/Head still drew
+   as two stacked TIN DRUMS: a nearly flat lid where the increases run past the
+   flat rate, a dead-vertical wall where the counts repeat, and a hard shoulder
+   where they meet. Its numbers were right (aspect 1.499, equator 0.71, closed,
+   0 ruffles) and its curvature was wrong, which is the whole of this change:
+   three passes that move the profile and NOT one number in 01 §2 —
+     * a PROFILE FILLET that limits the meridian's bend radius to FILLET_BEND
+       stitch heights by moving rings along y (a ring's radius is its stitch
+       count over 2pi and stays fixed), borrowing the height from the straight
+       run and giving it back;
+     * a WALL BOW, declared cosmetic: the middle of a straight run gains up to
+       WALL_BOW of radius on a sine, drawn and reserved for but never measured;
+     * a LID DOME that gives a run past the flat rate the sagitta LID_SAG of a
+       shallow spherical cap instead of lying dead flat.
+   Gated on STUFF_MIN_SLACK and scaled by the slack, so slack 0 — a doily, a
+   granny square, a sheet — is untouched. See the STUFF_* constants for the
+   argument and `stuffProfile` / `bendProfile` for the code.
+
+   (8) ORIENTATION. `layout(model, {upsideDown:true})`, or
+   `model.shape.upsideDown` from text like "starting from the bottom of the
+   body", flips a piece so ROUND 1 IS AT THE BOTTOM: `y` is mirrored about the
+   piece's mid-height (so the piece still occupies [-height, 0]) and
+   `closedTop` / `closedBottom` swap, because they name the piece's geometric
+   ENDS. `shape.closedTop` / `shape.closedBottom` keep naming round 1's ring and
+   the gathered close, which is what tells a renderer WHICH BAND each cap
+   belongs to. Rows mode already walks upward, so a sheet is unaffected.
+
+   (9) GRANNY CLUSTERS SPLAY (01 §1.4.5, `GRANNY_FLAT`). The other side of
+   POLY_FLAT_TOL. A real granny square grows +12 TREBLE widths a round — four
+   corners, three trebles a group — and lies FLAT, while the k = 4 flat rate at
+   the height a treble arrives with is 15–16 widths a round. The arc walk spent
+   the shortfall as rise, so the Stylecraft hood motif climbed into a cup at
+   aspect 0.49 against 01 §2.2 #43's < 0.08 — and it did so at BOTH heights the
+   UK/US conversion can hand it (0.79 of the rate as dc, 0.62 as tr).
+   The arithmetic is right and the HEIGHT is wrong: three trebles worked into
+   ONE chain space fan out, so a cluster round is shorter than a plain dc/tr
+   row and +12 really does cover the rate. Rather than guess a second height
+   table for clusters, read it off the growth — a k-gon round (a measured k, or
+   the text prior's) growing at GRANNY_FLAT or more of its own flat rate is
+   granny fabric and gets dy = 0 and `granny: true`. Below that it may still
+   cup: a bowl deliberately worked in the round with stacked corners (+6 on a
+   k = 4, 0.37 of the rate) is a real bowl and keeps its arc. Above
+   POLY_FLAT_TOL it still ruffles. The verdict is also taken for the PIECE
+   (`grannyFabric`, the median over its k-gon rounds), so the two circular
+   rounds a motif starts with — the chain ring and the round around it, before
+   the corners form — lie flat with the rest of the same fabric instead of
+   standing the finished square up on a 4-stitch-high collar.
+   A PLAIN RING IS NEVER ASKED: kf = 1 leaves `grannyRatio` unset, so no sphere,
+   tube or disc round can reach the rule.
+
    No modules, no build step. Attaches window.DiagramGeo.
    ===================================================================== */
 (function (global) {
@@ -225,6 +278,58 @@
   var LOFT_ITERS = 48;                // bisection steps for a run's sphere R
   var LOFT_MAX_R = 1e4;               // past this the run is a flat annulus
 
+  /* ------------------------------------ the stuffed profile (06 defect 7 and
+     the amigurumi re-review). With the ruffle gate fixed and the domes lofted,
+     a closed stuffed segment still came out as a DRUM: the fast-increase rounds
+     form a nearly flat lid, the straight rounds a dead-vertical wall, and the
+     two meet at a hard shoulder. The baphomet Body/Head is two stacked drums at
+     aspect 1.499 — the right number on the wrong curve. Three things are
+     missing and all three are the stuffing:
+
+       1 PROFILE FILLET. A stuffed fabric corner cannot bend tighter than about
+         1.2 stitch heights of radius — the yarn will not turn tighter than the
+         stitch that makes it. So the meridian r(y) is filleted to that limit by
+         moving rings ALONG y: a ring's radius is its stitch count over 2pi and
+         is not negotiable, but WHERE that ring sits is. The height a corner
+         needs is taken out of the straight run and given straight back, over
+         about FILLET_SPAN rounds either side, so the segment's total height —
+         and therefore every aspect in 01 §2 — does not move. Where height alone
+         cannot round a corner (a waist, where the profile reverses radially) a
+         radial ease of at most FILLET_EASE is allowed, and never on the widest
+         ring, so the equator and the aspect stay where the counts put them.
+       2 WALL BOW. A run of straight rounds under stuffing bows outward. The
+         first and last round of the run are pinned by the shaping either side
+         of it; the middle rounds gain up to WALL_BOW of radius on a sine over
+         the run. This is yarn stretch, i.e. COSMETIC, so it is the one thing
+         here that does NOT touch `radius`: it is a separate fraction, `bow`,
+         which `radiusDraw` carries into the drawn bands and into the
+         `radiusMax` the fit reserves. The piece's own `maxRadius` / `width` /
+         `aspect` / equator keep measuring the ring the stitch count asks for.
+       3 LID DOME. A run past the flat rate lies on no curved surface of
+         revolution at all (`loftRadius` returns 0 — the run is flatter than a
+         flat annulus), so the walk lays it flat and it reads as a tin lid.
+         Stuffing pushes it out into a shallow spherical cap of sagitta LID_SAG
+         of the lid's own radius; the rise that costs comes out of the straight
+         run, so the segment's height is again unchanged. Rise only ever GROWS
+         here, so a run the loft already domed is left exactly alone.
+
+     All three are gated on STUFF_MIN_SLACK and scaled by the slack, so a doily,
+     a granny square, a flat disc and every rows-mode sheet (slack 0) are
+     untouched, and a cup at 0.20 gets a little over half of what a firmly
+     stuffed ball at 0.35 gets. A frilled round is skipped throughout: a buckle
+     is not a stuffed corner, and its own wave is already its shape. */
+  var STUFF_MIN_SLACK = 0.20;
+  var FILLET_BEND = 1.2;    // min meridian bend radius, in stitch heights
+  var FILLET_SPAN = 2;      // rounds either side of a shoulder that share it
+  var FILLET_ITERS = 24;    // relaxation passes per attempt
+  var FILLET_RELAX = 0.6;   // ...each damped by this much
+  var FILLET_TRIES = 2;     // relax, ease the corners left over, relax again
+  var FILLET_EASE = 0.04;   // last-resort radial ease, fraction of the ring
+  var FILLET_KEEP = 0.30;   // a donor round keeps at least this much of its h
+  var WALL_BOW = 0.05;      // straight-run outward bow, fraction of radius
+  var WALL_BOW_MIN = 3;     // ...over a run of at least this many rounds
+  var LID_SAG = 0.15;       // flat-lid sagitta, fraction of the lid radius
+
   /* Polygon detection (01 §1.4). Candidate corner counts in priority order. */
   var POLY_KS = [4, 6, 8, 3];
   var POLY_RUN = 3;             // >= 3 consecutive rounds, same k, same phase
@@ -245,6 +350,27 @@
      inherit sc 1.0 where the fabric is twice that. 1.5 covers both, and a
      genuine frill — a doily's picot round, 2x over — still frills. */
   var POLY_FLAT_TOL = 1.5;
+  /* GRANNY CLUSTERS SPLAY (01 §1.4.5, the other side of POLY_FLAT_TOL).
+     A real granny square grows +12 TREBLE-widths per round — four corners,
+     three trebles per group — and lies FLAT. The k = 4 flat rate at the height
+     a treble arrives with is 15–16 widths per round (2pi*h*kf: 15.3 at h 2.01,
+     19.4 at h 2.55), so +12 is only 0.6–0.8 of it and the arc walk spends the
+     shortfall as RISE: the Stylecraft hood motif walked up into a cup at
+     aspect 0.49 where 01 §2.2 #43 wants < 0.08.
+     The walk is not wrong about the arithmetic, it is wrong about the height.
+     Three trebles worked into ONE chain space FAN OUT from that space; the
+     round's effective height is lower than a plain dc/tr row's, so the same
+     +12 covers the whole flat rate in the real object. Rather than guess a
+     second height table for clusters, read it off the growth: fabric a k-gon
+     that grows at GRANNY_FLAT or more of its own flat rate is granny fabric
+     and LIES FLAT. Under that it may still cup — a bowl deliberately worked in
+     the round with stacked corners (+6 on a k = 4, 0.37 of the rate) is a real
+     bowl and keeps its rise. Over POLY_FLAT_TOL it still ruffles.
+     0.55 sits between the two: the granny cases in the corpus measure 0.46
+     (hood round 2 at tr height) … 0.98 and the bowl 0.39.
+     A plain ring — every amigurumi sphere, tube and disc — has kf = 1 and is
+     never asked this question. */
+  var GRANNY_FLAT = 0.55;
   var SHARP_FLAT = 0.75;        // granny corners
   var SHARP_SOFT = 0.45;        // amigurumi darts
   var RIPPLE_AMP = 0.06;        // chevron: a gentle radial wave, still a ring
@@ -344,13 +470,21 @@
           wSum += (count - lim);
         }
       }
-      var best = 0, bestKey = null;
+      /* A row is as tall as its TALLEST stitch, not its commonest: a shell
+         row of (sc, ch 3, tr, dc, hdc, sc) stands treble-high even though
+         sc owns most of its width. Ignore heights that cover under 10% of
+         the row (a lone bobble must not lift a whole sc round), and fall
+         back to the commonest height when nothing clears that bar. */
+      var best = 0, bestKey = null, tallest = 0;
       for (i = 0; i < keys.length; i++) {
         if (tally[keys[i]] > best) { best = tally[keys[i]]; bestKey = keys[i]; }
+        if (wSum > 0 && tally[keys[i]] / wSum >= 0.10) {
+          var hk = parseFloat(keys[i]);
+          if (hk > tallest) tallest = hk;
+        }
       }
-      if (bestKey != null) {
-        hBest = wSum > 0 && best / wSum < 0.5 ? hMean / wSum : parseFloat(bestKey);
-      }
+      if (tallest > 0) hBest = tallest;
+      else if (bestKey != null) hBest = parseFloat(bestKey);
     } else {
       perimeter = count * SW;
     }
@@ -531,6 +665,11 @@
     var chainLen = isNum(s.chainLen) && s.chainLen > 0 ? Math.floor(s.chainLen) : 0;
     var ringCount = isNum(s.ringCount) && s.ringCount > 0 ? Math.floor(s.ringCount) : 0;
     var stuffed = s.stuffed === true ? true : (s.stuffed === false ? false : null);
+    /* The store's reading of "starting from the bottom of the body", "start at
+       the base", "worked from the bottom up": round 1 is the piece's BOTTOM.
+       Only `true` counts — an absent or unparsed flag leaves the piece the way
+       every other part is laid out, round 1 at the top. */
+    var upsideDown = s.upsideDown === true;
     var firm = s.stuffed === 'firm';
     if (firm) stuffed = true;
     /* The polygon prior (01 §1.4.7). 0 = no prior; anything that is not one of
@@ -594,6 +733,7 @@
     return {
       start: start, chainLen: chainLen, ringCount: ringCount, stuffed: stuffed,
       firm: firm, slack: slack, closedTop: !!closedTop, closedBottom: closedBottom,
+      upsideDown: upsideDown,
       firstCount: first, lastCount: last, maxCount: max,
       form: form, openEnd: !!openEnd, counts: cp,
       corners: corners, cornersSource: cornersSource
@@ -886,14 +1026,18 @@
    *            rounds:Array<{kind:string, corners:number, chainLen:number,
    *              radius:number, perimeter:number, y:number, ruffle:boolean}>}}
    */
-  function classify(model) {
+  function classify(model, opts) {
     var m = model || {};
+    var o = opts || {};
     var mode = m.mode === 'rows' ? 'rows' : 'rounds';
     var rounds = arr(m.rounds) || [];
     var shape = shapeOf({ mode: mode, rounds: rounds, shape: m.shape });
+    /* An explicit `opts.upsideDown` wins over the model's own flag, so a host
+       can preview either way up without editing the store's shape. */
+    var flip = o.upsideDown == null ? shape.upsideDown : o.upsideDown === true;
     return mode === 'rows'
       ? classifyRows(rounds, shape)
-      : classifyRounds(rounds, shape);
+      : classifyRounds(rounds, shape, flip);
   }
 
   /* ------------------------------------------------------- 7a. the dome loft
@@ -1008,22 +1152,417 @@
     var t = clamp(shape.slack / LOFT_BLEND_AT, 0, 1);
     if (!(t > 0) || !out) return;
     var stretch = 1 / Math.max(0.1, 1 - shape.slack);
-    var rPrev = startR, cur = null, i, e, dir;
-    var runs = [];
-    for (i = 0; i < out.length; i++) {
-      e = out[i];
-      if (e.empty || e.outlier) continue;     // not fabric: it spans no arc
+    var runs = monotoneRuns(realEntries(out), startR), i;
+    for (i = 0; i < runs.length; i++) loftRun(runs[i], stretch, t);
+  }
+
+  /* ------------------------------------------------- 7b. the stuffed profile
+     The three passes described at the STUFF_* constants, run in this order
+     after the loft and before `y` is walked out:
+
+       lidDomes  a run past the flat rate becomes a shallow cap  (rise only)
+       wallBow   a straight run bows out            (radius only, COSMETIC)
+       fillet    the meridian's bend radius is limited  (rise, then a bounded
+                 radial ease where the corner is otherwise unavoidable)
+
+     Every pass that spends height takes it back out of the straight run, and
+     `stuffProfile` finishes by renormalising the rises onto the height the arc
+     walk produced, so the piece's height is what it was to within floating
+     point and `aspect` cannot move at all. */
+
+  /** The entries that are real fabric: a zero-count or bridged round is not. */
+  function realEntries(out) {
+    var list = [], i;
+    for (i = 0; i < (out ? out.length : 0); i++) {
+      if (!out[i].empty && !out[i].outlier) list.push(out[i]);
+    }
+    return list;
+  }
+
+  /** How loudly the stuffing speaks: 0 at slack 0, 1 at SLACK_STUFFED. */
+  function stuffScale(slack) { return clamp(slack / SLACK_STUFFED, 0, 1); }
+
+  /**
+   * The monotone runs of a fabric list, in walk order. `r0` is the ring each
+   * run opens from, `dir` +1 for a run that grows and -1 for one that closes
+   * in. A straight round or a frill ends a run: neither is part of a dome.
+   */
+  function monotoneRuns(list, startR) {
+    var runs = [], cur = null, rPrev = startR, i, e, dir;
+    for (i = 0; i < list.length; i++) {
+      e = list[i];
       dir = 0;
       if (!e.ruffle) dir = e.radius > rPrev + 1e-9 ? 1 : (e.radius < rPrev - 1e-9 ? -1 : 0);
       if (dir && cur && cur.dir === dir) cur.list.push(e);
       else if (dir) { cur = { dir: dir, r0: rPrev, list: [e] }; runs.push(cur); }
-      else cur = null;                        // a straight round, or a frill
+      else cur = null;
       rPrev = e.radius;
     }
-    for (i = 0; i < runs.length; i++) loftRun(runs[i], stretch, t);
+    return runs;
   }
 
-  function classifyRounds(rounds, shape) {
+  /**
+   * The runs of rounds that REPEAT the ring above them — the WALL of a piece.
+   * A repeated count adds no circumference, so the round can only become wall;
+   * that is the height the fillet and the lid dome borrow from, and it is the
+   * run the wall bow bows.
+   */
+  function straightRuns(list, startR) {
+    var runs = [], cur = null, rPrev = startR, i, e;
+    for (i = 0; i < list.length; i++) {
+      e = list[i];
+      if (!e.ruffle && Math.abs(e.radius - rPrev) < 1e-9) {
+        if (cur) cur.push(e); else { cur = [e]; runs.push(cur); }
+      } else cur = null;
+      rPrev = e.radius;
+    }
+    return runs;
+  }
+
+  /** Depth of a spherical cap of sphere radius `rho`, at ring radius `r`. */
+  function capDepth(rho, r) {
+    var q = rho * rho - r * r;
+    return rho - Math.sqrt(q > 0 ? q : 0);
+  }
+
+  /**
+   * Take `want` of rise out of `pool`, in proportion to what each round has to
+   * spare over FILLET_KEEP of its own stitch height — so a 0.95-tall wall round
+   * lends and a 0.14-tall pole round does not.
+   * @returns {number} what was actually taken; less than `want` if the pool ran dry
+   */
+  function takeRise(pool, want) {
+    if (!(want > 0) || !pool || !pool.length) return 0;
+    var s = [], spare = 0, i;
+    for (i = 0; i < pool.length; i++) {
+      s[i] = Math.max(0, pool[i].dy - FILLET_KEEP * Math.max(pool[i].h, 1e-6));
+      spare += s[i];
+    }
+    if (!(spare > 0)) return 0;
+    var take = Math.min(want, spare);
+    for (i = 0; i < pool.length; i++) pool[i].dy -= take * (s[i] / spare);
+    return take;
+  }
+
+  /**
+   * Pay for `want` of extra rise somewhere else in the segment. The straight
+   * run gives it up first — "compensate in the straight run": a wall has height
+   * to lend, a pole and a frill do not — and anything else that is not `busy`
+   * (i.e. not one of the rounds being paid for) covers the remainder.
+   * @param {boolean[]} busy indexed like ctx.list
+   * @returns {number} what was found
+   */
+  function payRise(ctx, want, busy) {
+    if (!(want > 0)) return 0;
+    var walls = [], rest = [], i;
+    for (i = 0; i < ctx.list.length; i++) {
+      if (busy && busy[i]) continue;
+      if (ctx.list[i].ruffle) continue;       // a frill is slack, not tension
+      if (ctx.isWall[i]) walls.push(ctx.list[i]); else rest.push(ctx.list[i]);
+    }
+    var got = takeRise(walls, want);
+    if (got < want - 1e-12) got += takeRise(rest, want - got);
+    return got;
+  }
+
+  /** Scale the rises back onto `target`, so the piece's height is exact. */
+  function renormRise(list, target) {
+    var sum = 0, i;
+    for (i = 0; i < list.length; i++) sum += list[i].dy;
+    if (!(sum > 0) || !(target > 0)) return 1;
+    var k = target / sum;
+    for (i = 0; i < list.length; i++) list[i].dy *= k;
+    return k;
+  }
+
+  /**
+   * 3 — THE LID DOME. A run that grows (or closes) past the flat rate has no
+   * curved surface of revolution to lie on, so the walk lays it flat: the
+   * baphomet Body/Head's 48 -> 36 close rises 0.019 of a 0.95 stitch and reads
+   * as a serrated tin lid. Stuffing pushes such a lid into a shallow spherical
+   * cap of sagitta LID_SAG of its own radius. Rise only ever grows: a run the
+   * loft already domed is taller than the cap law and is skipped, so this pass
+   * cannot flatten anything.
+   */
+  function lidDomes(ctx) {
+    var res = { lids: 0, rise: 0, paid: 0 };
+    if (!(ctx.sc > 0)) return res;
+    var runs = monotoneRuns(ctx.list, ctx.startR), i, k;
+    var busy = [];
+    for (i = 0; i < runs.length; i++) {
+      var run = runs[i], flat = false;
+      for (k = 0; k < run.list.length; k++) if (run.list[k].flattened) flat = true;
+      if (!flat) continue;
+      var R = [run.r0];
+      for (k = 0; k < run.list.length; k++) R.push(run.list[k].radius);
+      var rOut = Math.max(R[0], R[R.length - 1]);
+      var rIn = Math.min(R[0], R[R.length - 1]);
+      var S = LID_SAG * ctx.sc * rOut;
+      if (!(S > 0) || !(rOut > rIn)) continue;
+      var rho = (rOut * rOut + S * S) / (2 * S);
+      var want = Math.abs(capDepth(rho, rOut) - capDepth(rho, rIn));
+      var have = 0;
+      for (k = 0; k < run.list.length; k++) have += run.list[k].dy;
+      if (!(want > have + 1e-9)) continue;    // already domed: leave it alone
+      var got = 0;
+      for (k = 0; k < run.list.length; k++) {
+        var e = run.list[k];
+        var d = Math.abs(capDepth(rho, R[k + 1]) - capDepth(rho, R[k]));
+        e.dy = Math.max(d, DY_MIN * e.h);
+        e.lid = true;
+        busy[e.li] = true;
+        got += e.dy;
+      }
+      res.lids++;
+      res.rise += got - have;
+    }
+    if (res.rise > 0) res.paid = payRise(ctx, res.rise, busy);
+    return res;
+  }
+
+  /**
+   * 2 — THE WALL BOW. Yarn STRETCH, and COSMETIC by declaration, so it is the
+   * one thing here that does not touch `radius`: a ring's radius is its stitch
+   * count over 2pi and that is what the piece is measured by. The bow is a
+   * separate fraction, `bow`, which `radiusDraw` carries into the bands that get
+   * drawn and into the `radiusMax` the fit reserves — and into nothing else, so
+   * `width`, `aspect`, the equator and every per-round radius the gallery prints
+   * are exactly the numbers the stitch counts asked for.
+   */
+  function wallBow(ctx) {
+    var res = { runs: 0, max: 0 };
+    var amp = WALL_BOW * ctx.sc;
+    if (!(amp > 0)) return res;
+    var runs = ctx.straight, i, j;
+    for (i = 0; i < runs.length; i++) {
+      var run = runs[i], m = run.length;
+      if (m < WALL_BOW_MIN) continue;
+      res.runs++;
+      for (j = 0; j < m; j++) {
+        /* pinned at both ends of the run, a full sine bulge between them */
+        var f = amp * Math.sin(Math.PI * (j / (m - 1)));
+        if (!(f > 1e-12)) continue;
+        run[j].bow = f;
+        if (f > res.max) res.max = f;
+      }
+    }
+    return res;
+  }
+
+  /**
+   * 1 — THE PROFILE FILLET. Limit the meridian's bend radius to FILLET_BEND
+   * stitch heights by moving rings along y, then — only where that cannot do it
+   * — by a radial ease of at most FILLET_EASE.
+   *
+   * The relaxation: at every interior ring whose discrete bend radius
+   * L / theta is under the limit, the two segments meeting there are short by
+   * `FILLET_BEND * h * theta - L` between them. Asking for twice that (each
+   * segment's length grows by at most the rise it gains) spread over the ring's
+   * own two segments and FILLET_SPAN - 1 more either side both LENGTHENS the
+   * segments and, because a longer segment is a steeper one, REDUCES the turn.
+   * Damped by FILLET_RELAX and iterated, which is what makes a shoulder round
+   * off over two rounds instead of jumping.
+   */
+  function fillet(ctx) {
+    var list = ctx.list, m = list.length;
+    var res = { passes: 0, corners: 0, eased: 0, easeMax: 0, rise: 0 };
+    if (!(ctx.sc > 0) || m < 3) return res;
+    var R = new Array(m + 1), Y = new Array(m + 1), d = new Array(m + 1);
+    var req = new Array(m + 1), busy = new Array(m);
+    var i, j, k;
+
+    function rings() {
+      R[0] = ctx.startR; Y[0] = 0;
+      for (i = 0; i < m; i++) {
+        R[i + 1] = list[i].radius;
+        d[i + 1] = list[i].dy;
+        Y[i + 1] = Y[i] - d[i + 1];
+      }
+    }
+    /* Discrete bend radius at ring j, in that round's own stitch heights: the
+       mean of the two segment lengths over the turn between them. */
+    function bendAt(j) {
+      var ax = R[j] - R[j - 1], ay = Y[j] - Y[j - 1];
+      var bx = R[j + 1] - R[j], by = Y[j + 1] - Y[j];
+      var la = Math.sqrt(ax * ax + ay * ay), lb = Math.sqrt(bx * bx + by * by);
+      if (!(la > 0) || !(lb > 0)) return { r: Infinity, th: 0, L: 0 };
+      var th = Math.acos(clamp((ax * bx + ay * by) / (la * lb), -1, 1));
+      var L = (la + lb) / 2;
+      return { r: th > 1e-6 ? L / th / Math.max(list[j - 1].h, 1e-6) : Infinity, th: th, L: L };
+    }
+    /* A frill is not a stuffed corner — it is a buckle whose radial jump no
+       amount of height can round off — so a vertex either side of one is left
+       to its own wave. */
+    function skip(j) {
+      return list[j - 1].ruffle || (j < m && list[j].ruffle);
+    }
+
+    var tries, sharp;
+    for (tries = 0; tries < FILLET_TRIES; tries++) {
+      var pass;
+      for (pass = 0; pass < FILLET_ITERS; pass++) {
+        rings();
+        for (j = 0; j <= m; j++) req[j] = 0;
+        for (j = 0; j < m; j++) busy[j] = false;
+        sharp = 0;
+        var total = 0;
+        for (j = 1; j < m; j++) {
+          if (skip(j)) continue;
+          var b = bendAt(j);
+          if (!(b.r < FILLET_BEND)) continue;
+          sharp++;
+          var need = FILLET_BEND * Math.max(list[j - 1].h, 1e-6) * b.th - b.L;
+          if (!(need > 0)) continue;
+          var ask = 2 * need * FILLET_RELAX;
+          for (k = 1 - FILLET_SPAN; k <= FILLET_SPAN; k++) {
+            var seg = j + k;
+            if (seg < 1 || seg > m) continue;
+            if (list[seg - 1].ruffle) continue;
+            var w = (k === 0 || k === 1) ? 1 : 0.5;
+            var v = ask * w / (2 * FILLET_SPAN - 1);
+            if (v > req[seg]) req[seg] = v;
+          }
+        }
+        if (!sharp) break;
+        res.passes++;
+        for (j = 1; j <= m; j++) {
+          total += req[j];
+          if (req[j] > 0) busy[j - 1] = true;
+        }
+        if (!(total > 0)) break;
+        var found = payRise(ctx, total, busy);
+        if (!(found > 1e-12)) break;          // nothing left to lend
+        var scale = found / total;
+        for (j = 1; j <= m; j++) {
+          if (!(req[j] > 0)) continue;
+          /* ...but never past the stretch ceiling: a round of h-tall stitches
+             cannot rise more than h/(1 - s) however much the corner wants, which
+             is the same limit 01 §1.1's sqrt spends on |dr|. Whatever the ceiling
+             refuses, `renormRise` hands back to the piece at the end. */
+          var e = list[j - 1];
+          var room = Math.max(0, e.h * ctx.stretch - e.dy);
+          e.dy += Math.min(req[j] * scale, room);
+        }
+        res.rise += found;
+      }
+      if (!sharp) break;
+      if (tries + 1 >= FILLET_TRIES) break;
+      /* Height alone cannot round a corner where the profile REVERSES radially
+         — the baphomet's FLO waist turns 96 degrees at a 0.32-wide step — so
+         ease the ring itself toward the chord its neighbours draw. Bounded by
+         FILLET_EASE, slack-scaled, and never applied to the widest ring: the
+         equator is what 01 §2's aspect is measured against and it is not
+         negotiable, so the piece's measured width is still the one the stitch
+         counts asked for. */
+      rings();
+      for (j = 1; j < m; j++) {
+        var e = list[j - 1];
+        if (skip(j) || e.ruffle) continue;
+        if (!(bendAt(j).r < FILLET_BEND)) continue;
+        if (Math.abs((e.radiusMax || e.radius) - ctx.maxR) < 1e-9) continue;
+        var span = Y[j + 1] - Y[j - 1];
+        if (!(Math.abs(span) > 1e-9)) continue;
+        var tgt = R[j - 1] + (R[j + 1] - R[j - 1]) * ((Y[j] - Y[j - 1]) / span);
+        var r0 = e.radius;
+        var lim = FILLET_EASE * ctx.sc * Math.max(r0, R_MIN);
+        var dr = clamp(tgt - r0, -lim, lim);
+        if (!(Math.abs(dr) > 1e-9)) continue;
+        e.radius = Math.max(R_MIN, r0 + dr);
+        e.meanRadius = e.radius;
+        e.ease = (e.ease || 0) + dr;
+        res.eased++;
+        /* measured against the ring the count asked for, so `easeMax` is
+           directly comparable with FILLET_EASE */
+        var frac = Math.abs(e.radius - r0) / Math.max(r0, 1e-6);
+        if (frac > res.easeMax) res.easeMax = frac;
+      }
+    }
+
+    rings();
+    res.corners = 0;
+    for (j = 1; j < m; j++) {
+      if (skip(j)) continue;
+      if (bendAt(j).r < FILLET_BEND) res.corners++;
+    }
+    return res;
+  }
+
+  /**
+   * Run the three stuffed-profile passes over a walked-out round list.
+   * Mutates `dy` and (for the bow and the ease) `radius`; the caller re-walks
+   * `y` from the result. Returns the report `classify` publishes as `stuff`.
+   */
+  function stuffProfile(out, shape, startR, maxR) {
+    var res = {
+      applied: false, slack: shape.slack, scale: 0,
+      lids: 0, lidRise: 0, bowRuns: 0, bowMax: 0,
+      filletPasses: 0, filletRise: 0, corners: 0, eased: 0, easeMax: 0,
+      renorm: 1
+    };
+    if (!out || shape.slack < STUFF_MIN_SLACK) return res;
+    var list = realEntries(out), i;
+    if (list.length < 2) return res;
+    var ctx = {
+      list: list, startR: startR, maxR: maxR,
+      sc: stuffScale(shape.slack), isWall: [], straight: null,
+      /* the most a round of h-tall stitches can rise, 01 §1.1's own ceiling */
+      stretch: 1 / Math.max(0.1, 1 - shape.slack)
+    };
+    for (i = 0; i < list.length; i++) { list[i].li = i; ctx.isWall[i] = false; }
+    ctx.straight = straightRuns(list, startR);
+    for (i = 0; i < ctx.straight.length; i++) {
+      for (var j = 0; j < ctx.straight[i].length; j++) ctx.isWall[ctx.straight[i][j].li] = true;
+    }
+    var height0 = 0;
+    for (i = 0; i < list.length; i++) height0 += list[i].dy;
+
+    var lid = lidDomes(ctx);
+    var bow = wallBow(ctx);
+    var fil = fillet(ctx);
+
+    res.applied = true;
+    res.scale = ctx.sc;
+    res.lids = lid.lids; res.lidRise = lid.rise;
+    res.bowRuns = bow.runs; res.bowMax = bow.max;
+    res.filletPasses = fil.passes; res.filletRise = fil.rise;
+    res.corners = fil.corners; res.eased = fil.eased; res.easeMax = fil.easeMax;
+    res.renorm = renormRise(list, height0);
+    return res;
+  }
+
+  /**
+   * The meridian's tightest bend, in stitch heights, for a classified piece.
+   * Vertices either side of a frill are excluded (`minAll` includes them), and
+   * the first ring is the one `startRadius` opens from, at the first round's own
+   * `yTop` — so the measurement is the same whichever way up the piece is.
+   * @returns {{min:number, at:number, sharp:number, minAll:number, n:number}}
+   */
+  function bendProfile(cls) {
+    var res = { min: Infinity, at: -1, sharp: 0, minAll: Infinity, n: 0 };
+    if (!cls || cls.mode !== 'rounds') return res;
+    var list = realEntries(cls.rounds || []);
+    if (list.length < 2) return res;
+    var R = [startRadius(cls.shape || {}, list[0].radius)];
+    var Y = [list[0].yTop], H = [list[0].h], i;
+    for (i = 0; i < list.length; i++) { R.push(list[i].radius); Y.push(list[i].y); H.push(list[i].h); }
+    res.n = list.length;
+    for (i = 1; i < list.length; i++) {
+      var ax = R[i] - R[i - 1], ay = Y[i] - Y[i - 1];
+      var bx = R[i + 1] - R[i], by = Y[i + 1] - Y[i];
+      var la = Math.sqrt(ax * ax + ay * ay), lb = Math.sqrt(bx * bx + by * by);
+      if (!(la > 0) || !(lb > 0)) continue;
+      var th = Math.acos(clamp((ax * bx + ay * by) / (la * lb), -1, 1));
+      if (!(th > 1e-6)) continue;
+      var r = ((la + lb) / 2) / th / Math.max(H[i], 1e-6);
+      if (r < res.minAll) res.minAll = r;
+      if (list[i - 1].ruffle || (i < list.length && list[i].ruffle)) continue;
+      if (r < res.min) { res.min = r; res.at = i; }
+      if (r < FILLET_BEND) res.sharp++;
+    }
+    return res;
+  }
+
+  function classifyRounds(rounds, shape, flip) {
     var n = rounds.length, i;
     var met = [], sit = [], fit = [], spread = [];
     var bridged = outlierFlags(rounds, 'rounds');
@@ -1119,7 +1658,7 @@
     var straight = ovalOn ? shape.chainLen * SW : 0;
 
     var out = [];
-    var prevR = 0, maxR = 0, ruffles = 0, corners = 0, flattened = 0;
+    var prevR = 0, maxR = 0, ruffles = 0, corners = 0, flattened = 0, grannies = 0;
     var firstR = 0, firstIdx = -1;
     for (i = 0; i < n; i++) {
       if (!met[i].empty && !bridged[i]) {
@@ -1127,6 +1666,50 @@
       }
     }
     prevR = startRadius(shape, firstR);
+
+    /* GRANNY FABRIC (GRANNY_FLAT). Every ring radius is `perimeter / 2pi` and
+       the start radius, so the whole growth series is known before any rise is
+       walked — which is what lets the verdict be about the PIECE and not just
+       the round in hand. `grannyRatio[i]` is the round's growth as a fraction
+       of the k-gon flat rate it is measured against, for the rounds that carry
+       a k-gon rate at all (a measured k, or the text prior's k across the whole
+       walk); a plain ring, a chevron and an oval get none and are untouched.
+       A round is granny fabric when its OWN ratio clears GRANNY_FLAT, or when
+       the piece's does: the median over the piece is robust to the ring-opening
+       round (the hood's round 1 grows out of a ch-6 ring, so its apparent
+       growth is short by the ring) and to one corner space the parser counted
+       differently, and the hood's rounds 1–2 — the start ring and the round
+       around it, still circular because the corners have not formed yet — are
+       the same granny fabric as round 3 whichever height the trebles arrive at.
+       A deliberate bowl has no round over the bar and a low median, so it keeps
+       every bit of its rise. */
+    var grannyRatio = new Array(n);
+    var grannyOn = false;
+    var ovalStart = shape.start === 'chain-oval' && shape.chainLen > 0;
+    var anyPoly = false;
+    for (i = 0; i < n; i++) if (polyK[i]) anyPoly = true;
+    if (prior > 0 || anyPoly) {
+      var gr = [], rPrev = prevR;
+      for (i = 0; i < n; i++) {
+        if (met[i].empty || bridged[i]) continue;
+        var rNow = Math.max(R_MIN, met[i].perimeter / TAU);
+        /* the same kf the walk below picks, for the cases that have one */
+        var kfi = ripple[i] ? 1
+          : polyK[i] ? polygonRatios(polyK[i]).flat
+            : (!ovalStart && prior > 0 && !spread[i]) ? kfPrior : 1;
+        if (kfi > 1 && met[i].hw > 0 && rNow > rPrev) {
+          grannyRatio[i] = (1 - shape.slack) * (rNow - rPrev) / (met[i].hw * kfi);
+          gr.push(grannyRatio[i]);
+        }
+        rPrev = rNow;
+      }
+      if (gr.length) {
+        gr.sort(function (a, b) { return a - b; });
+        var mid = gr.length >> 1;
+        var median = gr.length % 2 ? gr[mid] : (gr[mid - 1] + gr[mid]) / 2;
+        grannyOn = median >= GRANNY_FLAT;
+      }
+    }
 
     for (i = 0; i < n; i++) {
       var mt = met[i];
@@ -1233,7 +1816,15 @@
            DY_MIN floor here, and the loft below spreads the run's rise over
            this round too, so a flat shoulder no longer reads as a hard ledge) */
         if (adrEff > h * kf * (1 + RUFFLE_EPS)) { entry.flattened = true; flattened++; }
-        dy = h * Math.sqrt(Math.max(0, 1 - q * q));
+        /* GRANNY FABRIC (GRANNY_FLAT). A k-gon round growing at 0.55 or more of
+           its own flat rate is a granny round: its clusters splay, so the height
+           the arc walk is dividing by is too tall and the shortfall is not rise.
+           Lay it flat. A ring never reaches here (kf = 1 leaves grannyRatio
+           unset), and a bowl at 0.37 of the rate keeps its arc. */
+        if (grannyRatio[i] != null && (grannyOn || grannyRatio[i] >= GRANNY_FLAT)) {
+          entry.granny = true; grannies++;
+          dy = 0;
+        } else dy = h * Math.sqrt(Math.max(0, 1 - q * q));
       }
       if (dy < DY_MIN * h) dy = DY_MIN * h;
 
@@ -1246,7 +1837,12 @@
         } else if (kind === 'polygon') {
           var nfk = flatRate(mt.h * SH_SC, 1) * kf;
           var dnk = i > 0 ? mt.count - met[i - 1].count : mt.count;
-          var sharp = Math.abs(dnk - nfk) <= 0.25 * nfk ? SHARP_FLAT : SHARP_SOFT;
+          /* 01 §1.4's own words for SHARP_FLAT are "granny corners", so a round
+             the granny rule laid flat takes them whatever the rate test makes of
+             its height — otherwise the hood's cross-section changed shape when
+             its trebles changed height, at the same flat fabric. */
+          var sharp = entry.granny || Math.abs(dnk - nfk) <= 0.25 * nfk
+            ? SHARP_FLAT : SHARP_SOFT;
           entry.kind = 'polygon';
           entry.corners = polyk;
           entry.prof = profilePolygon(polyk, polyPhase[i], sharp);
@@ -1286,7 +1882,15 @@
        on the stuffed-sphere law, then re-walk `y` from the new rises. The
        run totals are preserved, so `height`, the equator and every aspect in
        01 §2 are exactly what the arc walk produced. */
-    loftDomes(out, shape, startRadius(shape, firstR));
+    var startR = startRadius(shape, firstR);
+    loftDomes(out, shape, startR);
+
+    /* ...and a STUFFED one is not a drum either (the STUFF_* note above): the
+       flat lid domes, the straight wall bows, and no corner of the meridian
+       bends tighter than the fabric can. Height in, height out, so `height`,
+       the equator and every aspect in 01 §2 are still the arc walk's own. */
+    var stuff = stuffProfile(out, shape, startR, maxR);
+
     var yWalk = 0;
     for (i = 0; i < out.length; i++) {
       out[i].yTop = yWalk;
@@ -1294,7 +1898,10 @@
       out[i].y = yWalk;
     }
     var height = -yWalk;
-    /* the equator is the CENTRE of the max-radius plateau (01 §1.6) */
+    /* the equator is the CENTRE of the max-radius plateau (01 §1.6), still
+       measured on the rings the counts asked for: the fillet's radial ease
+       never touches the widest ring and the wall bow never touches `radius`
+       at all, so this picks exactly the rounds it picked before */
     var first = -1, last = -1;
     for (i = 0; i < out.length; i++) {
       if (out[i].empty || out[i].outlier) continue;
@@ -1302,26 +1909,62 @@
     }
     var eqY = 0;
     if (first >= 0) eqY = -((out[first].y + out[last].y) / 2);
+
+    /* THE RING THAT GETS DRAWN. `radius` is the fabric's own, from the stitch
+       count; `radiusDraw` adds the cosmetic wall bow, and `radiusMax` /
+       `radiusMin` — the reach the fit reserves and the renderer's `radMax` —
+       follow it, so a bowed wall is never clipped. `maxRadius` above
+       deliberately does not, which is why no aspect in 01 §2 moves. */
+    for (i = 0; i < out.length; i++) {
+      var rg = profileRange(out[i].prof);
+      out[i].radiusDraw = out[i].radius * (1 + (out[i].bow || 0));
+      out[i].radiusMax = out[i].radiusDraw * rg.max;
+      out[i].radiusMin = out[i].radiusDraw * rg.min;
+    }
+
+    /* ORIENTATION (`layout(model, {upsideDown:true})`, `shape.upsideDown`).
+       A part the text works from the bottom up — "starting from the bottom of
+       the body", "start at the base" — is the same fabric the other way up, so
+       nothing above changes: only the finished piece is mirrored. `y` is
+       reflected about the piece's own mid-height, so it still occupies
+       [-height, 0] and the fit, the contact shadow and the ghost cage need no
+       special case; `closedTop` / `closedBottom` swap, because they name the
+       piece's geometric ENDS rather than its rounds (`shape.closedTop` and
+       `shape.closedBottom` keep naming round 1's ring and the gather, which is
+       what the renderer needs to know WHICH BAND each cap belongs to); and the
+       equator is still a fraction of the height measured from the top. */
+    if (flip) {
+      for (i = 0; i < out.length; i++) {
+        out[i].yTop = -out[i].yTop - height;
+        out[i].y = -out[i].y - height;
+      }
+      if (height > 0) eqY = height - eqY;
+    }
+
     return {
       mode: 'rounds',
       rounds: out,
       slack: shape.slack,
       form: shape.form,
       shape: shape,
-      closedTop: shape.closedTop,
-      closedBottom: shape.closedBottom,
+      upsideDown: !!flip,
+      closedTop: flip ? shape.closedBottom : shape.closedTop,
+      closedBottom: flip ? shape.closedTop : shape.closedBottom,
       height: height,
       maxRadius: maxR,
       width: 2 * maxR,
       aspect: maxR > 0 ? height / (2 * maxR) : 0,
       equatorFrac: height > 0 ? clamp(eqY / height, 0, 1) : 0,
       equatorRound: first >= 0 ? Math.round((first + last) / 2) : -1,
+      stuff: stuff,
       corners: corners,
       cornersSource: corners ? (priorRounds > 0 && corners === prior ? shape.cornersSource || 'text' : 'sites') : null,
       priorK: prior,
       priorRounds: priorRounds,
       outliers: countTrue(bridged),
       flattened: flattened,
+      granny: grannies,
+      grannyFabric: grannyOn,
       ruffles: ruffles
     };
   }
@@ -1424,6 +2067,10 @@
       shape: shape,
       closedTop: false,
       closedBottom: false,
+      /* Rows mode walks UPWARD already — row 1 sits at y = 0 and the sheet
+         grows over it — so a sheet is worked from the bottom up by
+         construction and `upsideDown` has nothing to flip. */
+      upsideDown: false,
       anchor: anchor,
       height: totalH,
       width: maxW,
@@ -1438,6 +2085,9 @@
       outliers: countTrue(bridged),
       rowsDrawn: rowCount,
       flattened: 0,
+      granny: 0,
+      grannyFabric: false,
+      stuff: null,
       ruffles: 0
     };
   }
@@ -1452,8 +2102,8 @@
    * `prof` is a radius MULTIPLIER, blended from the ring above (t = 0) to the
    * round's own ring (t = 1); null means a circle.
    */
-  function layout(model) {
-    var cls = classify(model);
+  function layout(model, opts) {
+    var cls = classify(model, opts);
     var rounds = cls.rounds, i;
     var bands = [];
 
@@ -1486,13 +2136,16 @@
         var e = rounds[i];
         if (e.outlier) { bands.push(null); continue; }   // bridged: see above
         var prof = blendProfiles(prevProf, e.prof);
+        /* `radiusDraw` is the ring plus the cosmetic wall bow (1.3.0); it falls
+           back to `radius` for a Model the stuffed profile never touched. */
+        var rDraw = e.radiusDraw > 0 ? e.radiusDraw : e.radius;
         bands.push({
-          rTop: prevR, rBot: e.radius, yTop: e.yTop, yBot: e.y, reach: e.h,
+          rTop: prevR, rBot: rDraw, yTop: e.yTop, yBot: e.y, reach: e.h,
           prof: prof, kind: e.kind, corners: e.corners, ruffle: e.ruffle,
-          radMax: Math.max(prevR, e.radiusMax || e.radius),
+          radMax: Math.max(prevR, e.radiusMax || rDraw),
           sig: (prof && prof.sig ? prof.sig : 0)
         });
-        prevR = e.radius;
+        prevR = rDraw;
         prevProf = e.prof;
       }
     }
@@ -1608,7 +2261,7 @@
   /* --------------------------------------------------------------- exports */
 
   global.DiagramGeo = {
-    version: '1.2.0',
+    version: '1.3.0',
 
     // constants (read-only by convention; the test page prints them)
     SW: SW,
@@ -1626,9 +2279,16 @@
     CUP_STRAIGHT: CUP_STRAIGHT,
     RUFFLE_EPS: RUFFLE_EPS,
     RUFFLE_RISE: RUFFLE_RISE,
+    DY_MIN: DY_MIN,
     STUFFED_FLAT_TOL: STUFFED_FLAT_TOL,
     CLOSE_COUNT: CLOSE_COUNT,
     LOFT: { blendAt: LOFT_BLEND_AT, minRun: LOFT_MIN_RUN },
+    STUFF: {
+      minSlack: STUFF_MIN_SLACK,
+      filletBend: FILLET_BEND, filletSpan: FILLET_SPAN, filletEase: FILLET_EASE,
+      filletKeep: FILLET_KEEP,
+      wallBow: WALL_BOW, wallBowMin: WALL_BOW_MIN, lidSag: LID_SAG
+    },
     FIT: {
       minRadiusFrac: FIT_MIN_RADIUS_FRAC, maxOverscale: FIT_MAX_OVERSCALE,
       minHeightFrac: FIT_MIN_HEIGHT_FRAC, maxOverscaleRows: FIT_MAX_OVERSCALE_ROWS,
@@ -1637,6 +2297,7 @@
     POLY: {
       ks: POLY_KS, priorKs: POLY_PRIOR_KS, priorFrom: POLY_PRIOR_FROM,
       run: POLY_RUN, minPerSite: POLY_MIN_PER_SITE, flatTol: POLY_FLAT_TOL,
+      grannyFlat: GRANNY_FLAT,
       sharpFlat: SHARP_FLAT, sharpSoft: SHARP_SOFT
     },
     OUTLIER: {
@@ -1660,6 +2321,10 @@
     outlierFlags: outlierFlags,
     sphereArc: sphereArc,
     loftRadius: loftRadius,
+    capDepth: capDepth,
+    monotoneRuns: monotoneRuns,
+    straightRuns: straightRuns,
+    bendProfile: bendProfile,
     isFinished: isFinished,
     rowsAnchor: rowsAnchor,
 

@@ -87,6 +87,29 @@ Part = {
                                     // parser could not name updates itself instead of being
                                     // appended as 'Part 10', 'Part 11', … (13 #7). '' when the
                                     // part was made by hand.
+
+  // --- per-part crochet rendering hints (3D waves B–D). Crochet only. -----
+  workMode: 'auto'|'rounds'|'rows',        // default 'auto'. Rounds vs rows is a
+                                    // property of the PIECE, not the project (05 #2).
+                                    // Resolved by `Store.partWorkMode`.
+  orientation: 'auto'|'top-down'|'bottom-up',  // default 'auto'. The model always
+                                    // grows DOWNWARD from round 1, so a piece the
+                                    // designer worked from its base renders upside
+                                    // down until something says so. 'auto' reads the
+                                    // part's own text ("starting from the bottom of
+                                    // the body"); `Model.shape.upsideDown` carries the
+                                    // verdict and `DiagramGeo.layout` does the flip.
+  dialect: 'auto'|'uk'|'us',        // default 'auto'. UK and US crochet COUNT the same
+                                    // (sc/dc/tr are one-for-one), so this never moves a
+                                    // stitch count — it moves HEIGHTS, which is the whole
+                                    // of the 3D diagram: a UK `tr` is a US `dc` (h 2.01),
+                                    // a US `tr` is a round taller (h 2.68). 'auto' asks
+                                    // this piece's own text through `Patterns.dialectHints`
+                                    // and `importPatternSections` seeds it from the WHOLE
+                                    // document, because a section that writes nothing but
+                                    // `tr`, `dc` and `ch` is undecided on its own (the
+                                    // Stylecraft hood motif came out 33 % too tall).
+                                    // There is no UI for this yet.
 }
 ```
 
@@ -435,7 +458,7 @@ Status change sheet: Active / Paused / Finished / Frogged with short explanation
 - `index.html` has `<link rel="apple-touch-icon">`, `apple-mobile-web-app-capable`, `apple-mobile-web-app-status-bar-style` = `black-translucent`, viewport `viewport-fit=cover`.
 
 
-## Live 3D diagram (branch `feature/live-diagram`)
+## Live 3D diagram
 
 Goal: inside the big stitch button, show the piece being made as a **slowly rotating 3D model**, updated in real time as the user taps. A round-worked piece is a **stack of rings** (one ring per round, ring circumference = stitch count), which is a solid of revolution: sphere for increase-then-decrease, cone for a horn, tube for a body. Each stitch is a small bump on its ring, coloured by yarn. A row-worked piece is a gently curved sheet of stitch bumps. Colours come from the pattern (colour changes, colour prefixes, legends) or the user's yarn colour settings. The current round shows only the stitches tapped so far; future rounds from the pattern are faint wireframe ghosts. With no pattern, the model is built purely from what was actually tapped.
 
@@ -457,6 +480,49 @@ Patterns.colorHex(name) → '#rrggbb' | null
 ```
 Rules: colour state flows row to row: `In Twilight :`, `In Color A`, `With MC`, `Using yellow` set the base colour (from notes attached to the row or header lines before it); `Colour change to black`, `change to Color B`, `switch to yellow` attached to row N sets the base from row N; `Fasten off Almond` ends a secondary colour; prefixes `A (Sc 5)`, `S (Dec x 12)`, `MC: sc 6`, `(in B) sc 3` colour just that group; `Rnd 5 (yellow): ...` colours the row. When a row cannot be evaluated but has a count, emit `count` × `{t:'x', c:null}`. Never throw; on any failure return `count` generic stitches. `colorHex` knows ~120 yarn colour words (black, white, cream, ivory, almond, sand, beige, tan, brown, chocolate, twilight → dark navy, navy, teal, sage, mint, forest, olive, lime, yellow, mustard, gold, orange, coral, peach, pink, blush, rose, red, burgundy, maroon, purple, lavender, lilac, plum, grey/gray, silver, charcoal, sky, baby blue, denim, turquoise, aqua, ...) and returns null for `Color A`, `MC`, `CC` and unknown words (the app maps those).
 
+**`expand` v2** (waves B–D) returns one record per **ring position**, not per stitch:
+```js
+Patterns.expand(lines, rowNumber, prevCount, state) → {
+  stitches: [ { t, c, h: number, w: number } ],   // per-stitch HEIGHT and WIDTH in sc units
+  color, height,               // `height` is the round's dominant stitch, as before
+  width: number,               // the round's total width — the sum of the w's
+  inc: number[], dec: number[],// stitch INDEXES where the round increases / decreases
+  state: object
+}
+```
+- `t` gains `'inc+'` (a 3-into-1 or larger increase) beside `'inc'` / `'dec'`, and longhand
+  increases (`2 dc in the next st`) are read as increases rather than as two plain stitches.
+- **Width by consumption.** A group worked into one anchor shares that anchor's width between its
+  members (`shares`), so a shell and the chain space it sits in are the size they really are; a
+  chain that closes into a loop spans its chord, not its length (`Patterns.LOOP_CHAIN_W` = 0.75,
+  exported for the geometry owner). This is why a round can carry more records than its count.
+- **Motif anchors** (§9b): how many corners, chain spaces and group-gaps the round **below** left
+  is the only place a motif round's repeat count is written down, so `(3 dc, ch 3, 3 dc) in each
+  corner sp` is expanded against the round below rather than guessed. Open-fill rows consume the
+  row below.
+- **Repeat back-references**: `Rnds 4-15: rep Rnd 3` re-reads the row it points at *here*, against
+  the count this row starts from, so every stitch, increase position and per-stitch height comes
+  out of that reading instead of a generic run. A row with no count anywhere cannot hold more ring
+  positions than the row below did (its chain spaces would compound every repeat).
+- UK dialect is honoured for **heights**, never for counts (see `Part.dialect`).
+
+**Shape and document hints** (all pure, all null-safe, none ever throw):
+```js
+Patterns.startHint(lines) → { start: 'magic-ring'|'chain-ring'|'chain-oval'|'chain-row'|'unknown',
+                              chainLen: number, ringCount: number }
+Patterns.workMode(text)     → 'rounds' | 'rows' | null   // row/round markers, then vocabulary
+Patterns.stuffingHint(text) → true | false | null        // null = the pattern never says
+Patterns.dialectHints(text) → { uk, us, dialect: 'uk'|'us'|null, craft, tokens, … }
+Patterns.gauge(text)        → { stsPer10cm, rowsPer10cm, stsPer4in, rowsPer4in,
+                                stitch, source, estimated }
+```
+`gauge` reads every house's spelling of the gauge box (`9 hdc and 6 rows = 4"`,
+`Tension: 16 sts x 20 rows to 10 cm`, and the rows-less `12 dc = 4"`, finished off from the
+stitch's own height and flagged `estimated`), converting 4 in and 10 cm properly rather than
+treating them as the same swatch. It exists so **"work until it measures 59″" can become a row
+count**: the pattern told you the rows two pages earlier. With no gauge anywhere, one sc row is
+assumed to be 5 mm and everything derived from it is `estimated`.
+
 **2. Renderer (`js/diagram.js`, `window.Diagram` v1.3) — 3D, WebGL**
 
 **Model v2** (what `Store.diagramModel` returns; v1 — no `shape`, no `inc`/`dec`, no
@@ -474,11 +540,23 @@ Model = {
     ghost: boolean,                // planned from pattern, not started
     inc: number[], dec: number[],  // stitch indexes where this round increases / decreases
     row: number,                   // 1-based WORK row this round draws
+    outlier: boolean,              // the count is a wild outlier from its neighbours,
+                                   // i.e. a line the parser misread. Never undefined.
+                                   // `DiagramGeo` bridges it: no band, and it is left
+                                   // out of the piece's width, height and aspect.
+    truncated: boolean,            // `stitches` is a SAMPLE of the round, not all of it
+                                   // (over `STITCH_DETAIL_MAX` = 999 records). The
+                                   // `count` itself is never truncated.
   } ],
   current: number,                 // index of the round being worked
   defaultColor: '#hex',
   shape: { start: 'magic-ring'|'chain-ring'|'chain-oval'|'chain-row'|'unknown',
-           chainLen: number|null, ringCount: number|null, stuffed: boolean|null },
+           chainLen: number|null, ringCount: number|null, stuffed: boolean|null,
+           corners: 0|3|4|6|8,                      // polygon prior: how many corners
+           cornersSource: 'sites'|'text'|null,      // measured increase sites, or the text
+           upsideDown: boolean,                     // round 1 belongs at the BOTTOM
+           upsideDownSource: 'part'|'text'|null,    // the chip, or the pattern's words
+           dialect: 'uk'|'us'|null },               // resolved stitch-height dialect
   window: { first: number, total: number },     // rounds[0] is work row `first` of `total`
   deviation: { expected: number|null, actual: number },  // the pattern's count for the
                                  // working round vs the stitches tapped into it; `expected`
@@ -547,9 +625,13 @@ DiagramGeo.layout(model) → classify(model) + `bands`, one per round, ready to 
     rounds: { rTop, rBot, yTop, yBot, reach, prof(θ,t), sig, kind, corners, ruffle, radMax }
     rows:   { rTop, rBot, yTop, yBot, reach, Rc, x0, width, anchor, sig }
     `prof` is a radius MULTIPLIER (polygon / stadium / ripple cross-section), null = a circle.
-DiagramGeo.fit({ rad, ymin, ymax, halfW, halfH, cp, sp, curY, mode })
-  → { scale, base, clamp: ''|'radius'|'height', cy, radFrac, heightFrac }
+DiagramGeo.layout(model, { upsideDown })          // forces the orientation flip
+DiagramGeo.fit({ rad, ymin, ymax, halfW, halfH, cp, sp, curY, mode,
+                 purpose: 'button'|'viewer'|'gallery', finished, model })
+  → { scale, base, clamp: ''|'radius'|'height', cy, radFrac, heightFrac,
+      purpose, finished, letterbox }
 DiagramGeo.arcSlices(prof, wt, n, a0Out, awOut)   // stitch width follows ARC LENGTH
+DiagramGeo.version                                // '1.3.0'
 ```
 The renderer **consumes** `fit` rather than re-deriving it: `clamp: 'radius'` keeps a very long
 thin tail from being cropped to a hairline, `clamp: 'height'` lets a 405-stitch row overflow
@@ -557,6 +639,38 @@ sideways with the worked row centred (`cy = curY`, which the ghost floor is not 
 off). `getStats().fitClamp` reports the clamp that actually bound the final scale, with
 `+solid` appended when the ghost floor took over. `index.html` loads `js/diagram-geo.js`
 **before** `js/diagram.js`, and `sw.js` precaches it.
+
+**Two fit purposes, not one** (07 D2). `purpose: 'button'` (the default) is the piece being
+**counted**: a 405-stitch row fitted to the width is a hairline, so the scale is pushed up until
+the fabric fills `FIT_MIN_HEIGHT_FRAC` (0.40) of the height and the sheet overflows sideways with
+the worked row centred — bounded by `FIT_MAX_WIDTH_FRAC` (1.5), so the silhouette overflows the
+frame by at most half, never the 4.5× the wrap and 8× the throw were getting. `purpose: 'viewer'`
+/ `'gallery'`, `finished: true`, or a model whose rounds are **all worked** is the piece being
+**looked at**: letterbox it at its honest scale, so a rectangle is seen as a rectangle. A finished
+piece letterboxes in the button too — there is no current row left to centre on. `purpose` /
+`finished` / `letterbox` in the result say which policy ran, and the host passes the purpose
+(`js/app.js` for the button and the viewer, the gallery page for itself).
+
+**The geometry rules, and the constant each one is spelled with** (`js/diagram-geo.js` v1.3.0;
+every constant is re-exported on `DiagramGeo` so `test/diagram.test.html` prints it):
+
+| rule | what it does | constants |
+|---|---|---|
+| stitch metrics | one round's `perimeter` is the **sum of every stitch record's width**, not `count × SW` — a row may carry MORE records than its count (a chain space or a shell shares the width of what it is worked into), and clamping to `count` halved a mesh row. `h` is the **tallest**/dominant stitch of the round, or the width-weighted mean when no height owns half of it | `SW` 1.0, `SH_SC` 0.95, `STITCH_H` (hdc 1.34, dc 2.01, tr 2.68, dtr 3.35, sl 0.3, ch 0, bbl 1.68, puff 1.79), `STITCH_W` (sl 0.7, bbl/puff 1.15) |
+| radius | `r = perimeter / 2π`, floored | `R_MIN` 0.42, `RING_START` 0.30, `RING_START_FRAC` 0.34 |
+| arc walk with slack | `dy = h·sqrt(1 − ((1−s)·abs(dr)/h)²)` — "+6 sc lies flat", "no change is a cylinder" out of one line. `s` is the stuffing slack | `SLACK` stuffed 0.35, firm 0.45, unstuffed 0.05, open 0.00, shaped 0.20, bowl 0.10; `DY_MIN` 0.02 |
+| open-rim forms (`formOf`) | 01 §1.3 gives every open-rim piece slack 0, which is right for a doily and wrong for everything domed. The count sequence decides: increases → **≥ 2 straight rounds** → stop open = cup/dome/hat (slack `shaped`, or stuffed when the text says so); increases → stop open = flat disc/bowl (slack 0, the sqrt alone picks which); a small unstuffed piece that decreases a little = shallow bowl | `CUP_STRAIGHT` 2, `BOWL_MAX_ROUNDS` 8, `BOWL_MIN_END` 0.5, `FLAT_TOL` 0.85 |
+| ruffle gate, slack-aware | a round frills only past the **slack-adjusted** flat rate. On a piece held out from inside, surplus up to 1.5× is pressed flat (a wide annulus, still a ring); a doily's picot round, with nothing pressing outward, still buckles | `RUFFLE_EPS` 0.08, `RUFFLE_RISE` 0.12, `STUFFED_FLAT_TOL` 1.5 |
+| closure | one threshold for "the yarn was pulled shut", used by both `closedBottom` and `closesIn` | `CLOSE_COUNT` 9 |
+| sphere-law dome loft | a magic-ring spiral is a dome, not a cone: each monotone run's rise is redistributed on `r = R·sin φ`, `y = R(1 − cos φ)` with the fabric's own arc, **keeping the run's total**, so every aspect in 01 §2 is unchanged and only the curvature is new. Blended in by slack | `LOFT.blendAt` 0.35, `LOFT.minRun` 2 |
+| stuffed profile | three passes that move the profile and not one measured number: a **fillet** limiting the meridian's bend radius (rings move along `y`, borrowing height from the straight run and giving it back; a last-resort radial ease, never on the widest ring), a **wall bow** on the middle of a straight run — declared cosmetic, carried as `bow`/`radiusDraw`, never measured — and a **lid dome** giving a past-the-flat-rate run a shallow spherical sagitta instead of a tin lid | `STUFF.minSlack` 0.20, `filletBend` 1.2, `filletSpan` 2, `filletEase` 0.04, `filletKeep` 0.30, `wallBow` 0.05 (`wallBowMin` 3 rounds), `lidSag` 0.15 |
+| polygon / oval / ripple classification | increase **sites** that cluster into a `k` give a k-gon cross-section; a *spread* increase (k even sites gaining under `minPerSite` each, i.e. "+6 sc per round") is a positive verdict for a **circle** and the text prior may not overrule it | `POLY.ks` [4,6,8,3], `run` 3, `POLY_OCCUPANCY` 0.8, `minPerSite` 1.8, `sharpFlat` 0.75, `sharpSoft` 0.45, `RIPPLE_AMP` 0.06, `OVAL_MIN_END` 0.15 |
+| text corner prior | `shape.corners` fills the rounds the sites cannot speak for, because `expand` returns no positioned `inc` for `(3 dc, ch 3, 3 dc) in corner sp`. Rounds 1–2 stay circular (the corners have not formed); the **k-gon flat rate** `kf = k·tan(π/k)/π` (1.273 for a square, 1.103 for a hexagon) applies to the whole walk, or a flat granny square ruffles; a prior round may run past that rate and still lie flat, because the text is independent evidence and the stitch height is the soft number | `POLY.priorKs` [3,4,6,8], `priorFrom` 2, `flatTol` 1.5 |
+| granny flat rule | the other side of `flatTol`: three trebles worked into one chain space **fan out**, so a k-gon round growing at `grannyFlat` or more of its own flat rate is granny fabric — `dy = 0`, `granny: true`. Below it a piece may still cup (a bowl with stacked corners is a real bowl); above `flatTol` it still ruffles. Taken for the PIECE too (`grannyFabric`, the median over its k-gon rounds), so a motif's two circular opening rounds lie flat with the rest of the same fabric. A plain ring has `kf = 1` and is never asked | `POLY.grannyFlat` 0.55 |
+| chain-ring opening | a round 1 worked into a small chain ring opens out from the **ring**, like a magic ring, not from its own circumference — guarded by `chainR < firstR` so a 240-chain cowl is untouched | — |
+| outlier bridging | a round the store flagged `outlier` — or, absent the flag, a rows-mode row under `frac` of the running median of the rows before it — gets no band, joins the rows above and below, and is left out of the piece's width, height and aspect. Rows-only fallback, so a piece that grows from 3 stitches is safe | `OUTLIER.frac` 0.20, `minMedian` 8, `minBefore` 1 |
+| tallest-stitch row height | a rows-mode row is as tall as its dominant stitch, from the same metrics as a round | `SHEET_CURVE` 3 (sheet bend radius, in widths) |
+| orientation flip | `layout(model, {upsideDown})` — or `model.shape.upsideDown` — mirrors `y` about the piece's mid-height (the piece still occupies `[-height, 0]`) and swaps `closedTop`/`closedBottom`, because those name the piece's geometric **ends**. `shape.closedTop`/`shape.closedBottom` keep naming round 1's ring and the gathered close, which tells the renderer which BAND each cap belongs to. Rows mode already walks upward, so a sheet is unaffected | — |
 
 - **Geometry, rounds mode**: ring i has radius `R_i = max(R_min, count_i * SW / 2π)` and sits at height `y_i = -Σ height_k * SH` (round 1 at the top; the piece grows downward). Between consecutive rings build a triangle strip. Each stitch of a ring occupies an angular slice; subdivide each slice into 4 segments and displace the middle vertices outward (+bump) and the slice edges inward, so the surface reads as a knobby crochet texture; `inc` slices are wider, `dec` narrower, `sl`/`ch` flat. Vertex colour = stitch colour (or the round colour). Round 0/1 stitches (magic ring) = a small cap. The ring being worked: only `done` slices are solid; the remaining slices of that ring are drawn as a translucent wireframe **grid** in `palette.ghost` at alpha 0.72 (cells waiting to be filled), and every future round as a single bare **ring** at alpha 0.20 — a full grid on every planned round reads as a cage at button size. Close the top with a cap when round 1 is a magic ring; leave the bottom open (you see inside a tube slightly, which looks right).
   The stitch bump must taper to zero at the top and bottom edge of its band. Consecutive rounds have different stitch counts and different per-stitch amplitudes, so any bump left at the shared ring makes the two bands disagree about its radius and hairline cracks of background show between every round.
@@ -576,11 +690,13 @@ off). `getStats().fitClamp` reports the clamp that actually bound the final scal
 - `Project.yarnColors: { [name]: '#hex' }` with reserved key `'*'` = main yarn colour (default warm cream `#f1e3c8`).
 - `Store.diagramModel(part, project) → Model`: rows 1..max(part.row + 1, pattern maxRow, rowStitches.length); per row: if a pattern line exists → `Patterns.expand` (state carried row to row), colours resolved as `yarnColors[name] || Patterns.colorHex(name) || yarnColors['*']`; else if `rowStitches[row]` → that many generic stitches in the main colour; else if it is the current row → `count = max(part.stitch, target || 0)`; `done` from rowStitches / part.stitch; `ghost = row > current`. Cache per part (key: patternText, sizeIndex, yarnColors, row, rowStitches.length, `partWorkMode`) and on the tap path only mutate the current round's `done`/`count`. It returns **Model v2**: per-stitch `h`/`w`, `inc`/`dec` positions, the round's own `row`, `shape` from `Patterns.startHint`/`stuffingHint`, a `window` of rounds anchored to the round being **worked** (not to the end of the pattern), and `deviation`.
 - **Rounds vs rows is a property of the PIECE** (05 #2). `Part.workMode: 'auto' | 'rounds' | 'rows'` (default `'auto'`, set through `updatePart`). `Store.partWorkMode(part, project)` resolves it in order: the owner's explicit `workMode`, then what `Patterns.workMode(patternText)` says, then `Project.countMode` as the tie-break. Everything that labels one part's counter goes through it — the ROW/ROUND caption, the pattern-line tag, the viewer readout — and so does `Store.diagramModel`. The part editor carries a **"Worked in: Auto / Rounds / Rows"** segmented control whose Auto row says what it resolves to for the text in the box right now ("Auto — this pattern reads as rounds."), and the 3D viewer carries the same three chips. One project-level word used to decide the shape of seven different pieces, and an amigurumi imported as `'rows'` modelled a tail that begins `R1: MR4` as a flat sheet.
-- **`Store.importPatternSections` reports `modeFlipped`** when every section reads as rounds and it moved the project off `'rows'`. The app says so once, in a toast: *"This pattern is worked in rounds — switched the project to Rounds"*. Nothing else in the UI would ever mention it, and the flip is the difference between a tail rendering as a tail and rendering as a blanket.
+- **The other two per-part resolvers, same pattern.** `Store.partShape(part)` builds the whole `Model.shape` — `Patterns.startHint` / `stuffingHint`, the corner prior (`sites` from measured increase positions, else `text`), the orientation verdict (`part` chip → the part's own text → null) and the dialect. `Store.partDialect(part)` resolves `Part.dialect`: the owner's explicit `'uk'`/`'us'`, else this piece's own text through `Patterns.dialectHints`, else whatever the imported document said. `Store.roundDeviation(part)` is unchanged. All of them are in the `diagramModel` cache key.
+- **`Store.importPatternSections` reports `modeFlipped`** when every section reads as rounds and it moved the project off `'rows'`, and **`dialectSet`** (a count of parts) when `opts.text` — the WHOLE document — carried a dialect onto sections whose own text was undecided. A part whose `dialect` is already an explicit `'uk'`/`'us'` is never touched. The app says so once, in a toast: *"This pattern is worked in rounds — switched the project to Rounds"*. Nothing else in the UI would ever mention it, and the flip is the difference between a tail rendering as a tail and rendering as a blanket.
 - **`Store.roundDeviation(part) → { expected, actual, row, delta }`** (05 #6): the pattern's count for the round being worked against the stitches actually tapped into it. `expected` is `null` when the pattern never stated one, and is never compared against a count the store invented. When `delta > 0` the counter shows one quiet inline line under the stitch readout — *"3 more than the pattern's 24"* — and the renderer draws the surplus stitches in `palette.alert`. Never modal.
 - **The piece gets its own region of the stitch button** (05 #1). `STITCHES`, a 90 px numeral and the `TAP` pill used to run down the exact centre of the button, which is exactly where a round-worked solid of revolution is: on the 6-round Ear the whole model sat behind the `STITCHES` pill. With the live diagram on, the caption and the number are one row pinned to the **top** of the button (`.stitch-head`, numeral at 0.68 × `--counter-size`), the hint is a hairline at the bottom that fades once the piece has been counted on, and everything between belongs to the piece. `js/app.js` measures that row and passes it as `handle.setSafeInsets({top, right, bottom, left})`, so the fit box is the free area rather than the canvas and the projection is shifted to centre the piece in it. The whole button stays the tap target, and without the diagram the old centred stack is unchanged.
 - App: `<canvas id="stitch-canvas">` inside `#stitch-btn` behind the caption/number (absolute, inset 0, `pointer-events:none`; number/caption get a soft text shadow), `Diagram.mount` when the project screen renders, `setModel(..., {animate:'stitch'})` on the tap fast path, `'round'` on row completion, `setPalette` on theme change, `destroy` when leaving. The canvas is `pointer-events: none`, so the stitch button's own pointer handlers drive rotation through `handle.dragStart/dragMove/dragEnd` once the pointer passes the 12px tolerance (see "UX rules"); the handle is also parked on the canvas element as `canvas.diagram` so `getStats()` can be read from a console.
 - **Long patterns do not mount the live canvas** (13 #5). `Store.diagramModel` rebuilds the whole piece whenever the row changes, and that build walks every row looking each one up, so its cost grows with the square of the pattern length: measured in the Browser pane, a completed row cost ~1,040 ms on a 1,500-row pattern (a sixth of a second was already visible at 500 rows) while a 60-row amigurumi stays under a millisecond. Stitch taps were always cheap — the model is cached — but a row tap froze the counter, which is the one interaction that must never stutter. So App will not ask for a live model past `DIAGRAM_MAX_LIVE_ROWS`, or for any build measured over 60 ms (remembered per part): the canvas inside the tap button is not mounted, `pushDiagram` is a no-op, and the piece is built only when the user opens the 3D viewer on purpose. **That real fix has landed** — `Store.diagramModel` builds a row → line index once instead of calling `lineForRow` inside the loop, and a 1,500-row pattern now builds in under 60 ms — so `DIAGRAM_MAX_LIVE_ROWS` is **2,000**. The measured-time guard and `partIsHeavy` stay as the safety valve for whatever the row count does not predict.
-- A **⤢ 3D view** button in the stitch actions row (never inside the tap surface — see Screens) opens the **3D viewer sheet**: full-height canvas with `interactive: true`, the part name, round/stitch readout, and a Yarn colours button. Above the stage it shows **the resolved shape class and its size in stitch units** from `DiagramGeo.classify` — "Sphere · 15 rounds · 48 around", "Capsule · 42 rounds · 15 around", "Flat panel · 46 rows · 405 wide" — beside the **Auto / Rounds / Rows** chips that write `Part.workMode`. Opening the viewer **closes the button's GL context** and closing it rebuilds one, so the app never holds more than one context and repeated opens can never leave a blank canvas; if there is no piece on screen the stage carries a one-line footer ("Showing a simple outline — 3D isn't available right now") instead of a flat slab of `--primary`. Settings toggle **Live diagram** (default on; off removes the canvas). New sheet **Yarn colours** (project overflow menu + from the viewer): Main yarn plus every name from `Patterns.colors` across the project's parts, each with `<input type="color">` and the resolved swatch; edits update the model live.
+- A **⤢ 3D view** button in the stitch actions row (never inside the tap surface — see Screens) opens the **3D viewer sheet**: full-height canvas with `interactive: true`, the part name, round/stitch readout, and a Yarn colours button. Above the stage it shows **the resolved shape class and its size in stitch units** from `DiagramGeo.classify` — "Sphere · 15 rounds · 48 around", "Capsule · 42 rounds · 15 around", "Flat panel · 46 rows · 405 wide" — beside the **Auto / Rounds / Rows** chips that write `Part.workMode` and the **Auto / Top-down / Bottom-up** chips that write `Part.orientation` (each set has a one-line hint under it saying what Auto resolved to and why; both stay in step with the store, so an Undo or a chip tapped in the part editor moves them).
+  **The shape names** (`shapeName` in `js/app.js`): rounds mode gives `Triangle motif` / `Square motif` / `Hexagon motif` / `Octagon motif` when anything knows the corner count (`shape.corners` or the geometry's own), then `Ruffle`, then by aspect and caps — `Bobble` / `Flat circle` under 0.38, **`Egg`** for a closed top over 1.2 (`Capsule` from 2.4), `Sphere` for a closed top from 0.9, `Sphere`/`Capsule` when both ends close, **`Dome`** for an open rim that shrank back in, `Cone` when it grew, `Tube` from 1.5, else `Bowl`. A dome is by definition squat, so "Dome" is left for the open-rimmed cups it describes and a 20-round closed-top piece is an egg (06 #12). Rows mode gives `Triangle` (a spine anchor), `Shaped panel` (a left/right anchor) or `Flat panel`. The detail line counts **the pattern's own rows and its widest real row**, not `model.rounds.length` and not `max(count)` — the working round the builder appends past the end used to turn "46 rows" into "47 rows · 406 wide" on completion (07 #7) — and appends "worked bottom-up" when the piece was actually drawn flipped. Opening the viewer **closes the button's GL context** and closing it rebuilds one, so the app never holds more than one context and repeated opens can never leave a blank canvas; if there is no piece on screen the stage carries a one-line footer ("Showing a simple outline — 3D isn't available right now") instead of a flat slab of `--primary`. Settings toggle **Live diagram** (default on; off removes the canvas). New sheet **Yarn colours** (project overflow menu + from the viewer): Main yarn plus every name from `Patterns.colors` across the project's parts, each with `<input type="color">` and the resolved swatch; edits update the model live.
 - Tour: one counter-tour step for the diagram, targeting `#stitch-3d` ("The piece inside the big button grows as you count. Tap 3D view to open it full size and spin it around."). It trims itself out when the button is absent.
 - Bump `CACHE_VERSION`, precache `./js/diagram-geo.js` and `./js/diagram.js` (in that load order — `DiagramGeo` must be on `window` before `Diagram` reads it).

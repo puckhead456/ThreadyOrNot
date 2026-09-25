@@ -165,6 +165,38 @@
     return dflt || 'auto';
   }
 
+  /**
+   * `Part.orientation`: 'auto' (ask the pattern text), or the explicit
+   * 'top-down' / 'bottom-up' the owner picked. The model always grows DOWNWARD
+   * from round 1, so a body the designer worked from its base renders upside
+   * down until something says so — and the text does not always say it in
+   * words the phrase list can see.
+   */
+  function normalizeOrientation(v, dflt) {
+    var s = str(v, '').trim().toLowerCase().replace(/[\s_]+/g, '-');
+    if (s === 'top-down' || s === 'bottom-up' || s === 'auto') return s;
+    return dflt || 'auto';
+  }
+
+  /**
+   * `Part.dialect`: 'auto' (ask this piece's own text, and failing that whatever
+   * the imported DOCUMENT said), or the explicit 'uk' / 'us' the owner picked.
+   *
+   * UK and US crochet count the same — sc/dc/tr are all one-for-one — so this
+   * never changes a stitch count. It changes HEIGHTS, which is the whole of the
+   * 3D diagram: a UK `tr` is a US `dc` (h 2.01), while a US `tr` is a round
+   * taller (h 2.68). `Patterns.dialectHints` reads the Stylecraft hood leaflet
+   * as UK on the strength of `htr` and "Tension" on its abbreviations page, but
+   * the Motif SECTION on its own writes nothing but `tr`, `dc` and `ch` — so
+   * the section alone is undecided, `expand` fell back to US trebles, and the
+   * granny square came out 33 % too tall and cupped.
+   */
+  function normalizeDialect(v, dflt) {
+    var s = str(v, '').trim().toLowerCase();
+    if (s === 'uk' || s === 'us' || s === 'auto') return s;
+    return dflt || 'auto';
+  }
+
   /** FNV-1a, base36. Short, stable, and good enough to key a PDF section. */
   function hash32(text) {
     var h = 0x811c9dc5;
@@ -420,12 +452,20 @@
           placementNotes: str(p.placementNotes, ''),
           // Rides along with patternText: a template drafted from an amigurumi
           // part keeps "this piece is worked in rounds".
-          workMode: normalizeWorkMode(p.workMode, 'auto')
+          workMode: normalizeWorkMode(p.workMode, 'auto'),
+          // ...and which way up it was worked, for the same reason.
+          orientation: normalizeOrientation(p.orientation, 'auto'),
+          // ...and which side of the Atlantic named its stitches: the text
+          // rides along, so the reading of the text must too.
+          dialect: normalizeDialect(p.dialect, 'auto')
         });
       }
     }
     if (!parts.length) {
-      parts = [{ name: 'Main', makeCount: 1, patternText: '', placementNotes: '', workMode: 'auto' }];
+      parts = [{
+        name: 'Main', makeCount: 1, patternText: '', placementNotes: '',
+        workMode: 'auto', orientation: 'auto', dialect: 'auto'
+      }];
     }
 
     var checklist = [];
@@ -573,7 +613,9 @@
         makeCount: Math.floor(mc),
         patternText: str(p.patternText, ''),
         placementNotes: str(p.placementNotes, ''),
-        workMode: normalizeWorkMode(p.workMode, 'auto')
+        workMode: normalizeWorkMode(p.workMode, 'auto'),
+        orientation: normalizeOrientation(p.orientation, 'auto'),
+        dialect: normalizeDialect(p.dialect, 'auto')
       });
     }
     if (!parts.length) throw new Error('Add at least one part.');
@@ -648,7 +690,9 @@
           makeCount: p.makeCount,
           patternText: str(p.patternText, ''),
           placementNotes: str(p.placementNotes, ''),
-          workMode: normalizeWorkMode(p.workMode, 'auto')
+          workMode: normalizeWorkMode(p.workMode, 'auto'),
+          orientation: normalizeOrientation(p.orientation, 'auto'),
+          dialect: normalizeDialect(p.dialect, 'auto')
         };
       }),
       checklist: proj.checklist
@@ -684,6 +728,11 @@
       sizeIndex: 0,
       // 3D diagram: rounds vs rows for THIS piece. 'auto' asks the pattern.
       workMode: 'auto',
+      // 3D diagram: which way up THIS piece was worked. 'auto' asks the text.
+      orientation: 'auto',
+      // 3D diagram: UK or US stitch names for THIS piece. 'auto' asks this
+      // piece's text, then whatever the imported document said.
+      dialect: 'auto',
       // Live diagram: index = row number (1-based), value = stitches in that row.
       rowStitches: [0]
     };
@@ -743,6 +792,12 @@
       sizeIndex: clampInt(p.sizeIndex, 0, 99, 0),
       // v5 (3D wave A): parts saved before per-part rounds/rows ask the pattern.
       workMode: normalizeWorkMode(p.workMode, 'auto'),
+      // v5 (3D wave C): ...and parts saved before the orientation hint ask the
+      // pattern text. Additive with a default, so no backup migration is due.
+      orientation: normalizeOrientation(p.orientation, 'auto'),
+      // v5 (3D wave D): ...and parts saved before the dialect carry ask their
+      // own text. Additive with a default, so no backup migration is due.
+      dialect: normalizeDialect(p.dialect, 'auto'),
       // v3 (live diagram): saves from before it simply have nothing recorded.
       rowStitches: normalizeRowStitches(p.rowStitches, clampInt(p.row, 0, 999999, 0))
     };
@@ -2452,6 +2507,8 @@
         made.patternText = str(p.patternText, '');
         made.placementNotes = str(p.placementNotes, '');
         made.workMode = normalizeWorkMode(p.workMode, 'auto');
+        made.orientation = normalizeOrientation(p.orientation, 'auto');
+        made.dialect = normalizeDialect(p.dialect, 'auto');
         return made;
       }),
       checklist: tpl.checklist.map(function (t) { return { id: uid(), text: t, done: false }; }),
@@ -2655,6 +2712,17 @@
     if (patch.workMode !== undefined) {
       prt.workMode = normalizeWorkMode(patch.workMode, normalizeWorkMode(prt.workMode, 'auto'));
     }
+    // The three-chip "This piece: Auto / Top down / Bottom up" control. Undoable
+    // for the same reason, and it overrides whatever the pattern text says.
+    if (patch.orientation !== undefined) {
+      prt.orientation = normalizeOrientation(patch.orientation, normalizeOrientation(prt.orientation, 'auto'));
+    }
+    // The three-chip "Stitch names: Auto / UK / US" control, and the door the
+    // importer uses to write the document's dialect onto a section that could
+    // not decide for itself. Undoable for the same reason as the two above.
+    if (patch.dialect !== undefined) {
+      prt.dialect = normalizeDialect(patch.dialect, normalizeDialect(prt.dialect, 'auto'));
+    }
     if (patch.piecesDone !== undefined) prt.piecesDone = clampInt(patch.piecesDone, 0, prt.makeCount, prt.piecesDone);
     touch(proj);
     return prt;
@@ -2726,6 +2794,27 @@
   }
 
   /**
+   * `Patterns.dialectHints(text).dialect` → 'uk' | 'us' | null, never throwing.
+   * Null means "this text does not say", which is the whole point: it is the
+   * question the importer asks of a SECTION before it lends it the document's
+   * answer, and the question `partDialect` asks of a part's own text.
+   */
+  function textDialect(text) {
+    var api = patternsApi();
+    if (!api || typeof api.dialectHints !== 'function') return null;
+    var s = str(text, '');
+    if (!/\S/.test(s)) return null;
+    var d = null;
+    try {
+      d = api.dialectHints(s);
+    } catch (e) {
+      return null;
+    }
+    var v = d && typeof d === 'object' ? str(d.dialect, '') : '';
+    return v === 'uk' || v === 'us' ? v : null;
+  }
+
+  /**
    * Import parsed pattern sections into a project.
    * mode 'parts'  → one part per section: a part with the same name (case
    *                 insensitive) is updated, otherwise a new part is added.
@@ -2740,12 +2829,21 @@
    * second half off. When the import CREATES parts and every section reads as
    * worked in rounds, a project labelled 'rows' is corrected to 'rounds' and
    * `modeFlipped` says so.
+   *
+   * `opts.text` (the WHOLE document) also carries the dialect into the parts:
+   * a leaflet that says UK on its abbreviations page says UK about every
+   * section in it, including the one whose own instructions are all `tr` and
+   * `dc` and so decide nothing. A section that DOES decide for itself keeps its
+   * own reading — the King Cole festival pair share an abbreviations page, and
+   * the US edition's rows say `sc` — and a part the owner has already put on an
+   * explicit 'uk' / 'us' is never touched. `dialectSet` counts the parts that
+   * were lent the document's answer.
    * @returns {{created:number, updated:number, placed:number, targeted:number,
-   *            modeFlipped:boolean}}
+   *            modeFlipped:boolean, dialectSet:number}}
    */
   function importPatternSections(projectId, sections, opts) {
     var proj = project(projectId);
-    var out = { created: 0, updated: 0, placed: 0, targeted: 0, modeFlipped: false };
+    var out = { created: 0, updated: 0, placed: 0, targeted: 0, modeFlipped: false, dialectSet: 0 };
     if (!proj || !Array.isArray(sections) || !sections.length) return out;
     var mode = opts && opts.mode === 'active' ? 'active' : 'parts';
     snapshot(proj);
@@ -2758,6 +2856,23 @@
         var names = window.Patterns.detectSizes(fullText);
         if (Array.isArray(names) && names.length > 1) proj.sizes = names.map(String);
       } catch (e) { /* ignore parser errors */ }
+    }
+
+    // Read ONCE for the whole document, not once per section: `dialectHints`
+    // scans the text with ten regexes and a 200-page leaflet is not a contest.
+    var docDialect = fullText ? textDialect(fullText) : null;
+
+    /**
+     * Lend `prt` the document's dialect, but only where there is nothing to
+     * override: not over the owner's own chip, and not over a section whose own
+     * instructions name their dialect outright.
+     */
+    function lendDialect(prt, sectionText) {
+      if (!docDialect || !prt) return;
+      if (normalizeDialect(prt.dialect, 'auto') !== 'auto') return;
+      if (textDialect(sectionText)) return;
+      prt.dialect = docDialect;
+      out.dialectSet++;
     }
 
     if (mode === 'active') {
@@ -2780,6 +2895,7 @@
         var activeTarget = targetRowsFromText(joined);
         if (activeTarget) { prt.targetRows = activeTarget; out.targeted = 1; }
       }
+      lendDialect(prt, joined);
       delete lineCache[prt.id];
       out.updated = 1;
       touch(proj);
@@ -2836,6 +2952,7 @@
             out.placed++;
           }
         }
+        lendDialect(existing, text);
         delete lineCache[existing.id];
         out.updated++;
       } else {
@@ -2844,6 +2961,7 @@
         added.importKey = key;
         if (target) { added.targetRows = target; out.targeted++; }
         if (place) { added.placementNotes = place; out.placed++; }
+        lendDialect(added, text);
         proj.parts.push(added);
         out.created++;
       }
@@ -3436,7 +3554,9 @@
       defaultColor: MAIN_YARN_DEFAULT,
       shape: {
         start: 'unknown', chainLen: null, ringCount: null, stuffed: null,
-        corners: 0, cornersSource: null
+        corners: 0, cornersSource: null,
+        upsideDown: false, upsideDownSource: null,
+        dialect: null
       },
       window: { first: 0, total: 0 },
       deviation: { expected: null, actual: 0 }
@@ -3600,6 +3720,153 @@
     return proj && proj.countMode === 'rounds' ? 'rounds' : 'rows';
   }
 
+  /* ------------------------------------------------------------------ *
+   * Which way up (01 §1.4.8)
+   *
+   * The model has exactly one direction of growth: round 1 first, and every
+   * round after it further DOWN the piece. That is right for a head worked
+   * from its crown, and upside down for the very common amigurumi body the
+   * designer worked from its base — the baphomet ("Starting from bottom of
+   * body in main color"), the snowman ("bottom to top:"), and every pattern
+   * that opens "start at the base" / "worked from the bottom up" / "begin at
+   * the bottom". The model does not flip anything; it publishes
+   * `shape.upsideDown` and `DiagramGeo.layout` does the flipping.
+   *
+   * The phrase list is deliberately mean. "bottom" in a finished pattern is
+   * usually ASSEMBLY ("sew to the bottom of the body", "18 sc into the bottom
+   * of the head", "close at the bottom by sewing", "into bottom side of first
+   * ch"), so a match needs a direction of travel stated outright
+   * ("bottom to top", "bottom up") or a starting verb reaching for the bottom
+   * ("starting FROM bottom", "begin AT the bottom"); a line that mentions
+   * joining pieces up is skipped whatever else it says; and the scan stops
+   * after the piece's own header / setup lines, because that is the only place
+   * a designer ever writes this down.
+   * ------------------------------------------------------------------ */
+
+  var ORIENT_SCAN_MIN = 30;              // ...and never fewer lines than this
+  var ORIENT_SCAN_MAX = 80;              // ...nor more, however long the preamble
+
+  /* "R1:", "Rnd 1", "Round 12", "Row 6-55" — the first one ends the header. */
+  var ORIENT_ROW_RE = /^\s*(?:r|rd|rnd|rnds|row|rows|round|rounds)\s*\.?\s*:?\s*\d/i;
+
+  /* Putting the toy together is not a statement about how it was worked. Bare
+     "stitch" is deliberately NOT in here — it is half the vocabulary of every
+     pattern — and it does not need to be: "slip stitch to the base of the head"
+     has no starting verb in it either way. */
+  var ORIENT_ASSEMBLY_RE =
+    /\b(?:sew|sewn|sewing|stitching|attach|attached|attaching|join|joined|joining|insert|inserted|inserting|glue|glued|pin|pinned|place|places|placed|placing|placement|position|positioned|close|closed|closing|stuff|stuffed|stuffing|embroider|embroidered|marker|fasten)\b/;
+
+  /* The direction of travel, said outright. */
+  var ORIENT_DOWN_RE = /\bbottom\s*(?:to|-|–|—|>|→)+\s*top\b|\bbottom[\s-]*up(?:ward|wards)?\b/;
+  var ORIENT_UP_RE = /\btop\s*(?:to|-|–|—|>|→)+\s*bottom\b|\btop[\s-]*down(?:ward|wards)?\b/;
+
+  /* A starting verb reaching for one end of the piece. `from|at|with` only —
+     "working INTO the bottom loops of the chain" is a stitch placement. */
+  var ORIENT_VERBS =
+    '(?:start|starts|started|starting|begin|begins|began|beginning|work|works|worked|working|make|made|crochet|crocheted|commence|commencing)';
+  var ORIENT_START_DOWN_RE =
+    new RegExp('\\b' + ORIENT_VERBS + '\\b[^.\\n]{0,24}?\\b(?:from|at|with)\\b[^.\\n]{0,24}?\\b(?:bottom|base)\\b');
+  var ORIENT_START_UP_RE =
+    new RegExp('\\b' + ORIENT_VERBS + '\\b[^.\\n]{0,24}?\\b(?:from|at|with)\\b[^.\\n]{0,24}?\\btop\\b');
+
+  /**
+   * How many leading lines count as the piece's header / setup: everything up
+   * to and including its first numbered round, and never fewer than
+   * ORIENT_SCAN_MIN nor more than ORIENT_SCAN_MAX. A section whose preamble is
+   * 16 lines of stitch glossary (the snowman) still gets its "bottom to top:".
+   */
+  function orientScanLimit(lines) {
+    var limit = ORIENT_SCAN_MIN, i;
+    for (i = 0; i < lines.length && i < ORIENT_SCAN_MAX; i++) {
+      if (ORIENT_ROW_RE.test(lines[i])) {
+        if (i + 1 > limit) limit = i + 1;
+        break;
+      }
+    }
+    if (limit > ORIENT_SCAN_MAX) limit = ORIENT_SCAN_MAX;
+    if (limit > lines.length) limit = lines.length;
+    return limit;
+  }
+
+  /**
+   * True when the pattern text says this piece was worked from its bottom.
+   * A top-down phrase anywhere in the window wins, so a head that says
+   * "starting at the top of the head" can never be flipped by a stray
+   * "bottom" further down.
+   */
+  function textUpsideDown(raw) {
+    var text = String(raw == null ? '' : raw);
+    if (!/\S/.test(text)) return false;
+    var lines = text.split(/\r\n|\r|\n/);
+    var limit = orientScanLimit(lines);
+    var down = false;
+    for (var i = 0; i < limit; i++) {
+      var line = lines[i].replace(/\s+/g, ' ').toLowerCase();
+      if (!line) continue;
+      if (ORIENT_ASSEMBLY_RE.test(line)) continue;
+      if (ORIENT_UP_RE.test(line) || ORIENT_START_UP_RE.test(line)) return false;
+      if (ORIENT_DOWN_RE.test(line) || ORIENT_START_DOWN_RE.test(line)) down = true;
+    }
+    return down;
+  }
+
+  /**
+   * `textUpsideDown` memoised on the parse — the same cache `partLines`
+   * invalidates when the text changes, so a row tap that rebuilds the model
+   * never re-scans the header (exactly as `textCornersFor` does).
+   */
+  function textUpsideDownFor(prt) {
+    var entry = partLines(prt);
+    if (entry === EMPTY_ENTRY) return false;
+    if (typeof entry.upsideDownText !== 'boolean') {
+      entry.upsideDownText = textUpsideDown(prt && prt.patternText ? String(prt.patternText) : '');
+    }
+    return entry.upsideDownText;
+  }
+
+  /**
+   * `{upsideDown, upsideDownSource}` for `Model.shape`, in resolution order:
+   * the owner's explicit `Part.orientation` first — a chip beats a guess, both
+   * ways round — then the pattern text, then false, because a piece that never
+   * says grows the way the model already draws it.
+   * @returns {{upsideDown:boolean, upsideDownSource:'part'|'text'|null}}
+   */
+  function orientationOf(prt) {
+    var explicit = normalizeOrientation(prt && prt.orientation, 'auto');
+    if (explicit === 'bottom-up') return { upsideDown: true, upsideDownSource: 'part' };
+    if (explicit === 'top-down') return { upsideDown: false, upsideDownSource: 'part' };
+    if (textUpsideDownFor(prt)) return { upsideDown: true, upsideDownSource: 'text' };
+    return { upsideDown: false, upsideDownSource: null };
+  }
+
+  /**
+   * `textDialect` memoised on the parse — the same cache `partLines` invalidates
+   * when the text changes, exactly as `textUpsideDownFor` does. `diagramKey`
+   * asks for this on every tap and the hints are ten regexes over 50 KB.
+   * `false` is the memo for "asked, and the text does not say".
+   */
+  function textDialectFor(prt) {
+    var entry = partLines(prt);
+    if (entry === EMPTY_ENTRY) return null;
+    if (entry.dialectText === undefined) {
+      entry.dialectText = textDialect(prt && prt.patternText ? String(prt.patternText) : '') || false;
+    }
+    return entry.dialectText || null;
+  }
+
+  /**
+   * UK or US stitch names for ONE piece, in resolution order: the owner's (or
+   * the importer's) explicit `Part.dialect`, then what this piece's own text
+   * says, then null — "nobody knows", and `Patterns.expand` may go on reading
+   * the text for itself.
+   * @returns {'uk'|'us'|null}
+   */
+  function partDialect(prt) {
+    var explicit = normalizeDialect(prt && prt.dialect, 'auto');
+    if (explicit !== 'auto') return explicit;
+    return textDialectFor(prt);
+  }
+
   var START_KINDS = {
     'magic-ring': true,
     'chain-ring': true,
@@ -3613,16 +3880,24 @@
   }
 
   /**
-   * `Model.shape` — how the piece starts and whether it is stuffed, from
-   * `Patterns.startHint` / `Patterns.stuffingHint`. Every field degrades to
-   * 'unknown' / null, so a parser without them costs nothing but detail.
+   * `Model.shape` — how the piece starts, whether it is stuffed and which way
+   * up it was worked, from `Patterns.startHint` / `Patterns.stuffingHint` and
+   * `orientationOf`. Every field degrades to 'unknown' / null / false, so a
+   * parser without them costs nothing but detail.
    */
   function partShape(prt) {
+    var orient = orientationOf(prt);
     var out = {
       start: 'unknown', chainLen: null, ringCount: null, stuffed: null,
       // The polygon prior (01 §1.4). Filled in by buildDiagramModel, which is
       // the only place that has the per-round increase sites to judge it.
-      corners: 0, cornersSource: null
+      corners: 0, cornersSource: null,
+      // Which way up the piece was worked — the chip, else the text, else
+      // false. See `orientationOf` above.
+      upsideDown: orient.upsideDown, upsideDownSource: orient.upsideDownSource,
+      // Which dialect named the stitches, and so how tall a `tr` is — the chip
+      // or the import, else this piece's own text, else null. See `partDialect`.
+      dialect: partDialect(prt)
     };
     var api = patternsApi();
     var lines = linesFor(prt);
@@ -4023,7 +4298,12 @@
 
     var rounds = [];
     var current = -1;
-    var state = null;
+    // `expand` reads the dialect off the part text it was handed and caches the
+    // answer on its own state, so a section that says nothing gets US heights —
+    // a `tr` two rounds tall instead of the UK treble's 2.01, which cupped every
+    // granny square in a UK leaflet. Seeding the state says it outright; a null
+    // dialect seeds nothing and `expand` goes on deciding for itself.
+    var state = shape.dialect ? { uk: shape.dialect === 'uk' } : null;
     var prevCount = 0;
 
     // Rows past the window are never pushed and nothing downstream reads their
@@ -4201,6 +4481,11 @@
       sizeIndexOf(prt) + '|' + prt.row + '|' + prt.piecesDone + '|' + rowStitchSerial(rs) + '|' +
       (prt.repeat && prt.repeat.enabled ? prt.repeat.startRow + '-' + prt.repeat.endRow + 'x' + prt.repeat.times : '-') +
       '|' + partWorkMode(prt, proj === undefined ? null : proj) +
+      // The text-derived orientation rides on `entry.version`; the chip does not.
+      '|' + normalizeOrientation(prt.orientation, 'auto') +
+      // The RESOLVED dialect, because both halves of it move the heights: the
+      // chip, and the document's answer the importer wrote onto the part.
+      '|' + (partDialect(prt) || '-') +
       '|' + yarnSerial(proj) +
       '|' + entry.length + '|v' + entry.version
     );
@@ -4234,7 +4519,9 @@
    * @returns {{mode:'rounds'|'rows', rounds:Array, current:number,
    *           defaultColor:string,
    *           shape:{start:string, chainLen:number|null, ringCount:number|null, stuffed:boolean|null,
-   *                  corners:0|3|4|6|8, cornersSource:'sites'|'text'|null},
+   *                  corners:0|3|4|6|8, cornersSource:'sites'|'text'|null,
+   *                  upsideDown:boolean, upsideDownSource:'part'|'text'|null,
+   *                  dialect:'uk'|'us'|null},
    *           window:{first:number, total:number},
    *           deviation:{expected:number|null, actual:number}}}
    */
@@ -4449,6 +4736,7 @@
     // live 3D diagram
     diagramModel: diagramModel,
     partWorkMode: partWorkMode,
+    partDialect: partDialect,
     partShape: partShape,
     roundDeviation: roundDeviation,
     yarnColorNames: yarnColorNames,

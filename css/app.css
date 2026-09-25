@@ -856,6 +856,26 @@ dialog.sheet.sheet-viewer .sheet-body {
 }
 .viewer-bar .seg { flex: 0 0 auto; }
 .viewer-bar .seg button { font-size: 12px; padding: 5px 9px; }
+/* Second row of the bar: the Auto/Top-down/Bottom-up chips and what Auto read
+   out of the pattern. Its own line, so 375 wide never squeezes the chips. */
+.viewer-bar-row {
+  flex: 1 0 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+/* "Top-down" / "Bottom-up" stay on one line — a chip broken over two lines
+   reads as two chips — so the hint takes the line under them. */
+.viewer-bar-row .seg button { white-space: nowrap; }
+.viewer-bar-hint {
+  flex: 1 0 100%;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
 /* "Showing a simple outline — 3D isn't available right now." */
 .viewer-note {
   position: absolute;

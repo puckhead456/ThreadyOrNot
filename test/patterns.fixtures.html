@@ -935,6 +935,10 @@ function runDiagramV2() {
       '4,10,16,22,28,34', '5,12,19,26,33,40', '6,14,22,30,38,46'],
       'turtle Belly: six evenly spread increases every round, drifting one stitch per round');
     eq(genericIn(rows), 0, 'turtle Belly: every round is typed');
+    // §8c LOOP_CHAIN_W invariant: an amigurumi round makes no chain at all, so
+    // Sigma w is still exactly the stitch count, round for round.
+    eq(widthsOf(rows), countsOf(rows),
+      'turtle Belly: Σw = count on every round - the loop calibration leaves amigurumi alone');
     eq(P.startHint(s.text).start, 'magic-ring', 'turtle Belly starts from a magic ring');
   });
   part('crochet-turtle.pdf', 'Feet', 'turtle Feet', function (s) {
@@ -974,15 +978,58 @@ function runDiagramV2() {
     // the square is at each round. Rounds 1-3 grow by their corner increases -
     // round 3's four `(3 dc, ch 3, 3 dc) all in next sc` corners are worked
     // into a single STITCH each, so they fan and every entry stays a full
-    // stitch wide, which is exactly how a granny square grows. Rounds 4 and 6
-    // work their corners into a chain SPACE and so divide it: round 4 is 47
-    // wide over 51 positions.
-    eq(widthsOf(t6), [16, 24, 48, 47, 80, 87],
-      'Persian Tiles rounds 1-6 WIDTHS: the square grows 16 -> 24 -> 48 on its corner increases');
+    // stitch wide, which is exactly how a granny square grows.
+    //
+    // Round 4's `(sc, ch 2, sc) all in ch-3 sp` is a CORNER group: the two
+    // stitches divide the 3-wide space between them, but the 2 chains they make
+    // are the next round's corner space, fabric this round added, and stand
+    // beside the space at one apiece (markCornerChains). So round 4 is 51 wide -
+    // one per position - and the square never gets narrower than the round
+    // below, which it did (47 against round 3's 48) while the corner chains were
+    // dividing the space along with the stitches.
+    //
+    // Rounds 5 and 6 are open LACE, and they are where §8c's LOOP_CHAIN_W
+    // lands. Round 5 is twenty ch-3 loops, each `ch 3, sc in next sp` hung
+    // between two consecutive anchors; round 6 has one such loop per side
+    // repeat. Read at a full stitch per chain the square grew by 29 in round 5
+    // - twice the rate a dc-height k=4 motif can lie flat at (01 §1.4 puts it
+    // at 2pi*1.91*1.273 = 15.3 a round) - so the round that should be the
+    // flattest came out as a frill. A taut loop spans its chord, about three
+    // quarters of its chains, and the growth falls back inside the flat band:
+    //
+    //   round     1    2    3     4      5       6
+    //   Sigma w  16   24   48    51   68.75     84
+    //   delta        +8  +24    +3  +17.75  +15.25
+    //
+    // Round 5's 0.75 lands on 45 of its 60 chains: the first ch-3 of each
+    // repeat BRIDGES the dc the round skips ("ch 3, skip next dc") and keeps a
+    // full stitch per chain, and the head's last run is a loop on the three
+    // repeats that are followed by the tail's `sc in next dc`, not on the
+    // fourth, which is where the .75 comes from. Rounds 3 and 4 keep their
+    // deltas: round 3's +24 is four corner groups FANNED out of a single stitch
+    // each and round 4's +3 is corner chains standing beside the space they sit
+    // in. Neither is a loop, and neither is the calibration's business.
+    eq(widthsOf(t6), [16, 24, 48, 51, 68.75, 84],
+      'Persian Tiles rounds 1-6 WIDTHS: 16, 24, 48, 51, 68.75, 84 - monotonic, as a square must be');
     eq(widthsOf(t6)[2] - widthsOf(t6)[1], 24,
       '...round 3 is 24 wider than round 2, the four seven-entry corner groups it fanned out');
-    eq([t6[3].stitches.length - widthsOf(t6)[3], t6[5].stitches.length - widthsOf(t6)[5]], [4, 0],
-      '...and round 4’s four `(sc, ch 2, sc) all in ch-3 sp` corners divide a 3-wide space four ways, so it is 4 narrower than its 51 positions');
+    log(widthsOf(t6).every(function (w, i, a) { return i === 0 || w > a[i - 1]; }),
+      '...and every round is wider than the one below it', widthsOf(t6).join(' -> '));
+    var pd = widthsOf(t6).map(function (w, i, a) { return i === 0 ? 0 : Math.round((w - a[i - 1]) * 100) / 100; });
+    eq(pd.slice(4), [17.75, 15.25],
+      '...the two open lace rounds grow by 17.75 and 15.25 - inside the +6…+18 a k = 4 dc motif lies flat at (was +29 and +7)');
+    log(pd[4] >= 6 && pd[4] <= 18 && pd[5] >= 6 && pd[5] <= 18,
+      '...so no lace round is outside the flat band any more', pd.slice(1).join(' / '));
+    eq([t6[3].stitches.length - widthsOf(t6)[3], t6[5].stitches.length - widthsOf(t6)[5]], [0, 3],
+      '...round 4’s corner chains are not part of the ch-3 space they sit in, so its width is its 51 positions; round 6 is 3 under its 87 - its four side loops');
+    // What the calibration must NOT move. The hex socks' and the hood's chains
+    // are CORNER spaces inside `(3tr, 2ch, 3tr)` groups, not loops between
+    // anchors, so both motifs keep the flat rate they had; the Premier wrap's
+    // ch-3 mesh rows ARE loops between anchors, but they spend every anchor of
+    // the row below and their width is pinned by that consumption. All three are
+    // asserted in their own fixtures below (hex socks +18, hood +12, wrap 404).
+    eq(chRuns(t6[4]), 20,
+      'Persian Tiles round 5: twenty chain runs - and reading them as loops changes no count, only the width');
     eq(P.startHint(s.text), { start: 'chain-ring', chainLen: 4, ringCount: 15 },
       'Persian Tiles: "ch 4; join with a sl st to form a ring" is a chain ring of 4');
     eq(P.workMode(s.text), 'rounds', 'Persian Tiles: workMode is rounds');
@@ -1005,6 +1052,16 @@ function runDiagramV2() {
     eq(chRuns(r3), 6, '...over six 2-chain corner spaces');
     eq(r3.stitches.length, 66, '...and 66 ring positions in all');
     eq(rows[1].height, 2.01, 'hex socks: a UK treble is 2.01 tall, not 2.68 (03 #9)');
+    // WIDTH invariant for §8c's LOOP_CHAIN_W: every chain this hexagon makes is
+    // a CORNER space inside a `(3tr, 2ch, 3tr)` group, never a loop hung
+    // between two anchors, so the loop calibration must leave it alone. Rnd 1's
+    // `(3tr, 2ch) five times in ring` ends in a chain run, but the run hangs off
+    // three trebles rather than one stitch, so it is not a loop either.
+    var hw = widthsOf(walkV2(s.text, 6));
+    eq(hw, [30, 43, 46, 64, 82, 100],
+      'hex socks WIDTHS: 30, 43, 46, 64, 82, 100 - its chains are corner spaces, so LOOP_CHAIN_W moves nothing');
+    eq([hw[3] - hw[2], hw[4] - hw[3], hw[5] - hw[4]], [18, 18, 18],
+      '...and the hexagon keeps exactly +18 a round, the flat rate for a k = 6 motif in UK trebles (01 §1.1)');
     eq(P.startHint(s.text), { start: 'chain-ring', chainLen: 4, ringCount: 2 },
       'hex socks: "make 4ch. Join with sl st in first ch to form a ring"');
     eq(P.workMode(s.text), 'rounds', 'hex socks: workMode is rounds');
@@ -1022,13 +1079,43 @@ function runDiagramV2() {
     // The motif keeps four corners for all three rounds, and the 3rd Rnd -
     // "3tr in each sp between next two 3tr groups to next corner 2ch sp" -
     // used to be an open fill the expander gave up on, so the round was empty.
-    var hrows = walkV2(s.text, 3);
-    eq(hrows.map(function (r) { return chRuns(r); }), [4, 4, 4],
-      'Stylecraft hood: four 2-chain corners on every round of the motif');
-    eq(hrows.map(function (r) { return stitchesOnly(r); }), [23, 32, 47],
-      '...and the 3rd Rnd now expands (was 0): two side groups per side');
+    // The motif is the Foundation Rnd plus SIX rounds: the three that are
+    // written, then "Rep 3rd Rnd 3 times changing from colours A to B
+    // alternately ending with A", which the TENSION box confirms ("6 rnds to
+    // 16cm"). Every one of the six keeps four corners, and the counts are the
+    // granny-square series 24, 36, 48, 60, 72, 84 (+12 a round: four corners of
+    // six trebles, plus one three-treble group per side per round).
+    //
+    // Round 2 comes out 33 rather than 36 because the leaflet itself only writes
+    // THREE of its four side groups - "* 3tr in sp between next two 3tr groups,
+    // (3tr, 2ch, 3tr) in next 2ch sp, rep from * 2 times more" gives four
+    // corners and three sides, and the fourth side is left to the crocheter.
+    // Rounds 3-6 are exact.
+    var hrows = walkV2(s.text, 6);
+    eq(hrows.map(function (r) { return chRuns(r); }), [4, 4, 4, 4, 4, 4],
+      'Stylecraft hood: four 2-chain corners on every one of the motif’s six rounds');
+    eq(hrows.map(function (r) { return stitchesOnly(r); }), [24, 33, 48, 60, 72, 84],
+      '...and rounds 4-6 come out of "Rep 3rd Rnd 3 times": +12 trebles a round to 84');
     eq(hrows[2].inc.length, 12,
       '...as four corner clusters plus two side clusters a side');
+    eq(genericIn(hrows), 0, 'Stylecraft hood: no generic round in the six');
+    // WIDTH: each corner is (3tr, 2ch, 3tr) worked into a 2-chain space. The six
+    // trebles divide those 2 positions between them; the 2 chains they make are
+    // the NEXT round's corner and stand beside it. So a corner is 4 wide, not 2,
+    // and that is why a granny square lies flat while its count grows by only 12.
+    eq(widthsOf(hrows), [16, 25, 40, 52, 64, 76],
+      'Stylecraft hood WIDTHS: 16, 25, 40, 52, 64, 76 - +12 a round, with the corner chains counted');
+    log(widthsOf(hrows).every(function (w, i, a) { return i === 0 || w > a[i - 1]; }),
+      '...every round wider than the one below', widthsOf(hrows).join(' -> '));
+    eq(hrows[5].stitches.filter(function (st) { return st.t === 'ch'; })
+      .every(function (st) { return st.w === 1; }), true,
+      '...and every corner chain is one position wide (01 §1.2: w = 1 per chain)');
+    // ...which is also the §8c LOOP_CHAIN_W invariant: a corner chain is not a
+    // loop hung between two consecutive anchors, so the loop calibration must
+    // not touch it, and the motif keeps its +12.
+    var hwd = widthsOf(hrows);
+    eq([hwd[3] - hwd[2], hwd[4] - hwd[3], hwd[5] - hwd[4]], [12, 12, 12],
+      '...so the hood keeps exactly +12 width a round once the motif is square, LOOP_CHAIN_W or not');
   });
 
   // --- Stylecraft cowl: the chevron cylinder ----------------------------
@@ -1132,10 +1219,13 @@ function runDiagramV2() {
     // WIDTH (01 §1.2, §1.4). A hexagon in UK trebles lies flat at +17.6
     // stitches a round, and this one adds six 3tr groups in the spaces between
     // groups - 18 stitch widths - every round. The corner groups go into a
-    // 2-chain space and divide it, so they add nothing; all the growth is in
-    // the sides, which is what makes the corners corners.
+    // 2-chain space and divide it, so their TREBLES add nothing; all the growth
+    // is in the sides, which is what makes the corners corners. What the corners
+    // do add is the six new 2-chain spaces they make, ten positions the trebles
+    // used to swallow (markCornerChains) - a flat constant on every round, so
+    // the +18 rate is untouched.
     var hw = widthsOf(rows);
-    eq(hw.slice(2), [36, 54, 72, 90, 108, 126, 144, 162, 180, 198, 216, 234, 252],
+    eq(hw.slice(2), [46, 64, 82, 100, 118, 136, 154, 172, 190, 208, 226, 244, 262],
       'hex socks: the WIDTH grows exactly 18 a round from round 3 (the round that sets the pattern) to round 15');
     log(hw.slice(3).every(function (w, i) { return w - hw[i + 2] === 18; }),
       '...+18 on every single round, never compounding',
@@ -1218,21 +1308,71 @@ function runDiagramV2() {
     log(rows[2].stitches.every(function (s) { return s.w === 0.5; }),
       '...every one of the shell row’s 808 positions is half a stitch wide',
       'first widths ' + rows[2].stitches.slice(0, 8).map(function (s) { return s.w; }).join(','));
+    // §8c LOOP_CHAIN_W, and the one place consumption has to overrule it. The
+    // mesh rows ARE the loop form - `* ch 3, sc in next ch-3 sp; rep from *
+    // across`, 101 loops hung between consecutive anchors - so the calibration
+    // would read each of their 303 chains as 0.75 and report a 74"-long wrap as
+    // 328 wide every other row. But a row that spends every anchor of the row
+    // below cannot come out narrower than it: these rows' Sigma w is pinned by
+    // what they consumed, and a pinned row is not re-scaled.
+    var mesh = rows.filter(function (r, i) { return i % 2 === 1 && i <= 43; });
+    log(mesh.length === 22 && mesh.every(function (r) {
+      return r.stitches.every(function (s) { return s.t !== 'ch' || s.w === 1; });
+    }), '...and every chain of all 22 mesh rows stays a full stitch wide: consumption pins the row, LOOP_CHAIN_W does not touch it',
+      mesh.length + ' mesh rows, row 4 widths ' +
+      rows[3].stitches.slice(0, 6).map(function (s) { return s.w; }).join(','));
     var ls = P.parse(s.text);
     eq([5, 20, 44, 45].map(function (r) { return P.targetFor(ls, r); }), [405, 405, 405, 405],
       'sparkling wrap: targetFor still answers 405 for every repeated row');
   });
 
   // --- Premier simple throw: "Rep Row 2 until it measures 59\"" -------
+  //
+  // The leaflet prints the length, not the rows: "Rep Row 2 until blanket
+  // measures approximately 59"." The row count is in the gauge box on the page
+  // before -
+  //
+  //     GAUGE
+  //     9 hdc and 6 rows = 4"
+  //
+  // - so 6 rows / 4" = 1.5 rows to the inch and 59" x 1.5 = 88.5, which rounds
+  // to 89 rows. (Width checks out the same way: 94 sts / 2.25 sts per inch =
+  // 41.8" against the printed 40".) Every one of the 89 is Row 2 again: 94 hdc.
   part('crochet-premier-simple-throw.pdf', null, 'simple throw back-references', function (s) {
-    var rows = walkV2(s.text, 46);
-    eq(countsOf(rows).length, 46, 'simple throw: the caller can ask for 46 rows...');
+    var rows = walkV2(s.text, 89);
+    eq(countsOf(rows).length, 89, 'simple throw: 59" of blanket is 89 rows...');
     eq(rows.every(function (r) { return r.stitches.length === 94; }), true,
-      '...and every one of them is 94 stitches - "Rep Row 2 until blanket measures 59"" has no row count at all');
+      '...and every one of them is 94 stitches');
     eq(rows.every(function (r) { return r.height === 1.34; }), true, '...at hdc height');
     eq(genericIn(rows), 0, 'simple throw: no generic row');
-    eq(P.summary(P.parse(s.text)).maxRow, 2,
-      '...while maxRow stays 2: an open-ended repeat answers for a row without inventing one');
+    var g = P.gauge(s.text);
+    eq([g.stsPer4in, g.rowsPer4in, g.stitch, g.estimated], [9, 6, 'hdc', false],
+      'simple throw: gauge() reads "9 hdc and 6 rows = 4"" - 9 sts and 6 rows to 4 inches, in hdc');
+    var sum = P.summary(P.parse(s.text));
+    eq(sum.suggestions.untilLength, { value: 59, unit: 'in' },
+      'simple throw: the repeat carries its length target, 59 inches');
+    eq([sum.suggestions.targetRows, sum.suggestions.estimated], [89, false],
+      '...which the gauge turns into 89 rows, not estimated');
+    eq([sum.rows, sum.maxRow], [2, 89],
+      '...so two rows are WRITTEN and maxRow follows the blanket to row 89');
+    eq([P.targetFor(P.parse(s.text), 3), P.targetFor(P.parse(s.text), 89)], [94, 94],
+      'simple throw: targetFor answers 94 for row 3 and for row 89');
+    eq(P.lineFor(P.parse(s.text), 50) !== null, true,
+      '...and lineFor finds the repeat sentence for row 50');
+  });
+
+  // --- the estimate: the same repeat with the gauge box torn off ------
+  part('crochet-premier-simple-throw.pdf', null, 'simple throw with no gauge', function (s) {
+    // Strip the gauge splitSections copies onto the part and the repeat has
+    // nothing measured to go by, so the rows are ESTIMATED from the stitch the
+    // repeated row is made of: one sc row is about 5 mm, an hdc row is
+    // 1.27/0.95 of that (6.68 mm), so an inch holds 3.8 hdc rows and 59" is 224.
+    var bare = s.text.split(/\n/).filter(function (l) { return !/gauge/i.test(l); }).join('\n');
+    var sum = P.summary(P.parse(bare));
+    eq(P.gauge(bare).source, null, 'simple throw (no gauge): gauge() finds nothing to read');
+    eq([sum.suggestions.targetRows, sum.suggestions.estimated], [224, true],
+      '...so 59" becomes 224 hdc rows at 5 mm per sc row, and SAYS it is an estimate');
+    eq(sum.maxRow, 224, '...and maxRow follows it');
   });
 
   // --- the cardigan: "Repeat Rows 5-8 until there are 25 Rows" --------
@@ -1604,18 +1744,28 @@ var NEW_CORPUS = [
   {
     file: 'crochet-bernat-basketweave.pdf',
     what: 'Bernat blanket, fpdc/bpdc, three columns on a landscape page with the abbreviations beside the instructions',
-    verdict: 'exact - five written rows and the edging; rows 2-5 carry no printed total and none is invented',
+    verdict: 'exact - five written rows and the edging; rows 2-5 carry no printed total and none is invented, and the 56" length becomes 70 rows off the gauge',
     expect: ['/1/5', 'Edging/1/1'],
     dialect: 'us', craft: 'crochet',
     check: function (res, secs) {
       eq(rowCounts(secs[0], [1]), [98], 'bernat-basketweave: 1st row "Turn. 98 sts."');
       eq(rowCounts(secs[0], [2, 3, 4, 5]), [null, null, null, null],
         'bernat-basketweave: the fpdc/bpdc rows print no total, so none is guessed');
+      // GAUGE: "8 sts and 5 rows = 4" [10 cm] in pat." -> 1.25 rows to the inch,
+      // so "Rep 2nd to 5th rows ... until piece measures approx 56" [142 cm]" is
+      // 56 x 1.25 = 70 rows. The bracketed [142 cm] is the same length again and
+      // must not be read as a second, longer piece.
       eq(P.summary(P.parse(secs[0].text)).suggestions.repeat,
-        { startRow: 2, endRow: 5, times: null, untilRows: null },
-        'bernat-basketweave: "Rep 2nd to 5th rows for Basketweave Pat" -> repeat rows 2-5');
-      eq(P.summary(P.parse(secs[0].text)).suggestions.targetRows, null,
-        'bernat-basketweave: "until piece measures approx 56 in" sets no row target');
+        { startRow: 2, endRow: 5, times: null, untilRows: 70 },
+        'bernat-basketweave: "Rep 2nd to 5th rows for Basketweave Pat" -> repeat rows 2-5, resolved to 70');
+      eq(P.summary(P.parse(secs[0].text)).suggestions.untilLength, { value: 56, unit: 'in' },
+        'bernat-basketweave: "until piece measures approx 56" [142 cm]" is 56 inches, not 142');
+      eq(P.summary(P.parse(secs[0].text)).suggestions.targetRows, 70,
+        '...which the gauge (8 sts and 5 rows = 4") turns into 70 rows');
+      eq(P.summary(P.parse(secs[0].text)).suggestions.estimated, false,
+        '...off a printed gauge, so nothing is estimated');
+      eq(P.summary(P.parse(secs[0].text)).maxRow, 70,
+        '...and maxRow follows the piece to row 70');
     }
   },
   {
@@ -1664,9 +1814,18 @@ var NEW_CORPUS = [
     dialect: 'uk', craft: 'crochet',
     check: function (res, secs) {
       eq(secs.length, 6, 'pumpkins: three designs x two parts = six sections');
-      eq(secs.map(function (s) { return P.summary(P.parse(s.text)).maxRow; }),
+      eq(secs.map(function (s) { return P.summary(P.parse(s.text)).rows; }),
         [2, 2, 2, 2, 2, 2],
-        'pumpkins: every part stops at row 2 - the counter never runs into the next design');
+        'pumpkins: every part writes two rows - the counter never runs into the next design');
+      // ...and maxRow is how far the PIECE goes. The stalks say "Repeat 2nd Row
+      // 2 more times" - a flat count of repeats, so 2 + 3 = 5 rows. The bodies
+      // say "Repeat Row 2 until work measures 10 inches long, approx. 44 rows":
+      // a condition judged at the hook with the designer's own estimate beside
+      // it, so the 44 is offered as a suggestion (below) and the body still
+      // stops at the two rows it writes.
+      eq(secs.map(function (s) { return P.summary(P.parse(s.text)).maxRow; }),
+        [2, 5, 2, 5, 2, 5],
+        'pumpkins: maxRow adds the stalks’ three repeats and nothing else');
       eq(secs.map(function (s) { return P.summary(P.parse(s.text)).suggestions.targetRows; }),
         [44, null, 56, null, 84, null],
         'pumpkins: "approx. 44 / 56 / 84 rows" become the three bodies row targets');

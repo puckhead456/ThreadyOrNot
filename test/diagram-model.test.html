@@ -25,8 +25,11 @@
   PART, the shape hint, the my-count-vs-the-pattern deviation, cache invalidation and the build
   budget, and the three model-side findings of
   <code>docs/brainstorm/3d/07-review-motifs-garments.md</code>: the corner prior, outlier rounds
-  and the chain-ring seed. Synthetic patterns throughout, plus dev-only fixture PDFs (groups
-  17-18) that skip themselves when <code>../tmp-pdf</code> is not there.
+  and the chain-ring seed, the bottom-up orientation hint (01 §1.4.8), and the UK/US dialect carry
+  (<code>Part.dialect</code> — what makes a UK <code>tr</code> 2.01 tall instead of 2.68, so that a
+  granny square out of a UK leaflet stops cupping). Synthetic patterns
+  throughout, plus dev-only fixture PDFs (groups 18-21) that skip themselves when
+  <code>../tmp-pdf</code> is not there.
 </p>
 <p class="note">
   The page runs against the CURRENT parser and against the wave-A one: anything that needs
@@ -52,7 +55,7 @@
 
 /* pdftext.js points the pdf.js worker at './js/vendor/...', right for the app at
    the repo root but wrong from /test/. Pin it, same as diagram.gallery.html.
-   pdf.js is here for groups 17-18 only — the two fixture PDFs live in the
+   pdf.js is here for groups 18-20 only — the two fixture PDFs live in the
    uncommitted ../tmp-pdf, and that group skips itself when they are absent. */
 (function () {
   if (!window.pdfjsLib || !window.pdfjsLib.GlobalWorkerOptions) return;
@@ -198,6 +201,7 @@ function mkPart(proj, text, opts) {
   var prt = proj.parts[0];
   Store.updatePart(proj.id, prt.id, { patternText: text });
   if (opts.workMode) Store.updatePart(proj.id, prt.id, { workMode: opts.workMode });
+  if (opts.dialect) Store.updatePart(proj.id, prt.id, { dialect: opts.dialect });
   prt.row = typeof opts.row === 'number' ? opts.row : 0;
   prt.stitch = typeof opts.stitch === 'number' ? opts.stitch : 0;
   prt.rowStitches = [0];
@@ -602,8 +606,9 @@ group('4. Shape: oval start, chain-ring tube, stuffing');
     var prt2 = mkPart(p, OVAL, { row: 0, stitch: 0 });
     var m2 = Store.diagramModel(prt2, p);
     assertEqual(m2.shape,
-      { start: 'chain-oval', chainLen: 12, ringCount: null, stuffed: false, corners: 0, cornersSource: null },
-      'an oval start with its chain length, and "do not stuff"');
+      { start: 'chain-oval', chainLen: 12, ringCount: null, stuffed: false, corners: 0, cornersSource: null,
+        upsideDown: false, upsideDownSource: null, dialect: 'us' },
+      'an oval start with its chain length, and "do not stuff" (a text full of sc reads as US)');
   });
 
   withPatterns({
@@ -614,8 +619,9 @@ group('4. Shape: oval start, chain-ring tube, stuffing');
     var prt2 = mkPart(p, TUBE, { row: 0, stitch: 0 });
     var m2 = Store.diagramModel(prt2, p);
     assertEqual(m2.shape,
-      { start: 'chain-ring', chainLen: 6, ringCount: 12, stuffed: true, corners: 0, cornersSource: null },
-      'a chain ring keeps both the chain length and the ring count');
+      { start: 'chain-ring', chainLen: 6, ringCount: 12, stuffed: true, corners: 0, cornersSource: null,
+        upsideDown: false, upsideDownSource: null, dialect: null },
+      'a chain ring keeps both the chain length and the ring count (and dc/ch name no dialect)');
   });
 
   // Junk from the parser is refused rather than passed on.
@@ -627,7 +633,8 @@ group('4. Shape: oval start, chain-ring tube, stuffing');
     var prt2 = mkPart(p, OVAL, { row: 0, stitch: 0 });
     var m2 = Store.diagramModel(prt2, p);
     assertEqual(m2.shape,
-      { start: 'unknown', chainLen: null, ringCount: null, stuffed: null, corners: 0, cornersSource: null },
+      { start: 'unknown', chainLen: null, ringCount: null, stuffed: null, corners: 0, cornersSource: null,
+        upsideDown: false, upsideDownSource: null, dialect: 'us' },
       'an unknown start kind, a negative chain and a string all normalise away');
   });
 
@@ -1109,7 +1116,8 @@ group('11. Odds and ends');
   assertEqual(em.window, { first: 0, total: 0 }, 'with an empty window');
   assertEqual(em.deviation, { expected: null, actual: 0 }, 'and no deviation');
   assertEqual(em.shape,
-    { start: 'unknown', chainLen: null, ringCount: null, stuffed: null, corners: 0, cornersSource: null },
+    { start: 'unknown', chainLen: null, ringCount: null, stuffed: null, corners: 0, cornersSource: null,
+      upsideDown: false, upsideDownSource: null, dialect: null },
     'and an unknown shape');
 
   var proj = mkProject('ZD Odds', 'rounds');
@@ -1640,10 +1648,607 @@ group('16. A chain ring seeds round 1 with the chain (finding 3 / D5)');
   assertEqual(full.kinds[0], 'tr', 'and keeps its parsed stitch types');
 })();
 
+/* ====================================================================== */
+group('17. Which way up: Model.shape.upsideDown from the text (01 §1.4.8)');
+/* ====================================================================== */
+
+/* A plain amigurumi body: magic ring, grow, straight, close. The header line
+   above it is the only thing that changes from case to case. */
+var UP_ROUNDS = [
+  'R1: 6 sc in a magic ring (6)',
+  'R2: inc in each st around (12)',
+  'R3: (sc, inc) x6 (18)',
+  'R4: (2sc, inc) x6 (24)',
+  'R5-R8: sc in each st around (24)',
+  'R9: (2sc, dec) x6 (18)',
+  'R10: (sc, dec) x6 (12)',
+  'R11: dec x6 (6)',
+  'Fasten off and close the hole.'
+].join('\n');
+
+/** The shape of a body whose pattern opens with `header` (omit for none). */
+function upShape(header, opts) {
+  var proj = mkProject('ZD Up', 'rounds');
+  var text = (header ? header + '\n' : '') + UP_ROUNDS;
+  var prt = mkPart(proj, text, { row: 0, stitch: 0, workMode: 'rounds' });
+  if (opts && opts.orientation !== undefined) {
+    Store.updatePart(proj.id, prt.id, { orientation: opts.orientation });
+  }
+  return Store.diagramModel(prt, proj).shape;
+}
+
+(function () {
+  fresh();
+
+  /* -- the phrases the corpus actually uses (01 §1.4.8) ---------------- */
+  var PHRASES = [
+    'Starting from bottom of body in main color',   // crochet-baphomet
+    'bottom to top:',                               // crochet-snowman
+    'Bottom-up:',
+    'Body: start at the base.',
+    'The body is worked from the bottom up.',
+    'Begin at the bottom and work upwards.',
+    'Starting at the base of the body.'
+  ];
+  for (var i = 0; i < PHRASES.length; i++) {
+    var s = upShape(PHRASES[i]);
+    assertEqual([s.upsideDown, s.upsideDownSource], [true, 'text'],
+      'bottom-up from the text: "' + PHRASES[i] + '"');
+  }
+
+  /* -- and the ones that must never fire ------------------------------ */
+  var NONE = [
+    ['', 'a body that never says which way up'],
+    ['Starting at the top of the head.', 'a head worked from its crown'],
+    ['Head: work from the top down.', '"top down" says it outright'],
+    ['Top to bottom:', 'so does "top to bottom"'],
+    ['Sew the head to the bottom of the body.', 'an assembly note that mentions the bottom'],
+    ['Note: place 18 sc into the bottom of the head.', 'a stitch placement into the bottom'],
+    ['Do not stuff, close at the bottom by crocheting/sewing.', 'the turtle\'s finishing line'],
+    ['bottom picture shows back', 'a caption under a photo'],
+    ['Work 12 sc into bottom side of first ch.', 'working into the bottom of a chain'],
+    ['Slip stitch until you reach the base of the head and fasten off.', 'an edging note']
+  ];
+  for (i = 0; i < NONE.length; i++) {
+    var n = upShape(NONE[i][0]);
+    assertEqual([n.upsideDown, n.upsideDownSource], [false, null],
+      'stays the right way up: ' + NONE[i][1]);
+  }
+
+  /* A top-down phrase FORCES false, even next to a bottom-up one. */
+  var both = upShape('Worked from the top down.\nStart at the base.');
+  assertEqual([both.upsideDown, both.upsideDownSource], [false, null],
+    '"top down" wins over a "start at the base" in the same header');
+
+  /* Every shape carries the two fields, always the right types. */
+  assertTrue(typeof upShape('').upsideDown === 'boolean', 'upsideDown is always a boolean');
+})();
+
+(function () {
+  fresh();
+
+  /* -- the scan window: header / setup lines only ---------------------- */
+  var LONG = [];
+  for (var i = 1; i <= 40; i++) LONG.push('R' + i + ': 24 sc around (24)');
+  LONG = LONG.join('\n');
+
+  var proj = mkProject('ZD UpLate', 'rounds');
+  var late = mkPart(proj, LONG + '\nFor the second body, begin at the bottom.',
+    { row: 0, stitch: 0, workMode: 'rounds' });
+  assertEqual(Store.diagramModel(late, proj).shape.upsideDown, false,
+    'a bottom phrase 40 rounds in is not a header: ignored');
+
+  var proj2 = mkProject('ZD UpEarly', 'rounds');
+  var early = mkPart(proj2, 'Start at the base.\n' + LONG, { row: 0, stitch: 0, workMode: 'rounds' });
+  assertEqual(Store.diagramModel(early, proj2).shape.upsideDown, true,
+    'the same phrase in line 1 of the same pattern is read');
+
+  /* The snowman's 16 lines of stitch glossary push "bottom to top:" past a flat
+     30-line window, so the window stretches to the piece's first round. */
+  var pre = [];
+  for (i = 1; i <= 35; i++) pre.push('note line ' + i);
+  var proj3 = mkProject('ZD UpPreamble', 'rounds');
+  var pream = mkPart(proj3, pre.join('\n') + '\nbottom to top:\n' + UP_ROUNDS,
+    { row: 0, stitch: 0, workMode: 'rounds' });
+  assertEqual(Store.diagramModel(pream, proj3).shape.upsideDown, true,
+    'a 35-line preamble is still setup: the phrase after it counts');
+
+  /* ...but not forever. */
+  var pre2 = [];
+  for (i = 1; i <= 90; i++) pre2.push('note line ' + i);
+  var proj4 = mkProject('ZD UpHuge', 'rounds');
+  var huge = mkPart(proj4, pre2.join('\n') + '\nbottom to top:\n' + UP_ROUNDS,
+    { row: 0, stitch: 0, workMode: 'rounds' });
+  assertEqual(Store.diagramModel(huge, proj4).shape.upsideDown, false,
+    'and a 90-line preamble is past the cap: nothing is read');
+})();
+
+/* ====================================================================== */
+group('17b. Part.orientation: the owner\'s chip beats the text');
+/* ====================================================================== */
+
+(function () {
+  fresh();
+  var proj = mkProject('ZD Orient', 'rounds');
+  var prt = proj.parts[0];
+  assertEqual(prt.orientation, 'auto', 'a new part asks the text');
+
+  /* bottom-up on a head that says it starts at the crown. */
+  Store.updatePart(proj.id, prt.id, { patternText: 'Starting at the top of the head.\n' + UP_ROUNDS });
+  var m = Store.diagramModel(prt, proj);
+  assertEqual([m.shape.upsideDown, m.shape.upsideDownSource], [false, null],
+    'the text says top-down, so the model does');
+
+  Store.updatePart(proj.id, prt.id, { orientation: 'bottom-up' });
+  m = Store.diagramModel(prt, proj);
+  assertEqual([m.shape.upsideDown, m.shape.upsideDownSource], [true, 'part'],
+    'the chip flips it, and says the chip did it (no stale cached model)');
+
+  /* ...and top-down on the baphomet, which says the opposite. */
+  var proj2 = mkProject('ZD Orient2', 'rounds');
+  var prt2 = proj2.parts[0];
+  Store.updatePart(proj2.id, prt2.id, { patternText: 'Starting from bottom of body in main\ncolor\n' + UP_ROUNDS });
+  assertEqual(Store.diagramModel(prt2, proj2).shape.upsideDownSource, 'text',
+    'the baphomet header reads as bottom-up');
+  Store.updatePart(proj2.id, prt2.id, { orientation: 'top-down' });
+  var m2 = Store.diagramModel(prt2, proj2);
+  assertEqual([m2.shape.upsideDown, m2.shape.upsideDownSource], [false, 'part'],
+    'and the chip pins it back the other way');
+
+  /* Normalisation and junk. */
+  Store.updatePart(proj2.id, prt2.id, { orientation: 'Bottom Up' });
+  assertEqual(Store.project(proj2.id).parts[0].orientation, 'bottom-up', '"Bottom Up" normalises');
+  Store.updatePart(proj2.id, prt2.id, { orientation: 'TOP_DOWN' });
+  assertEqual(Store.project(proj2.id).parts[0].orientation, 'top-down', '"TOP_DOWN" normalises');
+  Store.updatePart(proj2.id, prt2.id, { orientation: 'sideways' });
+  assertEqual(Store.project(proj2.id).parts[0].orientation, 'top-down', 'junk keeps the value it had');
+  Store.updatePart(proj2.id, prt2.id, { orientation: 42 });
+  assertEqual(Store.project(proj2.id).parts[0].orientation, 'top-down', 'so does a number');
+  Store.updatePart(proj2.id, prt2.id, { orientation: 'auto' });
+  assertEqual(Store.project(proj2.id).parts[0].orientation, 'auto', 'and "auto" hands it back to the text');
+
+  /* Undoable, like every other updatePart field. */
+  var proj3 = mkProject('ZD OrientUndo', 'rounds');
+  Store.updatePart(proj3.id, proj3.parts[0].id, { orientation: 'bottom-up' });
+  assertEqual(Store.project(proj3.id).parts[0].orientation, 'bottom-up', 'the chip landed');
+  Store.undo();
+  assertEqual(Store.project(proj3.id).parts[0].orientation, 'auto', 'and undo takes it back');
+
+  /* It survives a reload. */
+  Store.updatePart(proj3.id, proj3.parts[0].id, { orientation: 'bottom-up' });
+  Store.flush();
+  Store.load();
+  assertEqual(Store.project(proj3.id).parts[0].orientation, 'bottom-up', 'and a reload keeps it');
+
+  /* A save written before the field existed reads as 'auto'. */
+  var old = Store.project(proj3.id);
+  delete old.parts[0].orientation;
+  Store.flush();
+  Store.load();
+  assertEqual(Store.project(proj3.id).parts[0].orientation, 'auto',
+    'a part saved without the field normalises to auto');
+})();
+
+/* ====================================================================== */
+group('17c. Templates carry the orientation, and the cache key holds it');
+/* ====================================================================== */
+
+(function () {
+  fresh();
+  var saved = Store.saveTemplate({
+    name: 'ZD Amigurumi',
+    parts: [
+      { name: 'Body', makeCount: 1, patternText: UP_ROUNDS, orientation: 'bottom-up' },
+      { name: 'Head', makeCount: 1, patternText: UP_ROUNDS, orientation: 'sideways' }
+    ]
+  });
+  assertEqual(saved.parts[0].orientation, 'bottom-up', 'a template part keeps its orientation');
+  assertEqual(saved.parts[1].orientation, 'auto', 'and junk on a template part normalises to auto');
+  assertEqual(Store.template(saved.id).parts[0].orientation, 'bottom-up', 'read back from the store too');
+
+  var made = Store.createProject({ name: 'ZD FromAmi', templateId: saved.id });
+  assertEqual(made.parts[0].orientation, 'bottom-up',
+    'a project made from the template starts bottom-up, like workMode');
+  assertEqual(made.parts[1].orientation, 'auto', 'and its other part stays on auto');
+  assertEqual(Store.diagramModel(made.parts[0], made).shape.upsideDownSource, 'part',
+    'so the model says the chip decided it');
+
+  var draft = Store.templateFromProject(made.id);
+  assertEqual(draft.parts[0].orientation, 'bottom-up', 'and a template drafted back out keeps it');
+
+  /* The built-in blank template has no orientation of its own. */
+  assertEqual(Store.template('blank').parts[0].orientation, 'auto', 'the blank built-in is on auto');
+
+  /* -- diagramKey: the chip alone must invalidate the cached model ----- */
+  fresh();
+  var proj = mkProject('ZD OrientKey', 'rounds');
+  var prt = mkPart(proj, UP_ROUNDS, { row: 0, stitch: 0, workMode: 'rounds' });
+  var a = Store.diagramModel(prt, proj);
+  assertEqual(a.shape.upsideDown, false, 'a body with no phrase starts the right way up');
+  Store.updatePart(proj.id, prt.id, { orientation: 'bottom-up' });
+  var b = Store.diagramModel(prt, proj);
+  assertTrue(a !== b, 'the chip changed the key, so a fresh model was built');
+  assertEqual(b.shape.upsideDown, true, 'and it is flipped');
+  Store.updatePart(proj.id, prt.id, { orientation: 'auto' });
+  assertEqual(Store.diagramModel(prt, proj).shape.upsideDown, false, 'back to auto, back to false');
+})();
+
+/* ====================================================================== *
+ * The UK / US dialect carry.
+ *
+ * UK and US crochet count the same, so nothing below is about counts. It is
+ * all about HEIGHT: a UK `tr` is a US `dc` (2.01), and a US `tr` is a round
+ * taller (2.68). `TR_ROUNDS` is the shape of the bug — a section whose every
+ * stitch name (tr, dc, ch, sl st) exists in both dialects, so
+ * `Patterns.dialectHints` cannot decide and `expand` falls back to US.
+ * ====================================================================== */
+
+/** Undecided: tr / dc / ch / sl st only. `dialectHints(...).dialect` is null. */
+var TR_ROUNDS =
+  'Rnd 1: Ch 6, join with a sl st to form a ring. 12 tr in ring (12)\n' +
+  'Rnd 2: tr in each st around (12)\n' +
+  'Rnd 3: tr in each st around (12)\n';
+
+/** Decided UK by its own instructions: htr exists in no US pattern. */
+var HTR_ROUNDS =
+  'Rnd 1: Ch 6, join with a sl st to form a ring. 12htr in ring (12)\n' +
+  'Rnd 2: 1htr in each st around (12)\n' +
+  'Rnd 3: 1htr in each st around (12)\n';
+
+/** Decided US by its own instructions: sc exists in no UK pattern. */
+var SC_ROUNDS =
+  'Rnd 1: 6 sc in magic ring (6)\n' +
+  'Rnd 2: 2 sc in each st around (12)\n' +
+  'Rnd 3: sc in each st around (12)\n';
+
+/**
+ * The abbreviations page that decides a whole leaflet, Stylecraft-fashion: UK
+ * vocabulary used often enough to clear `dialectHints`' own margin, so that one
+ * US section in the same document cannot talk the verdict out of it.
+ */
+var UK_DOC_HEAD =
+  'ABBREVIATIONS\n' +
+  'ch = chain, dc = double crochet, htr = half treble, tr = treble, dtr = double treble\n' +
+  'TENSION: 6 rnds to 16cm over the motif\n' +
+  'NOTE: every htr is worked into the back loop only, and a dtr counts as a stitch.\n' +
+  'The border alternates htr and dtr throughout; the htr edging is worked last.\n\n';
+
+var US_DOC_HEAD =
+  'ABBREVIATIONS\n' +
+  'ch = chain, sc = single crochet, hdc = half double crochet, dc = double crochet\n' +
+  'GAUGE: 6 rnds to 6 1/4 in over the motif\n\n';
+
+/** The height every round of a model came out at, de-duplicated. */
+function heights(model) {
+  var out = [];
+  model.rounds.forEach(function (r) { if (out.indexOf(r.height) < 0) out.push(r.height); });
+  return out;
+}
+
+/* ====================================================================== */
+group('17d. Part.dialect: normalisation, resolution order, persistence');
+/* ====================================================================== */
+
+(function () {
+  fresh();
+  var proj = mkProject('ZD Dialect', 'rounds');
+  var prt = proj.parts[0];
+  assertEqual(prt.dialect, 'auto', 'a new part asks its own text');
+
+  /* Resolution order: the text first, when the text says anything at all. */
+  Store.updatePart(proj.id, prt.id, { patternText: TR_ROUNDS });
+  assertEqual(Store.partDialect(prt), null, 'a section of tr / dc / ch decides nothing — null');
+  Store.updatePart(proj.id, prt.id, { patternText: HTR_ROUNDS });
+  assertEqual(Store.partDialect(prt), 'uk', 'htr in the instructions reads as UK');
+  Store.updatePart(proj.id, prt.id, { patternText: SC_ROUNDS });
+  assertEqual(Store.partDialect(prt), 'us', 'sc in the instructions reads as US');
+
+  /* ...and the explicit value beats the text, both ways round. */
+  Store.updatePart(proj.id, prt.id, { dialect: 'uk' });
+  assertEqual(Store.partDialect(prt), 'uk', 'the chip overrules a text full of sc');
+  Store.updatePart(proj.id, prt.id, { patternText: HTR_ROUNDS, dialect: 'us' });
+  assertEqual(Store.partDialect(prt), 'us', 'and overrules a text full of htr the other way');
+  Store.updatePart(proj.id, prt.id, { dialect: 'auto' });
+  assertEqual(Store.partDialect(prt), 'uk', '"auto" hands the question back to the text');
+
+  /* An empty part, and no part at all. */
+  Store.updatePart(proj.id, prt.id, { patternText: '' });
+  assertEqual(Store.partDialect(prt), null, 'a part with no text at all is null');
+  assertEqual(Store.partDialect(null), null, 'and so is no part at all');
+
+  /* Normalisation and junk, exactly as workMode / orientation do it. */
+  Store.updatePart(proj.id, prt.id, { dialect: '  UK ' });
+  assertEqual(Store.project(proj.id).parts[0].dialect, 'uk', 'case and space are normalised');
+  Store.updatePart(proj.id, prt.id, { dialect: 'US' });
+  assertEqual(Store.project(proj.id).parts[0].dialect, 'us', '"US" normalises');
+  Store.updatePart(proj.id, prt.id, { dialect: 'australian' });
+  assertEqual(Store.project(proj.id).parts[0].dialect, 'us', 'junk keeps the value it had');
+  Store.updatePart(proj.id, prt.id, { dialect: 42 });
+  assertEqual(Store.project(proj.id).parts[0].dialect, 'us', 'so does a number');
+  Store.updatePart(proj.id, prt.id, { dialect: null });
+  assertEqual(Store.project(proj.id).parts[0].dialect, 'us', 'and so does null');
+
+  /* Undoable, like every other updatePart field. */
+  var projU = mkProject('ZD DialectUndo', 'rounds');
+  Store.updatePart(projU.id, projU.parts[0].id, { dialect: 'uk' });
+  assertEqual(Store.project(projU.id).parts[0].dialect, 'uk', 'the chip landed');
+  Store.undo();
+  assertEqual(Store.project(projU.id).parts[0].dialect, 'auto', 'and undo takes it back');
+
+  /* It survives a reload... */
+  Store.updatePart(projU.id, projU.parts[0].id, { dialect: 'uk' });
+  Store.flush();
+  Store.load();
+  assertEqual(Store.project(projU.id).parts[0].dialect, 'uk', 'and a reload keeps it');
+
+  /* ...and a save written before the field existed reads as 'auto'. */
+  var old = Store.project(projU.id);
+  delete old.parts[0].dialect;
+  Store.flush();
+  Store.load();
+  assertEqual(Store.project(projU.id).parts[0].dialect, 'auto',
+    'a part saved without the field normalises to auto');
+
+  /* A parser with no dialectHints at all costs nothing but the hint. */
+  var projN = mkProject('ZD DialectNoApi', 'rounds');
+  var prtN = mkPart(projN, HTR_ROUNDS, { row: 0, stitch: 0, workMode: 'rounds' });
+  withPatterns({ dialectHints: null }, function () {
+    assertEqual(Store.partDialect(prtN), null, 'a parser without dialectHints answers null');
+  });
+  withPatterns({ dialectHints: function () { throw new Error('nope'); } }, function () {
+    var projT = mkProject('ZD DialectThrows', 'rounds');
+    var prtT = mkPart(projT, HTR_ROUNDS, { row: 0, stitch: 0, workMode: 'rounds' });
+    assertEqual(Store.partDialect(prtT), null, 'and a throwing one answers null rather than throwing');
+  });
+  withPatterns({ dialectHints: function () { return { dialect: 'canadian' }; } }, function () {
+    var projJ = mkProject('ZD DialectJunk', 'rounds');
+    var prtJ = mkPart(projJ, HTR_ROUNDS, { row: 0, stitch: 0, workMode: 'rounds' });
+    assertEqual(Store.partDialect(prtJ), null, 'a dialect the store does not know is refused');
+  });
+})();
+
+/* ====================================================================== */
+group('17e. The dialect reaches expand: a UK tr is 2.01, not 2.68');
+/* ====================================================================== */
+
+(function () {
+  fresh();
+  var proj = mkProject('ZD DialectH', 'rounds');
+  var prt = mkPart(proj, TR_ROUNDS, { row: 0, stitch: 0, workMode: 'rounds' });
+
+  var m = Store.diagramModel(prt, proj);
+  assertEqual(counts(m), [12, 12, 12], 'the undecided section parses as three rounds of 12');
+  assertEqual(m.shape.dialect, null, 'and Model.shape.dialect says nobody knows');
+  assertEqual(heights(m), [2.68], 'so every round is a US treble, 2.68 tall (today\'s behaviour)');
+
+  /* The one line this whole part exists for. */
+  Store.updatePart(proj.id, prt.id, { dialect: 'uk' });
+  var mk = Store.diagramModel(prt, proj);
+  assertEqual(counts(mk), [12, 12, 12], 'UK terms change no count — sc/dc/tr are all one-for-one');
+  assertEqual(mk.shape.dialect, 'uk', 'Model.shape.dialect carries the resolved answer');
+  assertEqual(heights(mk), [2.01], 'and every tr is now a UK treble = a US dc, 2.01 tall');
+  assertTrue(mk.rounds[0].stitches.length > 0, 'the round really has stitch records',
+    String(mk.rounds[0].stitches.length));
+  assertEqual(mk.rounds[0].stitches[mk.rounds[0].stitches.length - 1].h, 2.01,
+    'per stitch as well as per round');
+
+  Store.updatePart(proj.id, prt.id, { dialect: 'us' });
+  assertEqual(heights(Store.diagramModel(prt, proj)), [2.68], 'the US chip puts 2.68 back');
+  Store.updatePart(proj.id, prt.id, { dialect: 'auto' });
+  assertEqual(heights(Store.diagramModel(prt, proj)), [2.68],
+    'and auto on an undecided section reads as US, as expand always did');
+
+  /* A section that decides for itself needs no seed and must not be changed. */
+  var projH = mkProject('ZD DialectHtr', 'rounds');
+  var prtH = mkPart(projH, HTR_ROUNDS, { row: 0, stitch: 0, workMode: 'rounds' });
+  var mh = Store.diagramModel(prtH, projH);
+  assertEqual(mh.shape.dialect, 'uk', 'the htr section resolves uk off its own text');
+  assertEqual(heights(mh), [1.34], 'and htr is 1.34 in either dialect, so nothing moved');
+
+  /* What the store actually hands `expand`: `{ uk: ... }`, and only when known. */
+  (function () {
+    var seen = [];
+    function spy() {
+      return function (lines, row, prev, state) {
+        seen.push(state === null || state === undefined ? null : state.uk);
+        return REAL_PATTERNS.expand(lines, row, prev, state);
+      };
+    }
+
+    var projS = mkProject('ZD DialectSpy', 'rounds');
+    var prtS = mkPart(projS, TR_ROUNDS, { row: 0, stitch: 0, workMode: 'rounds' });
+    seen = [];
+    withPatterns({ expand: spy() }, function () { Store.diagramModel(prtS, projS); });
+    assertEqual(seen[0], null, 'an undecided part seeds nothing: expand decides for itself');
+
+    Store.updatePart(projS.id, prtS.id, { dialect: 'uk' });
+    seen = [];
+    withPatterns({ expand: spy() }, function () { Store.diagramModel(prtS, projS); });
+    assertEqual(seen[0], true, 'a uk part hands expand state.uk = true on the first round');
+    assertTrue(seen.length > 1 && seen[1] === true,
+      'and the same state rides on to the rounds after it', JSON.stringify(seen));
+
+    Store.updatePart(projS.id, prtS.id, { dialect: 'us' });
+    seen = [];
+    withPatterns({ expand: spy() }, function () { Store.diagramModel(prtS, projS); });
+    assertEqual(seen[0], false, 'a us part hands expand state.uk = false, rather than leaving it open');
+  })();
+
+  /* -- diagramKey: the resolved dialect alone must invalidate the model -- */
+  var projK = mkProject('ZD DialectKey', 'rounds');
+  var prtK = mkPart(projK, TR_ROUNDS, { row: 0, stitch: 0, workMode: 'rounds' });
+  var a = Store.diagramModel(prtK, projK);
+  Store.updatePart(projK.id, prtK.id, { dialect: 'uk' });
+  var b = Store.diagramModel(prtK, projK);
+  assertTrue(a !== b, 'the chip changed the key, so a fresh model was built');
+  assertEqual(heights(b), [2.01], 'and the fresh model is in UK heights');
+  var c = Store.diagramModel(prtK, projK);
+  assertTrue(b === c, 'asking twice with nothing changed hits the cache');
+  Store.updatePart(projK.id, prtK.id, { dialect: 'auto' });
+  assertEqual(heights(Store.diagramModel(prtK, projK)), [2.68], 'back to auto, back to 2.68');
+})();
+
+/* ====================================================================== */
+group('17f. Import: the document lends its dialect to an undecided section');
+/* ====================================================================== */
+
+(function () {
+  /* One leaflet: an abbreviations page that says UK, a Motif section that says
+     nothing, and a Border section that says US outright. This is the Stylecraft
+     hood next to the King Cole festival pair, in twelve lines. */
+  var UK_SECTIONS = [
+    { name: 'Motif', makeCount: 1, text: TR_ROUNDS, placement: '' },
+    { name: 'Edging', makeCount: 1, text: HTR_ROUNDS, placement: '' }
+  ];
+  var MIXED_SECTIONS = [
+    { name: 'Motif', makeCount: 1, text: TR_ROUNDS, placement: '' },
+    { name: 'Nose', makeCount: 1, text: SC_ROUNDS, placement: '' }
+  ];
+  function doc(head, sections) {
+    return head + sections.map(function (s) { return s.name + '\n' + s.text; }).join('\n\n');
+  }
+
+  fresh();
+  var proj = mkProject('ZD DialectImport', 'rounds');
+  var res = Store.importPatternSections(proj.id, UK_SECTIONS,
+    { mode: 'parts', text: doc(UK_DOC_HEAD, UK_SECTIONS) });
+  assertEqual(res.created, 2, 'both sections became parts');
+  assertEqual(res.dialectSet, 1, 'and exactly one of them was lent the document\'s dialect');
+  var parts = Store.project(proj.id).parts;
+  assertEqual(parts[0].dialect, 'uk',
+    'the Motif, whose own tr / dc decide nothing, takes UK from the leaflet');
+  assertEqual(parts[1].dialect, 'auto',
+    'the Edging, whose own htr already says UK, is left on auto — nothing to fix');
+  assertEqual(Store.partDialect(parts[1]), 'uk', 'and still resolves uk off its own text');
+  assertEqual(heights(Store.diagramModel(parts[0], Store.project(proj.id))), [2.01],
+    'so the imported Motif is drawn in UK trebles, which is the whole point');
+
+  /* A section that decides the OTHER way is never overridden. */
+  var projM = mkProject('ZD DialectImportMixed', 'rounds');
+  var resM = Store.importPatternSections(projM.id, MIXED_SECTIONS,
+    { mode: 'parts', text: doc(UK_DOC_HEAD, MIXED_SECTIONS) });
+  assertEqual(resM.dialectSet, 1, 'only the undecided section is touched');
+  assertEqual(Store.project(projM.id).parts[1].dialect, 'auto',
+    'a section of sc keeps its own reading even inside a UK leaflet');
+  assertEqual(Store.partDialect(Store.project(projM.id).parts[1]), 'us', 'which is us');
+
+  /* A US document does the same thing the other way round. */
+  var projUS = mkProject('ZD DialectImportUS', 'rounds');
+  Store.importPatternSections(projUS.id, [UK_SECTIONS[0]],
+    { mode: 'parts', text: doc(US_DOC_HEAD, [UK_SECTIONS[0]]) });
+  assertEqual(Store.project(projUS.id).parts[0].dialect, 'us',
+    'the same undecided Motif in a US leaflet takes US');
+  assertEqual(heights(Store.diagramModel(Store.project(projUS.id).parts[0], Store.project(projUS.id))),
+    [2.68], 'and is drawn in US trebles');
+
+  /* An explicit value the owner (or an earlier import) set is never replaced. */
+  var projE = mkProject('ZD DialectImportExplicit', 'rounds');
+  Store.importPatternSections(projE.id, UK_SECTIONS, { mode: 'parts' });
+  var pe = Store.project(projE.id).parts[0];
+  Store.updatePart(projE.id, pe.id, { dialect: 'us' });
+  var resE = Store.importPatternSections(projE.id, UK_SECTIONS,
+    { mode: 'parts', text: doc(UK_DOC_HEAD, UK_SECTIONS) });
+  assertEqual(resE.created, 0, 'the re-import updates rather than creates');
+  assertEqual(resE.dialectSet, 0, 'and lends nobody anything');
+  assertEqual(Store.project(projE.id).parts[0].dialect, 'us',
+    'the explicit chip survives a re-import of the whole leaflet');
+
+  /* An UPDATED part that is still on auto does get the answer. */
+  var projA = mkProject('ZD DialectImportAgain', 'rounds');
+  Store.importPatternSections(projA.id, UK_SECTIONS, { mode: 'parts' });
+  assertEqual(Store.project(projA.id).parts[0].dialect, 'auto',
+    'an import with no opts.text lends nothing — there is no document to ask');
+  var resA = Store.importPatternSections(projA.id, UK_SECTIONS,
+    { mode: 'parts', text: doc(UK_DOC_HEAD, UK_SECTIONS) });
+  assertEqual(resA.updated, 2, 'the second import updates both parts');
+  assertEqual(resA.dialectSet, 1, 'and now lends the Motif the leaflet\'s UK');
+  assertEqual(Store.project(projA.id).parts[0].dialect, 'uk', 'which lands on the part');
+
+  /* A document that decides nothing itself lends nothing. */
+  var projQ = mkProject('ZD DialectImportQuiet', 'rounds');
+  var resQ = Store.importPatternSections(projQ.id, [UK_SECTIONS[0]],
+    { mode: 'parts', text: 'MOTIF\n' + TR_ROUNDS });
+  assertEqual(resQ.dialectSet, 0, 'a leaflet with no abbreviations page decides nothing');
+  assertEqual(Store.project(projQ.id).parts[0].dialect, 'auto', 'so the part stays on auto');
+
+  /* mode:'active' — a paste into the open part is an import too. */
+  var projAc = mkProject('ZD DialectImportActive', 'rounds');
+  var resAc = Store.importPatternSections(projAc.id, [UK_SECTIONS[0]],
+    { mode: 'active', text: doc(UK_DOC_HEAD, [UK_SECTIONS[0]]) });
+  assertEqual(resAc.dialectSet, 1, 'the active-part import lends it too');
+  assertEqual(Store.project(projAc.id).parts[0].dialect, 'uk', 'and the open part is UK');
+
+  /* Undo puts the whole import, dialect and all, back. */
+  var projU = mkProject('ZD DialectImportUndo', 'rounds');
+  Store.importPatternSections(projU.id, [UK_SECTIONS[0]],
+    { mode: 'parts', text: doc(UK_DOC_HEAD, [UK_SECTIONS[0]]) });
+  assertEqual(Store.project(projU.id).parts[0].dialect, 'uk', 'imported as UK');
+  Store.undo();
+  assertTrue(!Store.project(projU.id).parts.some(function (p) { return p.dialect === 'uk'; }),
+    'and undo leaves no UK part behind');
+
+  /* A parser with no dialectHints imports exactly as it did before. */
+  withPatterns({ dialectHints: null }, function () {
+    var projN = mkProject('ZD DialectImportNoApi', 'rounds');
+    var resN = Store.importPatternSections(projN.id, UK_SECTIONS,
+      { mode: 'parts', text: doc(UK_DOC_HEAD, UK_SECTIONS) });
+    assertEqual(resN.created, 2, 'the sections still import');
+    assertEqual(resN.dialectSet, 0, 'and nothing is lent');
+    assertEqual(Store.project(projN.id).parts[0].dialect, 'auto', 'every part stays on auto');
+  });
+  withPatterns({ dialectHints: function () { throw new Error('nope'); } }, function () {
+    var projT = mkProject('ZD DialectImportThrows', 'rounds');
+    var resT = Store.importPatternSections(projT.id, UK_SECTIONS,
+      { mode: 'parts', text: doc(UK_DOC_HEAD, UK_SECTIONS) });
+    assertEqual(resT.created, 2, 'a throwing dialectHints does not stop the import');
+    assertEqual(resT.dialectSet, 0, 'and lends nothing');
+  });
+})();
+
+/* ====================================================================== */
+group('17g. Templates carry the dialect, like workMode and orientation');
+/* ====================================================================== */
+
+(function () {
+  fresh();
+  var saved = Store.saveTemplate({
+    name: 'ZD UK leaflet',
+    parts: [
+      { name: 'Motif', makeCount: 1, patternText: TR_ROUNDS, dialect: 'uk' },
+      { name: 'Edging', makeCount: 1, patternText: TR_ROUNDS, dialect: 'australian' }
+    ]
+  });
+  assertEqual(saved.parts[0].dialect, 'uk', 'a template part keeps its dialect');
+  assertEqual(saved.parts[1].dialect, 'auto', 'and junk on a template part normalises to auto');
+  assertEqual(Store.template(saved.id).parts[0].dialect, 'uk', 'read back from the store too');
+
+  var made = Store.createProject({ name: 'ZD FromUK', templateId: saved.id });
+  assertEqual(made.parts[0].dialect, 'uk',
+    'a project made from the template starts UK, like workMode and orientation');
+  assertEqual(made.parts[1].dialect, 'auto', 'and its other part stays on auto');
+  assertEqual(heights(Store.diagramModel(made.parts[0], made)), [2.01],
+    'so the very first model it draws is already in UK trebles');
+  assertEqual(heights(Store.diagramModel(made.parts[1], made)), [2.68],
+    'while the part on auto reads the same text as US');
+
+  var draft = Store.templateFromProject(made.id);
+  assertEqual(draft.parts[0].dialect, 'uk', 'and a template drafted back out keeps it');
+
+  /* The built-in blank template has no dialect of its own. */
+  assertEqual(Store.template('blank').parts[0].dialect, 'auto', 'the blank built-in is on auto');
+
+  /* A template part with no dialect at all is auto, not undefined. */
+  var plain = Store.saveTemplate({
+    name: 'ZD Plain leaflet',
+    parts: [{ name: 'Motif', makeCount: 1, patternText: TR_ROUNDS }]
+  });
+  assertEqual(plain.parts[0].dialect, 'auto', 'a template part without one is auto');
+})();
+
 /* ---------------------------------------------------------------------- */
 
 /**
- * Group 17 reads two copyrighted PDFs out of the uncommitted ../tmp-pdf, the way
+ * Group 18 reads two copyrighted PDFs out of the uncommitted ../tmp-pdf, the way
  * test/diagram.gallery.html does (fetch, PdfText.extract, Store.splitSections),
  * on its own ZS2_ storage key. It is asynchronous, so the summary is written by
  * finish() once it has run — or once it has skipped itself.
@@ -1689,7 +2294,7 @@ function mainSection(text) {
 
 function runFixtures() {
   if (!window.PdfText || typeof window.PdfText.extract !== 'function') {
-    group('17. Fixture PDFs (skipped)');
+    group('18. Fixture PDFs (skipped)');
     note('pdftext.js / pdf.js did not load — nothing read.');
     return Promise.resolve();
   }
@@ -1699,7 +2304,7 @@ function runFixtures() {
   })).then(function (got) {
     var missing = got.filter(function (g) { return !!g.err; });
     if (missing.length) {
-      group('17. Fixture PDFs (skipped)');
+      group('18. Fixture PDFs (skipped)');
       missing.forEach(function (g) {
         note(g.f.file + ' could not be read (' + g.err.message + ') — ../tmp-pdf is dev-only.');
       });
@@ -1710,7 +2315,7 @@ function runFixtures() {
     Store.load();
 
     /* ---------------------------------------------------------------- */
-    group('17. Fixture: ' + FIXTURES[0].label + ' — a range that grows');
+    group('18. Fixture: ' + FIXTURES[0].label + ' — a range that grows');
     /* ---------------------------------------------------------------- */
 
     var sec = mainSection(got[0].text);
@@ -1735,7 +2340,7 @@ function runFixtures() {
     assertEqual(Store.targetFor(prt, 55), 57, 'the printed 57 lands on row 55, the end of the range');
 
     /* ---------------------------------------------------------------- */
-    group('17b. Fixture: ' + FIXTURES[1].label + ' — a ch-3 mesh');
+    group('18b. Fixture: ' + FIXTURES[1].label + ' — a ch-3 mesh');
     /* ---------------------------------------------------------------- */
 
     var wsec = mainSection(got[1].text);
@@ -1810,7 +2415,7 @@ function runFixtures() {
 /* ---------------------------------------------------------------------- */
 
 /**
- * Group 18: the five fixtures of 07-review's findings 1 and 3, read the way
+ * Group 19: the five fixtures of 07-review's findings 1 and 3, read the way
  * test/diagram.gallery.html reads them — fetch, PdfText.extract,
  * Store.splitSections, one part per section — on its own ZS3_ storage key.
  *
@@ -1858,7 +2463,7 @@ function sectionOf(text, re) {
 
 function runMotifFixtures() {
   if (!window.PdfText || typeof window.PdfText.extract !== 'function') {
-    group('18. Motif / garment fixtures (skipped)');
+    group('19. Motif / garment fixtures (skipped)');
     note('pdftext.js / pdf.js did not load — nothing read.');
     return Promise.resolve();
   }
@@ -1868,7 +2473,7 @@ function runMotifFixtures() {
   })).then(function (got) {
     var missing = got.filter(function (g) { return !!g.err; });
     if (missing.length) {
-      group('18. Motif / garment fixtures (skipped)');
+      group('19. Motif / garment fixtures (skipped)');
       missing.forEach(function (g) {
         note(g.f.file + ' could not be read (' + g.err.message + ') — ../tmp-pdf is dev-only.');
       });
@@ -1891,7 +2496,7 @@ function runMotifFixtures() {
     });
 
     /* ---------------------------------------------------------------- */
-    group('18. Fixture: the corner prior on the real motifs');
+    group('19. Fixture: the corner prior on the real motifs');
     /* ---------------------------------------------------------------- */
 
     var ps = models['crochet-redheart-persian-tiles.pdf'];
@@ -1914,7 +2519,7 @@ function runMotifFixtures() {
     assertEqual(models['cardigan.pdf'].model.shape.corners, 0, 'nor the cardigan swatch');
 
     /* ---------------------------------------------------------------- */
-    group('18b. Fixture: the cowl keeps its 240-stitch chain');
+    group('19b. Fixture: the cowl keeps its 240-stitch chain');
     /* ---------------------------------------------------------------- */
 
     var cw = models['crochet-stylecraft-cowl-mitts.pdf'];
@@ -1927,7 +2532,7 @@ function runMotifFixtures() {
       'with a stitch record per chain', String(cw.model.rounds[0].stitches.length));
 
     /* ---------------------------------------------------------------- */
-    group('18c. Fixture: outlier rows in the wrap and the cardigan swatch');
+    group('19c. Fixture: outlier rows in the wrap and the cardigan swatch');
     /* ---------------------------------------------------------------- */
 
     var sw = models['cardigan.pdf'];
@@ -1975,6 +2580,263 @@ function runMotifFixtures() {
 
 /* ---------------------------------------------------------------------- */
 
+/**
+ * Group 20: which way up, on the four amigurumi the orientation hint was
+ * written for, read the way test/diagram.gallery.html reads them — fetch,
+ * PdfText.extract, Store.splitSections, one part per section — on its own ZS6_
+ * storage key.
+ *
+ * These are the two shapes of the problem. The baphomet and the snowman say
+ * which way up they are worked and must flip; the panda and the turtle say
+ * nothing at all ("Rnd 1: With white, ch 2, 6 sc in second chain from hook")
+ * and must not, because a false flip is worse than no flip.
+ */
+var ORIENT_FIXTURES = [
+  { file: 'crochet-baphomet.pdf', section: /Body/i, label: 'Baphomet Body/Head',
+    upsideDown: true, source: 'text' },
+  { file: 'crochet-snowman.pdf', section: null, label: 'snowman body',
+    upsideDown: true, source: 'text' },
+  { file: 'crochet-panda.pdf', section: /^Body$/i, label: 'panda Body',
+    upsideDown: false, source: null },
+  { file: 'crochet-panda.pdf', section: /^Head$/i, label: 'panda Head',
+    upsideDown: false, source: null },
+  { file: 'crochet-turtle.pdf', section: /Shell/i, label: 'turtle Shell',
+    upsideDown: false, source: null }
+];
+var FIX6_KEY = 'ZS6_diagram_model_orientation';
+var fix6Seq = 0;
+
+/** The gallery's part, on the ZS6_ key: a plain object no Store API stores. */
+function orientPart(section) {
+  fix6Seq++;
+  return {
+    id: 'ZS6_p' + fix6Seq, name: (section && section.name) || '(unnamed)',
+    patternText: (section && section.text) || '',
+    row: 0, stitch: 0, rowStitches: [], sizeIndex: 0, piecesDone: 0, repeat: null,
+    workMode: 'rounds', orientation: 'auto'
+  };
+}
+
+function runOrientFixtures() {
+  if (!window.PdfText || typeof window.PdfText.extract !== 'function') {
+    group('20. Which way up: amigurumi fixtures (skipped)');
+    note('pdftext.js / pdf.js did not load — nothing read.');
+    return Promise.resolve();
+  }
+  var files = ORIENT_FIXTURES.map(function (f) { return f.file; })
+    .filter(function (f, i, all) { return all.indexOf(f) === i; });
+  return Promise.all(files.map(function (file) {
+    return fixtureText(file).then(function (t) { return { file: file, text: t }; },
+      function (e) { return { file: file, err: e }; });
+  })).then(function (got) {
+    var missing = got.filter(function (g) { return !!g.err; });
+    if (missing.length) {
+      group('20. Which way up: amigurumi fixtures (skipped)');
+      missing.forEach(function (g) {
+        note(g.file + ' could not be read (' + g.err.message + ') — ../tmp-pdf is dev-only.');
+      });
+      return;
+    }
+    var texts = {};
+    got.forEach(function (g) { texts[g.file] = g.text; });
+
+    Store.__setKeyForTests(FIX6_KEY);
+    Store.load();
+
+    /* ---------------------------------------------------------------- */
+    group('20. Which way up: Model.shape.upsideDown on the real amigurumi');
+    /* ---------------------------------------------------------------- */
+
+    ORIENT_FIXTURES.forEach(function (f) {
+      var sec = sectionOf(texts[f.file], f.section);
+      var prt = orientPart(sec);
+      var proj = { id: 'ZS6_proj', countMode: 'rounds', yarnColors: {} };
+      var m = Store.diagramModel(prt, proj);
+      note(f.label + ' — section ' + JSON.stringify(prt.name) + ' · ' + m.rounds.length +
+        ' rounds · upsideDown ' + m.shape.upsideDown + ' (' + m.shape.upsideDownSource + ')');
+      assertTrue(m.rounds.length > 1, f.label + ': the section really parsed',
+        String(m.rounds.length));
+      assertEqual([m.shape.upsideDown, m.shape.upsideDownSource], [f.upsideDown, f.source],
+        f.label + ' is ' + (f.upsideDown ? 'bottom-up (flip it)' : 'top-down (leave it)'));
+
+      /* The owner's chip still wins on a real pattern. */
+      prt.orientation = f.upsideDown ? 'top-down' : 'bottom-up';
+      var flipped = Store.diagramModel(prt, proj);
+      assertEqual([flipped.shape.upsideDown, flipped.shape.upsideDownSource],
+        [!f.upsideDown, 'part'],
+        f.label + ': the chip overrides whatever the text said');
+    });
+  }).catch(function (e) {
+    log(false, 'the orientation fixture group ran to the end', e && e.message);
+  }).then(function () {
+    try { window.localStorage.removeItem(FIX6_KEY); } catch (e) { /* private mode */ }
+    Store.__setKeyForTests(TEST_KEY);
+  });
+}
+
+/* ---------------------------------------------------------------------- */
+
+/**
+ * Group 21: the dialect carry on the real leaflets, through the REAL import
+ * path — `Store.importPatternSections(projectId, splitSections(text),
+ * { mode: 'parts', text: text })`, which is what the gallery and the app both
+ * call — on its own ZS7_ storage key.
+ *
+ * The Stylecraft hood is the bug in one file: `Patterns.dialectHints` reads the
+ * whole leaflet as UK (htr and "Tension" on its abbreviations page) and reads
+ * the Motif section alone as nothing at all, because the motif is written in
+ * `tr`, `dc` and `ch`, which both dialects own. The document's answer has to
+ * reach the part, or the granny square is drawn in US trebles (2.68 instead of
+ * 2.01) and cups.
+ *
+ * The panda is the control: its own rows say `sc`, so it decides for itself,
+ * must stay on 'auto', and must come out in sc heights of 1.
+ *
+ * The King Cole festival pair is the trap: the two editions SHARE an
+ * abbreviations page, so the US one also says "UK TERMS" while every
+ * instruction in it says sc and hdc. The verdict has to come from the
+ * vocabulary, and each file's parts have to land on their own side.
+ */
+var DIALECT_FIXTURES = [
+  { file: 'crochet-stylecraft-hood.pdf', section: /motif/i, label: 'Stylecraft hood Motif',
+    doc: 'uk', partDialect: 'uk', explicit: 'uk', trHeight: 2.01 },
+  { file: 'crochet-panda.pdf', section: /^Body$/i, label: 'panda Body',
+    doc: 'us', partDialect: 'us', explicit: 'auto', trHeight: 1 },
+  { file: 'crochet-kingcole-festival-uk.pdf', section: null, label: 'King Cole festival UK',
+    doc: 'uk', partDialect: 'uk', explicit: null, trHeight: null },
+  { file: 'crochet-kingcole-festival-us.pdf', section: null, label: 'King Cole festival US',
+    doc: 'us', partDialect: 'us', explicit: null, trHeight: null }
+];
+var FIX7_KEY = 'ZS7_diagram_model_dialect';
+var fix7Seq = 0;
+
+/** Every distinct round height in a model, commonest first. */
+function heightTally(model) {
+  var seen = {};
+  model.rounds.forEach(function (r) { seen[r.height] = (seen[r.height] || 0) + 1; });
+  return Object.keys(seen)
+    .sort(function (a, b) { return seen[b] - seen[a]; })
+    .map(function (k) { return k + '×' + seen[k]; })
+    .join(' ');
+}
+
+function runDialectFixtures() {
+  if (!window.PdfText || typeof window.PdfText.extract !== 'function') {
+    group('21. The dialect carry: leaflet fixtures (skipped)');
+    note('pdftext.js / pdf.js did not load — nothing read.');
+    return Promise.resolve();
+  }
+  var files = DIALECT_FIXTURES.map(function (f) { return f.file; })
+    .filter(function (f, i, all) { return all.indexOf(f) === i; });
+  return Promise.all(files.map(function (file) {
+    return fixtureText(file).then(function (t) { return { file: file, text: t }; },
+      function (e) { return { file: file, err: e }; });
+  })).then(function (got) {
+    var missing = got.filter(function (g) { return !!g.err; });
+    if (missing.length) {
+      group('21. The dialect carry: leaflet fixtures (skipped)');
+      missing.forEach(function (g) {
+        note(g.file + ' could not be read (' + g.err.message + ') — ../tmp-pdf is dev-only.');
+      });
+      return;
+    }
+    var texts = {};
+    got.forEach(function (g) { texts[g.file] = g.text; });
+
+    Store.__setKeyForTests(FIX7_KEY);
+    try { window.localStorage.removeItem(FIX7_KEY); } catch (e) { /* private mode */ }
+    Store.load();
+
+    /* ---------------------------------------------------------------- */
+    group('21. The dialect carry through the real import path');
+    /* ---------------------------------------------------------------- */
+
+    DIALECT_FIXTURES.forEach(function (f) {
+      var text = texts[f.file];
+      var sections = Store.splitSections(text) || [];
+      assertTrue(sections.length > 0, f.label + ': the leaflet split into sections',
+        String(sections.length));
+      if (!sections.length) return;
+
+      /* What the WHOLE document says, and what this section says alone. */
+      var docHint = null, secHint = null;
+      try { docHint = window.Patterns.dialectHints(text).dialect; } catch (e) { docHint = 'threw'; }
+      assertEqual(docHint, f.doc, f.label + ': the document reads as ' + f.doc);
+
+      /* The import, exactly as the app does it. */
+      fix7Seq++;
+      var proj = Store.createProject({ name: 'ZS7 ' + f.label + ' ' + fix7Seq });
+      Store.updateProject(proj.id, { countMode: 'rounds' });
+      var res = Store.importPatternSections(proj.id, sections, { mode: 'parts', text: text });
+      proj = Store.project(proj.id);
+      assertTrue(res.created > 0, f.label + ': the import created parts', JSON.stringify(res));
+      note(f.label + ' — ' + sections.length + ' sections, ' + res.created + ' parts created, ' +
+        res.dialectSet + ' lent the document\'s dialect');
+
+      /* Every part that resolves at all resolves to this leaflet's side. */
+      var resolved = proj.parts.map(function (p) { return Store.partDialect(p); });
+      var wrong = resolved.filter(function (d) { return d && d !== f.partDialect; });
+      var known = resolved.filter(function (d) { return !!d; });
+      note('   parts: ' + proj.parts.map(function (p, i) {
+        return p.name + ' [' + p.dialect + '→' + (resolved[i] || 'null') + ']';
+      }).join(', '));
+      assertTrue(known.length > 0, f.label + ': at least one part resolved a dialect',
+        JSON.stringify(resolved));
+      assertEqual(wrong, [], f.label + ': no part resolves to the other side of the Atlantic');
+
+      if (!f.section) return;
+
+      /* ...and the named section in particular. */
+      var hit = null;
+      for (var i = 0; i < proj.parts.length; i++) {
+        if (f.section.test(proj.parts[i].name)) { hit = proj.parts[i]; break; }
+      }
+      assertTrue(!!hit, f.label + ': the named section is one of the parts',
+        proj.parts.map(function (p) { return p.name; }).join(' | '));
+      if (!hit) return;
+
+      try { secHint = window.Patterns.dialectHints(hit.patternText).dialect; }
+      catch (e) { secHint = 'threw'; }
+      assertEqual(hit.dialect, f.explicit,
+        f.label + ': Part.dialect is ' + JSON.stringify(f.explicit) +
+        ' (the section alone reads as ' + JSON.stringify(secHint) + ')');
+      assertEqual(Store.partDialect(hit), f.partDialect,
+        f.label + ': and it resolves ' + f.partDialect);
+
+      var m = Store.diagramModel(hit, proj);
+      note('   ' + hit.name + ': ' + m.rounds.length + ' rounds · shape.dialect ' +
+        m.shape.dialect + ' · heights ' + heightTally(m) +
+        ' · counts ' + JSON.stringify(counts(m)).slice(0, 120));
+      assertTrue(m.rounds.length > 1, f.label + ': the section really parsed',
+        String(m.rounds.length));
+      assertEqual(m.shape.dialect, f.partDialect, f.label + ': Model.shape.dialect carries it');
+
+      /* The heights, which is the only thing the dialect actually moves. */
+      var hs = m.rounds.map(function (r) { return r.height; });
+      var atTarget = hs.filter(function (h) { return h === f.trHeight; }).length;
+      assertTrue(atTarget >= Math.ceil(hs.length / 2),
+        f.label + ': most rounds are ' + f.trHeight + ' tall', heightTally(m));
+      if (f.trHeight === 2.01) {
+        assertEqual(hs.filter(function (h) { return h === 2.68; }).length, 0,
+          f.label + ': and NOT one round is a US treble (2.68) — this is the bug');
+      }
+
+      /* The chip still overrules the import, on a real leaflet. */
+      Store.updatePart(proj.id, hit.id, { dialect: f.partDialect === 'uk' ? 'us' : 'uk' });
+      var flipped = Store.diagramModel(Store.part(Store.project(proj.id), hit.id), Store.project(proj.id));
+      assertEqual(flipped.shape.dialect, f.partDialect === 'uk' ? 'us' : 'uk',
+        f.label + ': the owner\'s chip overrules what the leaflet said');
+    });
+  }).catch(function (e) {
+    log(false, 'the dialect fixture group ran to the end', e && e.message);
+  }).then(function () {
+    try { window.localStorage.removeItem(FIX7_KEY); } catch (e) { /* private mode */ }
+    Store.__setKeyForTests(TEST_KEY);
+  });
+}
+
+/* ---------------------------------------------------------------------- */
+
 function finish() {
   document.getElementById('perf').textContent = perfLines.join('\n');
 
@@ -1989,7 +2851,11 @@ function finish() {
   window.setTimeout(cleanup, 400);
 }
 
-runFixtures().then(runMotifFixtures, runMotifFixtures).then(finish, finish);
+runFixtures()
+  .then(runMotifFixtures, runMotifFixtures)
+  .then(runOrientFixtures, runOrientFixtures)
+  .then(runDialectFixtures, runDialectFixtures)
+  .then(finish, finish);
 </script>
 </body>
 </html>
