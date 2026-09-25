@@ -10,6 +10,12 @@
 //   6. evaluate() - computed counts (tokenizer + vocabulary)
 //   7. headers / sections / notes / repeat suggestions
 //   8. parse(), targetFor(), lineFor(), summary(), splitSections()
+//   9. expand() - the stitch-by-stitch reading (cells, colours, geometry)
+//   9b. motif anchors - how many corners / spaces / group-gaps the round
+//       below left, which is the only place a motif round's repeat count is
+//       written down (roundStruct, anchorHits, anchorReps)
+//  10. row plumbing, back-references (refTarget)
+//  11. shape hints (startHint, workMode, stuffingHint)
 'use strict';
 
 (function () {
@@ -3051,7 +3057,7 @@
     for (i = 0; i < list.length; i++) {
       var e = list[i];
       if (e === FILL_MARK) continue;
-      out.push({ t: e.t, c: e.c, h: e.h, w: e.w });
+      out.push({ t: e.t, c: e.c, h: e.h, w: e.w, g: e.g });
     }
     return out;
   }
@@ -3061,9 +3067,115 @@
     for (i = 0; i < list.length; i++) {
       var e = list[i];
       if (e === FILL_MARK) { out.push(e); continue; }
-      out.push({ t: e.t, c: colr, h: e.h, w: e.w });
+      out.push({ t: e.t, c: colr, h: e.h, w: e.w, g: e.g });
     }
     return out;
+  }
+
+  // =====================================================================
+  // 8c. Per-stitch WIDTH: who shares the width of what they are worked into
+  //
+  // 01 §1.2 states the rule twice: a chain space is `k` wide and 0 tall, and
+  // "groups worked into one place share the width of what they are worked
+  // into". A stitch worked into a stitch is one wide, and an increase is two
+  // stitches side by side in the new round - that is why `Sigma w` = count for
+  // every amigurumi round and why a +6 round is 6 wider than the one below.
+  // But a shell, a cluster or a corner group worked into ONE chain space does
+  // not widen the fabric by its stitch count: the Premier wrap's shell row
+  // puts eight positions (sc, ch 3, tr, dc, hdc, sc) into one ch-3 space plus
+  // the stitch it skips over, and the finished wrap is 405 stitches wide at
+  // every one of its 46 rows, not 808. So those eight positions divide the
+  // four positions they consume between them.
+  //
+  // The division cannot be done where the words are read: a repeat unit is
+  // expanded ONCE and then cloned once per anchor, long after. So each cell
+  // that shares carries a share id, and one {w, n} record says how wide the
+  // anchor is and how many cells were in the unit. Every clone of that unit
+  // then divides the same anchor between the same n cells - which is exactly
+  // what the fabric does, one anchor per repeat.
+  // ---------------------------------------------------------------------
+
+  /** Open a share over an anchor `w` positions wide. Under 2 there is nothing
+   *  to share: one stitch into one stitch is one stitch wide. */
+  function openShare(ctx, w) {
+    if (!ctx) return;
+    ctx.share = null;
+    if (!(w >= 2)) return;
+    ctx.shareId = (ctx.shareId || 0) + 1;
+    var id = 's' + ctx.shareId;
+    ctx.shares[id] = { w: w, n: 0 };
+    ctx.share = id;
+  }
+
+  /** These cells go into the anchor the open share names. */
+  function joinShare(ctx, cells) {
+    if (!ctx || !ctx.share || !cells) return;
+    var rec = ctx.shares[ctx.share], i;
+    for (i = 0; i < cells.length; i++) {
+      if (!cells[i] || cells[i] === FILL_MARK) continue;
+      cells[i].g = ctx.share;
+      rec.n++;
+    }
+  }
+
+  // The stitch the group sits over: "(sc, ch 3, tr, dc, hdc, sc) in this ch-3
+  // sp, sk next st" consumes the space AND the skipped stitch, so the group is
+  // four positions wide, not three.
+  function widenShare(ctx, extra) {
+    if (ctx && ctx.share && extra > 0) ctx.shares[ctx.share].w += extra;
+  }
+
+  function closeShare(ctx) { if (ctx) ctx.share = null; }
+
+  /** Divide each anchor between the cells worked into it. A stitch is never
+   *  made WIDER this way - a lone sc in a ch-3 space gathers the space, it
+   *  does not become three stitches wide. */
+  function applyShares(list, shares) {
+    var i, e, rec, w;
+    if (!list || !shares) return;
+    for (i = 0; i < list.length; i++) {
+      e = list[i];
+      if (!e || e === FILL_MARK || !e.g) continue;
+      rec = shares[e.g];
+      if (rec && rec.n > 0) {
+        w = rec.w / rec.n;
+        if (w < e.w) e.w = w;
+      }
+      delete e.g;
+    }
+  }
+
+  // How many positions of the round below the anchor a phrase names covers.
+  // "in next ch-3 sp" says three; "in next sc" says one; a bare "in next sp"
+  // says nothing at all, and guessing it from the round below's widest space
+  // reads a granny round's own new corner loop as part of the space it grew
+  // out of - so an unnumbered space shares nothing and every stitch in it
+  // stays one wide.
+  function anchorWidth(text) {
+    return chSpWidth(text);
+  }
+
+  function sumWidth(list) {
+    var t = 0, i;
+    for (i = 0; i < list.length; i++) {
+      if (!list[i] || list[i] === FILL_MARK) continue;
+      t += (typeof list[i].w === 'number' && isFinite(list[i].w)) ? list[i].w : 1;
+    }
+    return Math.round(t * 1e6) / 1e6;
+  }
+
+  // Is everything this fragment made a chain? A made chain either bridges to
+  // the next anchor (one wide per chain, 01 §1.2) or sits inside the anchor
+  // the fragment before it worked into, and only the words that come next say
+  // which.
+  function allChain(list) {
+    var i, any = false;
+    for (i = 0; i < list.length; i++) {
+      if (!list[i] || list[i] === FILL_MARK) continue;
+      if (list[i].t !== 'ch') return false;
+      any = true;
+    }
+    return any;
   }
 
   // The stitches of one bracket group all worked into a single stitch or space
@@ -3075,8 +3187,8 @@
     for (i = 0; i < list.length; i++) {
       var e = list[i];
       if (e === FILL_MARK) { out.push(e); continue; }
-      if (e.t === 'ch') { out.push({ t: e.t, c: e.c, h: e.h, w: e.w }); continue; }
-      out.push({ t: first ? 'inc' : 'inc+', c: e.c, h: e.h, w: e.w });
+      if (e.t === 'ch') { out.push({ t: e.t, c: e.c, h: e.h, w: e.w, g: e.g }); continue; }
+      out.push({ t: first ? 'inc' : 'inc+', c: e.c, h: e.h, w: e.w, g: e.g });
       first = false;
     }
     return out;
@@ -3086,6 +3198,101 @@
     var n = 0, i;
     for (i = 0; i < list.length; i++) if (list[i] !== FILL_MARK && list[i].t !== 'ch') n++;
     return n;
+  }
+
+  // A motif has between three and eight corners. Anything outside that is a
+  // mesh, a ring of chain spaces or a misreading, and naming it "the corners"
+  // would be worse than admitting the round said nothing.
+  var CORNERS_MIN = 3, CORNERS_MAX = 8;
+
+  /**
+   * The anchors one expanded round leaves for the next: its chain spaces, the
+   * clusters it worked into a single place, and the gaps between those
+   * clusters. All of it read back off the stitch list, which is the only
+   * record of what the round actually made.
+   *
+   * A `(3tr, 2ch, 3tr)` corner is one cluster with its chain space INSIDE it,
+   * which is what tells a corner from a side: a cluster carrying a chain run
+   * is a corner group, and the gaps between neighbouring clusters (walked
+   * circularly, because a round has no ends) are the side spaces the next
+   * round works into.
+   *
+   * @param {Array} list  cells as expand() hands them out
+   * @returns {{spaces:number, sizes:Object, spaceW:number, groups:number,
+   *            corners:number, cornerW:number, between:number, perSide:number}}
+   */
+  function roundStruct(list) {
+    var res = { spaces: 0, sizes: {}, spaceW: 0, groups: 0, corners: 0,
+      cornerW: 0, between: 0, perSide: 0 };
+    if (!list || !list.length) return res;
+    var n = list.length, i, j, runs = [], groups = [];
+    for (i = 0; i < n; ) {
+      if (list[i] && list[i].t === 'ch') {
+        j = i;
+        while (j < n && list[j] && list[j].t === 'ch') j++;
+        runs.push({ s: i, e: j - 1, w: j - i });
+        i = j;
+      } else i++;
+    }
+    for (i = 0; i < n; ) {
+      if (list[i] && list[i].t === 'inc') {
+        j = i + 1;
+        var last = i;
+        while (j < n && list[j] && (list[j].t === 'inc+' || list[j].t === 'ch')) {
+          if (list[j].t === 'inc+') last = j;
+          j++;
+        }
+        groups.push({ s: i, e: last });
+        i = last + 1;
+      } else i++;
+    }
+    res.spaces = runs.length;
+    var wCount = {}, k, maxW = 0, bestW = 0;
+    for (i = 0; i < runs.length; i++) {
+      wCount[runs[i].w] = (wCount[runs[i].w] || 0) + 1;
+      if (runs[i].w > maxW) maxW = runs[i].w;
+    }
+    res.sizes = wCount;
+    for (k in wCount) if (wCount[k] > bestW) { bestW = wCount[k]; res.spaceW = +k; }
+    res.groups = groups.length;
+
+    // corners: the clusters that carry a chain space of their own, else the
+    // widest chain spaces of the round
+    var cornerGroups = 0, cw = 0;
+    for (i = 0; i < groups.length; i++) {
+      for (j = 0; j < runs.length; j++) {
+        if (runs[j].s > groups[i].s && runs[j].e < groups[i].e) {
+          cornerGroups++; if (!cw) cw = runs[j].w;
+          break;
+        }
+      }
+    }
+    if (cornerGroups >= CORNERS_MIN && cornerGroups <= CORNERS_MAX) {
+      res.corners = cornerGroups;
+      res.cornerW = cw;
+    } else if (maxW > 0 && wCount[maxW] >= CORNERS_MIN && wCount[maxW] <= CORNERS_MAX) {
+      res.corners = wCount[maxW];
+      res.cornerW = maxW;
+    }
+
+    // side spaces: the gaps between neighbouring clusters, walked circularly,
+    // that hold no chain run of their own
+    if (groups.length >= 2) {
+      for (i = 0; i < groups.length; i++) {
+        var a = groups[i], b = groups[(i + 1) % groups.length];
+        var from = a.e + 1, to = (i + 1 === groups.length) ? b.s + n : b.s;
+        var clear = true;
+        for (j = from; j < to; j++) {
+          var cellAt = list[j % n];
+          if (cellAt && cellAt.t === 'ch') { clear = false; break; }
+        }
+        if (clear) res.between++;
+      }
+    }
+    if (res.corners > 0 && res.between > 0) {
+      res.perSide = Math.round(res.between / res.corners);
+    }
+    return res;
   }
 
   function stripMarks(list) {
@@ -3144,6 +3351,12 @@
     '|sts?|stitches?)?(?![a-z0-9])', 'i');
   // "3 dc in next sc", "7 dc in ch-5 sp", "5dc in next", "3 hdc in last st"
   var R_N_IN_ONE = new RegExp('^(\\d+)\\s*(' + STITCH_ALT + ')\\s*(?:sts?|stitches?)?\\s+(?:in|into)\\s+', 'i');
+  // "3 sc in each corner", "2 dc in each ch-1 sp around", "3tr in space
+  // between each 3tr group to next 2ch-sp", "sc in each sp around": the
+  // stitch is plain enough, but how MANY times the phrase repeats is only in
+  // the round below - anchorHits() asks it.
+  var R_ANCHORED = new RegExp('^(?:(\\d+)\\s*)?(' + STITCH_ALT +
+    ')\\s*(?:sts?|stitch(?:es)?)?\\s*(?:in|into|around)\\s+(.+)$', 'i');
   var IN_ONE_TARGET_RE = new RegExp('^(?:the\\s+|a\\s+|any\\s+|one\\s+)?' +
     '(?:next|same|this|that|last|first|corner|centre|center|middle|' +
     'ch(?:ain)?\\s*-?\\s*\\d|\\d+\\s*-?\\s*ch(?:ain)?\\s*-?\\s*(?:sp|space)|' +
@@ -3189,6 +3402,111 @@
     return (n && n > 0 && n < 30) ? n : 0;
   }
 
+  // =====================================================================
+  // 9b. Motif anchors: how many times a round repeats is in the ROUND BELOW
+  //
+  // A granny/motif round almost never says how often it repeats. "3tr in
+  // space between each 3tr group to next 2ch-sp", "(3tr, 2ch, 3tr) in each
+  // corner sp", "2 dc in each ch-1 sp around", "*3tr in next sp; rep from *
+  // around" all mean "once per anchor of this kind", and the only place the
+  // number of anchors is written down is the fabric the round below made.
+  //
+  // So every expanded round is boiled down to a small structure record
+  // (roundStruct) and parked in `state`; the next round reads it back as
+  // ctx.struct. Before this, such a round was sized by dividing the round
+  // below's POSITION count by whatever the words seemed to consume, which
+  // over-read every granny round it met: the Stylecraft hexagon came out at
+  // 109 trebles where the leaflet prints 54, and "Rep Rnd 3" then re-read
+  // that same misreading twelve times.
+  // ---------------------------------------------------------------------
+
+  // A target that names a SPACE (or a corner) of the round below rather than
+  // a stitch: "in next 2ch-sp", "all in ch-3 sp", "in same ch-sp",
+  // "skip next sp", "in each corner". "all in next sc" is NOT one of these.
+  var SPACE_TARGET_RE = new RegExp('\\b(?:in|into|skip|miss|sk)\\s+' +
+    '(?:(?:the|a|an|any|all|each|every|next|same|this|that|last|first|corner|centre|center|' +
+    'of|ch|chain|\\d+(?:st|nd|rd|th))\\s+)*' +
+    '(?:ch(?:ain)?\\s*-?\\s*\\d*\\s*-?\\s*|\\d+\\s*-?\\s*ch(?:ain)?s?\\s*-?\\s*)?' +
+    '(?:sp|space|corner)s?\\b', 'i');
+  // "(tr, dc, hdc, sc) in SAME ch-3 sp" goes back into the space the fragment
+  // before it already worked into, so it is not another anchor - unless nothing
+  // has been worked yet, in which case "in same ch-sp" IS this piece's own
+  // space ("sl st across to next 2ch-sp, 3ch, (2tr, 2ch, 3tr) in same ch-sp").
+  var SAME_TARGET_RE = /\b(?:in|into)\s+(?:the\s+)?same\b/i;
+
+  function eatsSpace(text, ctx) {
+    if (!SPACE_TARGET_RE.test(text)) return false;
+    if (SAME_TARGET_RE.test(text) && ctx.spUsed > 0) return false;
+    return true;
+  }
+
+  // "in the space between each 3tr group to the next corner" - a gap between
+  // two clusters of the round below, not a chain space.
+  var A_BETWEEN_RE = /\bbetween\b[^,;]*?\bgroups?\b/i;
+  // "between the next two 3tr groups" names ONE gap; "in the space between the
+  // 3tr groups" names every gap of that side, which is one in the round that
+  // sets the pattern and one more in each round that re-works it.
+  var A_ONE_GAP_RE = /\bbetween\s+(?:the\s+)?next\s+(?:two|2)\b/i;
+  var A_EACH_RE = /\b(?:each|every|all)\b/i;
+  var A_TO_CORNER_RE = /\bto\s+(?:the\s+)?(?:next|last|first)?\s*(?:corner|ch(?:ain)?\s*-?\s*\d|\d+\s*-?\s*ch)/i;
+  var A_CORNER_RE = /\b(?:each|every|all)\s+(?:of\s+the\s+)?(?:\d+\s+)?corner/i;
+  var A_CHSP_RE = /\b(?:each|every|all)\s+(?:of\s+the\s+)?(?:ch(?:ain)?\s*-?\s*(\d+)|(\d+)\s*-?\s*ch(?:ain)?s?)\s*-?\s*(?:sp|space)/i;
+  var A_SP_RE = /\b(?:each|every|all)\s+(?:of\s+the\s+)?(?:ch(?:ain)?\s*-?\s*)?(?:sp|space)/i;
+  var A_GROUP_RE = /\b(?:each|every|all)\s+(?:of\s+the\s+)?(?:\S+\s+)?groups?\b/i;
+
+  /**
+   * Which anchor of the round below a phrase names, and how many there are.
+   * @param {string} text    the words after the stitch ("in each corner sp")
+   * @param {Object} struct  roundStruct() of the round below
+   * @returns {{n:number,w:number,kind:string}|null} null when the words name
+   *          no anchor, or the round below never said how many it left.
+   */
+  function anchorHits(text, struct) {
+    if (!struct) return null;
+    var t = String(text == null ? '' : text);
+    var m;
+    if (A_BETWEEN_RE.test(t)) {
+      if (!(struct.perSide >= 1)) return null;
+      var many = A_EACH_RE.test(t) || A_TO_CORNER_RE.test(t) || !A_ONE_GAP_RE.test(t);
+      return { n: many ? struct.perSide : 1, w: 1, kind: 'gap' };
+    }
+    if (A_CORNER_RE.test(t)) {
+      if (!(struct.corners >= 1)) return null;
+      return { n: struct.corners, w: struct.cornerW || 1, kind: 'corner' };
+    }
+    m = A_CHSP_RE.exec(t);
+    if (m) {
+      var w = num(m[1] || m[2]);
+      var nw = (w && struct.sizes) ? (struct.sizes[w] || 0) : 0;
+      if (!(nw >= 1)) return null;
+      return { n: nw, w: w, kind: 'space' };
+    }
+    if (A_SP_RE.test(t)) {
+      if (!(struct.spaces >= 1)) return null;
+      return { n: struct.spaces, w: struct.spaceW || 1, kind: 'space' };
+    }
+    if (A_GROUP_RE.test(t)) {
+      if (!(struct.groups >= 1)) return null;
+      return { n: struct.groups, w: 1, kind: 'group' };
+    }
+    return null;
+  }
+
+  /**
+   * How many unit repeats a "* ... ; rep from * around" needs so that the
+   * anchors it eats come to exactly the number the round below left.
+   *   total = pre + reps*head + (endAt ? reps-1 : reps)*post + rest
+   * @returns {number|null} null when the unit eats no anchor of this kind.
+   */
+  function anchorReps(total, endAt, pre, head, post, rest) {
+    var per = head + post;
+    if (!(total >= 1) || per <= 0) return null;
+    var room = total - pre - rest + (endAt ? post : 0);
+    var n = Math.round(room / per);
+    if (!(n >= 1) || n > 500) return null;
+    return n;
+  }
+
   var WORD_N = { twice: 2, thrice: 3, two: 2, three: 3, four: 4, five: 5,
     six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12 };
   function wordNum(s) {
@@ -3224,7 +3542,15 @@
         ctx.hadChain = true;
         if (!(n > 0)) return { list: [], c: 0 };
         var bridges = ctx.produced || /^(?:skip|miss|sk)\b/i.test(nx);
-        if (!bridges || /^turn\b/i.test(nx)) return { list: [], c: 0 };
+        if (!bridges || /^turn\b/i.test(nx)) {
+          // "Ch 6, sc in 3rd ch of next ch-3 sp": an opening chain longer than
+          // the turning chain carries the row's FIRST space in its tail. Drop
+          // the turn and keep the space, or a mesh row makes one space fewer
+          // than it ate and the whole wrap narrows a space every row.
+          var opw = /^turn\b/i.test(nx) ? 0 : chSpWidth(nx);
+          if (opw > 0 && opw < n) return { list: runOf('ch', 0, opw), c: 0 };
+          return { list: [], c: 0 };
+        }
         return { list: runOf('ch', 0, n), c: 0 };
       }
       for (i = 0; i < SEG_MOVE_RE.length; i++) {
@@ -3295,17 +3621,45 @@
     m = R_FROM_HOOK.exec(s);
     if (m) { st = stitchTok(m[1], uk); return st ? { list: emit(st, 1), c: 0 } : null; }
 
+    // An anchored phrase repeats once per corner / space / group-gap of the
+    // round below, which is a definite number rather than an open fill.
+    if (rich && ctx.struct) {
+      m = R_ANCHORED.exec(s);
+      if (m) {
+        var ah = anchorHits(m[3], ctx.struct);
+        if (ah) {
+          st = stitchTok(m[2], uk);
+          if (st) {
+            var anLead = m[1] ? num(m[1]) : 1;
+            var anUnit = (anLead >= 2 && st.p === 1 && st.c === 1) ?
+              incRun(st, anLead) : emit(st, anLead);
+            // one anchor per repeat: the unit divides ONE anchor, and every
+            // clone of it divides its own
+            openShare(ctx, ah.w); joinShare(ctx, anUnit); closeShare(ctx);
+            var anAll = [];
+            for (i = 0; i < ah.n; i++) anAll = anAll.concat(cloneList(anUnit));
+            ctx.anchored = true;
+            ctx.spUsed += (ah.kind === 'space' || ah.kind === 'corner') ? ah.n : 0;
+            ctx.cnUsed += (ah.kind === 'corner') ? ah.n : 0;
+            return { list: anAll, c: ah.n * (ah.w || 1), anchored: true, shared: true };
+          }
+        }
+      }
+    }
+
     m = R_EACH.exec(s);
     if (m) {
       st = stitchTok(m[2], uk); if (!st) return null;
       var lead2 = m[1] ? num(m[1]) : 1;
       // "3 dc in each ch-2 sp around": each repetition eats the whole 2-chain
       // space, not one position.
-      var eachC = (rich ? chSpWidth(s) : 0) || st.c;
-      if (rich && lead2 >= 2 && st.p === 1 && st.c === 1) {
-        return { fill: { list: incRun(st, lead2), c: eachC } };
-      }
-      return { fill: { list: emit(st, lead2), c: eachC } };
+      var eachW = rich ? chSpWidth(s) : 0;
+      var eachC = eachW || st.c;
+      var eachL = (rich && lead2 >= 2 && st.p === 1 && st.c === 1) ?
+        incRun(st, lead2) : emit(st, lead2);
+      // "3 dc in each ch-2 sp": every repeat of the fill shares one 2-wide space
+      openShare(ctx, eachW); joinShare(ctx, eachL); closeShare(ctx);
+      return { fill: { list: eachL, c: eachC }, shared: true };
     }
     if (rich) {
       m = R_EACH_AROUND.exec(s);
@@ -3313,8 +3667,10 @@
         st = stitchTok(m[2], uk);
         if (st) {
           var la = m[1] ? num(m[1]) : 1;
-          return { fill: { list: la >= 2 && st.p === 1 && st.c === 1 ? incRun(st, la) : emit(st, la),
-            c: chSpWidth(s) || st.c } };
+          var laW = chSpWidth(s);
+          var laL = la >= 2 && st.p === 1 && st.c === 1 ? incRun(st, la) : emit(st, la);
+          openShare(ctx, laW); joinShare(ctx, laL); closeShare(ctx);
+          return { fill: { list: laL, c: laW || st.c }, shared: true };
         }
       }
     }
@@ -3389,12 +3745,46 @@
   // takes one more is a decrease in disguise ("skip next st, sc in next" eats
   // two and makes one) - unless a chain space has just bridged the gap, in
   // which case it is a mesh and nothing has decreased.
-  function expandSegments(list, ctx) {
+  function expandSegments(list, ctx, tail) {
     var out = [], c = 0, fill = null;
     var pendSkip = 0, lastWasCh = false;
     for (var i = 0; i < list.length; i++) {
       var r = expandSegment(list[i], ctx, list[i + 1]);
       if (!r) return null;
+      // Which anchor of the round below did this fragment work into, and is
+      // the fragment after it going back into the SAME one? `tail` is what the
+      // words say past the bracket group that follows this text run, which is
+      // where "(tr, dc, hdc, sc) in same ch-3 sp" spells out that the chain
+      // just made sits inside the space rather than bridging to the next.
+      if (ctx && !r.shared && r.abs === undefined) {
+        var segT = list[i];
+        var nextT = tail || '';
+        for (var q = i + 1; q < list.length; q++) {
+          if (String(list[q] || '').trim()) { nextT = list[q]; break; }
+        }
+        var cells = r.fill ? r.fill.list : r.list;
+        if (!cells.length && r.c > 0) {
+          widenShare(ctx, r.c);            // a skipped stitch the group sits over
+        } else if (!cells.length) {
+          /* commentary: leave the open share alone */
+        } else if (allChain(cells)) {
+          if (SAME_TARGET_RE.test(nextT)) joinShare(ctx, cells);
+          else closeShare(ctx);
+        } else if (SAME_TARGET_RE.test(segT)) {
+          joinShare(ctx, cells);
+        } else {
+          openShare(ctx, anchorWidth(segT));
+          joinShare(ctx, cells);
+        }
+      }
+      // A fragment that works into (or skips) a SPACE of the round below eats
+      // one of its anchors. Only a fragment that actually did something: the
+      // bare " in next 2ch-sp" left over beside a bracket group is commentary
+      // on the group, and the group has already been counted.
+      if (ctx && !r.fill && r.abs === undefined && !r.anchored &&
+          (r.c > 0 || (r.list && r.list.length)) && eatsSpace(list[i], ctx)) {
+        ctx.spUsed++;
+      }
       if (r.abs !== undefined) {
         if (ctx && r.abs.length) ctx.produced = true;
         return { abs: r.abs };
@@ -3410,7 +3800,9 @@
         if (r.list.length === 0 && r.c > 0) { pendSkip += r.c; c += r.c; continue; }
         if (pendSkip > 0 && !lastWasCh && !ctx.hadChain && r.list.length === 1 && r.c === 1 &&
             r.list[0].t !== 'ch' && r.list[0].t !== 'inc') {
-          out.push(cell('dec', r.list[0].h, r.list[0].w));
+          var dc1 = cell('dec', r.list[0].h, r.list[0].w);
+          dc1.g = r.list[0].g;
+          out.push(dc1);
           c += r.c; pendSkip = 0; ctx.produced = true;
           continue;
         }
@@ -3501,16 +3893,34 @@
   // Pattern-wide text repairs that only the expander applies.
   //   Dcfp/Dcbp   Yarnspirations writes the post stitches back to front
   //   3ch (counts as 1 tr)   a turning chain that IS a stitch
-  function richNormalise(s) {
-    return s
+  //   ...(counts as 1 tr here and throughout)   and so is the same chain at
+  //   the head of every later round, though only the first round says so.
+  //   Without that carry the Stylecraft hexagon loses one treble a round and
+  //   its "18 x 3tr groups" round 3 comes out at 53 rather than 54.
+  function richNormalise(s, ctx) {
+    s = s
       .replace(/\bdc(fp|bp)\b/gi, function (all, w) { return w.toLowerCase() + 'dc'; })
       .replace(/\b(?:sc|hdc|tr)(fp|bp)\b/gi, function (all, w) {
         return w.toLowerCase() + all.slice(0, all.length - 2);
       })
       .replace(/\binvisible\s+dec(?:rease)?\b/gi, 'invdec')
       .replace(/\binv(?:isible)?\s+dec(?:rease)?\b/gi, 'invdec')
-      .replace(/(\d+)\s*ch(?:ain)?s?\s*\(\s*counts?\s+as\s+(\d+)?\s*(sc|hdc|dc|htr|dtr|tr)\b[^)]*\)/gi,
-        function (all, ch, n, st) { return (n || '1') + ' ' + st; });
+      .replace(/(\d+)\s*ch(?:ain)?s?\s*\(\s*counts?\s+as\s+(\d+)?\s*(sc|hdc|dc|htr|dtr|tr)\b([^)]*)\)/gi,
+        function (all, ch, n, stw, tail) {
+          if (ctx && /\bthroughout\b/i.test(tail)) {
+            ctx.chThrough = { n: num(ch), st: stw };
+          }
+          return (n || '1') + ' ' + stw;
+        });
+    var th = ctx && ctx.chThrough;
+    if (th && th.n > 0 && th.st) {
+      // only the turning chain at the head of the round or of a clause, never
+      // a "2ch-sp" (that names a space below) or a "top of beg 3ch"
+      s = s.replace(new RegExp('(^|[,;:]\\s*)' + th.n +
+        '\\s*ch(?:ain)?s?\\b(?!\\s*-?\\s*(?:sp|space))', 'i'),
+        function (all, lead) { return lead + '1 ' + th.st; });
+    }
+    return s;
   }
 
   // One bracket group / comma run, expanded. Recursive, so a granny corner
@@ -3524,14 +3934,28 @@
     for (i = 0; i < items.length; i++) {
       var it = items[i];
       if (it.kind === 'text') {
-        var r = expandSegments(splitSegments(it.text), ctx);
+        // the words past the bracket group that follows this run - where a
+        // group's own target ("... in same ch-3 sp") is written down
+        var lookAhead = '';
+        if (items[i + 1] && items[i + 1].kind === 'group' &&
+            items[i + 2] && items[i + 2].kind === 'text') {
+          lookAhead = items[i + 2].text;
+        }
+        var r = expandSegments(splitSegments(it.text), ctx, lookAhead);
         if (!r) return null;
         if (r.abs !== undefined) return { list: r.abs, c: 0, fill: null, abs: true };
         if (r.fill) { if (fill) return null; fill = r.fill; }
         list = list.concat(r.list); consumed += r.c;
         continue;
       }
+      var spBefore = ctx ? ctx.spUsed : 0, cnBefore = ctx ? ctx.cnUsed : 0;
+      // The words INSIDE a bracket name no anchor of their own - the anchor is
+      // written after the bracket ("... in same ch-3 sp"). So the share the run
+      // before the bracket opened has to survive reading the bracket, or the
+      // group can no longer join the space the sc before it went into.
+      var shBefore = ctx ? ctx.share : null;
       var g = ctx ? expandBody(it.text, ctx) : expandSegments(splitSegments(it.text), ctx);
+      if (ctx) ctx.share = shBefore;
       if (!g || g.abs || g.fill) {
         if (it.mult === 1 && !it.filled && (!g || !g.fill)) continue;
         return null;
@@ -3543,9 +3967,36 @@
       // the whole group lands in ONE place, so it is one increase of n and it
       // eats only the space it is worked into.
       var after = (items[i + 1] && items[i + 1].kind === 'text') ? items[i + 1].text : '';
-      if (ctx && after && GROUP_IN_ONE_RE.test(after) && countable(glist) >= 2) {
+      // Only the clause that names the group's OWN target, never everything the
+      // round says next: in "(2tr, 2ch, 3tr) in same ch-sp, 3tr in space
+      // between 3tr groups" the second clause is its own instruction, and
+      // reading it as part of the group's target repeated the corner.
+      var aft = after.replace(/^[\s,;]+/, '').split(/[,;]/)[0];
+      if (ctx && aft && countable(glist) >= 2 &&
+          (GROUP_IN_ONE_RE.test(aft) || GROUP_IN_EACH_RE.test(aft))) {
         glist = asIncGroup(glist);
-        gc = chSpWidth(after) || 1;
+        gc = chSpWidth(aft) || 1;
+        if (eatsSpace(aft, ctx)) { ctx.cnUsed++; ctx.spUsed++; }
+        // "(3tr, 2ch, 3tr) in each corner sp" - one such corner per corner of
+        // the round below, a number only the round below knows.
+        var ga = ctx.struct ? anchorHits(aft, ctx.struct) : null;
+        // 01 §1.2: the group shares the width of the ONE place it is worked
+        // into. "in same ch-3 sp" goes back into the space the fragment before
+        // it already opened, so it joins that share instead of starting one.
+        if (SAME_TARGET_RE.test(aft) && ctx.share) joinShare(ctx, glist);
+        else {
+          openShare(ctx, (ga && ga.w > 1) ? ga.w : anchorWidth(aft));
+          joinShare(ctx, glist);
+        }
+        if (ga && ga.n > 1) {
+          var gone = glist, grep = [];
+          for (k = 0; k < ga.n; k++) grep = grep.concat(cloneList(gone));
+          glist = grep;
+          gc = ga.n * (ga.w || gc);
+          ctx.spUsed += ga.n - 1;
+          if (ga.kind === 'corner') ctx.cnUsed += ga.n - 1;
+          ctx.anchored = true;
+        }
       }
       if (it.filled) {
         if (fill) return null;
@@ -3554,6 +4005,12 @@
       } else {
         for (k = 0; k < it.mult; k++) list = list.concat(cloneList(glist));
         consumed += gc * it.mult;
+        // a bracket worked `mult` times eats its anchors `mult` times over,
+        // but the words inside it were only read once
+        if (ctx && it.mult > 1) {
+          ctx.spUsed += (ctx.spUsed - spBefore) * (it.mult - 1);
+          ctx.cnUsed += (ctx.cnUsed - cnBefore) * (it.mult - 1);
+        }
       }
     }
     return { list: list, c: consumed, fill: fill };
@@ -3634,7 +4091,11 @@
     if (prev !== null && (rich ? OPEN_FILL_VAGUE_RE : OPEN_FILL_RE).test(s)) {
       return runOf('sc', 1, prev);
     }
-    if (rich) { s = richNormalise(s); ctx.produced = false; ctx.hadChain = false; }
+    if (rich) {
+      s = richNormalise(s, ctx);
+      ctx.produced = false; ctx.hadChain = false; ctx.share = null;
+      ctx.spUsed = 0; ctx.cnUsed = 0;
+    }
 
     var out = rich ? expandRich(s, prev, ctx) : expandPlainBody(s, prev, ctx);
     if (out === null && rich && prev !== null && OPEN_FILL_RE.test(s)) {
@@ -3689,17 +4150,36 @@
     // "* ... ; rep from * around, end at **"
     var sr = starRepeat(s);
     if (sr) {
+      // Each piece is expanded once and the anchors it eats are tallied, so
+      // that "rep from * around" can be sized by the round below (once per
+      // corner, once per space) rather than by dividing position counts.
+      ctx.spUsed = 0; ctx.cnUsed = 0;
       var pre = sr.before.trim() ? expandBody(sr.before, ctx) : { list: [], c: 0, fill: null };
-      if (!pre || pre.fill || pre.abs) pre = { list: [], c: 0, fill: null };
+      var preCn = ctx.cnUsed, preSp = ctx.spUsed;
+      if (!pre || pre.fill || pre.abs) { pre = { list: [], c: 0, fill: null }; preCn = 0; preSp = 0; }
+      ctx.spUsed = 0; ctx.cnUsed = 0;
       var headB = expandBody(sr.head, ctx);
+      var headCn = ctx.cnUsed, headSp = ctx.spUsed;
       if (!headB || headB.fill || headB.abs) return null;
+      ctx.spUsed = 0; ctx.cnUsed = 0;
       var postB = sr.post.trim() ? expandBody(sr.post, ctx) : { list: [], c: 0, fill: null };
-      if (!postB || postB.fill || postB.abs) postB = { list: [], c: 0, fill: null };
+      var postCn = ctx.cnUsed, postSp = ctx.spUsed;
+      if (!postB || postB.fill || postB.abs) { postB = { list: [], c: 0, fill: null }; postCn = 0; postSp = 0; }
+      ctx.spUsed = 0; ctx.cnUsed = 0;
       var restB = sr.rest.trim() ? expandBody(sr.rest, ctx) : { list: [], c: 0, fill: null };
-      if (!restB || restB.fill || restB.abs) restB = { list: [], c: 0, fill: null };
+      var restCn = ctx.cnUsed, restSp = ctx.spUsed;
+      if (!restB || restB.fill || restB.abs) { restB = { list: [], c: 0, fill: null }; restCn = 0; restSp = 0; }
 
       var unitC = headB.c + postB.c;
       var reps = sr.times, spare = 0;
+      if (reps === null && ctx.struct) {
+        // a corner body runs once per corner; a side body once per space
+        var an = anchorReps(ctx.struct.corners, sr.endAt, preCn, headCn, postCn, restCn);
+        if (an === null) {
+          an = anchorReps(ctx.struct.spaces, sr.endAt, preSp, headSp, postSp, restSp);
+        }
+        if (an !== null) { reps = an; spare = 0; ctx.anchored = true; }
+      }
       if (reps === null) {
         if (prev == null) return null;
         var room = prev - pre.c - restB.c;
@@ -3769,6 +4249,39 @@
     return lines;
   }
 
+  // A starred repeat whose closing "rep from * around" was wrapped onto the
+  // next printed line. The column extractor hands the tail over as a note of
+  // its own, and without it the round stops in the middle of its repeat unit -
+  // Red Heart's Persian Tiles round 6 breaks off at "(3 dc, ch 5, 3 dc)" and
+  // came out at a quarter of its size.
+  var REP_TAIL_RE = /\brep(?:eat)?\s+from\s*\*/i;
+  var END_AT_RE = /\bend(?:ing)?\s*(?:at|with)?\s*\*\*/i;
+
+  /** Does this instruction open a starred repeat it never closes? */
+  function repeatIncomplete(instr) {
+    if (firstLoneStar(instr, instr.length) < 0) return false;
+    var rf = REP_TAIL_RE.exec(instr);
+    if (!rf) return true;
+    // "... ** sk next st; rep from * across to last st ending" - the "at **"
+    // that closes the two-marker form is on the next printed line
+    return instr.slice(0, rf.index).indexOf('**') >= 0 &&
+      !END_AT_RE.test(instr.slice(rf.index));
+  }
+
+  function joinRepeatTail(lines, line, instr) {
+    if (!instr || !repeatIncomplete(instr)) return instr;
+    for (var i = 0; i < lines.length; i++) {
+      if (lines[i] !== line) continue;
+      var nx = lines[i + 1];
+      if (!nx || nx.kind !== 'note' || (nx.row !== null && nx.row !== undefined)) return instr;
+      var txt = String(nx.text || '');
+      if (txt.indexOf('*') < 0 && !REP_TAIL_RE.test(txt)) return instr;
+      var joined = instr.replace(/[\s,;.]+$/, '') + ' ' + trimLine(txt);
+      return repeatIncomplete(joined) ? instr : joined;
+    }
+    return instr;
+  }
+
   // The instruction part of a row line: marker off the front, count off the
   // back - exactly what parse() feeds to evaluate().
   function instrOf(line) {
@@ -3792,7 +4305,28 @@
   }
 
   function newState() {
-    return { color: null, legend: {}, names: {}, ready: false, init: false };
+    return { color: null, legend: {}, names: {}, ready: false, init: false, structs: {} };
+  }
+
+  /**
+   * The structure of the last round expanded BEFORE `row` - the anchors the
+   * next round works into. Keyed by row so that expanding the same row twice
+   * (a re-render) reads the same round below rather than its own output.
+   */
+  function structBefore(st, row) {
+    if (!st.structs || !(row >= 1)) return null;
+    var best = null, bestRow = -1, k, r;
+    for (k in st.structs) {
+      r = +k;
+      if (r < row && r > bestRow) { bestRow = r; best = st.structs[k]; }
+    }
+    return best;
+  }
+
+  function rememberStruct(st, row, list) {
+    if (!(row >= 1)) return;
+    if (!st.structs) st.structs = {};
+    st.structs[row] = roundStruct(list);
   }
 
   function normState(state, parsed) {
@@ -3967,12 +4501,20 @@
    * time it is repeated. Both are null when the expansion speaks for itself.
    */
   function refTarget(lines, line, row, srcInstr, prev, raw) {
-    var out = { target: null, cap: null };
+    var out = { target: null, cap: null, from: null };
     var c = (line.row >= 1) ? countAt(line, row) : null;
-    if (c !== null && isFinite(c)) { out.target = c; return out; }
+    if (c !== null && isFinite(c)) {
+      out.target = c;
+      // a total the pattern PRINTS is the designer's word; one parse() only
+      // computed is its own arithmetic, and no better than the expansion
+      out.from = (line.countSource === 'explicit') ? 'printed' : 'computed';
+      return out;
+    }
     var ref = refRowOf(line, row);
     var d = (ref === null) ? null : refDelta(lines, line.section, ref);
-    if (d !== null && prev !== null && prev + d >= 0) { out.target = prev + d; return out; }
+    if (d !== null && prev !== null && prev + d >= 0) {
+      out.target = prev + d; out.from = 'delta'; return out;
+    }
     // A row that only says "work an earlier row again", with no count anywhere
     // to go by, cannot hold more ring positions than the row below did. Without
     // this the chain spaces compound: the hex socks grew 22 % a round on
@@ -3980,8 +4522,12 @@
     if (prev !== null && prev > 0) out.cap = prev;
     var ev = null;
     try { ev = evaluate(srcInstr, prev); } catch (e) { ev = null; }
-    if (typeof ev === 'number' && isFinite(ev) && ev >= 0) { out.target = ev; return out; }
-    if (prev !== null && prev > 0 && raw && countable(raw) > prev * REF_GROWTH_MAX) out.target = prev;
+    if (typeof ev === 'number' && isFinite(ev) && ev >= 0) {
+      out.target = ev; out.from = 'evaluate'; return out;
+    }
+    if (prev !== null && prev > 0 && raw && countable(raw) > prev * REF_GROWTH_MAX) {
+      out.target = prev; out.from = 'growth';
+    }
     return out;
   }
 
@@ -4001,10 +4547,10 @@
       st = normState(state, parsed);
     } catch (e) {
       st = normState(state, []);
-      return { stitches: [], color: st.color || null, height: 1, state: st, inc: [], dec: [] };
+      return { stitches: [], color: st.color || null, height: 1, width: 0, state: st, inc: [], dec: [] };
     }
 
-    var res = { stitches: [], color: st.color || null, height: 1, state: st, inc: [], dec: [] };
+    var res = { stitches: [], color: st.color || null, height: 1, width: 0, state: st, inc: [], dec: [] };
 
     try {
       // A numbered line wins; failing that, a bare "Rep Row 2 until it measures
@@ -4026,10 +4572,16 @@
         for (var n = 0; n < line.notes.length; n++) applyPhrases(line.notes[n], st);
       }
 
-      var instr = instrOf(line);
+      var instr = joinRepeatTail(parsed, line, instrOf(line));
       var prev = (typeof prevCount === 'number' && isFinite(prevCount)) ? prevCount : null;
       var ctx = { legend: st.legend, names: st.names, rowColor: null,
-        uk: ukOf(st, parsed), produced: false };
+        uk: ukOf(st, parsed), produced: false,
+        // the anchors the round below left, and the turning chain an earlier
+        // round declared to be a stitch "here and throughout"
+        struct: structBefore(st, rowNumber), chThrough: st.chThrough || null,
+        spUsed: 0, cnUsed: 0, anchored: false,
+        // the anchor each group of stitches divides between them (§8c)
+        shares: {}, shareId: 0, share: null };
 
       // "With black, ch 2, 6 sc" / "Colour change to black, sc in each st" /
       // "... changing to black in last 2 loops": a colour written on the row
@@ -4042,11 +4594,13 @@
       // and every stitch, increase position and per-stitch height comes out of
       // that reading rather than out of a generic run (03 #6, proposal 9).
       var src = line.repeatOf ? refSource(parsed, line, rowNumber, 0) : null;
-      var srcInstr = (src && src !== line) ? instrOf(src) : instr;
+      var srcInstr = (src && src !== line) ?
+        joinRepeatTail(parsed, src, instrOf(src)) : instr;
 
       var list = null;
       try { list = expandInstruction(srcInstr, prev, ctx); } catch (e3) { list = null; }
       if (ctx.rowColor) st.color = ctx.rowColor;
+      if (ctx.chThrough) st.chThrough = ctx.chThrough;
 
       // The total the pattern PRINTS is the designer's word and wins. A
       // computed total is only evaluate()'s own reading of the same words, and
@@ -4063,7 +4617,15 @@
       if (src && src !== line) {
         var rt = refTarget(parsed, line, rowNumber, srcInstr, prev, list);
         target = rt.target;
-        refCap = rt.cap;
+        // The "no more positions than the round below" ceiling, and evaluate()'s
+        // own coarse reading of the referenced words, both exist because an
+        // open-ended granny fill used to compound. A round whose repeats were
+        // counted off the round below's own anchors is not a guess, and a
+        // growing motif MUST outgrow the round below - the hexagon gains 18
+        // trebles a round, exactly as the leaflet prints. Only a total the
+        // pattern actually PRINTS still outranks such an expansion.
+        refCap = ctx.anchored ? null : rt.cap;
+        if (ctx.anchored && rt.from !== 'printed') target = null;
       }
       if (list === null) {
         var ev = null;
@@ -4079,10 +4641,17 @@
       settleHeights(list, dom);
       list = fitTo(list, target);
       if (refCap !== null && list.length > refCap) list = list.slice(0, refCap);
+      // every group that was worked into one place now divides that place's
+      // width between its stitches (§8c) - the row's WIDTH, which is what the
+      // geometry sums for a perimeter, rather than its stitch count
+      applyShares(list, ctx.shares);
+      // what this round leaves for the next one to work into
+      rememberStruct(st, rowNumber, list);
 
       var marks = marksOf(list);
       res.color = st.color || null;
       res.height = dom;
+      res.width = sumWidth(list);
       res.inc = marks.inc;
       res.dec = marks.dec;
       res.stitches = list.map(function (e) {

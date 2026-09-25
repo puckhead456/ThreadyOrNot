@@ -186,7 +186,10 @@ var FIXTURES = [
   { id: 'throw',      file: 'crochet-premier-simple-throw.pdf',  label: 'premier simple throw' },
   { id: 'basketweave', file: 'crochet-bernat-basketweave.pdf',   label: 'bernat basketweave' },
   { id: 'doily',      file: 'crochet-gosyo-lace-doily.pdf',      label: 'gosyo lace doily' },
-  { id: 'cardigan',   file: 'cardigan.pdf',                      label: 'cardigan' }
+  { id: 'cardigan',   file: 'cardigan.pdf',                      label: 'cardigan' },
+  /* 07 D10: the corpus's only one-edge-growth triangle (the regression case for
+     01 item 7, `anchor left`) had to be injected by hand for the last review. */
+  { id: 'amarah',     file: 'crochet-hobbii-amarah-en.pdf',      label: 'hobbii amarah shawl' }
 ];
 
 var SHAPE_CLASSES = [
@@ -365,9 +368,16 @@ function geomOf(model) {
   };
 }
 
-/** How the piece would be framed, so a hairline fit shows up as a number. */
+/** How the piece would be framed, so a hairline fit shows up as a number.
+ *
+ * Every card draws a FINISHED piece, and it draws it in the gallery's own
+ * frame — so the fit is asked for with `purpose: 'gallery', finished: true`,
+ * exactly what `Diagram.mount` passes for these canvases. Asking for the
+ * working-row fit here would print a number no card ever renders (07 finding 2).
+ */
+var FIT_PURPOSE = 'gallery';
 var FIT_FOV = 30 * Math.PI / 180, FIT_CAM = 34, FIT_PITCH = 20 * Math.PI / 180;
-function fitOf(cls) {
+function fitOf(cls, finished) {
   var halfH = FIT_CAM * Math.tan(FIT_FOV / 2) * 0.92;
   var halfW = halfH * (220 / 260);        // the card canvas
   var ymin = Infinity, ymax = -Infinity, rad = 0, i, e;
@@ -378,8 +388,11 @@ function fitOf(cls) {
     ymin = Math.min(ymin, e.y, e.yTop); ymax = Math.max(ymax, e.y, e.yTop);
   }
   if (!isFinite(ymin)) return null;
-  return Geo.fit({ rad: rad, ymin: ymin, ymax: ymax, halfW: halfW, halfH: halfH,
-    cp: Math.cos(FIT_PITCH), sp: Math.abs(Math.sin(FIT_PITCH)), curY: null, mode: cls.mode });
+  var f = Geo.fit({ rad: rad, ymin: ymin, ymax: ymax, halfW: halfW, halfH: halfH,
+    cp: Math.cos(FIT_PITCH), sp: Math.abs(Math.sin(FIT_PITCH)), curY: null, mode: cls.mode,
+    purpose: FIT_PURPOSE, finished: finished !== false });
+  if (f) { f.purpose = FIT_PURPOSE; f.finished = finished !== false; }
+  return f;
 }
 
 function n2(v) { return (Math.round(v * 100) / 100).toFixed(2); }
@@ -425,7 +438,9 @@ function finishedModel(part, proj, upto) {
       count: r.count, done: r.count,
       stitches: r.stitches && r.stitches.length ? r.stitches.slice() : [],
       color: r.color, height: r.height, ghost: false,
-      inc: r.inc || null, dec: r.dec || null, row: r.row || (i + 1)
+      inc: r.inc || null, dec: r.dec || null, row: r.row || (i + 1),
+      // the builder's "this row's count is a misparse" flag, printed per card
+      outlier: r.outlier || null
     });
   }
   // Drop the empty tail: a pattern whose last "row" carries no count is
@@ -535,7 +550,10 @@ function mountCard(card) {
     h = window.Diagram.mount(card.canvas, {
       palette: { ghost: '#ffffff', ink: '#ffffff', glow: '#fff4c4', bg: null },
       interactive: true,
-      reducedMotion: false
+      reducedMotion: false,
+      // a review card is a finished piece in the gallery's frame
+      fitPurpose: 'gallery',
+      finished: true
     });
   } catch (e) {
     var ph = document.createElement('div');
@@ -554,7 +572,9 @@ function applyModel(card) {
   var ghost = document.getElementById('ghostToggle').checked;
   var model = finishedModel(card.part, card.proj, ghost ? 0.6 : 0);
   card.model = model;
-  card.handle.setModel(model, { animate: 'none' });
+  // with the ghost tail on, the piece is deliberately mid-work, so it is not
+  // a finished piece any more and the fit must not pretend otherwise
+  card.handle.setModel(model, { animate: 'none', fitPurpose: 'gallery', finished: !ghost });
 }
 
 /* ==================================================================== *
@@ -665,6 +685,8 @@ function buildCard(fix, section, idx, guess, page, host) {
     peak: numRow(table, 'equator', '…'),
     shape: numRow(table, 'start / stuff', '…'),
     klass: numRow(table, 'shape class', '…'),
+    corners: numRow(table, 'corners', '…'),
+    outliers: numRow(table, 'outlier rows', '…'),
     fit: numRow(table, 'fit', '…'),
     heights: numRow(table, 'st heights', '…'),
     colors: numRow(table, 'colours', '…')
@@ -761,6 +783,7 @@ function fillNumbers(card) {
     c.rounds.textContent = '0';
     c.radius.textContent = c.size.textContent = c.aspect.textContent = c.peak.textContent = '—';
     c.shape.textContent = c.klass.textContent = c.fit.textContent = '—';
+    c.corners.textContent = c.outliers.textContent = '—';
     c.heights.textContent = c.colors.textContent = '—';
     return;
   }
@@ -790,10 +813,30 @@ function fillNumbers(card) {
     (cls.corners ? '  ·  ' + cls.corners + ' corners' : '') +
     (cls.ruffles ? '  ·  ' + cls.ruffles + ' ruffled (rounds ' + g.ruffled.slice(0, 8).join(',') + ')' : '') +
     (cls.anchor ? '  ·  anchor ' + cls.anchor : '');
-  var ft = fitOf(cls);
+  /* Corners come from the model builder's own reading of the text
+     (`shape.corners` + `cornersSource`) and from the geometry's increase-site
+     fit (`cls.corners`). Print BOTH: a square the text knows about and the
+     geometry does not is the difference between a granny square and a sun-hat
+     (07 D1). */
+  c.corners.textContent =
+    'model ' + (sh.corners == null ? '—' : sh.corners) +
+    (sh.cornersSource ? ' (' + sh.cornersSource + ')' : '') +
+    '  ·  geometry ' + (cls.corners || 0) +
+    (sh.corners > 0 && !cls.corners ? '   ← the text says a polygon, the fit does not' : '');
+  /* Rows the model builder flagged as a misparse (a row of 2 among rows of
+     405): they are what tears the sheet into detached pieces (07 D4). */
+  var outl = [];
+  for (var oi = 0; oi < model.rounds.length; oi++) {
+    if (model.rounds[oi].outlier) outl.push((model.rounds[oi].row || (oi + 1)) + (model.rounds[oi].outlier === true ? '' : ':' + model.rounds[oi].outlier));
+  }
+  c.outliers.textContent = outl.length
+    ? outl.length + ': rows ' + outl.slice(0, 12).join(', ') + (outl.length > 12 ? ' …' : '')
+    : 'none flagged';
+  var ft = fitOf(cls, !document.getElementById('ghostToggle').checked);
   c.fit.textContent = ft
-    ? ('scale ' + n2(ft.scale) + ' (honest ' + n2(ft.base) + ')' +
-       (ft.clamp ? '  CLAMPED: ' + ft.clamp : '') +
+    ? ('purpose ' + ft.purpose + (ft.finished ? ' (finished)' : ' (mid-work)') +
+       '  ·  scale ' + n2(ft.scale) + ' (honest ' + n2(ft.base) + ')' +
+       (ft.clamp ? '  CLAMPED: ' + ft.clamp : '  no clamp') +
        '  ·  on screen: radius ' + Math.round(ft.radFrac * 100) + '% of the half-width, height ' +
        Math.round(ft.heightFrac * 100) + '%')
     : '—';
@@ -947,7 +990,9 @@ all.onclick = function () {
 chips.appendChild(all);
 
 document.getElementById('ghostToggle').onchange = function () {
-  for (var i = 0; i < live.length; i++) applyModel(live[i]);
+  // the fit readout says finished / mid-work, so the numbers move with the toggle
+  // fillNumbers first: applyModel leaves `card.model` as what the canvas shows
+  for (var i = 0; i < live.length; i++) { fillNumbers(live[i]); applyModel(live[i]); }
 };
 
 document.getElementById('photoToggle').onchange = function () {
@@ -986,14 +1031,18 @@ document.getElementById('exportBtn').onclick = function () {
         row.aspect = +n2(g.aspect); row.maxRAt = g.rMaxAt + 1;
         row.kinds = g.kinds;
         row.corners = g.cls.corners;
+        row.modelCorners = c.model.shape ? (c.model.shape.corners == null ? null : c.model.shape.corners) : null;
+        row.cornersSource = c.model.shape ? (c.model.shape.cornersSource || null) : null;
+        row.outlierRows = c.model.rounds.filter(function (r) { return r.outlier; })
+          .map(function (r, i) { return r.row || (i + 1); });
         row.ruffles = g.cls.ruffles;
         row.slack = g.cls.slack;
         row.equatorFrac = +n2(g.cls.equatorFrac);
         row.capTop = g.cls.closedTop;
         row.capBottom = g.cls.closedBottom;
         row.anchor = g.cls.anchor || null;
-        var ft = fitOf(g.cls);
-        if (ft) { row.fitScale = +n2(ft.scale); row.fitClamp = ft.clamp; }
+        var ft = fitOf(g.cls, true);
+        if (ft) { row.fitScale = +n2(ft.scale); row.fitClamp = ft.clamp; row.fitPurpose = ft.purpose; }
       }
     });
   }

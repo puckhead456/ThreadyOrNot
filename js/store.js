@@ -79,6 +79,12 @@
   var DIAGRAM_WINDOW_BACK = 0.7;
   /* Per-stitch records kept for one round; the count itself is never truncated. */
   var STITCH_DETAIL_MAX = 999;
+  /* Ring POSITIONS read out of one expansion, matching the parser's own
+     MAX_STITCHES. A ch-3 mesh row spends four positions per stitch (the
+     Premier sparkling wrap: 1,617 positions for 405 sts), so a ceiling set to
+     the renderer's detail budget used to cut the row — and the row after it,
+     which starts from this one's count — down to 999. */
+  var DIAGRAM_MAX_POSITIONS = 20000;
 
   /* ------------------------------------------------------------------ *
    * Small utilities
@@ -1655,16 +1661,33 @@
   }
 
   /**
+   * The count a line publishes for ONE row of its range — `Patterns.countAt`'s
+   * rule, which `Patterns.targetFor` reads through. A back-referencing range
+   * grows or shrinks row by row and prints its total on the LAST row only
+   * ("Row 6-55: Repeat rows 4 & 5 <57 sts>" is 9 at row 6 and 57 at row 55), so
+   * `line.count` on its own freezes the whole shawl at its finished width.
+   */
+  function countAtRow(line, row) {
+    if (!line) return null;
+    if (line.counts && line.row >= 1) {
+      var c = line.counts[row - line.row];
+      if (typeof c === 'number' && isFinite(c)) return c;
+    }
+    return strictCount(line);
+  }
+
+  /**
    * row -> line / row -> count, built once per parse instead of scanning every
    * line for every row. Resolution order is `Patterns.lineFor`'s, to the letter:
    * the first line of section 0 that covers the row, then the first line of any
    * section. `count` is resolved separately because a section-0 line WITHOUT a
-   * count does not shadow a later line that has one.
+   * count does not shadow a later line that has one, and it is read PER ROW so a
+   * growing range keeps its shape (`countAtRow`).
    */
   function buildRowIndex(lines, upTo) {
     var line = [];
     var count = [];
-    var pass, i, l, r, end, c;
+    var pass, i, l, r, end, c, per, cr;
     for (pass = 0; pass < 2; pass++) {
       for (i = 0; i < lines.length; i++) {
         l = lines[i];
@@ -1673,10 +1696,16 @@
         end = typeof l.rowEnd === 'number' && isFinite(l.rowEnd) && l.rowEnd > l.row ? l.rowEnd : l.row;
         if (end > upTo) end = upTo;
         if (l.row > upTo) continue;
+        // One count for the whole line is the common case and stays hoisted;
+        // only a line with per-row `counts` pays for a lookup per row.
         c = strictCount(l);
+        per = l.counts ? l.counts : null;
         for (r = l.row; r <= end; r++) {
           if (line[r] === undefined) line[r] = l;
-          if (count[r] === undefined && c !== null) count[r] = c;
+          if (count[r] === undefined) {
+            cr = per ? countAtRow(l, r) : c;
+            if (cr !== null) count[r] = cr;
+          }
         }
       }
     }
@@ -3405,7 +3434,10 @@
       rounds: [],
       current: 0,
       defaultColor: MAIN_YARN_DEFAULT,
-      shape: { start: 'unknown', chainLen: null, ringCount: null, stuffed: null },
+      shape: {
+        start: 'unknown', chainLen: null, ringCount: null, stuffed: null,
+        corners: 0, cornersSource: null
+      },
       window: { first: 0, total: 0 },
       deviation: { expected: null, actual: 0 }
     };
@@ -3586,7 +3618,12 @@
    * 'unknown' / null, so a parser without them costs nothing but detail.
    */
   function partShape(prt) {
-    var out = { start: 'unknown', chainLen: null, ringCount: null, stuffed: null };
+    var out = {
+      start: 'unknown', chainLen: null, ringCount: null, stuffed: null,
+      // The polygon prior (01 §1.4). Filled in by buildDiagramModel, which is
+      // the only place that has the per-round increase sites to judge it.
+      corners: 0, cornersSource: null
+    };
     var api = patternsApi();
     var lines = linesFor(prt);
     if (api && typeof api.startHint === 'function' && lines.length) {
@@ -3613,6 +3650,245 @@
     return out;
   }
 
+  /* ------------------------------------------------------------------ *
+   * The polygon prior (01 §1.4, 07-review finding 1 / defect D1)
+   *
+   * A granny square, a hexagon motif and an octagon are RINGS in the count
+   * sequence and polygons on the table, and the difference is where the
+   * increases sit. `js/diagram-geo.js` `polygonFit` already reads the
+   * per-round increase sites the model publishes — but a granny round is
+   * phrased `(3 dc, ch 3, 3 dc) in corner sp`, which `Patterns.expand` returns
+   * as a flat count with no positioned `inc` at all, so there is nothing to
+   * fit and every motif in the corpus renders as a solid of revolution.
+   *
+   * `Model.shape.corners` is the escape hatch 01 §1.4.7 asked for: the number
+   * of corners the PATTERN TEXT says the piece has, offered to the geometry as
+   * a prior for exactly the case where the sites are missing.
+   * `cornersSource` says where it came from, so nothing downstream has to
+   * treat a guess as a measurement.
+   * ------------------------------------------------------------------ */
+
+  var CORNER_KS = [4, 6, 8, 3];          // same order as DiagramGeo.POLY_KS
+  var CORNER_OCCUPANCY = 0.8;            // >= ceil(0.8k) of the k slots used
+  var CORNER_MIN_PER_SITE = 1.8;         // a corner takes a group, not one st
+  var CORNER_PERSIST = 3;                // 01 §1.4.4: one round is a dart
+  var CORNER_MIN_ROUNDS = 3;             // ...so a 1-round scrap is never a k-gon
+  var TAU = Math.PI * 2;
+
+  /**
+   * Best k for ONE round's increase sites, or 0. A deliberate mirror of
+   * `DiagramGeo.polygonFit` (01 §1.4 steps 2-4) on the RAW site list: the
+   * store must reach the same verdict the geometry will, because the whole
+   * point of the text fallback is to fire only where the sites cannot decide.
+   */
+  function cornerFitRound(sites, count) {
+    if (!sites || sites.length < 3 || count < 6) return 0;
+    var thetas = [], i;
+    for (i = 0; i < sites.length; i++) {
+      thetas.push((((sites[i] % count) + count) % count) / count * TAU);
+    }
+    for (var ki = 0; ki < CORNER_KS.length; ki++) {
+      var k = CORNER_KS[ki];
+      var need = Math.ceil(CORNER_OCCUPANCY * k);
+      if (thetas.length < need) continue;
+      if (thetas.length > k * 2) continue;     // too many sites for k corners
+      var seg = TAU / k, sx = 0, sy = 0, u;
+      for (i = 0; i < thetas.length; i++) {
+        u = thetas[i] % seg;
+        sx += Math.cos(u * k); sy += Math.sin(u * k);
+      }
+      /* A weak resultant means the sites are spread across the slice rather
+         than clustered in it — 6 hexagon corners tested against k = 4. */
+      if (Math.sqrt(sx * sx + sy * sy) / thetas.length < 0.5) continue;
+      var mean = Math.atan2(sy, sx) / k;
+      if (mean < 0) mean += seg;
+      var tol = (Math.PI / k) / 3, ok = true, occ = {}, nOcc = 0, d, slot, key;
+      for (i = 0; i < thetas.length; i++) {
+        d = thetas[i] - mean;
+        slot = Math.round(d / seg);
+        if (Math.abs(d - slot * seg) > tol) { ok = false; break; }
+        key = ((slot % k) + k) % k;
+        if (!occ[key]) { occ[key] = 1; nOcc++; }
+      }
+      if (ok && nOcc >= need) return k;
+    }
+    return 0;
+  }
+
+  /**
+   * What the increase SITES say about the piece.
+   * `k` is a corner count they settle on their own (the same k for
+   * CORNER_PERSIST consecutive rounds, each growing by >= 1.8 stitches per
+   * site — a corner is a group, 01 §1.4.5); `circle` counts the rounds whose
+   * sites DO land on k even slots but add only one stitch each, which is not a
+   * polygon at all, it is the `[n sc, inc] x k` of every amigurumi sphere.
+   * @returns {{k:number, circle:number}}
+   */
+  function siteCorners(rounds) {
+    var best = 0, runK = 0, run = 0, circle = 0, prev = 0, i;
+    for (i = 0; i < rounds.length; i++) {
+      var r = rounds[i];
+      var c = r && r.count > 0 ? r.count : 0;
+      if (!c) { runK = 0; run = 0; prev = 0; continue; }
+      var sites = Array.isArray(r.inc) ? r.inc : [];
+      var k = cornerFitRound(sites, c);
+      if (k && prev > 0) {
+        if ((c - prev) / sites.length >= CORNER_MIN_PER_SITE) {
+          if (k === runK) { run++; } else { runK = k; run = 1; }
+          if (run >= CORNER_PERSIST && !best) best = k;
+        } else {
+          circle++;
+          runK = 0; run = 0;
+        }
+      } else {
+        runK = 0; run = 0;
+      }
+      prev = c;
+    }
+    return { k: best, circle: circle };
+  }
+
+  /* 01 §1.4.7, verbatim from the fixtures. Tried in this order, so a piece
+     that says "hexagon" in one place and "square brackets" in another is a
+     hexagon: the named polygon always beats the generic corner vocabulary. */
+  var CORNER_TEXT = [
+    { k: 8, re: /\boctagon(s|al)?\b/ },
+    {
+      k: 6,
+      re: /\bhexagon(s|al)?\b|\bhexes\b|\bhex\b|\b6\s*x\s*3\s*tr\b|\bsix[\s-]?(fold|sided|pointed)\b|\b(six|6)\s+corners\b/
+    },
+    { k: 3, re: /\btriangle\s+motif\b|\btriangular\s+motif\b|\bmotif\s+triangle\b/ },
+    {
+      k: 4,
+      re: /\bcorner[\s-]*sp(ace)?s?\b|\bin each corner\b|\bgranny\b|\bsquares?\b|\btiles?\b|\bmotifs?\b|\(\s*3\s*d?c[^)]*\bch\s*[235]\b[^)]*\)\s*in\b[^.]{0,24}\bcorner\b/
+    }
+  ];
+
+  /** 0 | 3 | 4 | 6 | 8 from the part's pattern text. */
+  function textCorners(raw) {
+    if (!raw) return 0;
+    var t = String(raw).replace(/\s+/g, ' ').toLowerCase();
+    for (var i = 0; i < CORNER_TEXT.length; i++) {
+      if (CORNER_TEXT[i].re.test(t)) return CORNER_TEXT[i].k;
+    }
+    return 0;
+  }
+
+  /**
+   * `textCorners` against a 52 KB pattern, memoised on the parse (the same
+   * cache `partLines` invalidates when the text changes), so a row tap that
+   * rebuilds the model never re-scans the text.
+   */
+  function textCornersFor(prt) {
+    var entry = partLines(prt);
+    if (entry === EMPTY_ENTRY) return 0;
+    if (typeof entry.cornersText !== 'number') {
+      entry.cornersText = textCorners(prt && prt.patternText ? String(prt.patternText) : '');
+    }
+    return entry.cornersText;
+  }
+
+  /**
+   * `{corners, cornersSource}` for `Model.shape`. Rounds only — a panel worked
+   * in rows has edges, not corners, and `classifyRows` says so — and only for
+   * a piece with enough rounds to persist (01 §1.4.4).
+   */
+  function cornersOf(mode, rounds, prt) {
+    var out = { corners: 0, cornersSource: null };
+    if (mode !== 'rounds') return out;
+    var solid = 0, i;
+    for (i = 0; i < rounds.length; i++) if (rounds[i] && rounds[i].count > 0) solid++;
+    if (solid < CORNER_MIN_ROUNDS) return out;
+
+    var sc = siteCorners(rounds);
+    if (sc.k) {
+      out.corners = sc.k;
+      out.cornersSource = 'sites';
+      return out;
+    }
+    /* The sites are readable and they read as a CIRCLE. This is the guard that
+       keeps the panda, the snowman, the turtle, the bear, cato, the baphomet,
+       the bee and the pumpkins at 0 corners no matter what stray word
+       ("a tension square") the pattern happens to contain. */
+    if (sc.circle >= CORNER_PERSIST) return out;
+
+    var k = textCornersFor(prt);
+    if (k) {
+      out.corners = k;
+      out.cornersSource = 'text';
+    }
+    return out;
+  }
+
+  /* ------------------------------------------------------------------ *
+   * Outlier rounds (07-review finding 3 / defect D4)
+   *
+   * `405, 2, 5, 5, 405 …` is not a wrap with a notch in it and `18, 18, 2, 2,
+   * 2, 2` is not a swatch with a tower on it: they are lines the parser
+   * misread, and drawn at full width ratio they tear the sheet into detached
+   * pieces. The count is KEPT — the model never invents fabric — and the round
+   * carries `outlier: true` so the geometry can leave it out of the surface.
+   * ------------------------------------------------------------------ */
+
+  var OUTLIER_FRAC = 0.2;
+
+  /**
+   * Flags every round whose count is a wild outlier from its neighbours, and
+   * sets `outlier: false` on every other one so the field is never undefined.
+   *
+   * Rows mode judges a row against the nearest real row before it and the
+   * nearest full-size row after it (their median), which is what makes the
+   * whole `2, 5, 5` run fall: once row 2 is out, row 3 is measured against the
+   * 405 before it and not against row 2. A trailing run can fall the same way
+   * — the cardigan swatch's four 2-stitch rows are the clearest single image
+   * of the defect. What CANNOT fall is a genuine decrease run, because each of
+   * its steps is a fraction of the row before, not a fifth of it.
+   *
+   * Rounds mode is stricter: only a MID-PIECE round, under a fifth of both
+   * neighbours — a mis-parsed note between two real rounds. Never the first or
+   * the last round, so a magic-ring start and a `pull to close` finish are
+   * safe by construction.
+   */
+  function flagOutliers(mode, rounds) {
+    var n = rounds.length, i, j;
+    for (i = 0; i < n; i++) if (rounds[i]) rounds[i].outlier = false;
+    if (n < 3) return;
+    var hi = mode === 'rows' ? n - 1 : n - 2;
+    for (i = 1; i <= hi; i++) {
+      var r = rounds[i];
+      if (!r || !(r.count > 0)) continue;
+      if (r.row === 1) continue;           // the piece's own first round, never
+      var prev = 0;
+      for (j = i - 1; j >= 0; j--) {
+        if (rounds[j] && rounds[j].count > 0 && !rounds[j].outlier) {
+          prev = rounds[j].count;
+          break;
+        }
+      }
+      if (!(prev > 0)) continue;
+      var thresh = OUTLIER_FRAC * prev;
+      if (r.count >= thresh) continue;
+      var next = 0;
+      for (j = i + 1; j < n; j++) {
+        var c = rounds[j] && rounds[j].count > 0 ? rounds[j].count : 0;
+        if (c >= thresh && c > 0) { next = c; break; }
+      }
+      // In rounds mode a run that never comes back is the piece closing, not a
+      // note: `…, 12, 6, 2` is real fabric and must stay.
+      if (!next) { if (mode !== 'rows') continue; }
+      else if (r.count >= OUTLIER_FRAC * ((prev + next) / 2)) continue;
+      r.outlier = true;
+    }
+  }
+
+  /* A chain ring's first round is worked into EVERY chain, so `make 240ch,
+     join chain into a circle` is a 240-stitch round however few stitches the
+     parse found in the `Rnd 1` line (the Stylecraft cowl reads 23 — 07-review
+     defect D5). Small rings are left alone: `ch 4; join to form a ring` then
+     `16 dc in ring` is 16 stitches in a 4-chain loop, not 4. */
+  var CHAIN_RING_MIN = 12;
+  var CHAIN_RING_FRAC = 0.5;
+
   /**
    * The pattern's count for the round being worked vs the stitches actually
    * tapped into it (05-ux-meaning #12). `expected` is null when the pattern
@@ -3638,18 +3914,31 @@
    * `inc` entries of one increase (and the newer `inc` + `inc+` pair) into the
    * single site they really are.
    */
-  function incDecPositions(ex, stitches) {
+  function incDecPositions(ex, stitches, positions) {
     var inc = [];
     var dec = [];
     var i, n;
 
+    // `stitches` may be an even SAMPLE of a long round (see the position cap in
+    // buildDiagramModel), and `expand` indexes the full list — so an index is
+    // scaled into the sample it was taken from, or a mesh row's marks would all
+    // land in its first quarter.
+    var kept = stitches.length;
+    var total = (typeof positions === 'number' && positions > kept) ? positions : kept;
+    var scale = (kept > 0 && total > kept) ? kept / total : 0;
+
     function collect(raw, into) {
       if (!Array.isArray(raw)) return false;
+      var seen = {};
       for (var k = 0; k < raw.length; k++) {
         var v = raw[k];
-        if (typeof v === 'number' && isFinite(v) && v >= 0 && v < stitches.length) {
+        if (typeof v === 'number' && isFinite(v) && v >= 0 && v < total) {
           v = Math.floor(v);
-          if (into.indexOf(v) === -1) into.push(v);
+          if (scale) {
+            v = Math.floor(v * scale);
+            if (v >= kept) v = kept - 1;
+          }
+          if (!seen[v]) { seen[v] = 1; into.push(v); }
         }
       }
       into.sort(function (a, b) { return a - b; });
@@ -3679,6 +3968,21 @@
     return { inc: inc, dec: dec };
   }
 
+  /**
+   * How many of `expand`'s positions the pattern COUNTS. A chain space is a ring
+   * position but not a stitch (`{t:'ch'}`), and the totals a pattern prints —
+   * and so `Patterns` reports — never include them. Feeding positions forward as
+   * the next row's starting count is what inflated a ch-3 mesh row by 4x a row.
+   */
+  function countableStitches(list) {
+    var n = 0, i, e;
+    for (i = 0; i < list.length; i++) {
+      e = list[i];
+      if (!e || e.t !== 'ch') n++;
+    }
+    return n;
+  }
+
   function buildDiagramModel(prt, proj) {
     var mode = partWorkMode(prt, proj === undefined ? null : proj);
     var main = mainYarn(proj);
@@ -3688,6 +3992,9 @@
     var rs = Array.isArray(prt.rowStitches) ? prt.rowStitches : [];
     var api = patternsApi();
     var canExpand = !!(lines.length && api && typeof api.expand === 'function');
+    // Read up front: round 1 is seeded from a big chain ring (D5) while the
+    // rows are being walked, not patched up afterwards.
+    var shape = partShape(prt);
 
     var maxRow = 0;
     if (lines.length) {
@@ -3730,6 +4037,8 @@
       var height = 1;
       var color = main;
       var ex = null;
+      var positions = 0;
+      var truncated = false;
 
       if (canExpand) {
         try {
@@ -3742,12 +4051,23 @@
           if (typeof ex.height === 'number' && isFinite(ex.height) && ex.height > 0) height = ex.height;
           if (ex.color) color = resolve(ex.color);
           var list = Array.isArray(ex.stitches) ? ex.stitches : [];
-          count = Math.min(list.length, STITCH_DETAIL_MAX);
+          if (list.length > DIAGRAM_MAX_POSITIONS) list = list.slice(0, DIAGRAM_MAX_POSITIONS);
+          positions = list.length;
+          // The round's COUNT is its stitches; its POSITIONS are its geometry.
+          // On a ch-3 mesh row those differ four-fold, and it is the count that
+          // the next row starts from (and that the stitch counter compares
+          // against), so the chain spaces are left out of it.
+          count = countableStitches(list);
           // Rows before the window are walked only to carry `prevCount` and the
           // colour state forward, so they never pay for stitch records.
-          if (row >= first) {
-            for (var si = 0; si < count; si++) {
-              var st = list[si] && typeof list[si] === 'object' ? list[si] : {};
+          if (row >= first && positions > 0) {
+            var keep = positions > STITCH_DETAIL_MAX ? STITCH_DETAIL_MAX : positions;
+            truncated = keep < positions;
+            for (var si = 0; si < keep; si++) {
+              // Evenly sampled, never the first 999 of 1,617: the row still
+              // reads as itself, and `truncated` says the list is a sample.
+              var src = truncated ? Math.floor(si * positions / keep) : si;
+              var st = list[src] && typeof list[src] === 'object' ? list[src] : {};
               // h/w per stitch: a dc bump is twice as tall as an sc, an inc
               // wider than a dec. `expand` computed them and used to throw
               // them away.
@@ -3763,14 +4083,32 @@
           ex = null;
         }
       }
-      // No expand (or it gave up): counts only, generic stitches.
+      // No expand (or it gave up): counts only, generic stitches. The row index
+      // already holds the count this ROW publishes, so a growing range does not
+      // fall back to its end-of-range total (`countOf` reads `line.count`, which
+      // is 57 for every row of "Row 6-55: Repeat rows 4 & 5 <57 sts>").
       if (!count && line) {
-        var lc = countOf(line);
+        var lc = rowIndex ? rowIndex.count[patternRow] : undefined;
+        if (typeof lc !== 'number' || !isFinite(lc)) lc = countOf(line);
         if (typeof lc === 'number' && lc > 0) count = Math.floor(lc);
       }
       if (!count && rs[row] > 0) count = rs[row];
       if (!count && row === workingRow) {
         count = Math.max(prt.stitch, (rowIndex ? usableCount(rowIndex.count[patternRow]) : null) || 0);
+      }
+
+      // The chain ring wins round 1 (D5). Round 2 then starts from the chain
+      // too, because `prevCount` is what `expand` is handed next.
+      if (row === 1 && mode === 'rounds' && shape.start === 'chain-ring' &&
+          shape.chainLen >= CHAIN_RING_MIN && count < CHAIN_RING_FRAC * shape.chainLen) {
+        count = shape.chainLen;
+        // The parsed positions described a 23-stitch round; they do not
+        // describe this one, so the round falls back to generic stitches
+        // below and publishes no increase sites it cannot vouch for.
+        stitches = [];
+        positions = 0;
+        truncated = false;
+        ex = null;
       }
 
       var done;
@@ -3788,7 +4126,7 @@
 
       if (row >= first) {
         if (row === anchor) current = rounds.length;
-        var marks = incDecPositions(ex, stitches);
+        var marks = incDecPositions(ex, stitches, positions);
         rounds.push({
           count: count,
           done: done,
@@ -3798,6 +4136,11 @@
           ghost: row > workingRow,
           inc: marks.inc,
           dec: marks.dec,
+          // true when `stitches` is an even SAMPLE of a longer position list.
+          truncated: truncated,
+          // set by flagOutliers once the whole sequence is known: this count is
+          // a wild outlier from its neighbours, i.e. a mis-parsed line.
+          outlier: false,
           // 1-based pattern row this round draws (= the work row; they differ
           // only inside a repeat, where the pattern row is reused).
           row: row
@@ -3807,13 +4150,19 @@
     }
 
     if (current < 0) current = rounds.length ? rounds.length - 1 : 0;
+
+    flagOutliers(mode, rounds);
+    var ck = cornersOf(mode, rounds, prt);
+    shape.corners = ck.corners;
+    shape.cornersSource = ck.cornersSource;
+
     var dev = roundDeviation(prt);
     return {
       mode: mode,
       rounds: rounds,
       current: current,
       defaultColor: main,
-      shape: partShape(prt),
+      shape: shape,
       window: { first: rounds.length ? first : 0, total: total },
       deviation: { expected: dev.expected, actual: dev.actual }
     };
@@ -3884,7 +4233,8 @@
    * @param {object} [proj]  its project (looked up when omitted)
    * @returns {{mode:'rounds'|'rows', rounds:Array, current:number,
    *           defaultColor:string,
-   *           shape:{start:string, chainLen:number|null, ringCount:number|null, stuffed:boolean|null},
+   *           shape:{start:string, chainLen:number|null, ringCount:number|null, stuffed:boolean|null,
+   *                  corners:0|3|4|6|8, cornersSource:'sites'|'text'|null},
    *           window:{first:number, total:number},
    *           deviation:{expected:number|null, actual:number}}}
    */

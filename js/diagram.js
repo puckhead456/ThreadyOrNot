@@ -96,8 +96,26 @@
      wrong by 57% (01 §1.2) and the asin(R/Rmax) slope heuristic that went
      with it is gone; see `geoLayout` below. */
   var BUMP = 0.20;         // outward bump at stitch centre, fraction of SW
+  /* ...but never more than this fraction of the RING'S OWN radius (06 #6).
+     BUMP alone is absolute, so the same 0.20 that reads as a stitch on a
+     48-round (r 7.64, a 2.6% wave) was a 21% radial wave on a 6-stitch ring
+     (r 0.95) and 31% on a 4-stitch one: the panda Tail came out as a stack of
+     lampshades, the Ear as an 18-point cog, the turtle Feet as a star-lidded
+     cake tin and the snowman Nose as a four-lobed paper bag. The per-stitch
+     amplitude is now min(BUMP*SW, BUMP_R*R), so the wave can never exceed
+     BUMP_R of the round it belongs to; the two meet at r = 3.33 (≈21 stitches),
+     above which nothing changes and large rounds keep every bit of texture. */
+  var BUMP_R = 0.06;
   var GROOVE = 0.03;       // inter-round crease, inward only (02 #2)
   var DIP = 0.17;          // vertical scallop ("v" shape) as a fraction of row height
+  /* The scallop is a fraction of the STITCH height, which on a round the
+     geometry compressed (a ruffle rises 0.12*h, a gathered close less) put the
+     band's mid-row BELOW its own bottom ring — and wider than it, because the
+     bump peaks on the same row. That is the "flared base overhanging the band
+     below" of 06 #6: every round boundary grew a lip and the piece read as a
+     stack of shells. Cap the scallop at this fraction of the band's own
+     height so it can never reach past the shared ring. */
+  var DIP_SPAN = 0.45;
   var R_MIN = 0.42;        // smallest ring radius
   var MAX_SLICES = 160;    // per-ring slice cap (subsample beyond)
   var SEGS = 4;            // angular segments per stitch
@@ -166,6 +184,16 @@
   var GHOST_ALPHA = 0.20;    // future rounds: a calm ring each
   var PENDING_ALPHA = 0.72;  // the current round's unworked slices: full grid
   var MARKER_ALPHA = 0.60;   // the working round's highlight ring (05 #3)
+
+  /* The surplus wedge (05 #6). The reviewer found it near-invisible: three
+     stitches of twenty-four, on a black band, at 375 px. It was a 0.8 mix into
+     the yarn's own colour and then went through the same lighting as the rest
+     of the piece, so on a dark round its lit value stayed dark. Now the slice's
+     colour is REPLACED by the alert tint and a flat, fully-lit lift of the same
+     colour is blended over the shading, so the wedge keeps one predictable
+     brightness whichever way it faces and whatever the yarn under it. */
+  var ALERT_MIX = 1.0;       // alert tint replaces the surplus slice's yarn
+  var ALERT_GLOW = 0.55;     // ... plus this much flat, unlit alert over the shading
 
   var SHADOW_SEGS = 30;
   var SHADOW_ALPHA = 0.38;   // centre of the contact shadow
@@ -476,7 +504,11 @@
     }
 
     var hashSeed = 2166136261;
-    var step = count > 0 ? count / n : 1;
+    /* A sampled mesh row (Store sets `truncated`) hands over more position
+       records than it has countable stitches; spread the slices over the
+       whole record list, not just its first `count` entries. */
+    var recs = stitches && stitches.length > count ? stitches.length : count;
+    var step = count > 0 ? recs / n : 1;
     var amp = new Float32Array(n);
     var wt = new Float32Array(n);
     var col = new Float32Array(n * 3);
@@ -489,7 +521,7 @@
     h = hashNum(h, stitches ? stitches.length : 0);
 
     for (var i = 0; i < n; i++) {
-      var si = count > 0 ? Math.min(count - 1, Math.floor(i * step)) : 0;
+      var si = count > 0 ? Math.min(recs - 1, Math.floor(i * step)) : 0;
       var st = null;
       if (stitches && stitches.length) {
         st = stitches[si < stitches.length ? si : stitches.length - 1];
@@ -561,8 +593,32 @@
       mode: mode, rounds: rounds, current: current, defaultColor: def,
       shape: shape, geo: geo, geoRaw: raw, geoShape: shape,
       geoCounts: countsOf(raw),
+      finished: m.finished != null ? !!m.finished : finishedOf(rounds, current),
       deviation: m.deviation && typeof m.deviation === 'object' ? m.deviation : null
     };
+  }
+
+  /* Is every round of this model worked? (06 #5.) The host normally says so —
+     `setModel(m, { finished: true })`, or `model.finished` — but the gallery and
+     any other caller that just sets `current = rounds.length - 1` does not, and
+     a finished piece must not wear the working-round glow: on the snowman Hat
+     that painted the whole flared brim coral and on a 2-round bee wing it
+     recoloured half the object. Derive it the same way DiagramGeo.isFinished
+     does — a countable round that is not fully done, or any ghost round, means
+     there is still work to do — and additionally require that `current` has
+     reached the last countable round, so a host that rewinds the marker to an
+     earlier round still sees its marker. */
+  function finishedOf(rounds, current) {
+    var any = false, lastCountable = -1;
+    for (var i = 0; i < rounds.length; i++) {
+      var r = rounds[i];
+      if (!r || r.count <= 0) continue;    // count-less rounds do not hold it open
+      if (r.ghost) return false;
+      if (r.done < r.count) return false;
+      any = true;
+      lastCountable = i;
+    }
+    return any && current >= lastCountable;
   }
 
   function countsOf(raw) {
@@ -708,7 +764,9 @@
      usual case) the ring is a circle and this costs nothing.
      `thick` > 0 extrudes the bump surface inward by that much and closes the
      four sides, so flat fabric has a real edge and never vanishes when it
-     turns side-on. Rounds mode is a closed solid already and passes 0. */
+     turns side-on. Rounds mode is a closed solid already and passes 0.
+     `bumpAmp` is this band's per-stitch bump ceiling in world units; absent it
+     falls back to the old absolute BUMP * SW. */
   function buildBand(o) {
     var n = o.n;
     var thick = o.thick || 0;
@@ -733,8 +791,15 @@
 
     var angA = new Float64Array(COLS);
     var blend = !!(prof && prof.blend);
+    /* Per-stitch bump amplitude (06 #6). `bumpAmp` is the band's own ceiling —
+       min(BUMP*SW, BUMP_R * its ring radius) — and the per-stitch weight in
+       `amp[]` still scales it, so a bobble is still bigger than a slip stitch
+       and a tiny round is still a circle. It is 0 at BOTH band edges (FT), so
+       consecutive bands meet exactly at rBase + BLG whatever their stitch
+       counts, phases and amplitudes: no lip and no crack. */
+    var bumpAmp = o.bumpAmp != null ? o.bumpAmp : BUMP * SW;
     for (j = 0; j < n; j++) {
-      var A = amp[j] * BUMP * SW;
+      var A = amp[j] * bumpAmp;
       var aStart = a0[j], aWidth = aw[j];
       for (k = 0; k < COLS; k++) {
         var ang0 = aStart + aWidth * (k / SEGS);
@@ -965,6 +1030,18 @@
     };
   }
 
+  /* This band's per-stitch bump ceiling (06 #6): the smaller of the absolute
+     BUMP and BUMP_R of the round's own ring radius. `rBot` IS that round's
+     radius (the band spans from the round above's ring down to its own), so a
+     6-stitch round gets 0.06 * 0.95 = 0.057 where it used to get 0.20, and a
+     48-stitch round keeps the full 0.20. Rows-mode bands carry the cylinder
+     radius, which is far past the crossover, so a sheet is untouched. */
+  function bumpAmpOf(band) {
+    if (!band) return BUMP * SW;
+    var r = band.rBot > 0 ? band.rBot : Math.max(band.rTop, 0);
+    return Math.min(BUMP * SW, BUMP_R * Math.max(R_MIN, r));
+  }
+
   /* Turns one prepared round + its layout band into geometry. */
   function buildRoundBand(mode, round, band, index) {
     var n = round.n;
@@ -988,6 +1065,11 @@
           a0[j] = acc; aw[j] = w; acc += w;
         }
       }
+      /* The scallop may not reach past the band's own edges (06 #6): on a
+         round the geometry compressed the mid-row would otherwise sit below
+         the bottom ring AND wider than it, which is the overhanging lip. */
+      var dyAbs = Math.abs(band.yBot - band.yTop);
+      var dipReach = Math.min(band.reach, DIP_SPAN * dyAbs / DIP);
       return buildBand({
         n: n, a0: a0, aw: aw, amp: round.amp, col: round.col,
         rBase: [band.rTop, (band.rTop + band.rBot) / 2, band.rBot],
@@ -995,9 +1077,10 @@
         yBase: [band.yTop, (band.yTop + band.yBot) / 2, band.yBot],
         dydt: band.yBot - band.yTop,
         zOff: 0,
-        dipScale: band.reach * (band.yBot < band.yTop ? 1 : -1),
+        dipScale: dipReach * (band.yBot < band.yTop ? 1 : -1),
         anchorCol: 0,
-        prof: band.prof || null
+        prof: band.prof || null,
+        bumpAmp: bumpAmpOf(band)
       });
     }
     /* rows: a cylinder segment about a vertical axis behind the sheet, so
@@ -1164,6 +1247,16 @@
       reducedMotion: !!opts.reducedMotion,
       interactive: !!opts.interactive,
       model: normalizeModel(null),
+      /* Which frame this canvas is: 'button' (the bounded clamp inside the
+         stitch button), 'viewer' (the ⤢ sheet) or 'gallery' (a review card).
+         `DiagramGeo.fit` owns what each one means; the renderer only says
+         which one it is, and whether the piece is finished — a finished piece
+         is letterboxed honestly instead of being over-scaled to fill the
+         height with the worked row centred (07 finding 2). 'button' is the
+         default, as it is in `DiagramGeo.fit`, so a host that says nothing
+         keeps the counting behaviour it has always had. */
+      fitPurpose: opts.fitPurpose === 'viewer' || opts.fitPurpose === 'gallery' ? opts.fitPurpose : 'button',
+      fitFinished: !!opts.finished,
       chunks: [],          // per band GPU chunk
       capChunk: null,
       botChunk: null,      // the gathered close at the bottom, when there is one
@@ -1341,6 +1434,17 @@
       var bands = geo.bands || [];
       state.bands = bands;
       state.geo = geo;
+      /* what the per-band bump ceiling actually came out as, so getStats can
+         report the numbers 06 #6 is about instead of the constant */
+      var bLo = Infinity, bHi = -Infinity;
+      for (var bi = 0; bi < bands.length; bi++) {
+        if (!bands[bi] || !rounds[bi] || rounds[bi].count <= 0) continue;
+        var ba = mode === 'rounds' ? bumpAmpOf(bands[bi]) : BUMP * SW;
+        if (ba < bLo) bLo = ba;
+        if (ba > bHi) bHi = ba;
+      }
+      state.bumpLo = bLo === Infinity ? 0 : bLo;
+      state.bumpHi = bHi === -Infinity ? 0 : bHi;
 
       var gl = state.gl;
       var i;
@@ -1365,9 +1469,15 @@
         h = hashNum(h, b.sig || 0);
         h = hashNum(h, (b.x0 || 0) * 97);
         if (state.hashes[i] === h && state.chunks[i]) continue;
-        var geo = buildRoundBand(mode, r, b, i);
-        if (!geo) { freeChunk(state.chunks[i]); state.chunks[i] = null; state.hashes[i] = h; continue; }
-        state.chunks[i] = uploadChunk(geo, state.chunks[i]);
+        /* NOT `geo`: `var` is function-scoped, so the old name overwrote the
+           layout `geo` above with this band's mesh — and a last round that
+           builds nothing (the count-less working round the model appends past
+           the end of a finished piece) left it null, so `geo.closedTop` below
+           threw and setModel died before it ever applied the fit. The viewer
+           then drew every finished amigurumi at scale 1, spilling off frame. */
+        var bandGeo = buildRoundBand(mode, r, b, i);
+        if (!bandGeo) { freeChunk(state.chunks[i]); state.chunks[i] = null; state.hashes[i] = h; continue; }
+        state.chunks[i] = uploadChunk(bandGeo, state.chunks[i]);
         state.hashes[i] = h;
         built++;
       }
@@ -1465,7 +1575,9 @@
         var x0 = b.x0 != null ? b.x0 : -w / 2;
         out.rad = Math.max(Math.abs(x0), Math.abs(x0 + w)) + THICK * SW;
       } else {
-        out.rad = (b.radMax > 0 ? b.radMax : Math.max(b.rTop, b.rBot)) + BUMP * SW;
+        // the same per-band bump the builder used, so the fit neither clips the
+        // fabric nor reserves 0.20 of margin a tiny round no longer needs
+        out.rad = (b.radMax > 0 ? b.radMax : Math.max(b.rTop, b.rBot)) + bumpAmpOf(b);
       }
       out.ymin = Math.min(b.yTop, b.yBot);
       out.ymax = Math.max(b.yTop, b.yBot);
@@ -1562,10 +1674,17 @@
       var cp = Math.cos(state.pitch), sp = Math.abs(Math.sin(state.pitch));
 
       /* y of the round being worked, so a clamped wide sheet stays centred on
-         the row the user is actually counting. */
+         the row the user is actually counting.
+         There is no row being counted on a FINISHED piece — the model's
+         `current` is then the working round the builder appends past the end,
+         which sits above the fabric and dragged the whole sheet down the frame
+         (07 finding 2 / #7) — and in the button the sheet is centred in the
+         free area rather than following the count at all. In both cases the
+         geometry is asked for a fit with no current row. */
       var curY = null;
       var cb = state.bands[clamp(state.model.current, 0, Math.max(0, state.bands.length - 1))];
       if (cb) curY = (cb.yTop + cb.yBot) / 2;
+      if (state.fitFinished || state.fitPurpose === 'button') curY = null;
 
       /* DiagramGeo.fit owns the two clamps: (a) a 42-round tail fits by height
          but must keep a visible silhouette, (b) a 405-stitch row must not be
@@ -1575,7 +1694,8 @@
       function geoFit(rad, ymin, ymax) {
         var Geo = geoOf();
         var spec = { rad: rad, ymin: ymin, ymax: ymax, halfW: halfW, halfH: halfH,
-          cp: cp, sp: sp, curY: curY, mode: state.model.mode };
+          cp: cp, sp: sp, curY: curY, mode: state.model.mode,
+          purpose: state.fitPurpose, finished: !!state.fitFinished };
         var f = null;
         if (Geo && Geo.fit) {
           try { f = Geo.fit(spec); } catch (e) { f = null; }
@@ -1606,7 +1726,8 @@
       var cy = lerp(allFit.cy, (sYmin + sYmax) / 2, k);
       /* A sheet the geometry clamped by height overflows sideways on purpose,
          and the one thing that must stay on screen is the row being counted —
-         so the ghost floor is not allowed to drag the centre off it. */
+         so the ghost floor is not allowed to drag the centre off it. `curY` is
+         already null when there is no row to follow (finished, or the button). */
       if (allFit.clamp === 'height' && curY != null) cy = curY;
       state.fitClamp = floorScale > allFit.scale
         ? (allFit.clamp ? allFit.clamp + '+solid' : 'solid')
@@ -1736,6 +1857,11 @@
          Slices past that are the stitches the counter is over by: they render
          in the alert tint instead of confidently closing the ring (05 #6). */
       var cur = clamp(state.model.current, 0, Math.max(0, rounds.length - 1));
+      /* A FINISHED piece has no working round (06 #5): no marker bracelet and
+         no pending grid. The host says so where it knows (`setModel`'s
+         `finished`), and the model derives it otherwise. */
+      var done = !!state.fitFinished || !!state.model.finished;
+      state.markerOn = !done;
       var dev = state.model.deviation;
       var expSlices = -1;
       if (dev && typeof dev.expected === 'number' && dev.expected > 0 && rounds[cur]) {
@@ -1809,10 +1935,18 @@
             gl.drawElements(gl.TRIANGLES, expSlices * c.tps, gl.UNSIGNED_SHORT, 0);
             draws++; tris += expSlices * c.tps / 3;
           }
-          gl.uniform1f(u.tintMix, 0.8);
+          /* the surplus wedge, loud enough to read at button size (06 #12):
+             the alert tint REPLACES the yarn and a flat, unlit lift of the same
+             colour goes over the shading, so three stitches of twenty-four on a
+             black band are still orange */
+          gl.uniform1f(u.tintMix, ALERT_MIX);
+          gl.uniform3f(u.glowColor, state.alertLin[0], state.alertLin[1], state.alertLin[2]);
+          gl.uniform1f(u.glow, Math.max(glowBand === i ? glowAmt : 0, ALERT_GLOW));
           gl.drawElements(gl.TRIANGLES, (solid - expSlices) * c.tps, gl.UNSIGNED_SHORT,
             expSlices * c.tps * 2);
           gl.uniform1f(u.tintMix, 0);
+          gl.uniform1f(u.glow, glowBand === i ? glowAmt : 0);
+          gl.uniform3f(u.glowColor, state.glowLin[0], state.glowLin[1], state.glowLin[2]);
           draws++; tris += (solid - expSlices) * c.tps / 3;
         } else {
           gl.drawElements(gl.TRIANGLES, solid * c.tps, gl.UNSIGNED_SHORT, 0);
@@ -1854,6 +1988,8 @@
         var cw = state.chunks[i];
         if (!cw) continue;
         var rw = rounds[i];
+        // a finished piece has no round in progress, so no pending grid (06 #5)
+        if (done && !rw.ghost) continue;
         var start = rw.ghost ? 0 : Math.min(rw.doneSlices, cw.n);
         if (start >= cw.n) continue;
         var a = (rw.ghost ? GHOST_ALPHA : PENDING_ALPHA) * ghostA;
@@ -1879,8 +2015,11 @@
          the current band get a glow line — consecutive bands share a ring, so
          the band above's ring IS this round's top edge — and the line is drawn
          with the depth test on, so it wraps the piece instead of floating over
-         it. No geometry: the ring index buffers already exist. */
-      if (rounds.length && state.chunks[cur]) {
+         it. No geometry: the ring index buffers already exist.
+         On a FINISHED piece there is no working round, so there is no bracelet
+         either (06 #5): the marker used to paint the snowman Hat's whole flared
+         brim coral and half of a 2-round bee wing. */
+      if (!done && rounds.length && state.chunks[cur]) {
         gl.uniform3f(u.flat, state.glowLin[0], state.glowLin[1], state.glowLin[2]);
         gl.uniform1f(u.alpha, MARKER_ALPHA);
         var cb2 = state.chunks[cur];
@@ -2373,6 +2512,14 @@
     function setModel(model, o) {
       if (state.destroyed) return;
       var animate = (o && o.animate) || 'none';
+      /* The host may re-declare which frame this is and whether the piece is
+         finished with every push: finishing the last round switches the
+         viewer from "keep the worked row on screen" to "letterbox the whole
+         piece honestly", and that has to take effect on the same push. */
+      if (o && (o.fitPurpose === 'button' || o.fitPurpose === 'viewer' || o.fitPurpose === 'gallery')) {
+        state.fitPurpose = o.fitPurpose;
+      }
+      if (o && o.finished !== undefined) state.fitFinished = !!o.finished;
       var prev = state.model;
       var next = normalizeModel(model, prev);
       state.model = next;
@@ -2520,6 +2667,18 @@
             pending: r3(PENDING_ALPHA * (state.ghostLin[3] == null ? 1 : state.ghostLin[3])),
             marker: MARKER_ALPHA
           },
+          /* Is this piece finished, and therefore was the working-round marker
+             and the pending grid drawn at all? (06 #5.) `markerOn` is what the
+             last frame really did, and is null until a frame has run. */
+          finished: !!state.fitFinished || !!state.model.finished,
+          markerOn: state.markerOn == null ? null : !!state.markerOn,
+          /* the per-stitch bump the last rebuild actually used (06 #6): the
+             absolute ceiling, the relative one, and the range over the bands */
+          bump: {
+            abs: r3(BUMP * SW), rel: BUMP_R,
+            min: r3(state.bumpLo || 0), max: r3(state.bumpHi || 0)
+          },
+          alert: { mix: ALERT_MIX, glow: ALERT_GLOW },
           insets: {
             top: state.insets.top, right: state.insets.right,
             bottom: state.insets.bottom, left: state.insets.left
@@ -2531,6 +2690,9 @@
           zoom: Math.round(state.zoom * 1000) / 1000,
           fitScale: Math.round(state.fit.scale * 1000) / 1000,
           fitClamp: state.fitClamp || '',
+          fitPurpose: state.fitPurpose,
+          fitFinished: !!state.fitFinished,
+          fitCy: Math.round(state.fit.cy * 1000) / 1000,
           dragging: !!state.dragging,
           /* geometry, so a test or the gallery can assert the reference table
              without re-deriving it (01 ranked change 14) */
@@ -2570,6 +2732,16 @@
     _consts: {
       SW: SW, SH_SC: (global.DiagramGeo ? global.DiagramGeo.SH_SC : FB_SH_SC),
       MAX_SLICES: MAX_SLICES, BUMP: BUMP,
+      /* 06 #6: the bump is min(BUMP*SW, BUMP_R*R), and the scallop may use at
+         most DIP_SPAN of the band's own height, so neither can reach past the
+         ring two bands share. */
+      BUMP_R: BUMP_R, DIP: DIP, DIP_SPAN: DIP_SPAN,
+      /* bump at the two ends of the useful range, as a fraction of the ring:
+         a 6-stitch ring (r 0.95) and a 48-stitch one (r 7.64) */
+      BUMP_AT_6: Math.round(Math.min(BUMP * SW, BUMP_R * 6 / TAU) / (6 / TAU) * 1e4) / 1e4,
+      BUMP_AT_48: Math.round(Math.min(BUMP * SW, BUMP_R * 48 / TAU) / (48 / TAU) * 1e4) / 1e4,
+      FT_EDGES_ZERO: FT[0] === 0 && Math.abs(FT[VROWS - 1]) < 1e-12,
+      ALERT_MIX: ALERT_MIX, ALERT_GLOW: ALERT_GLOW,
       GROOVE: GROOVE,
       BLG_MAX: Math.round(BLG_MAX * 1e6) / 1e6,
       BLG_MIN: Math.round(BLG_MIN * 1e6) / 1e6,

@@ -2110,6 +2110,63 @@
   }
 
   /**
+   * How many of the model's rounds are the PATTERN's own, and how wide the
+   * widest real row is. The builder appends a round for the row being worked
+   * as soon as the pattern's rows run out (`total = max(workingRow, maxRow)`),
+   * so a finished 46-row wrap arrives as 47 rounds with a count-less 47th —
+   * which is why the viewer's summary used to grow a row the moment the piece
+   * was done (07 #7). Nothing that has no stitches in it is fabric, and a row
+   * the model builder flagged as an `outlier` is a misparse, not a width.
+   * @returns {{rounds:number, wide:number}}
+   */
+  function modelSpan(model) {
+    var rounds = (model && model.rounds) || [];
+    var last = rounds.length;
+    while (last > 0 && (rounds[last - 1].count | 0) <= 0) last--;
+    var wide = 0;
+    for (var i = 0; i < last; i++) {
+      if (rounds[i].outlier) continue;
+      wide = Math.max(wide, rounds[i].count | 0);
+    }
+    /* A long pattern is modelled as a WINDOW of rounds, so the model's own
+       length is not the pattern's length; `window.total` is, minus however
+       many trailing count-less rounds the builder added past the end. */
+    var total = model && model.window && model.window.total > 0 ? model.window.total : 0;
+    var n = total ? Math.max(total - (rounds.length - last), 0) : last;
+    return { rounds: n, wide: wide };
+  }
+
+  /**
+   * Is every round of the piece worked? Drives the viewer's fit purpose: a
+   * finished piece is letterboxed honestly rather than over-scaled around the
+   * row being counted (07 finding 2). The trailing count-less round the
+   * builder appends past the last pattern row is not unfinished work.
+   */
+  function modelFinished(model) {
+    var rounds = (model && model.rounds) || [];
+    var any = false;
+    for (var i = 0; i < rounds.length; i++) {
+      var r = rounds[i];
+      if ((r.count | 0) <= 0) continue;
+      if (r.ghost || (r.done | 0) < (r.count | 0)) return false;
+      any = true;
+    }
+    if (!any) return false;
+    // A windowed model only holds part of the piece: the last round it holds
+    // has to BE the pattern's last round before the piece can be finished.
+    var total = model.window && model.window.total > 0 ? model.window.total : 0;
+    var span = modelSpan(model);
+    if (total && span.rounds && rounds.length) {
+      var lastRow = 0;
+      for (i = 0; i < rounds.length; i++) {
+        if ((rounds[i].count | 0) > 0) lastRow = rounds[i].row || (i + 1);
+      }
+      if (lastRow < span.rounds) return false;
+    }
+    return true;
+  }
+
+  /**
    * Push the current model at whatever is mounted.
    * @param {'stitch'|'round'|'none'} animate
    */
@@ -2120,16 +2177,24 @@
     var model = currentModel();
     if (!model) return;
     var opts = { animate: animate || 'none' };
+    /* Both frames are told whether the piece is finished: the geometry keeps
+       the counting clamp for the button only while there is still counting to
+       do, and letterboxes the finished piece in both. */
+    var done = modelFinished(model);
     if (live.handle) {
       try {
-        live.handle.setModel(model, opts);
+        live.handle.setModel(model, { animate: opts.animate, fitPurpose: 'button', finished: done });
       } catch (e) {
         /* a renderer that gave up must not break counting */
       }
     }
     if (viewer.handle) {
       try {
-        viewer.handle.setModel(model, opts);
+        viewer.handle.setModel(model, {
+          animate: opts.animate,
+          fitPurpose: 'viewer',
+          finished: done
+        });
       } catch (e) {
         /* ignore */
       }
@@ -2275,6 +2340,11 @@
           palette: diagramPalette(),
           reducedMotion: prefersReducedMotion(),
           interactive: false,
+          /* The button's frame is 100 px of a tap target, so the geometry's
+             bounded button clamp applies here and the sheet is centred in
+             what the caption leaves free (07 finding 2). */
+          fitPurpose: 'button',
+          finished: modelFinished(currentModel()),
           /* The renderer tells us when there is no piece on screen (a refused
              or lost context). In the button there is nowhere to put a message,
              so the canvas simply goes away and the plain number is back — the
@@ -2358,17 +2428,18 @@
    * `DiagramGeo.classify`, so the viewer can never claim a shape the renderer
    * did not draw.
    */
-  function shapeName(cls) {
+  function shapeName(cls, corners) {
     if (!cls) return 'Piece';
+    var k = corners || cls.corners || 0;
     if (cls.mode === 'rows') {
       if (cls.anchor === 'spine') return 'Triangle';
       if (cls.anchor === 'left' || cls.anchor === 'right') return 'Shaped panel';
       return 'Flat panel';
     }
-    if (cls.corners === 3) return 'Triangle motif';
-    if (cls.corners === 4) return 'Square motif';
-    if (cls.corners === 6) return 'Hexagon motif';
-    if (cls.corners === 8) return 'Octagon motif';
+    if (k === 3) return 'Triangle motif';
+    if (k === 4) return 'Square motif';
+    if (k === 6) return 'Hexagon motif';
+    if (k === 8) return 'Octagon motif';
     if (cls.ruffles > 1) return 'Ruffle';
     var rounds = [];
     var i;
@@ -2384,8 +2455,13 @@
     var shrank = maxR > 0 && last < maxR * 0.62;
     var grew = last > rounds[0] * 1.3;
     if (a < 0.38) return closed ? 'Bobble' : 'Flat circle';
-    if (closed && a <= 1.35) return 'Sphere';
-    if (closed) return 'Capsule';
+    /* 06 #12: a 20-round, aspect-1.49, closed-top open-bottom piece was called
+       a "Dome", and a dome is by definition squat — 01 §2.1 calls that an egg.
+       A closed top is what makes a piece an egg / a ball; "Dome" is left for
+       the open-rimmed cups (shrank, no cap) it actually describes. */
+    if (cls.closedTop && a > 1.2) return a >= 2.4 ? 'Capsule' : 'Egg';
+    if (cls.closedTop && a >= 0.9) return 'Sphere';
+    if (closed) return a <= 1.35 ? 'Sphere' : 'Capsule';
     if (shrank) return 'Dome';
     if (grew) return 'Cone';
     if (a >= 1.5) return 'Tube';
@@ -2402,20 +2478,27 @@
       return null;
     }
     if (!cls || !cls.rounds || !cls.rounds.length) return null;
-    var wide = 0;
-    for (var i = 0; i < model.rounds.length; i++) {
-      wide = Math.max(wide, model.rounds[i].count | 0);
-    }
-    var n = model.rounds.length;
+    /* The pattern's own rows and its widest real row — NOT `model.rounds.length`
+       and not `max(count)` over every round, which counted the working round
+       the builder appends past the end and quoted a misparsed row as a width
+       (07 #7: "46 rows" turning into "47 rows · 406 wide" on completion). */
+    var span = modelSpan(model);
+    var n = span.rounds;
+    var wide = span.wide;
+    /* How many corners the piece has, when anything knows: the model builder's
+       text fallback (`shape.corners`) or the geometry's own count. */
+    var corners = (model.shape && model.shape.corners) || cls.corners || 0;
     var bits = [];
     if (cls.mode === 'rows') {
       bits.push(n + ' row' + (n === 1 ? '' : 's'));
+      if (corners > 0) bits.push(corners + ' corner' + (corners === 1 ? '' : 's'));
       if (wide) bits.push(wide + ' wide');
     } else {
       bits.push(n + ' round' + (n === 1 ? '' : 's'));
+      if (corners > 0) bits.push(corners + ' corner' + (corners === 1 ? '' : 's'));
       if (wide) bits.push(wide + ' around');
     }
-    return { name: shapeName(cls), detail: bits.join(' · ') };
+    return { name: shapeName(cls, corners), detail: bits.join(' · ') };
   }
 
   function updateViewerReadout() {
@@ -2478,6 +2561,11 @@
         palette: diagramPalette(),
         reducedMotion: prefersReducedMotion(),
         interactive: true,
+        /* The sheet is the "show me the whole piece" frame: a finished piece
+           is letterboxed honestly here instead of being blown up around the
+           row being counted. `finished` is re-declared on every push. */
+        fitPurpose: 'viewer',
+        finished: modelFinished(currentModel()),
         /* Never render nothing (05 #7): if there is no piece on screen the
            viewer says so in one line instead of showing a flat rectangle of
            --primary and letting the user conclude the feature is broken. */
@@ -2516,11 +2604,20 @@
         /* ignore */
       }
     }
-    // The sheet may still be animating in — size it once it has landed.
+    /* The sheet may still be animating in — size it once it has landed, and
+       ask again on the next frame: the stage only reaches its final height
+       after the sheet's transform lands, and `resize` re-fits the piece (at
+       once, not as a transition) whenever the canvas really did change size.
+       Pushing the model a second time instead would start an EASED fit that
+       the idle render loop may never finish, leaving the piece at scale 1. */
     window.requestAnimationFrame(function () {
       resizeDiagrams();
       pushDiagram('none');
       updateViewerReadout();
+      window.requestAnimationFrame(function () {
+        if (!viewer.handle || viewer.canvas !== canvas) return;
+        resizeDiagrams();
+      });
     });
     return true;
   }

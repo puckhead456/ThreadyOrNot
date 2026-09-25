@@ -806,10 +806,24 @@ function walkV2(text, upTo) {
   return rows;
 }
 function countsOf(rows) { return rows.map(function (r) { return r.stitches.length; }); }
+/** The row's WIDTH - the sum of its stitches' widths, which is what a
+ *  perimeter is made of (01 §1.2). Rounded, because a shell that divides a
+ *  ch-3 space by eight is 0.375 per stitch. */
+function widthsOf(rows) {
+  return rows.map(function (r) { return Math.round(r.width * 100) / 100; });
+}
 function incsOf(rows) { return rows.map(function (r) { return r.inc.join(','); }); }
 function decsOf(rows) { return rows.map(function (r) { return r.dec.join(','); }); }
 function stitchesOnly(r) {
   return r.stitches.filter(function (s) { return s.t !== 'ch'; }).length;
+}
+/** How many chain SPACES the round holds - a granny motif's corners. */
+function chRuns(r) {
+  var n = 0, prev = false;
+  r.stitches.forEach(function (s) {
+    if (s.t === 'ch') { if (!prev) n++; prev = true; } else prev = false;
+  });
+  return n;
 }
 function genericIn(rows) {
   return rows.filter(function (r) {
@@ -943,6 +957,32 @@ function runDiagramV2() {
       'Persian Tiles round 4 expands with corners instead of collapsing to nothing',
       rows[3].stitches.length + ' positions, ' + rows[3].inc.length + ' increase sites');
     eq(genericIn(rows), 0, 'Persian Tiles rounds 1-4: no generic "x" round left');
+    // Rounds 4-6 each say "rep from * around" with nothing to say how often.
+    // The answer is "once per corner of the round below" for 4 and 6, and
+    // "once per chain space" for 5, which is the only round with no corner
+    // group in it. None of the three prints a total.
+    var t6 = walkV2(s.text, 6);
+    eq([t6[3].inc.length, t6[5].inc.length], [4, 4],
+      'Persian Tiles rounds 4 and 6: FOUR corner clusters, one per corner of the round below (round 4 had 8, round 6 had 1)');
+    eq([chRuns(t6[3]), chRuns(t6[4]), chRuns(t6[5])], [12, 20, 16],
+      '...round 4 leaves twelve chain spaces, round 5 twenty, round 6 sixteen (four 5-chain corners and twelve ch-3 sides)');
+    eq([t6[4].stitches.length, t6[5].stitches.length], [80, 87],
+      'Persian Tiles round 5 is 80 positions, not 342 - four repeats of three spaces each');
+    eq(t6.map(function (r) { return stitchesOnly(r); }), [16, 24, 36, 19, 20, 31],
+      'Persian Tiles rounds 1-6 stitch counts (rounds 5 and 6 were 87 and 13)');
+    // WIDTH (01 §1.2). The printed counts do not move; what moves is how wide
+    // the square is at each round. Rounds 1-3 grow by their corner increases -
+    // round 3's four `(3 dc, ch 3, 3 dc) all in next sc` corners are worked
+    // into a single STITCH each, so they fan and every entry stays a full
+    // stitch wide, which is exactly how a granny square grows. Rounds 4 and 6
+    // work their corners into a chain SPACE and so divide it: round 4 is 47
+    // wide over 51 positions.
+    eq(widthsOf(t6), [16, 24, 48, 47, 80, 87],
+      'Persian Tiles rounds 1-6 WIDTHS: the square grows 16 -> 24 -> 48 on its corner increases');
+    eq(widthsOf(t6)[2] - widthsOf(t6)[1], 24,
+      '...round 3 is 24 wider than round 2, the four seven-entry corner groups it fanned out');
+    eq([t6[3].stitches.length - widthsOf(t6)[3], t6[5].stitches.length - widthsOf(t6)[5]], [4, 0],
+      '...and round 4’s four `(sc, ch 2, sc) all in ch-3 sp` corners divide a 3-wide space four ways, so it is 4 narrower than its 51 positions');
     eq(P.startHint(s.text), { start: 'chain-ring', chainLen: 4, ringCount: 15 },
       'Persian Tiles: "ch 4; join with a sl st to form a ring" is a chain ring of 4');
     eq(P.workMode(s.text), 'rounds', 'Persian Tiles: workMode is rounds');
@@ -956,6 +996,14 @@ function runDiagramV2() {
     eq(stitchesOnly(rows[1]), 36, 'hex socks round 2: 36 trebles - the printed "12 x 3tr groups"');
     eq(stitchesOnly(rows[1]) - stitchesOnly(rows[0]), 18, '...which is +18 trebles on the round');
     eq(rows[1].inc.length, 6, '...added at SIX increase positions - the hexagon corners');
+    // Round 3 is the one that sets the pattern, and the one the old reading
+    // over-read: "3tr in space between each 3tr groups to next 2ch-sp" repeats
+    // once per gap of the side, not once per two ring positions.
+    var r3 = walkV2(s.text, 3)[2];
+    eq(stitchesOnly(r3), 54,
+      'hex socks round 3: the printed "18 x 3tr groups (3 per side)" - 54 trebles (was 109)');
+    eq(chRuns(r3), 6, '...over six 2-chain corner spaces');
+    eq(r3.stitches.length, 66, '...and 66 ring positions in all');
     eq(rows[1].height, 2.01, 'hex socks: a UK treble is 2.01 tall, not 2.68 (03 #9)');
     eq(P.startHint(s.text), { start: 'chain-ring', chainLen: 4, ringCount: 2 },
       'hex socks: "make 4ch. Join with sl st in first ch to form a ring"');
@@ -971,6 +1019,16 @@ function runDiagramV2() {
     eq(rows[0].inc.length, 4, 'Stylecraft hood Foundation Rnd: four corner groups');
     eq(P.startHint(s.text), { start: 'chain-ring', chainLen: 6, ringCount: 0 },
       'Stylecraft hood: "make 6ch and join with sl st to form a circle"');
+    // The motif keeps four corners for all three rounds, and the 3rd Rnd -
+    // "3tr in each sp between next two 3tr groups to next corner 2ch sp" -
+    // used to be an open fill the expander gave up on, so the round was empty.
+    var hrows = walkV2(s.text, 3);
+    eq(hrows.map(function (r) { return chRuns(r); }), [4, 4, 4],
+      'Stylecraft hood: four 2-chain corners on every round of the motif');
+    eq(hrows.map(function (r) { return stitchesOnly(r); }), [23, 32, 47],
+      '...and the 3rd Rnd now expands (was 0): two side groups per side');
+    eq(hrows[2].inc.length, 12,
+      '...as four corner clusters plus two side clusters a side');
   });
 
   // --- Stylecraft cowl: the chevron cylinder ----------------------------
@@ -1052,20 +1110,41 @@ function runDiagramV2() {
     log(back.every(function (r) { return r.stitches.length > 0; }),
       'hex socks: rounds 4-15 all expand - every one of them used to be cnt=0 (03 #6)',
       countsOf(rows).join('/'));
+    // Round 3 sets the pattern and every later round works it again, so each
+    // one gains a group a side: the leaflet prints "3 per side" for round 3,
+    // "9 x 3tr groups per side" at the end of Rnds 4-9 and "15 ... per side"
+    // at the end of Rnds 13-15. Six sides x three trebles = +18 a round.
     eq(back.map(function (r) { return stitchesOnly(r); }),
-      [109, 109, 109, 109, 109, 109, 109, 109, 109, 109, 109, 109],
-      '...each of them re-working round 3\'s own reading, 109 trebles');
+      [72, 90, 108, 126, 144, 162, 180, 198, 216, 234, 252, 270],
+      '...each of them gaining 18 trebles, the six corners of the hexagon (was 109 flat)');
+    eq(stitchesOnly(rows[8]), 162,
+      '...so round 9 is the printed "9 x 3tr groups per side" (9 x 6 x 3)');
+    eq(stitchesOnly(rows[14]), 270,
+      '...and round 15 the printed "15 x 3tr groups per side"');
     eq(back.every(function (r) { return r.height === 2.01; }), true,
       '...at UK treble height, not at the sc height of a generic run');
     eq(back.every(function (r) { return r.inc.length >= 6; }), true,
       '...with the corner increases of the hexagon, never an untyped round',
       'inc lengths ' + back.map(function (r) { return r.inc.length; }).join('/'));
+    eq(back.map(function (r) { return chRuns(r); }),
+      [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6],
+      '...over SIX clustered corner spaces every round - what makes it a hexagon');
+    // WIDTH (01 §1.2, §1.4). A hexagon in UK trebles lies flat at +17.6
+    // stitches a round, and this one adds six 3tr groups in the spaces between
+    // groups - 18 stitch widths - every round. The corner groups go into a
+    // 2-chain space and divide it, so they add nothing; all the growth is in
+    // the sides, which is what makes the corners corners.
+    var hw = widthsOf(rows);
+    eq(hw.slice(2), [36, 54, 72, 90, 108, 126, 144, 162, 180, 198, 216, 234, 252],
+      'hex socks: the WIDTH grows exactly 18 a round from round 3 (the round that sets the pattern) to round 15');
+    log(hw.slice(3).every(function (w, i) { return w - hw[i + 2] === 18; }),
+      '...+18 on every single round, never compounding',
+      hw.join('/'));
     eq(genericIn(rows), 0, 'hex socks: not one generic "x" round in the whole hexagon');
-    // The counts stay level because round 3's own granny fill over-reads
-    // (109 trebles where the print says 54) and the repeat can only be as
-    // good as the round it points at - a separate gap, 03 proposal 5.
-    log(Math.max.apply(null, countsOf(rows)) <= 200,
-      '...and the repeat does not compound round 3\'s misread fill (was 133, 365, 1003, 2761, 7592)',
+    // The growth is linear (+18) rather than geometric: the repeat is sized by
+    // the anchors round 3 leaves behind, not by dividing position counts.
+    log(Math.max.apply(null, countsOf(rows)) <= 300,
+      '...and the repeat grows linearly instead of compounding (was 133, 365, 1003, 2761, 7592)',
       'biggest round ' + Math.max.apply(null, countsOf(rows)));
   });
 
@@ -1093,15 +1172,55 @@ function runDiagramV2() {
     log(rows.every(function (r) { return r.stitches.length > 0; }),
       'sparkling wrap: all 46 rows expand - rows 5-45 were empty, a comb instead of a sheet',
       'smallest row ' + Math.min.apply(null, countsOf(rows)));
+    // Rows 2, 3 and 4 used to come out at 2, 5 and 8 stitches: the leaflet
+    // breaks "rep / from * across" and "... ending / at **" across a printed
+    // line, so the repeat clause never reached the expander and the starred
+    // unit ran once. With the clause joined, each row consumes the row below
+    // exactly, and the wrap stops being a comb.
+    //   row 1   405 sc                                   405 positions
+    //   row 2   ch-3 mesh: sc, [ch 3, sk 3, sc] x101     102 sc, 405 positions
+    //   row 3   a 5-stitch shell in every ch-3 space     505 sts, 808 positions
+    //   row 4   one sc in every ch-3 space               101 sc, 404 positions
+    // Rows 5-45 alternate rows 3 and 4 with NO drift, and row 46 closes the
+    // sheet back at its 405-stitch width. 405 is not the count of every row:
+    // the mesh and shell rows genuinely differ, and the old flat 405 was only
+    // evaluate()'s "same as the row before" fallback being used as a target.
+    eq(rows.slice(0, 4).map(function (r) { return stitchesOnly(r); }), [405, 102, 505, 101],
+      '...rows 1-4 are 405, 102, 505 and 101 stitches (rows 2-4 were 2, 5 and 8)');
+    eq(rows.slice(0, 4).map(function (r) { return r.stitches.length; }), [405, 405, 808, 404],
+      '...and row 2 spends all 405 of row 1\'s positions, row 3 all 405 of row 2\'s');
     eq(rows.slice(4, 45).map(function (r) { return stitchesOnly(r); }),
-      [405, 405, 405, 405, 405, 405, 405, 405, 405, 405, 405, 405, 405, 405, 405, 405, 405,
-       405, 405, 405, 405, 405, 405, 405, 405, 405, 405, 405, 405, 405, 405, 405, 405, 405,
-       405, 405, 405, 405, 405, 405, 405],
-      '...rows 5-45 at the wrap\'s printed 405 stitches, alternating rows 3 and 4');
+      [505, 101, 505, 101, 505, 101, 505, 101, 505, 101, 505, 101, 505, 101, 505, 101, 505,
+       101, 505, 101, 505, 101, 505, 101, 505, 101, 505, 101, 505, 101, 505, 101, 505, 101,
+       505, 101, 505, 101, 505, 101, 505],
+      '...rows 5-45 alternate rows 3 and 4 exactly, with no drift over the 41 rows');
+    log(rows.slice(2, 45).every(function (r) { return chRuns(r) === 101; }),
+      '...every one of them carrying the same 101 ch-3 spaces',
+      'spaces ' + rows.slice(2, 45).map(function (r) { return chRuns(r); }).join('/'));
+    eq(stitchesOnly(rows[45]), 405,
+      'sparkling wrap row 46: "3 sc in ch-3 sp, sc in next sc ... 4 sc in last ch-3 sp" closes at the 405-stitch width');
     eq(genericIn(rows), 0, 'sparkling wrap: no generic row');
+    // WIDTH (01 §1.2). The wrap is a 74" x 16" rectangle: 405 stitches wide at
+    // the foundation and 405 wide at every one of its 46 rows. The shell rows
+    // hold 808 POSITIONS - a sc, a 3-chain picot and a four-stitch shell in
+    // every ch-3 space - and every one of those eight sits in the one ch-3
+    // space plus the stitch the unit skips, so the row is four positions wide
+    // per repeat, not eight. Before the width rule the shell rows measured 808
+    // and the sheet's aspect collapsed from the true 0.216 to 0.087.
+    var ws = widthsOf(rows);
+    var off = ws.map(function (w) { return Math.abs(w - 405) / 405; });
+    log(Math.max.apply(null, off) <= 0.03,
+      'sparkling wrap: all 46 rows are 405 wide to within 3% - the foundation, the mesh rows and the 808-position shell rows alike',
+      'widths ' + ws[0] + '/' + ws[1] + '/' + ws[2] + '/' + ws[3] + ' ... ' + ws[45] +
+      ', worst ' + (Math.max.apply(null, off) * 100).toFixed(2) + '%');
+    eq([ws[0], ws[1], ws[2], ws[3], ws[45]], [405, 405, 404, 404, 404],
+      '...row by row: 405 foundation, 405 mesh, 404 shell, 404 mesh, 404 closing (the shell rows were 808)');
+    log(rows[2].stitches.every(function (s) { return s.w === 0.5; }),
+      '...every one of the shell row’s 808 positions is half a stitch wide',
+      'first widths ' + rows[2].stitches.slice(0, 8).map(function (s) { return s.w; }).join(','));
     var ls = P.parse(s.text);
     eq([5, 20, 44, 45].map(function (r) { return P.targetFor(ls, r); }), [405, 405, 405, 405],
-      'sparkling wrap: targetFor answers 405 for every repeated row');
+      'sparkling wrap: targetFor still answers 405 for every repeated row');
   });
 
   // --- Premier simple throw: "Rep Row 2 until it measures 59\"" -------

@@ -1927,8 +1927,10 @@ group('wave A 3D: the shape of expand()’s return');
 // -----------------------------------------------------------------------
 
 var shapeRow = ex('(Sc 1, Inc) x 3', 6);
-assertEqual(Object.keys(shapeRow).sort(), ['color', 'dec', 'height', 'inc', 'state', 'stitches'],
-  'expand() returns exactly { stitches, color, height, state, inc, dec }');
+assertEqual(Object.keys(shapeRow).sort(), ['color', 'dec', 'height', 'inc', 'state', 'stitches', 'width'],
+  'expand() returns exactly { stitches, color, height, width, state, inc, dec }');
+assertEqual(shapeRow.width, 9,
+  'width is the sum of the produced stitches’ widths - nine of them, one wide each');
 assertEqual(Object.keys(shapeRow.stitches[0]).sort(), ['c', 'h', 't', 'w'],
   'every produced stitch is exactly { t, c, h, w }');
 assertEqual(shapeRow.inc, [1, 4, 7], 'inc holds the index where each increase STARTS, in order');
@@ -1997,6 +1999,53 @@ assertEqual(ex('Ch 3, 15 dc in ring; join with a sl st to top of ch-3 - 16 sts',
   'a 16-stitch dc round is 2.01 tall, not padded down to sc height (03 #7)');
 assertEqual(tsOf(ex('Ch 3, 15 dc in ring; join with a sl st to top of ch-3 - 16 sts', null)).split(',').pop(), 'dc',
   '...and the padding to the printed total is a dc, not an sc');
+
+// -----------------------------------------------------------------------
+group('wave 1 3D: the per-stitch WIDTH rule (01 §1.2)');
+// -----------------------------------------------------------------------
+// The physical invariant: in a flat row with no edge shaping, the widths of
+// the stitches a row produces add up to the width of the row below that it
+// consumed. `expand().width` is that sum, and it - not the stitch count - is
+// what a perimeter is made of.
+
+// A plain round is as wide as it is long, and shaping moves the width by
+// exactly the number of increases or decreases: a stitch is one stitch wide
+// wherever it is worked into a stitch of its own.
+assertEqual(ex('sc in each st around (30)', 30).width, 30,
+  'a plain 30-stitch round is 30 wide - Σw = count');
+assertEqual(ex('(sc 4, inc) x6 (36)', 30).width, 36,
+  'a +6 round is 6 wider than the 30 it grew out of');
+assertEqual(ex('(sc 4, dec) x6 (30)', 36).width, 30,
+  'a -6 round is 6 narrower than the 36 it closed in from');
+assertEqual(ex('(Sc in next st, 2 sc in next st) around. (18)', 12).width, 18,
+  '...and the longhand "2 sc in next st" spelling says the same');
+assertEqual(wsOf(ex('2 sc in next st, sc in next st', 2)), '1,1,1',
+  'both stitches of an increase are a full stitch wide: the fabric really is wider there');
+
+// A chain space is as wide as what it bridges, and no taller (01 §1.2).
+assertEqual(ex('sc in next st, ch 3, skip 3 sts, sc in next st', 8).width, 5,
+  'a ch-3 bridging 3 skipped stitches is 3 wide, so the row spans the 5 positions it ate');
+
+// A group worked into ONE place shares the width of what it is worked into.
+assertEqual(wsOf(ex('(tr, dc, hdc, sc) in next ch-3 sp', 4)), '0.75,0.75,0.75,0.75',
+  'a 4-stitch shell in a ch-3 space divides those 3 positions between its stitches');
+assertEqual(ex('(tr, dc, hdc, sc) in next ch-3 sp', 4).width, 3, '...so the shell is 3 wide, not 4');
+assertEqual(ex('7 dc in ch-5 sp', 5).width, 5, '"7 dc in ch-5 sp" is five positions wide, not seven');
+assertEqual(wsOf(ex('3 sc in ch-3 sp, sc in next sc', 4)), '1,1,1,1',
+  '3 sc in a ch-3 space come out one wide each - the space had room for exactly three');
+assertEqual(wsOf(ex('(3 dc, ch 3, 3 dc) all in next sc', 1)), '1,1,1,1,1,1,1,1,1',
+  'a granny corner worked into one STITCH shares one stitch and so fans: every entry stays 1 wide');
+assertEqual(ex('(3 dc, ch 3, 3 dc) all in next sc', 1).width, 9,
+  '...which is how a square grows at its corners');
+
+// The Premier wrap's shell row, one repeat of it: eight positions - a sc, a
+// 3-chain picot and a four-stitch shell - all in one ch-3 space plus the
+// stitch the unit skips over. Four positions consumed, four wide.
+var shellUnit = ex('sc in ch-3 sp, ch 3, (tr, dc, hdc, sc) in same ch-3 sp, sk next st', 4);
+assertEqual(shellUnit.stitches.length, 8, 'the wrap’s shell unit makes eight positions');
+assertEqual(wsOf(shellUnit), '0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5',
+  '...which divide the ch-3 space AND the skipped stitch they sit over');
+assertEqual(shellUnit.width, 4, '...so the unit is 4 wide: eight positions, four stitch widths');
 
 // -----------------------------------------------------------------------
 group('wave A 3D: longhand increases and decreases, with their positions');
@@ -2482,6 +2531,109 @@ assertEqual(nsOf(walkRef(
   log(biggest <= 20000 && gp > 0,
     'forty repeats of a granny round stay bounded instead of doubling every round',
     'biggest row ' + biggest);
+})();
+
+// -----------------------------------------------------------------------
+group('motif anchors: "in each corner", "in each sp", "between each group"');
+// -----------------------------------------------------------------------
+
+/**
+ * A motif round almost never says how often it repeats: "in each corner sp",
+ * "in each ch-2 sp around", "3tr in the space between each 3tr group to the
+ * next corner", "*3tr in next sp; rep from * around" all mean "once per anchor
+ * of this kind", and only the round BELOW knows how many there are. These walk
+ * a granny square whose round 2 is unambiguous - four (3 dc, ch 2, 3 dc)
+ * corners, 24 dc over 32 ring positions - and then ask each phrase for round 3.
+ */
+var GRANNY_BASE =
+  'Rnd 1: 12 dc in magic ring. (12)\n' +
+  'Rnd 2: * (3 dc, ch 2, 3 dc) in next dc, skip 2 dc; rep from * around.\n';
+
+function anchorRow(rnd3, upTo) {
+  return walkRef(GRANNY_BASE + rnd3 + '\n', upTo || 3);
+}
+
+// the base round the rest of this group leans on
+(function () {
+  var base = anchorRow('Rnd 3: sc in each st around.', 2);
+  assertEqual([base[0].n, base[1].n], [12, 32],
+    'the base granny: round 2 is 32 ring positions (24 dc plus four 2-chain corners)');
+  assertEqual(base[1].inc.length, 4, '...worked as four corner clusters');
+})();
+
+// --- "(3 dc, ch 2, 3 dc) in each corner sp" ----------------------------
+(function () {
+  var r = anchorRow('Rnd 3: (3 dc, ch 2, 3 dc) in each corner sp; join.')[2];
+  assertEqual([r.n, r.sts, r.inc.length], [32, 24, 4],
+    '"(3 dc, ch 2, 3 dc) in each corner sp": one corner group per corner of the round below');
+})();
+
+// --- "3 dc in each corner sp" ------------------------------------------
+(function () {
+  var r = anchorRow('Rnd 3: 3 dc in each corner sp; join.')[2];
+  assertEqual([r.sts, r.inc.length], [12, 4],
+    '"3 dc in each corner sp": four clusters of three, not an open fill over 32 positions');
+})();
+
+// --- "2 dc in each ch-2 sp around" -------------------------------------
+(function () {
+  var r = anchorRow('Rnd 3: 2 dc in each ch-2 sp around; join.')[2];
+  assertEqual([r.sts, r.inc.length], [8, 4],
+    '"2 dc in each ch-2 sp around": once per 2-chain space the round below made, not once per two positions');
+})();
+
+// --- "*3 dc in next ch-2 sp; rep from * around" ------------------------
+(function () {
+  var r = anchorRow('Rnd 3: *3 dc in next ch-2 sp; rep from * around; join.')[2];
+  assertEqual([r.sts, r.inc.length], [12, 4],
+    '"*3 dc in next ch-2 sp; rep from * around" runs once per space, not 16 times over the positions');
+})();
+
+// --- "sc in each st and 3 sc in each corner sp" ------------------------
+(function () {
+  var r = anchorRow('Rnd 3: sc in each st and 3 sc in each corner sp; join.')[2];
+  assertEqual(r.inc.length, 4,
+    '"sc in each st and 3 sc in each corner sp": the corners resolve, so the plain fill is free to take the rest');
+  assertTrue(r.sts > 24 && r.sts <= 40,
+    '...and the row comes out a plausible edging round', r.sts + ' stitches');
+})();
+
+// --- "3 dc in the space between each 3 dc group" -----------------------
+(function () {
+  // round 2 has one gap per side, so the side phrase lays one group per side
+  var r = anchorRow('Rnd 3: * (3 dc, ch 2, 3 dc) in next ch-2 sp, ' +
+    '3 dc in space between each 3 dc group; rep from * around; join.\n' +
+    'Rnd 4: rep Rnd 3.', 4);
+  assertEqual([r[2].sts, r[2].inc.length], [36, 8],
+    '"3 dc in space between each 3 dc group": four corners plus one side group a side');
+  // ...and round 3 has TWO gaps per side, so re-working it lays two
+  assertEqual([r[3].sts, r[3].inc.length], [48, 12],
+    '...and the same words re-worked as round 4 fill both gaps of each side: +12 dc');
+})();
+
+// --- what must NOT become an anchor ------------------------------------
+(function () {
+  var plain = anchorRow('Rnd 3: sc in each st around.')[2];
+  assertEqual(plain.sts, 32,
+    '"sc in each st around" names no anchor and stays the open fill it is');
+  var noStruct = walkRef('Rnd 1: 12 dc in magic ring. (12)\n' +
+    'Rnd 2: 3 dc in each corner sp; join.\n', 2)[1];
+  assertEqual([noStruct.sts, noStruct.inc.length], [36, 12],
+    'a round below with no corners cannot answer "in each corner sp", so the open fill reads it as before');
+})();
+
+// --- a wrapped "rep from *" clause -------------------------------------
+(function () {
+  // The column extractor breaks the line where the leaflet breaks it, and the
+  // closing clause arrives as a note of its own.
+  var split = walkRef(
+    'Row 1: sc in each of 21 ch; turn - 21 sc.\n' +
+    'Row 2: ch 1, sc in first sc, * ch 3, sk 3 sts, sc in next sc; rep\n' +
+    'from * across; turn.\n', 2);
+  assertEqual(split[1].n, 21,
+    'a "rep from * across" wrapped onto the next printed line still closes the repeat');
+  assertEqual(split[1].sts, 6,
+    '...and the mesh row is five ch-3 spaces and six sc, consuming all 21 stitches');
 })();
 
 var summaryEl = document.getElementById('summary');
