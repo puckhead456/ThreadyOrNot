@@ -124,6 +124,129 @@
     return project && project.countMode === 'rounds' ? 'Rnd' : 'Row';
   }
 
+  /**
+   * 05 #2: rounds vs rows is a property of the PIECE, not of the project. One
+   * project-level word turned every part of an amigurumi whose every line says
+   * `MR4` / `sc around` into a flat sheet. `Store.partWorkMode` resolves the
+   * owner's explicit `Part.workMode`, then the pattern text, then the project.
+   * Anything that labels one part's counter goes through these two.
+   */
+  function partMode(project, prt) {
+    if (prt && window.Store && typeof Store.partWorkMode === 'function') {
+      try {
+        return Store.partWorkMode(prt, project) === 'rounds' ? 'rounds' : 'rows';
+      } catch (e) {
+        /* fall through to the project's own word */
+      }
+    }
+    return project && project.countMode === 'rounds' ? 'rounds' : 'rows';
+  }
+
+  function partRowWord(project, prt, caps) {
+    var w = partMode(project, prt) === 'rounds' ? 'Round' : 'Row';
+    return caps ? w.toUpperCase() : w;
+  }
+
+  function partShortRowWord(project, prt) {
+    return partMode(project, prt) === 'rounds' ? 'Rnd' : 'Row';
+  }
+
+  /* ---- Which way up a piece was worked (3D wave C) ---- */
+
+  var ORIENT_OPTIONS = [
+    { id: 'auto', label: 'Auto' },
+    { id: 'top-down', label: 'Top-down' },
+    { id: 'bottom-up', label: 'Bottom-up' }
+  ];
+
+  /** The chip's own value — never a guess. @returns {'auto'|'top-down'|'bottom-up'} */
+  function partOrientation(prt) {
+    var v = prt && prt.orientation;
+    return v === 'top-down' || v === 'bottom-up' ? v : 'auto';
+  }
+
+  /**
+   * What Auto reads out of the pattern text for this piece, with the chip taken
+   * out of the way. `Store.partShape` is the SAME resolver the model carries to
+   * the renderer, so the hint can never promise a way up the geometry did not
+   * draw (05 #2's lesson, applied to orientation).
+   * @returns {boolean} whether the text reads as worked from the bottom
+   */
+  function autoUpsideDown(prt) {
+    if (!prt || !window.Store || typeof Store.partShape !== 'function') return false;
+    var tmp = {};
+    for (var k in prt) if (prt.hasOwnProperty(k)) tmp[k] = prt[k];
+    // A separate id: the Store memoises per part, and this is not that part.
+    tmp.id = (prt.id || 'part') + ':orientpreview';
+    tmp.orientation = 'auto';
+    try {
+      return !!Store.partShape(tmp).upsideDown;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /**
+   * The one line under / beside the orientation chips. Auto says which way it
+   * went and where that came from; an explicit pick says what it means for the
+   * 3D piece.
+   * @param {'auto'|'top-down'|'bottom-up'} pick
+   */
+  function orientationHint(pick, prt) {
+    if (pick === 'bottom-up') return 'Worked bottom-up — round 1 sits at the bottom.';
+    if (pick === 'top-down') return 'Worked top-down — round 1 sits at the top.';
+    return autoUpsideDown(prt) ? 'Auto — bottom-up from the pattern' : 'Auto — top-down';
+  }
+
+  /* ---- UK or US stitch names (Wave E: the Part.dialect chip) ---- */
+
+  var DIALECT_OPTIONS = [
+    { id: 'auto', label: 'Auto' },
+    { id: 'uk', label: 'UK' },
+    { id: 'us', label: 'US' }
+  ];
+
+  /** The chip's own value — never a guess. @returns {'auto'|'uk'|'us'} */
+  function partDialectPick(prt) {
+    var v = prt && prt.dialect;
+    return v === 'uk' || v === 'us' ? v : 'auto';
+  }
+
+  /**
+   * What Auto reads for this piece with the chip taken out of the way — the
+   * piece's own text through `Store.partDialect`, the same resolver the model
+   * carries to `expand` and so to the heights the 3D piece is drawn at.
+   * @returns {'uk'|'us'|null}
+   */
+  function autoDialect(prt) {
+    if (!prt || !window.Store || typeof Store.partDialect !== 'function') return null;
+    var tmp = {};
+    for (var k in prt) if (prt.hasOwnProperty(k)) tmp[k] = prt[k];
+    // A separate id: the Store memoises per part, and this is not that part.
+    tmp.id = (prt.id || 'part') + ':dialectpreview';
+    tmp.dialect = 'auto';
+    try {
+      return Store.partDialect(tmp) || null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /**
+   * The line beside the Terms chips. UK and US count the same, so this never
+   * moves a stitch target; it says what it changes, which is how tall a `tr`
+   * (and so the 3D piece) is.
+   * @param {'auto'|'uk'|'us'} pick
+   */
+  function dialectHint(pick, prt, short) {
+    if (pick === 'uk') return short ? 'UK: tr = US dc' : 'UK terms — a tr is a US dc. Counts do not change.';
+    if (pick === 'us') return short ? 'US: tr = tall treble' : 'US terms — a tr is the tall treble. Counts do not change.';
+    var d = autoDialect(prt);
+    if (d === 'uk') return short ? 'Auto — UK, from the text' : 'Auto — UK terms from the pattern';
+    if (d === 'us') return short ? 'Auto — US, from the text' : 'Auto — US terms from the pattern';
+    return short ? 'Auto — not stated (US)' : 'Auto — the pattern does not say; read as US';
+  }
+
   /* ================================================================== *
    * 3. Optional collaborators (defensive)
    * ================================================================== */
@@ -162,6 +285,7 @@
     els.project = $('#screen-project');
     els.live = $('#live-region');
     els.toasts = $('#toasts');
+    els.banners = $('#app-banners');
 
     // Craft screen (docs/CRAFTS.md) — absent from an old cached index.html,
     // so everything that touches it is guarded.
@@ -196,9 +320,11 @@
     els.patternText = $('#pattern-line-text');
     els.patternNotes = $('#pattern-line-notes');
     els.stitchSection = $('.stitch-section');
+    els.stitchActions = $('#stitch-actions');
     els.stitchBtn = $('#stitch-btn');
     els.stitchNumber = $('#stitch-number');
     els.stitchReadout = $('#stitch-readout');
+    els.stitchDev = $('#stitch-dev');
     els.stitchProgress = $('#stitch-progress');
     els.stitchBarFill = $('#stitch-bar-fill');
     els.stitchBarLabel = $('#stitch-bar-label');
@@ -213,12 +339,78 @@
    * 5. Live region + toasts
    * ================================================================== */
 
+  /**
+   * The one live region, shared by every craft (through `ctx.announce`).
+   *
+   * Policy (UX sweep D7, Wave E) — the same in all three crafts: announce
+   * MILESTONES, never a single stitch. A row / round done, a stitch group
+   * done, a piece / part / project done, a colour done, a step done, a block
+   * or cut count moved, and — only where there is no grouping to mark it —
+   * every 50th stitch. Per-stitch speech would make the big button unusable
+   * with a screen reader on.
+   *
+   * A19: it used to clear the region and write 30 ms later, so a second call
+   * inside that window ("Cream done" then "Now stitching Teal") dropped the
+   * first. Calls that land together are now spoken together.
+   */
+  /**
+   * UX sweep D5 / A15 — keep keyboard focus across a rebuild. Every list in
+   * the app is re-rendered by clearing and rebuilding it, so the button you
+   * just pressed was destroyed under you and focus fell to <body> (tick three
+   * checklist items with the keyboard and you started over three times).
+   *
+   * `preserveFocus(fn)` notes the focused element's key — `data-focus-key`,
+   * else its id, else its aria-label — runs `fn`, and if that element is gone
+   * afterwards, focuses its replacement (or, when the replacement is now
+   * disabled, the first control in the same row). It never moves focus that
+   * is still on a live element. Published as `ctx.preserveFocus` so the craft
+   * modules get the same behaviour.
+   * @template T
+   * @param {function(): T} fn
+   * @returns {T}
+   */
+  function preserveFocus(fn) {
+    var a = document.activeElement;
+    var key = null;
+    if (a && a !== document.body && a.getAttribute) {
+      if (a.getAttribute('data-focus-key')) key = ['data-focus-key', a.getAttribute('data-focus-key')];
+      else if (a.id) key = ['id', a.id];
+      else if (a.getAttribute('aria-label')) key = ['aria-label', a.getAttribute('aria-label')];
+    }
+    var scope = a && a.closest ? a.closest('dialog') : null;
+    var out = fn();
+    if (!key || (a && document.contains(a))) return out;
+    var root = scope && document.contains(scope) ? scope : document;
+    var hit = null;
+    var all = root.querySelectorAll('[' + key[0] + ']');
+    for (var i = 0; i < all.length; i++) {
+      if (all[i].getAttribute(key[0]) === key[1]) { hit = all[i]; break; }
+    }
+    if (hit && (hit.disabled || hit.hidden)) {
+      var row = hit.closest('.list-item, [data-focus-row]') || hit.parentNode;
+      var alt = row ? focusablesIn(row) : [];
+      hit = alt[0] || null;
+    }
+    if (hit) {
+      try { hit.focus({ preventScroll: true }); } catch (e) { try { hit.focus(); } catch (e2) { /* ignore */ } }
+    }
+    return out;
+  }
+
+  var announceQueue = [];
+  var announceTimer = null;
+
   function announce(text) {
-    if (!els.live) return;
+    if (!els.live || !text) return;
+    announceQueue.push(String(text));
+    if (announceTimer) return;
     els.live.textContent = '';
     // A fresh text node in the next frame makes screen readers re-announce.
-    window.setTimeout(function () {
-      els.live.textContent = text;
+    announceTimer = window.setTimeout(function () {
+      announceTimer = null;
+      var said = announceQueue.join('. ');
+      announceQueue = [];
+      els.live.textContent = said;
     }, 30);
   }
 
@@ -250,6 +442,372 @@
   }
 
   /* ================================================================== *
+   * 5b. Top banners
+   *
+   * A persistent strip above every screen for the two things the user must
+   * not be able to miss: a save that failed (13 #2, 09 #2) and another tab
+   * that changed the same data (13 #1). They are `role="alert"`, they are not
+   * dismissable, and they push the screens down rather than covering them.
+   * ================================================================== */
+
+  var banners = Object.create(null); // id -> node, so one id never stacks
+
+  /** Screens read --banner-h; keep it in step with whatever is showing. */
+  function syncBannerHeight() {
+    if (!els.banners) return;
+    var h = els.banners.childNodes.length ? els.banners.offsetHeight : 0;
+    document.documentElement.style.setProperty('--banner-h', (h || 0) + 'px');
+  }
+
+  /**
+   * @param {{id:string, tone?:'danger'|'calm', text:string,
+   *          actions?:Array<{text:string, onClick:Function}>}} opts
+   */
+  function showBanner(opts) {
+    if (!els.banners || !opts || !opts.id) return null;
+    hideBanner(opts.id);
+    var bar = el('div', 'banner banner-' + (opts.tone === 'calm' ? 'calm' : 'danger'));
+    bar.setAttribute('role', 'alert');
+    bar.setAttribute('data-banner', opts.id);
+    bar.appendChild(el('p', 'banner-text', opts.text || ''));
+    if (opts.actions && opts.actions.length) {
+      var row = el('div', 'banner-actions');
+      opts.actions.forEach(function (a) {
+        var b = button('btn small', a.text);
+        on(b, 'click', a.onClick);
+        row.appendChild(b);
+      });
+      bar.appendChild(row);
+    }
+    banners[opts.id] = bar;
+    els.banners.appendChild(bar);
+    syncBannerHeight();
+    return bar;
+  }
+
+  function hideBanner(id) {
+    var node = banners[id];
+    if (!node) return false;
+    delete banners[id];
+    if (node.parentNode) node.parentNode.removeChild(node);
+    syncBannerHeight();
+    return true;
+  }
+
+  /* ================================================================== *
+   * 5c. Storage health (13 #2–#3, 09 #2) and multi-tab (13 #1)
+   * ================================================================== */
+
+  var QUOTA_TEXT = 'Your last taps are not saved. Free up space or download a backup.';
+  var PRIVATE_TEXT = 'Private browsing: nothing will be saved after you close this tab.';
+
+  /**
+   * The craft module's own "make this project smaller" path, if it published
+   * one. Cross-stitch has the counts-mode downgrade internally but does not
+   * expose it on its registration yet, so today this returns null and the
+   * button is simply not shown (see HANDOFF).
+   */
+  function freeUpSpaceAction() {
+    var p = currentProject();
+    var def = craftFor(p);
+    if (!p || !def || typeof def.freeUpSpace !== 'function') return null;
+    return {
+      text: 'Free up space',
+      onClick: function () {
+        try { def.freeUpSpace(p.id, ctx); } catch (e) { /* the banner stays */ }
+      }
+    };
+  }
+
+  /** What raised the current storage banner, or null. */
+  var storageBannerKind = null;
+
+  /**
+   * The banner is not dismissable by hand, but it should not outlive the
+   * problem: once a write succeeds again (space freed, a backup taken) it
+   * goes. Private mode is forever, so that one stays.
+   */
+  function syncStorageBanner() {
+    if (!storageBannerKind || storageBannerKind === 'private') return;
+    if (Store.saveFailed()) return;
+    storageBannerKind = null;
+    hideBanner('storage');
+  }
+
+  /** One banner, whatever kind of write failure put it there. */
+  function showStorageBanner(kind) {
+    var calm = kind === 'private';
+    storageBannerKind = kind || 'quota';
+    var actions = [];
+    if (!calm) {
+      actions.push({ text: 'Download backup', onClick: function () { exportBackup(); } });
+      var free = freeUpSpaceAction();
+      if (free) actions.push(free);
+    }
+    showBanner({
+      id: 'storage',
+      tone: calm ? 'calm' : 'danger',
+      text: calm ? PRIVATE_TEXT : QUOTA_TEXT,
+      actions: actions
+    });
+  }
+
+  /**
+   * "Your saved projects could not be read": the only screen that gets in the
+   * way of everything, because the next write would destroy the evidence.
+   */
+  function openCorruptSheet() {
+    var key = Store.corruptKey() || (Store.KEY + '.corrupt');
+    openSheet({
+      title: 'Your saved projects could not be read',
+      cls: 'sheet-corrupt',
+      locked: true,
+      build: function (body) {
+        body.appendChild(
+          el(
+            'p',
+            null,
+            'Something wrote a damaged copy of your data — a phone that shut down mid-save is the ' +
+              'usual cause. Nothing has been thrown away: the unreadable text is still on this ' +
+              'device under “' + key + '”.'
+          )
+        );
+        body.appendChild(
+          el(
+            'p',
+            'muted',
+            'Download the copy first. Then “Start fresh” lets the app save again; send us the file ' +
+              'and we can often get the projects back out of it.'
+          )
+        );
+      },
+      footer: [
+        {
+          text: 'Download the copy',
+          cls: 'btn',
+          onClick: function () {
+            downloadCorruptSnapshot(key);
+          }
+        },
+        {
+          text: 'Start fresh',
+          cls: 'btn primary',
+          onClick: function (api) {
+            confirmSheet({
+              title: 'Start fresh?',
+              message: 'The app will save again from now on. The damaged copy stays under “' + key + '”.',
+              confirmText: 'Start fresh',
+              danger: true
+            }).then(function (ok) {
+              if (!ok) return;
+              Store.acknowledgeCorrupt();
+              api.close();
+              render();
+              toast('Starting fresh — the old copy is still on this device');
+            });
+          }
+        }
+      ]
+    });
+  }
+
+  function downloadCorruptSnapshot(key) {
+    var text = Store.corruptSnapshot();
+    if (typeof text !== 'string' || !text) {
+      toast('That copy is no longer available');
+      return;
+    }
+    downloadText(text, String(key || 'stitchkeeper-corrupt') + '.json', 'application/json');
+    toast('Copy downloaded');
+  }
+
+  /** One anchor-click download, shared by the backup and the corrupt copy. */
+  function downloadText(text, filename, type) {
+    try {
+      var url = URL.createObjectURL(new Blob([text], { type: type || 'application/json' }));
+      var a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      a.style.display = 'none';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      window.setTimeout(function () { URL.revokeObjectURL(url); }, 1500);
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /** 'takeTheirs' re-emits onExternalChange; one toast is enough. */
+  var resolvingConflict = false;
+
+  function resolveConflictWith(how) {
+    hideBanner('conflict');
+    resolvingConflict = true;
+    try {
+      Store.resolveConflict(how);
+    } catch (e) {
+      /* the store keeps the flag; the banner comes back on the next event */
+    }
+    resolvingConflict = false;
+    render();
+    toast(how === 'takeTheirs' ? 'Using the other tab’s copy' : 'Kept this tab’s copy');
+  }
+
+  function showConflictBanner() {
+    showBanner({
+      id: 'conflict',
+      tone: 'danger',
+      text: 'This app is open in another tab and both made changes.',
+      actions: [
+        { text: 'Keep mine', onClick: function () { resolveConflictWith('keepMine'); } },
+        { text: 'Use the other tab’s', onClick: function () { resolveConflictWith('takeTheirs'); } }
+      ]
+    });
+  }
+
+  /** Boot-time wiring; everything it subscribes to lives for the page's life. */
+  function watchStorage() {
+    var health;
+    try {
+      health = Store.storageHealth();
+    } catch (e) {
+      health = { writable: true, privateMode: false };
+    }
+    if (health && (health.privateMode || !health.writable)) {
+      showStorageBanner(health.privateMode ? 'private' : 'unknown');
+    } else if (Store.saveFailed()) {
+      var last = Store.lastSaveError();
+      showStorageBanner(last && last.kind ? last.kind : 'quota');
+    }
+    if (Store.isCorrupt()) openCorruptSheet();
+
+    Store.onStorageError(function (e) {
+      showStorageBanner(e && e.kind);
+    });
+
+    // Another tab wrote and we had nothing in flight: take it and say so.
+    Store.onExternalChange(function () {
+      if (resolvingConflict) return; // resolveConflictWith says it itself
+      render();
+      toast('Updated from another tab');
+    });
+    // Both tabs changed things: the user picks.
+    Store.onConflict(showConflictBanner);
+    if (Store.conflict()) showConflictBanner();
+
+    window.addEventListener('resize', debounce(syncBannerHeight, 150));
+  }
+
+  /* ---- persistent storage + the backup nag (12 #1, 09 #4) ---- */
+
+  var persistAsked = false;
+
+  /** Once per session, after the first row is actually finished. */
+  function askForPersistOnce() {
+    if (persistAsked) return;
+    persistAsked = true;
+    if (typeof Store.requestPersist !== 'function') return;
+    try {
+      Store.requestPersist();
+    } catch (e) {
+      /* a browser without the API simply never grants it */
+    }
+  }
+
+  /** "61 MB" — one place so every size guard says it the same way. */
+  function mb(bytes) {
+    var n = Number(bytes) || 0;
+    if (n < 1024 * 1024) return Math.max(1, Math.round(n / 1024)) + ' KB';
+    return Math.round(n / (1024 * 1024)) + ' MB';
+  }
+
+  /**
+   * A PDF's own bytes never reach localStorage — only the text pulled out of
+   * it does, and even a 200-page pattern is well under a megabyte of text. So
+   * the PDF path asks "is there room for a megabyte?" rather than "is there
+   * room for twice this file?", which would warn on every ordinary 3 MB
+   * pattern however empty the storage was.
+   */
+  var PDF_TEXT_BUDGET = 1024 * 1024;
+
+  /**
+   * Pre-flight for anything that will end up in localStorage: text pulled out
+   * of a PDF, a backup about to be merged in (09 #2). `file.size * 2` is the
+   * bound on what the read will need, capped for PDFs as above.
+   * @param {File} file
+   * @param {string} what   named in the message
+   * @param {number} [cap]  upper bound on the estimate
+   * @returns {Promise<boolean>} false when the user backed out
+   */
+  function guardQuota(file, what, cap) {
+    var bytes = file && file.size ? file.size * 2 : 0;
+    if (cap && bytes > cap) bytes = cap;
+    var tight = false;
+    try {
+      tight = !!(bytes && Store.wouldExceedQuota(bytes));
+    } catch (e) {
+      tight = false;
+    }
+    if (!tight) return Promise.resolve(true);
+    return confirmSheet({
+      title: 'Storage is nearly full',
+      message:
+        'There may not be room for ' + (what || 'this file') + ' (' + mb(file.size) + '). ' +
+        'Download a backup first, or free up space — importing anyway may fail to save.',
+      confirmText: 'Import anyway'
+    });
+  }
+
+  /** iOS Safari that is not installed: Add to Home Screen is the real fix. */
+  function iosNotInstalled() {
+    var ua = String(navigator.userAgent || '');
+    var isIOS = /iPad|iPhone|iPod/.test(ua) ||
+      (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+    if (!isIOS) return false;
+    if (navigator.standalone === true) return false;
+    try {
+      if (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) return false;
+    } catch (e) { /* no matchMedia: treat as a browser tab */ }
+    return true;
+  }
+
+  /** The one-line dismissible bar at the top of the home list. */
+  function backupNagBar() {
+    var status;
+    try {
+      status = Store.backupStatus();
+    } catch (e) {
+      return null;
+    }
+    if (!status || !status.due) return null;
+
+    var bar = el('div', 'nag-bar');
+    bar.setAttribute('role', 'note');
+    var text = 'Your work lives only on this phone. Save a backup →';
+    if (iosNotInstalled()) text += ' Add to Home Screen keeps it safer.';
+    bar.appendChild(el('p', 'nag-text', text));
+
+    var actions = el('div', 'nag-actions');
+    var save = button('btn small primary', 'Download backup');
+    on(save, 'click', function () {
+      exportBackup();
+      renderHome();
+    });
+    var not = button('linkish', 'Not now');
+    on(not, 'click', function () {
+      Store.snoozeBackupNag(14);
+      renderHome();
+      toast('We’ll ask again in a couple of weeks');
+    });
+    actions.appendChild(save);
+    actions.appendChild(not);
+    bar.appendChild(actions);
+    return bar;
+  }
+
+  /* ================================================================== *
    * 6. Sheets (dynamic <dialog>)
    * ================================================================== */
 
@@ -257,7 +815,12 @@
   var sheetSeq = 0;
 
   /**
-   * @param {{title:string, cls?:string, build?:Function, footer?:Array, onClose?:Function}} opts
+   * @param {{title:string, cls?:string, build?:Function, footer?:Array,
+   *          onClose?:Function,
+   *          locked?:boolean,        // no ✕, no Escape, no backdrop close
+   *          subject?:string         // a project id this sheet is *about*;
+   *                                  // render() closes the sheet if it goes
+   *         }} opts
    */
   function openSheet(opts) {
     opts = opts || {};
@@ -273,6 +836,7 @@
     h.id = 'sheet-title-' + sheetSeq;
     dlg.setAttribute('aria-labelledby', h.id);
     var closeBtn = button('sheet-close', '✕', 'Close');
+    if (opts.locked) closeBtn.hidden = true;
     head.appendChild(h);
     head.appendChild(closeBtn);
 
@@ -301,6 +865,8 @@
       dialog: dlg,
       body: body,
       title: h,
+      /** The project this sheet edits, so render() can close it if it goes. */
+      subject: opts.subject || null,
       close: function (value) {
         result = value;
         try {
@@ -333,6 +899,7 @@
       api.close();
     });
     on(dlg, 'click', function (e) {
+      if (opts.locked) return;
       if (e.target === dlg) api.close();
     });
     on(dlg, 'close', teardown);
@@ -345,25 +912,116 @@
       if (e.defaultPrevented) return;
       if (e.key === 'Escape' || e.key === 'Esc') {
         e.preventDefault();
-        api.close();
+        if (!opts.locked) api.close();
       }
     });
+    // A locked sheet (the corrupt-state recovery) must not be dismissed by the
+    // dialog element's own cancel either.
+    if (opts.locked) {
+      on(dlg, 'cancel', function (e) { e.preventDefault(); });
+    }
 
     if (opts.build) opts.build(body, api);
 
     openSheets.push(api);
-    if (typeof dlg.showModal === 'function') {
+    if (typeof dlg.showModal === 'function' && !forceSheetFallback) {
       dlg.showModal();
     } else {
-      dlg.setAttribute('open', '');
+      openFallbackSheet(dlg, api);
     }
     return api;
+  }
+
+  /** TEST/QA hook: `App.__forceSheetFallback(true)` drives the no-showModal path. */
+  var forceSheetFallback = false;
+
+  var FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), ' +
+    'select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+  function focusablesIn(root) {
+    return Array.prototype.filter.call(root.querySelectorAll(FOCUSABLE), function (n) {
+      return !n.hidden && n.getAttribute('aria-hidden') !== 'true' &&
+        (n.offsetWidth > 0 || n.offsetHeight > 0 || n.getClientRects().length > 0);
+    });
+  }
+
+  /**
+   * UX sweep D3 / A14 — the sheet without `showModal` (older iOS Safari, which
+   * the PWA targets). `setAttribute('open')` alone gave a non-modal dialog: no
+   * top layer, no tint, no focus trap, and focus never came back. So on that
+   * path the sheet brings its own: `.sheet-fallback` paints the backdrop and
+   * lifts it above the app (the dialog already fills the viewport, so a tap on
+   * the tint IS a tap on the dialog and the existing backdrop-close works),
+   * `aria-modal` tells assistive tech, Tab wraps inside it, focus that escapes
+   * is pulled back, and closing puts focus back where it was.
+   */
+  function openFallbackSheet(dlg, api) {
+    var before = document.activeElement;
+    dlg.classList.add('sheet-fallback');
+    dlg.setAttribute('open', '');
+    dlg.setAttribute('aria-modal', 'true');
+    dlg.setAttribute('role', 'dialog');
+
+    function topmost() {
+      var open = openSheets.filter(function (s) { return s.dialog.classList.contains('sheet-fallback'); });
+      return open.length && open[open.length - 1] === api;
+    }
+    function onKey(e) {
+      if (e.key !== 'Tab' || !topmost()) return;
+      var f = focusablesIn(dlg);
+      if (!f.length) { e.preventDefault(); return; }
+      var first = f[0];
+      var last = f[f.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    }
+    function onFocusIn(e) {
+      if (!topmost() || dlg.contains(e.target)) return;
+      // The guided tour's card sits above sheets on purpose; leave it be.
+      if (e.target && e.target.closest && e.target.closest('.tour-overlay, .tour-card, #toasts')) return;
+      var f = focusablesIn(dlg);
+      (f[0] || dlg).focus();
+    }
+    dlg.addEventListener('keydown', onKey);
+    document.addEventListener('focusin', onFocusIn, true);
+    if (!dlg.hasAttribute('tabindex')) dlg.setAttribute('tabindex', '-1');
+
+    var close = api.close;
+    api.close = function (value) {
+      document.removeEventListener('focusin', onFocusIn, true);
+      dlg.removeEventListener('keydown', onKey);
+      close(value);
+      if (before && before.focus && document.contains(before)) {
+        try { before.focus(); } catch (e) { /* ignore */ }
+      }
+    };
+    // showModal() focuses the first focusable; do the same.
+    var f = focusablesIn(dlg);
+    var target = f.filter(function (n) { return !n.classList.contains('sheet-close'); })[0] || f[0] || dlg;
+    try { target.focus(); } catch (e) { /* ignore */ }
   }
 
   function closeAllSheets() {
     openSheets.slice().forEach(function (s) {
       s.close();
     });
+  }
+
+  /**
+   * 13 #11: a sheet whose project has been deleted was left open over the home
+   * screen, fully interactive, saving into nothing. Every sheet that names a
+   * `subject` project is checked on each render and closes itself.
+   */
+  function closeOrphanSheets() {
+    var gone = 0;
+    openSheets.slice().forEach(function (s) {
+      if (!s.subject) return;
+      if (Store.project(s.subject)) return;
+      gone++;
+      s.close();
+    });
+    if (gone) toast('That project is gone, so its editor closed');
+    return gone;
   }
 
   /** Custom confirm sheet (window.confirm looks wrong in standalone PWAs). */
@@ -743,6 +1401,8 @@
     closeAllSheets: closeAllSheets,
     toast: toast,
     announce: announce,
+    // Wrap a list rebuild so keyboard focus survives it (UX sweep D5).
+    preserveFocus: preserveFocus,
     fb: fb,
     render: render,
 
@@ -821,7 +1481,14 @@
    * 11. Render — router
    * ================================================================== */
 
+  /** Rebuild whatever screen is showing, keeping keyboard focus (D5). */
   function render() {
+    preserveFocus(renderNow);
+  }
+
+  function renderNow() {
+    closeOrphanSheets();
+    syncStorageBanner();
     var p = currentProject();
     if (p && isCraftProject(p)) {
       // A craft module owns this screen.
@@ -859,7 +1526,39 @@
 
     var prt = Store.activePart(p);
     if (!prt) return '';
-    var bits = [prt.name, shortRowWord(p) + ' ' + prt.row];
+    return crochetPartSummary(p, prt);
+  }
+
+  /** The terminal state of a part — the same test as the Store's own. */
+  function partFinished(prt) {
+    return !!(prt && prt.targetRows && prt.piecesDone >= prt.makeCount && prt.row >= prt.targetRows);
+  }
+
+  /**
+   * Wave E — the home card's crochet line. It used to pair the COMPLETED row
+   * count with the stitch target of the row AFTER it ("Rnd 1 · 0/12 sts" is
+   * round 2's twelve), used the project's word for every piece, said "Rnd 0"
+   * for a piece nobody had started (D9), and "Rnd 20 · 0 sts" for a finished
+   * one. Now: the round being worked with its own target, "of N" when the
+   * piece has a target, "piece 2 of 4" for a make-count, "done ✓" when it is.
+   */
+  function crochetPartSummary(p, prt) {
+    var word = partShortRowWord(p, prt);
+    var bits = [prt.name];
+    if (partFinished(prt)) {
+      bits.push(prt.makeCount > 1 ? 'all ' + prt.makeCount + ' done ✓' : 'done ✓');
+      var left = 0;
+      p.parts.forEach(function (q) { if (!partFinished(q)) left++; });
+      if (p.parts.length > 1) bits.push(left ? plural(left, 'part') + ' to go' : 'every part done');
+      return bits.join(' · ');
+    }
+    if (!prt.row && !prt.stitch && !prt.piecesDone) {
+      bits.push('not started yet');
+      return bits.join(' · ');
+    }
+    var ri = Store.repeatInfo(prt);
+    bits.push(word + ' ' + ri.workingRow + (prt.targetRows ? ' of ' + prt.targetRows : ''));
+    if (prt.makeCount > 1) bits.push('piece ' + Math.min(prt.piecesDone + 1, prt.makeCount) + ' of ' + prt.makeCount);
     var target = Store.currentTarget(prt);
     bits.push(target ? prt.stitch + '/' + target + ' sts' : prt.stitch + ' sts');
     return bits.join(' · ');
@@ -923,6 +1622,9 @@
     }
 
     clear(els.homeList);
+    // "Your work lives only on this phone" — above the projects it is about.
+    var nag = backupNagBar();
+    if (nag) els.homeList.appendChild(nag);
     live.forEach(function (p) {
       els.homeList.appendChild(projectCard(p));
     });
@@ -952,12 +1654,18 @@
     p.parts.forEach(function (prt) {
       var isActive = prt.id === p.activePartId;
       var tab = button('tab' + (isActive ? ' active' : ''));
+      // Its label changes when it becomes the current part; the key does not.
+      tab.setAttribute('data-focus-key', 'part-tab:' + prt.id);
       tab.setAttribute('aria-pressed', isActive ? 'true' : 'false');
       tab.setAttribute(
         'aria-label',
         prt.name + (isActive ? ' (current part — tap to edit)' : '')
       );
-      tab.appendChild(document.createTextNode(prt.name));
+      // 13 #10: a 2,000-character part name used to wrap into a block that
+      // filled the whole strip. The chip clips with an ellipsis; the full name
+      // is still on the tooltip and in the accessible name.
+      tab.title = prt.name;
+      tab.appendChild(el('span', 'tab-name', prt.name));
       if (prt.makeCount > 1) {
         tab.appendChild(document.createTextNode(' '));
         tab.appendChild(el('span', 'tab-badge', prt.piecesDone + '/' + prt.makeCount));
@@ -1002,11 +1710,45 @@
     els.pTimer.setAttribute('aria-label', (running ? 'Stop' : 'Start') + ' timer, ' + fmtDuration(Store.elapsedMs(p)));
   }
 
+  /**
+   * "Group 4 of 4 · stitch 3 of 6". Wave E: the last group of a round is only
+   * as long as what is left of the round — a 36-stitch round in groups of 10
+   * ends in a group of 6, and a 6-stitch magic ring is one group of 6, not
+   * "stitch 0 of 10". Past the target (an over-count) the group is full size.
+   * @param {number} stitch  stitches done in this row
+   * @param {number} g       group size (> 0)
+   * @param {number|null} target  this row's stitch target
+   * @param {string} approx  '≈ ' when the target was computed
+   */
+  function groupReadout(stitch, g, target, approx) {
+    var groupNo = stitch === 0 ? 1 : Math.ceil(stitch / g);
+    var within = stitch === 0 ? 0 : ((stitch - 1) % g) + 1;
+    var size = g;
+    if (target) {
+      var groups = Math.ceil(target / g);
+      if (groupNo === groups && stitch <= target) size = target - (groups - 1) * g;
+    }
+    var text = 'Group ' + groupNo;
+    if (target) text += ' of ' + approx + Math.ceil(target / g);
+    return text + ' · stitch ' + within + ' of ' + (size < g ? approx : '') + size;
+  }
+
+  /**
+   * "Pattern says 36 · instructions add up to 24", or '' — from the
+   * `printed` / `computed` pair `Store.roundDeviation` fills only when a
+   * round's printed total disagrees with its own instructions.
+   */
+  function countCheckText(dev) {
+    if (!dev || typeof dev.printed !== 'number' || typeof dev.computed !== 'number') return '';
+    if (dev.printed === dev.computed) return '';
+    return 'Pattern says ' + dev.printed + ' · instructions add up to ' + dev.computed;
+  }
+
   /** Fast path: only the numbers and readouts. */
   function updateCounters(p, prt) {
     if (!p || !prt) return;
 
-    els.rowLabel.textContent = rowWord(p, true);
+    els.rowLabel.textContent = partRowWord(p, prt, true);
     els.rowNumber.textContent = String(prt.row);
 
     if (prt.targetRows) {
@@ -1028,10 +1770,10 @@
       els.repeat.hidden = false;
       if (ri.inside) {
         els.repeat.textContent =
-          'Repeat ' + ri.k + ' of ' + ri.times + ' · ' + rowWord(p).toLowerCase() + ' ' + ri.j + ' of ' + ri.len;
+          'Repeat ' + ri.k + ' of ' + ri.times + ' · ' + partRowWord(p, prt).toLowerCase() + ' ' + ri.j + ' of ' + ri.len;
       } else {
         els.repeat.textContent =
-          'Repeat ' + rowWord(p).toLowerCase() + 's ' + prt.repeat.startRow + '–' + prt.repeat.endRow +
+          'Repeat ' + partRowWord(p, prt).toLowerCase() + 's ' + prt.repeat.startRow + '–' + prt.repeat.endRow +
           ' × ' + prt.repeat.times + ' (not in repeat)';
       }
     } else {
@@ -1051,7 +1793,7 @@
     var line = Store.lineForRow(prt, ri.patternRow);
     if (line && line.text) {
       els.patternLine.hidden = false;
-      els.patternTag.textContent = shortRowWord(p) + ' ' + ri.patternRow;
+      els.patternTag.textContent = partShortRowWord(p, prt) + ' ' + ri.patternRow;
       els.patternText.textContent = line.text;
       var notes = Store.notesOf(line);
       if (els.patternNotes) {
@@ -1069,12 +1811,12 @@
     var target = Store.currentTarget(prt);
     var approx = target && Store.isComputed(line) ? '≈ ' : '';
     var readout;
-    if (g > 0) {
-      var groupNo = prt.stitch === 0 ? 1 : Math.ceil(prt.stitch / g);
-      var within = prt.stitch === 0 ? 0 : ((prt.stitch - 1) % g) + 1;
-      readout = 'Group ' + groupNo;
-      if (target) readout += ' of ' + approx + Math.ceil(target / g);
-      readout += ' · stitch ' + within + ' of ' + g;
+    if (partFinished(prt)) {
+      // Wave E: a finished piece has no row being worked, and "Group 1 ·
+      // stitch 0 of 10" under a full progress bar was a number about nothing.
+      readout = 'All ' + prt.targetRows + ' ' + partRowWord(p, prt).toLowerCase() + 's done';
+    } else if (g > 0) {
+      readout = groupReadout(prt.stitch, g, target, approx);
     } else {
       // Grouping off: just the plain stitch number.
       readout = 'stitch ' + prt.stitch;
@@ -1088,6 +1830,45 @@
       els.stitchBarLabel.textContent = prt.stitch + ' / ' + approx + target;
     } else {
       els.stitchProgress.hidden = true;
+    }
+
+    /* 05 #6 — my count vs the pattern's, in one quiet line. Tapping 29 into a
+       24-stitch round used to draw a complete, happy, correctly closed ring of
+       29 and say nothing. Never modal, and only when the pattern actually
+       stated a count for this round (`Store.roundDeviation` returns
+       expected = null otherwise). */
+    if (els.stitchDev) {
+      var dev = null;
+      try {
+        dev = Store.roundDeviation(prt);
+      } catch (e) {
+        dev = null;
+      }
+      var lines = [];
+      if (dev && dev.delta > 0) lines.push(dev.delta + ' more than the pattern’s ' + dev.expected);
+      /* Wave E: the round's printed total and what its own instructions add
+         up to disagree (Baphomet R29 prints 36, "(2sc, dec)x8" makes 24). The
+         target stays the printed number — the pattern is quoted, never
+         corrected — but the maker is told before the round goes wrong. */
+      var chk = countCheckText(dev);
+      if (chk && !partFinished(prt)) lines.push(chk);
+      if (lines.length) {
+        els.stitchDev.hidden = false;
+        els.stitchDev.textContent = lines.join(' · ');
+      } else {
+        els.stitchDev.hidden = true;
+        els.stitchDev.textContent = '';
+      }
+    }
+
+    // the "tap" hint has done its job once this piece has any stitches on it,
+    // and its strip goes back to the 3D piece with it
+    if (els.stitchBtn) {
+      var counted = prt.stitch > 0 || prt.row > 0;
+      if (els.stitchBtn.classList.contains('counted') !== counted) {
+        els.stitchBtn.classList.toggle('counted', counted);
+        syncDiagramInsets();
+      }
     }
   }
 
@@ -1209,12 +1990,51 @@
     }, 500);
   }
 
-  function showProjectDoneSheet(p) {
+  /**
+   * The finish sheet, in both of its shapes.
+   *
+   * With nothing blocking it is the celebration. With parts still outstanding
+   * (02 #2: a target-less part that was never touched blocks the project) it
+   * names them and offers "Finish anyway", which is `finishProject(force)`.
+   * @param {object} p
+   * @param {string[]} [blocking] part names still in the way
+   */
+  function showProjectDoneSheet(p, blocking) {
+    var left = Array.isArray(blocking) ? blocking : [];
     openSheet({
-      title: 'All parts done! 🎉',
+      subject: p.id,
+      title: left.length ? 'Finish ' + p.name + '?' : 'All parts done! 🎉',
       build: function (body) {
-        body.appendChild(el('p', null, p.name + ' is off the hook. Time for assembly.'));
-        var b = button('btn primary block big', 'Assembly checklist →');
+        if (!left.length) {
+          body.appendChild(el('p', null, p.name + ' is off the hook. Time for assembly.'));
+        } else {
+          body.appendChild(
+            el('p', null, 'These parts are not finished yet:')
+          );
+          var ul = el('ul', 'blocking-list');
+          left.slice(0, 12).forEach(function (name) {
+            ul.appendChild(el('li', null, name));
+          });
+          if (left.length > 12) ul.appendChild(el('li', 'muted', '…and ' + (left.length - 12) + ' more'));
+          body.appendChild(ul);
+          body.appendChild(
+            el('p', 'muted', 'Finish anyway if you are done with them — nothing is deleted, and Undo puts it back.')
+          );
+          var anyway = button('btn primary block big', 'Finish anyway');
+          on(anyway, 'click', function () {
+            var res = Store.finishProject(p.id, { force: true });
+            closeAllSheets();
+            if (res && res.ok) {
+              fb('done');
+              celebrate('project');
+              render();
+              announce('Project complete');
+              toast(p.name + ' is finished ✓', { ms: 3200 });
+            }
+          });
+          body.appendChild(anyway);
+        }
+        var b = button('btn' + (left.length ? ' block' : ' primary block big'), 'Assembly checklist →');
         on(b, 'click', function () {
           closeAllSheets();
           openChecklistSheet(p.id);
@@ -1224,6 +2044,9 @@
     });
   }
 
+  /** Once per part per session — the guard is a nudge, not a nag. */
+  var alreadyDoneSaid = Object.create(null);
+
   function applyResult(res) {
     if (!res || res.event === 'none') return;
     var p = currentProject();
@@ -1231,16 +2054,34 @@
     var prt = Store.activePart(p);
 
     switch (res.event) {
+      // 13 #6: the part is already finished, so nothing moved. Say so once
+      // and stop — the counter must not pretend to climb past its target.
+      case 'alreadyDone':
+        var key = String(res.partName || (prt && prt.id) || '');
+        if (!alreadyDoneSaid[key]) {
+          alreadyDoneSaid[key] = true;
+          toast('Already finished — undo a row to keep counting', { ms: 3600 });
+        }
+        fb('undo');
+        updateCounters(p, prt);
+        break;
+
       case 'stitch':
         fb('tap');
         updateCounters(p, prt);
         pushDiagram('stitch');
+        // Announcement policy (see announce): with grouping off there is no
+        // group to mark, so every 50th stitch is the milestone.
+        if (!(p.groupSize > 0) && res.stitch > 0 && res.stitch % 50 === 0) {
+          announce('Stitch ' + res.stitch);
+        }
         break;
 
       case 'group':
         fb('group');
         updateCounters(p, prt);
         pushDiagram('stitch');
+        announce('Stitch ' + res.stitch + ', group ' + res.group + ' done');
         break;
 
       case 'alert':
@@ -1257,7 +2098,12 @@
         updateCounters(p, prt);
         updateBottomBar(p, prt);
         pushDiagram('round');
-        announce(rowWord(p) + ' ' + prt.row);
+        // "Round 5 done" — the piece's own word, and what the number means
+        // (`row` counts COMPLETED rows; "Round 5" alone read as "on round 5").
+        announce(partRowWord(p, prt) + ' ' + prt.row + ' done');
+        // 12 #1: a finished row is the earliest honest moment to ask the
+        // browser to keep this data. Once, after a real gesture.
+        askForPersistOnce();
         break;
 
       case 'pieceDone':
@@ -1279,11 +2125,14 @@
 
       case 'projectDone':
         fb('done');
-        Store.setStatus(p.id, 'finished');
+        // finishProject banks the timer and stamps finishedAt exactly once;
+        // if something still blocks, the sheet offers "Finish anyway".
+        var fin = Store.finishProject(p.id);
         celebrate('project');
         render();
         announce('Project complete');
-        showProjectDoneSheet(p);
+        askForPersistOnce();
+        showProjectDoneSheet(p, fin && fin.ok ? [] : (fin ? fin.blocking : []));
         break;
 
       default:
@@ -1405,7 +2254,12 @@
    * ================================================================== */
 
   var live = { handle: null, canvas: null, btn: null };
-  var viewer = { handle: null, canvas: null, readout: null, sheet: null };
+  /** How many times a lost context has been rebuilt; two is plenty. */
+  var diagramRecoveries = 0;
+  var viewer = {
+    handle: null, canvas: null, readout: null, sheet: null,
+    orientSeg: null, orientHint: null
+  };
 
   function prefersReducedMotion() {
     try {
@@ -1428,43 +2282,129 @@
     return diagramAvailable() && Store.settings().liveDiagram !== false;
   }
 
-  /** '#4a3728' / 'rgb(…)' → 'rgba(74,55,40,a)'. Unparseable colours pass through. */
-  function withAlpha(color, a) {
-    var c = String(color || '').trim();
-    if (!c) return 'rgba(0,0,0,' + a + ')';
-    var hex = c.charAt(0) === '#' ? c.slice(1) : null;
-    if (hex && hex.length === 3) {
-      hex = hex.charAt(0) + hex.charAt(0) + hex.charAt(1) + hex.charAt(1) + hex.charAt(2) + hex.charAt(2);
-    }
-    if (hex && /^[0-9a-fA-F]{6}$/.test(hex)) {
-      return (
-        'rgba(' + parseInt(hex.slice(0, 2), 16) + ',' + parseInt(hex.slice(2, 4), 16) + ',' +
-        parseInt(hex.slice(4, 6), 16) + ',' + a + ')'
-      );
-    }
-    var m = c.match(/^rgba?\(([^)]+)\)$/i);
-    if (m) {
-      var parts = m[1].split(',');
-      if (parts.length >= 3) {
-        return 'rgba(' + parts[0].trim() + ',' + parts[1].trim() + ',' + parts[2].trim() + ',' + a + ')';
-      }
-    }
-    return c;
-  }
-
   function cssVar(cs, name, fallback) {
     var v = (cs.getPropertyValue(name) || '').trim();
     return v || fallback;
   }
 
+  /** '#abc' / '#aabbcc' / 'rgb(…)' → [r, g, b] 0..255, or null. */
+  function rgbOf(color) {
+    var c = String(color || '').trim();
+    if (c.charAt(0) === '#') {
+      var hex = c.slice(1);
+      if (hex.length === 3) {
+        hex = hex.charAt(0) + hex.charAt(0) + hex.charAt(1) + hex.charAt(1) + hex.charAt(2) + hex.charAt(2);
+      }
+      if (!/^[0-9a-fA-F]{6}/.test(hex)) return null;
+      return [parseInt(hex.slice(0, 2), 16), parseInt(hex.slice(2, 4), 16), parseInt(hex.slice(4, 6), 16)];
+    }
+    var m = c.match(/^rgba?\(([^)]+)\)$/i);
+    if (!m) return null;
+    var parts = m[1].split(/[,\s/]+/).filter(function (x) { return x.length; });
+    if (parts.length < 3) return null;
+    return [parseFloat(parts[0]), parseFloat(parts[1]), parseFloat(parts[2])];
+  }
+
+  function relLum(color) {
+    var rgb = rgbOf(color);
+    if (!rgb) return 0;
+    var out = 0;
+    var k = [0.2126, 0.7152, 0.0722];
+    for (var i = 0; i < 3; i++) {
+      var v = Math.min(1, Math.max(0, rgb[i] / 255));
+      v = v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+      out += v * k[i];
+    }
+    return out;
+  }
+
+  /** WCAG contrast ratio between two CSS colours. */
+  function contrastRatio(a, b) {
+    var la = relLum(a), lb = relLum(b);
+    return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05);
+  }
+
+  /** Whichever candidate reads best against `bg`. */
+  function mostReadable(bg, candidates) {
+    var best = candidates[0], bestC = -1;
+    for (var i = 0; i < candidates.length; i++) {
+      if (!candidates[i]) continue;
+      var c = contrastRatio(bg, candidates[i]);
+      if (c > bestC) { bestC = c; best = candidates[i]; }
+    }
+    return best;
+  }
+
+  /**
+   * 02 #1: the ghost colour is passed OPAQUE. The renderer owns ghost alpha
+   * (GHOST_ALPHA 0.20 / PENDING_ALPHA 0.72); this used to pass
+   * rgba(--text, 0.35) on top of that, so future rounds composed to 0.070
+   * effective and were invisible in the app — while the test page, which
+   * passes an opaque white, looked right. And because `--text` on a light
+   * theme is a dark brown sitting on a mid `--primary` (barely 1.1:1), the
+   * colour is chosen by contrast against the button rather than by variable.
+   */
   function diagramPalette() {
     var cs = window.getComputedStyle(document.documentElement);
+    var primary = cssVar(cs, '--primary', '#4f9868');
+    var accent2 = cssVar(cs, '--accent-2', '#e6a23c');
+    var danger = cssVar(cs, '--danger', '#b65b5b');
     return {
-      ghost: withAlpha(cssVar(cs, '--text', '#000000'), 0.35),
+      ghost: mostReadable(primary, [
+        cssVar(cs, '--primary-text', '#ffffff'),
+        cssVar(cs, '--text', '#000000'),
+        '#ffffff'
+      ]),
       ink: cssVar(cs, '--primary-text', '#ffffff'),
-      glow: cssVar(cs, '--accent-2', '#e6a23c'),
-      bg: cssVar(cs, '--primary', '#4f9868')
+      glow: accent2,
+      /* The "you are over the pattern's count" tint (05 #6). --danger is the
+         right word in every theme, with one exception: on dragon-pixel
+         --danger IS --primary, so a surplus band would read as a hole in the
+         piece rather than as a warning. There, the warm accent takes over. */
+      alert: contrastRatio(danger, primary) < 1.3 ? (accent2 || '#d9603f') : danger,
+      bg: primary
     };
+  }
+
+  /* ---- The "too long to draw live" guard (13 #5) ----
+   *
+   * Store.diagramModel rebuilds the whole piece whenever the row changes, and
+   * that build walks every row of the pattern looking each one up, so its cost
+   * grows with the square of the pattern length: measured in the Browser pane,
+   * a 1,500-row pattern costs ~1,040 ms per completed row while a 60-row
+   * amigurumi costs well under a millisecond. Stitch taps are cheap either way
+   * (the model is cached), but a row tap on a long pattern froze the counter.
+   *
+   * The shell cannot make that build cheaper from here, so it stops asking for
+   * it: past the threshold the live canvas inside the tap button is not
+   * mounted at all and the piece is only built when the user opens the 3D view
+   * on purpose. Everything under the threshold is exactly as it was.
+   */
+  /* 2026-09-24: `Store.diagramModel` builds a row → line index once instead of
+     scanning every parsed line per row, so a 1,500-row pattern now builds in
+     under 60 ms where it used to cost ~1,040 ms per completed row. The row cap
+     goes 250 → 2,000; the MEASURED-time guard below stays, and `partIsHeavy`
+     stays as the safety valve for whatever the cap does not predict. */
+  var DIAGRAM_MAX_LIVE_ROWS = 2000;
+  var DIAGRAM_BUDGET_MS = 60;
+  /** partId -> true once this part has proved too expensive to draw live. */
+  var diagramHeavy = Object.create(null);
+
+  function partIsHeavy(prt) {
+    if (!prt) return false;
+    if (diagramHeavy[prt.id]) return true;
+    var rows = 0;
+    try {
+      var s = Store.patternSummary(prt);
+      rows = Math.max(s.maxRow || 0, prt.targetRows || 0, prt.row || 0);
+    } catch (e) {
+      rows = 0;
+    }
+    if (rows > DIAGRAM_MAX_LIVE_ROWS) {
+      diagramHeavy[prt.id] = true;
+      return true;
+    }
+    return false;
   }
 
   /** The model for whatever is on screen, or null. */
@@ -1472,11 +2412,82 @@
     var p = currentProject();
     var prt = p ? Store.activePart(p) : null;
     if (!p || !prt) return null;
+    var t0 = 0;
     try {
-      return Store.diagramModel(prt, p);
+      t0 = window.performance && performance.now ? performance.now() : 0;
+    } catch (e) {
+      t0 = 0;
+    }
+    var model;
+    try {
+      model = Store.diagramModel(prt, p);
     } catch (e) {
       return null;
     }
+    // A build that blew the frame budget: never again on the tap path.
+    if (t0) {
+      try {
+        if (performance.now() - t0 > DIAGRAM_BUDGET_MS) diagramHeavy[prt.id] = true;
+      } catch (e) { /* ignore */ }
+    }
+    return model;
+  }
+
+  /**
+   * How many of the model's rounds are the PATTERN's own, and how wide the
+   * widest real row is. The builder appends a round for the row being worked
+   * as soon as the pattern's rows run out (`total = max(workingRow, maxRow)`),
+   * so a finished 46-row wrap arrives as 47 rounds with a count-less 47th —
+   * which is why the viewer's summary used to grow a row the moment the piece
+   * was done (07 #7). Nothing that has no stitches in it is fabric, and a row
+   * the model builder flagged as an `outlier` is a misparse, not a width.
+   * @returns {{rounds:number, wide:number}}
+   */
+  function modelSpan(model) {
+    var rounds = (model && model.rounds) || [];
+    var last = rounds.length;
+    while (last > 0 && (rounds[last - 1].count | 0) <= 0) last--;
+    var wide = 0;
+    for (var i = 0; i < last; i++) {
+      if (rounds[i].outlier) continue;
+      wide = Math.max(wide, rounds[i].count | 0);
+    }
+    /* A long pattern is modelled as a WINDOW of rounds, so the model's own
+       length is not the pattern's length; `window.total` is, minus however
+       many trailing count-less rounds the builder added past the end. */
+    var total = model && model.window && model.window.total > 0 ? model.window.total : 0;
+    var n = total ? Math.max(total - (rounds.length - last), 0) : last;
+    return { rounds: n, wide: wide };
+  }
+
+  /**
+   * Is every round of the piece worked? Drives the viewer's fit purpose: a
+   * finished piece is letterboxed honestly rather than over-scaled around the
+   * row being counted (07 finding 2). The trailing count-less round the
+   * builder appends past the last pattern row is not unfinished work.
+   */
+  function modelFinished(model) {
+    var rounds = (model && model.rounds) || [];
+    var any = false;
+    for (var i = 0; i < rounds.length; i++) {
+      var r = rounds[i];
+      if ((r.count | 0) <= 0) continue;
+      if (r.ghost || (r.done | 0) < (r.count | 0)) return false;
+      any = true;
+    }
+    if (!any) return false;
+    // A windowed model only holds part of the piece: the last round it holds
+    // has to BE the pattern's last round before the piece can be finished.
+    var total = model.window && model.window.total > 0 ? model.window.total : 0;
+    var span = modelSpan(model);
+    if (total && span.rounds && rounds.length) {
+      var lastRow = 0;
+      for (i = 0; i < rounds.length; i++) {
+        if ((rounds[i].count | 0) > 0) lastRow = rounds[i].row || (i + 1);
+      }
+      if (lastRow < span.rounds) return false;
+    }
+    return true;
   }
 
   /**
@@ -1485,19 +2496,29 @@
    */
   function pushDiagram(animate) {
     if (!live.handle && !viewer.handle) return;
+    // Nothing but the deliberately-opened viewer pays for a heavy piece.
+    if (!viewer.handle && partIsHeavy(currentPart())) return;
     var model = currentModel();
     if (!model) return;
     var opts = { animate: animate || 'none' };
+    /* Both frames are told whether the piece is finished: the geometry keeps
+       the counting clamp for the button only while there is still counting to
+       do, and letterboxes the finished piece in both. */
+    var done = modelFinished(model);
     if (live.handle) {
       try {
-        live.handle.setModel(model, opts);
+        live.handle.setModel(model, { animate: opts.animate, fitPurpose: 'button', finished: done });
       } catch (e) {
         /* a renderer that gave up must not break counting */
       }
     }
     if (viewer.handle) {
       try {
-        viewer.handle.setModel(model, opts);
+        viewer.handle.setModel(model, {
+          animate: opts.animate,
+          fitPurpose: 'viewer',
+          finished: done
+        });
       } catch (e) {
         /* ignore */
       }
@@ -1563,12 +2584,42 @@
         /* ignore */
       }
     });
+    syncDiagramInsets();
   }
 
-  function destroyLiveDiagram() {
+  /**
+   * 05 #1 / 02 #16: hand the renderer the strip the number and the hint
+   * occupy, so the piece is fitted and centred in what is left instead of
+   * being drawn behind the caption. Measured, not guessed, because the head
+   * grows with the theme's --counter-size and with text zoom.
+   */
+  function syncDiagramInsets() {
+    if (!live.handle || typeof live.handle.setSafeInsets !== 'function') return;
+    var head = document.getElementById('stitch-head');
+    var hint = document.getElementById('stitch-hint');
+    var top = head ? head.offsetHeight : 0;
+    // the hint fades out once this piece has been counted on, and its strip
+    // goes back to the piece with it
+    var counted = !!(els.stitchBtn && els.stitchBtn.classList.contains('counted'));
+    var bottom = !counted && hint && !hint.hidden ? hint.offsetHeight + 10 : 0;
+    try {
+      live.handle.setSafeInsets({ top: top + 4, right: 8, bottom: bottom + 4, left: 8 });
+    } catch (e) {
+      /* ignore */
+    }
+  }
+
+  /** Just the canvas and its renderer; the "3D view" button stays. */
+  /**
+   * The canvas element goes too, so the GL context is RELEASED rather than
+   * left alive on a detached node. A page gets a handful of WebGL contexts and
+   * the browser drops the oldest without a word once they run out — which is
+   * how the ⤢ viewer came up blank after a few opens (05 #7).
+   */
+  function destroyLiveCanvas() {
     if (live.handle) {
       try {
-        live.handle.destroy();
+        live.handle.destroy({ release: true });
       } catch (e) {
         /* ignore */
       }
@@ -1576,15 +2627,26 @@
     }
     if (live.canvas && live.canvas.parentNode) live.canvas.parentNode.removeChild(live.canvas);
     live.canvas = null;
+    if (els.stitchBtn) els.stitchBtn.classList.remove('has-diagram');
+  }
+
+  function destroyLiveDiagram() {
+    destroyLiveCanvas();
     if (live.btn && live.btn.parentNode) live.btn.parentNode.removeChild(live.btn);
     live.btn = null;
-    if (els.stitchBtn) els.stitchBtn.classList.remove('has-diagram');
   }
 
   /** Mount (or refresh) the canvas inside the stitch button. */
   function mountLiveDiagram() {
     if (!diagramEnabled() || !els.stitchBtn) {
       destroyLiveDiagram();
+      return;
+    }
+    ensureThreeDButton();
+    // A pattern long enough that rebuilding the piece costs more than a frame
+    // keeps the 3D view button but not the live canvas (13 #5).
+    if (partIsHeavy(currentPart())) {
+      destroyLiveCanvas();
       return;
     }
     if (!live.canvas) {
@@ -1601,7 +2663,32 @@
         live.handle = window.Diagram.mount(live.canvas, {
           palette: diagramPalette(),
           reducedMotion: prefersReducedMotion(),
-          interactive: false
+          interactive: false,
+          /* The button's frame is 100 px of a tap target, so the geometry's
+             bounded button clamp applies here and the sheet is centred in
+             what the caption leaves free (07 finding 2). */
+          fitPurpose: 'button',
+          finished: modelFinished(currentModel()),
+          /* The renderer tells us when there is no piece on screen (a refused
+             or lost context). In the button there is nowhere to put a message,
+             so the canvas simply goes away and the plain number is back — the
+             counter must never look broken. */
+          onStatus: function (s) {
+            /* 'unavailable' is fine here: the renderer never got a GL context
+               on this canvas, so its own Canvas-2D silhouette draws and the
+               button still shows the piece. 'lost' / 'blank' are different —
+               that canvas can never be given a context again, so throw it away
+               and let the next render mount a fresh one (on a device that has
+               simply run out of contexts, the plain number is what is left,
+               which is the counter working normally). */
+            if (!s || s.webgl || (s.status !== 'lost' && s.status !== 'blank')) return;
+            if (diagramRecoveries >= 2) return;
+            diagramRecoveries += 1;
+            window.setTimeout(function () {
+              destroyLiveCanvas();
+              if (els.project && !els.project.hidden) mountLiveDiagram();
+            }, 0);
+          }
         });
       } catch (e) {
         live.handle = null;
@@ -1614,42 +2701,201 @@
       // the app reads it back.
       live.canvas.diagram = live.handle;
     }
-    if (!live.btn && els.stitchSection) {
-      var b = button('stitch-3d', '⤢', 'Open 3D view');
-      b.id = 'stitch-3d';
-      on(b, 'click', function (e) {
-        e.stopPropagation();
-        openViewerSheet();
-      });
-      els.stitchSection.appendChild(b);
-      live.btn = b;
-    }
     els.stitchBtn.classList.add('has-diagram');
     resizeDiagrams();
     pushDiagram('none');
+    syncDiagramInsets();
+  }
+
+  /**
+   * 02 #8 / 07 #7–#8: this used to be a 44×44 hole punched in the top-right
+   * corner of the tap button, so a mis-tap cost a stitch and opened a modal,
+   * it was last in the tab order, and its glyph failed WCAG 1.4.11 on the two
+   * dark `--primary-text` themes (1.81:1 and 2.53:1). It is now a labelled
+   * control in the actions row, on `--surface-2`, in DOM order.
+   */
+  function ensureThreeDButton() {
+    if (live.btn || !els.stitchActions) return;
+    // Plain `.btn` on purpose: --surface-2 / --text is a pair every theme
+    // designed to contrast, unlike the old --primary-text on a black scrim.
+    var b = button('btn stitch-3d', null, 'Open the 3D view');
+    b.id = 'stitch-3d';
+    b.setAttribute('data-tour', 'stitch-3d');
+    b.appendChild(el('span', 'stitch-3d-glyph', '⤢'));
+    b.appendChild(el('span', 'stitch-3d-label', '3D view'));
+    on(b, 'click', function (e) {
+      e.stopPropagation();
+      openViewerSheet();
+    });
+    var reset = document.getElementById('stitch-reset');
+    if (reset && reset.parentNode === els.stitchActions) {
+      els.stitchActions.insertBefore(b, reset);
+    } else {
+      els.stitchActions.appendChild(b);
+    }
+    live.btn = b;
   }
 
   /** "Rnd 5 · 13 / 24" for the viewer header. */
   function viewerReadoutText(p, prt) {
     if (!p || !prt) return '';
+    /* Wave E (07, viewer header row): a finished piece has no round being
+       worked, so the working round (row + 1) read "Row 47 · 0 sts" at 46/46.
+       The last round it HAS is the one to name. */
+    if (partFinished(prt)) {
+      return partShortRowWord(p, prt) + ' ' + prt.targetRows + ' · done';
+    }
     var ri = Store.repeatInfo(prt);
     var target = Store.currentTarget(prt);
-    var text = shortRowWord(p) + ' ' + ri.workingRow + ' · ' + prt.stitch;
+    var text = partShortRowWord(p, prt) + ' ' + ri.workingRow + ' · ' + prt.stitch;
     text += target ? ' / ' + target : ' sts';
     return text;
+  }
+
+  /**
+   * The viewer header: "Rnd 29 · 3 / 36", and under it, only when the round
+   * being worked prints a total its own instructions do not make, "Pattern
+   * says 36 · instructions add up to 24" (Wave E). The target stays printed.
+   */
+  function setViewerReadout(node, p, prt) {
+    if (!node) return;
+    clear(node);
+    node.appendChild(document.createTextNode(viewerReadoutText(p, prt)));
+    var note = '';
+    if (prt && !partFinished(prt)) {
+      try { note = countCheckText(Store.roundDeviation(prt)); } catch (e) { note = ''; }
+    }
+    if (note) node.appendChild(el('span', 'viewer-readout-note', note));
+  }
+
+  /**
+   * What the geometry made of this piece, in the words a crocheter uses:
+   * "Sphere · 15 rounds · 48 around". Everything comes from
+   * `DiagramGeo.classify`, so the viewer can never claim a shape the renderer
+   * did not draw.
+   */
+  function shapeName(cls, corners) {
+    if (!cls) return 'Piece';
+    var k = corners || cls.corners || 0;
+    if (cls.mode === 'rows') {
+      if (cls.anchor === 'spine') return 'Triangle';
+      if (cls.anchor === 'left' || cls.anchor === 'right') return 'Shaped panel';
+      return 'Flat panel';
+    }
+    if (k === 3) return 'Triangle motif';
+    if (k === 4) return 'Square motif';
+    if (k === 6) return 'Hexagon motif';
+    if (k === 8) return 'Octagon motif';
+    if (cls.ruffles > 1) return 'Ruffle';
+    var rounds = [];
+    var i;
+    for (i = 0; i < cls.rounds.length; i++) {
+      if (!cls.rounds[i].empty) rounds.push(cls.rounds[i].radius || 0);
+    }
+    if (!rounds.length) return 'Piece';
+    var a = cls.aspect || 0;
+    var closed = !!(cls.closedTop && cls.closedBottom);
+    var maxR = 0;
+    for (i = 0; i < rounds.length; i++) maxR = Math.max(maxR, rounds[i]);
+    var last = rounds[rounds.length - 1];
+    var shrank = maxR > 0 && last < maxR * 0.62;
+    var grew = last > rounds[0] * 1.3;
+    if (a < 0.38) return closed ? 'Bobble' : 'Flat circle';
+    /* 06 #12: a 20-round, aspect-1.49, closed-top open-bottom piece was called
+       a "Dome", and a dome is by definition squat — 01 §2.1 calls that an egg.
+       A closed top is what makes a piece an egg / a ball; "Dome" is left for
+       the open-rimmed cups (shrank, no cap) it actually describes. */
+    if (cls.closedTop && a > 1.2) return a >= 2.4 ? 'Capsule' : 'Egg';
+    if (cls.closedTop && a >= 0.9) return 'Sphere';
+    if (closed) return a <= 1.35 ? 'Sphere' : 'Capsule';
+    if (shrank) return 'Dome';
+    if (grew) return 'Cone';
+    if (a >= 1.5) return 'Tube';
+    return 'Bowl';
+  }
+
+  /** @returns {{name:string, detail:string}|null} */
+  function shapeSummary(model) {
+    if (!model || !window.DiagramGeo || typeof DiagramGeo.classify !== 'function') return null;
+    var cls;
+    try {
+      cls = DiagramGeo.classify(model);
+    } catch (e) {
+      return null;
+    }
+    if (!cls || !cls.rounds || !cls.rounds.length) return null;
+    /* The pattern's own rows and its widest real row — NOT `model.rounds.length`
+       and not `max(count)` over every round, which counted the working round
+       the builder appends past the end and quoted a misparsed row as a width
+       (07 #7: "46 rows" turning into "47 rows · 406 wide" on completion). */
+    var span = modelSpan(model);
+    var n = span.rounds;
+    var wide = span.wide;
+    /* How many corners the piece has, when anything knows: the model builder's
+       text fallback (`shape.corners`) or the geometry's own count. */
+    var corners = (model.shape && model.shape.corners) || cls.corners || 0;
+    var bits = [];
+    if (cls.mode === 'rows') {
+      bits.push(n + ' row' + (n === 1 ? '' : 's'));
+      if (corners > 0) bits.push(corners + ' corner' + (corners === 1 ? '' : 's'));
+      if (wide) bits.push(wide + ' wide');
+    } else {
+      bits.push(n + ' round' + (n === 1 ? '' : 's'));
+      if (corners > 0) bits.push(corners + ' corner' + (corners === 1 ? '' : 's'));
+      if (wide) bits.push(wide + ' around');
+    }
+    /* Which way up the renderer really drew it (3D wave C). `model.shape` is
+       what went to the geometry, chip or pattern text, so the line cannot claim
+       an orientation the piece was not built with. */
+    if (model.shape && model.shape.upsideDown) bits.push('worked bottom-up');
+    return { name: shapeName(cls, corners), detail: bits.join(' · ') };
+  }
+
+  /**
+   * Put the viewer's orientation chips and their hint back in step with the
+   * STORE, so an Undo (or a chip tapped in the part editor) moves them too.
+   */
+  function syncViewerOrientation() {
+    if (!viewer.orientSeg) return;
+    var p = currentProject();
+    var prt = p ? Store.activePart(p) : null;
+    if (!prt) return;
+    var pick = partOrientation(prt);
+    viewer.orientSeg.set(pick);
+    if (viewer.orientHint) viewer.orientHint.textContent = orientationHint(pick, prt);
+    // Wave E: the other two chip rows follow the Store the same way, so an
+    // Undo moves Worked in and Terms too (only orientation used to).
+    if (viewer.modeSeg) viewer.modeSeg.set(prt.workMode === 'rounds' || prt.workMode === 'rows' ? prt.workMode : 'auto');
+    if (viewer.dialectSeg) {
+      var dpick = partDialectPick(prt);
+      viewer.dialectSeg.set(dpick);
+      if (viewer.dialectHint) viewer.dialectHint.textContent = dialectHint(dpick, prt, true);
+    }
   }
 
   function updateViewerReadout() {
     if (!viewer.readout) return;
     var p = currentProject();
     var prt = p ? Store.activePart(p) : null;
-    viewer.readout.textContent = viewerReadoutText(p, prt);
+    syncViewerOrientation();
+    setViewerReadout(viewer.readout, p, prt);
+    if (viewer.shape) {
+      var sum = shapeSummary(currentModel());
+      viewer.shape.textContent = sum ? sum.name : (prt ? prt.name : '');
+      if (viewer.shapeSub) viewer.shapeSub.textContent = sum ? sum.detail : '';
+    }
   }
 
+  /**
+   * The viewer's canvas is thrown away with the sheet, so its GL context is
+   * RELEASED (05 #7). Combined with closing the button's context while the
+   * viewer is open, the app never holds more than one context at a time and
+   * the "open it ten times and it comes up blank" failure cannot happen.
+   */
   function destroyViewer() {
     if (viewer.handle) {
       try {
-        viewer.handle.destroy();
+        viewer.handle.destroy({ release: true });
       } catch (e) {
         /* ignore */
       }
@@ -1657,7 +2903,112 @@
     viewer.handle = null;
     viewer.canvas = null;
     viewer.readout = null;
+    viewer.shape = null;
+    viewer.shapeSub = null;
+    viewer.orientSeg = null;
+    viewer.orientHint = null;
+    viewer.modeSeg = null;
+    viewer.dialectSeg = null;
+    viewer.dialectHint = null;
+    viewer.note = null;
     viewer.sheet = null;
+    // give the button its piece back
+    if (els.project && !els.project.hidden) mountLiveDiagram();
+  }
+
+  /**
+   * Build the viewer's canvas and mount the renderer on it. Called again with
+   * a FRESH canvas element if the context is lost or the first frame drew
+   * nothing: a canvas whose GL context has gone can never be given another one
+   * (and Chrome paints a broken-image glyph on it), so recovering means
+   * replacing the element — at which point either WebGL comes back or the
+   * renderer's own Canvas-2D silhouette can finally draw. One retry.
+   * @returns {boolean} whether a renderer is mounted
+   */
+  function mountViewerCanvas(stage, prt, attempt) {
+    if (viewer.canvas && viewer.canvas.parentNode) {
+      viewer.canvas.parentNode.removeChild(viewer.canvas);
+    }
+    viewer.canvas = null;
+    var canvas = document.createElement('canvas');
+    canvas.className = 'viewer-canvas';
+    canvas.setAttribute('aria-label', prt.name + ' in 3D');
+    stage.insertBefore(canvas, stage.firstChild);
+    try {
+      viewer.handle = window.Diagram.mount(canvas, {
+        palette: diagramPalette(),
+        reducedMotion: prefersReducedMotion(),
+        interactive: true,
+        /* The sheet is the "show me the whole piece" frame: a finished piece
+           is letterboxed honestly here instead of being blown up around the
+           row being counted. `finished` is re-declared on every push. */
+        fitPurpose: 'viewer',
+        finished: modelFinished(currentModel()),
+        /* Never render nothing (05 #7): if there is no piece on screen the
+           viewer says so in one line instead of showing a flat rectangle of
+           --primary and letting the user conclude the feature is broken. */
+        onStatus: function (s) {
+          if (!s || viewer.canvas !== canvas) return;
+          if (s.webgl) {
+            viewerNote(stage, '');
+            return;
+          }
+          viewerNote(stage, s.message || "Showing a simple outline — 3D isn't available right now.");
+          if (attempt < 1 && (s.status === 'lost' || s.status === 'blank')) {
+            window.setTimeout(function () {
+              if (viewer.canvas !== canvas) return;
+              if (viewer.handle) {
+                try { viewer.handle.destroy({ release: true }); } catch (e) { /* ignore */ }
+                viewer.handle = null;
+              }
+              mountViewerCanvas(stage, prt, attempt + 1);
+            }, 0);
+          }
+        }
+      });
+    } catch (e) {
+      viewer.handle = null;
+    }
+    if (!viewer.handle) {
+      if (canvas.parentNode) canvas.parentNode.removeChild(canvas);
+      return false;
+    }
+    viewer.canvas = canvas;
+    canvas.diagram = viewer.handle;
+    if (typeof viewer.handle.setInteractive === 'function') {
+      try {
+        viewer.handle.setInteractive(true);
+      } catch (e2) {
+        /* ignore */
+      }
+    }
+    /* The sheet may still be animating in — size it once it has landed, and
+       ask again on the next frame: the stage only reaches its final height
+       after the sheet's transform lands, and `resize` re-fits the piece (at
+       once, not as a transition) whenever the canvas really did change size.
+       Pushing the model a second time instead would start an EASED fit that
+       the idle render loop may never finish, leaving the piece at scale 1. */
+    window.requestAnimationFrame(function () {
+      resizeDiagrams();
+      pushDiagram('none');
+      updateViewerReadout();
+      window.requestAnimationFrame(function () {
+        if (!viewer.handle || viewer.canvas !== canvas) return;
+        resizeDiagrams();
+      });
+    });
+    return true;
+  }
+
+  /** The one-line "it isn't 3D right now" footer inside the viewer stage. */
+  function viewerNote(stage, text) {
+    if (!stage) return;
+    if (!viewer.note) {
+      viewer.note = el('div', 'viewer-note', '');
+      stage.appendChild(viewer.note);
+    }
+    viewer.note.textContent = text;
+    viewer.note.hidden = !text;
   }
 
   function openViewerSheet() {
@@ -1666,13 +3017,15 @@
     if (!p || !prt) return;
 
     openSheet({
+      subject: p.id,
       title: prt.name,
       cls: 'sheet-viewer',
       build: function (body, api) {
         viewer.sheet = api;
 
         // The round / stitch readout lives in the sheet header, beside the name.
-        var readout = el('div', 'viewer-readout', viewerReadoutText(p, prt));
+        var readout = el('div', 'viewer-readout', '');
+        setViewerReadout(readout, p, prt);
         viewer.readout = readout;
         var head = api.dialog.querySelector('.sheet-head');
         if (head) {
@@ -1683,44 +3036,95 @@
           body.appendChild(readout);
         }
 
+        /* What the geometry made of the piece, and the per-part rounds/rows
+           override (05 #2 / #12). The shape line is the only place the app
+           ever says out loud what it thinks it is drawing. */
+        var bar = el('div', 'viewer-bar');
+        var shapeBox = el('div', 'viewer-shape');
+        var shapeLabel = el('span', null, '');
+        var shapeSub = el('span', 'viewer-shape-sub', '');
+        shapeBox.appendChild(shapeLabel);
+        shapeBox.appendChild(shapeSub);
+        viewer.shape = shapeLabel;
+        viewer.shapeSub = shapeSub;
+        bar.appendChild(shapeBox);
+        var modeSeg = segmented(
+          [{ id: 'auto', label: 'Auto' }, { id: 'rounds', label: 'Rounds' }, { id: 'rows', label: 'Rows' }],
+          prt.workMode === 'rounds' || prt.workMode === 'rows' ? prt.workMode : 'auto',
+          function (v) {
+            Store.updatePart(p.id, prt.id, { workMode: v });
+            pushDiagram('none');
+            updateViewerReadout();
+            render();
+            fb('tap');
+          }
+        );
+        modeSeg.node.setAttribute('aria-label', 'Worked in rounds or rows');
+        bar.appendChild(modeSeg.node);
+        viewer.modeSeg = modeSeg;
+
+        /* Which way up (3D wave C). Second row of the bar so 375 still fits:
+           the chips write `Part.orientation` and the hint says what Auto read
+           out of the pattern, the same resolution the model carries. */
+        var orientRow = el('div', 'viewer-bar-row');
+        var orientHint = el('div', 'viewer-bar-hint', '');
+        var orientSeg = segmented(ORIENT_OPTIONS, partOrientation(prt), function (v) {
+          Store.updatePart(p.id, prt.id, { orientation: v });
+          syncViewerOrientation();
+          pushDiagram('none');
+          updateViewerReadout();
+          render();
+          fb('tap');
+        });
+        orientSeg.node.setAttribute('aria-label', 'Worked top-down or bottom-up');
+        orientRow.appendChild(orientSeg.node);
+        orientRow.appendChild(orientHint);
+        bar.appendChild(orientRow);
+        viewer.orientSeg = orientSeg;
+        viewer.orientHint = orientHint;
+
+        /* Wave E — which side of the Atlantic named the stitches. Third row,
+           same shape as the one above: the chips write `Part.dialect`
+           (undoable, template-carried), the hint says what Auto read. It
+           moves heights only — a UK tr is a US dc — never a count. */
+        var dialectRow = el('div', 'viewer-bar-row viewer-bar-row-inline');
+        var dialectLabel = el('span', 'viewer-bar-label', 'Terms');
+        var dialectHintEl = el('div', 'viewer-bar-hint', '');
+        var dialectSeg = segmented(DIALECT_OPTIONS, partDialectPick(prt), function (v) {
+          Store.updatePart(p.id, prt.id, { dialect: v });
+          syncViewerOrientation();
+          pushDiagram('none');
+          updateViewerReadout();
+          render();
+          fb('tap');
+        });
+        dialectSeg.node.setAttribute('aria-label', 'Stitch terms: UK or US');
+        dialectRow.appendChild(dialectLabel);
+        dialectRow.appendChild(dialectSeg.node);
+        dialectRow.appendChild(dialectHintEl);
+        bar.appendChild(dialectRow);
+        viewer.dialectSeg = dialectSeg;
+        viewer.dialectHint = dialectHintEl;
+        body.appendChild(bar);
+        /* Fill the shape line now, not only on the canvas's first frame: with
+           no WebGL (or a throttled rAF) the summary used to stay blank. */
+        updateViewerReadout();
+
         var stage = el('div', 'viewer-stage');
-        var canvas = document.createElement('canvas');
-        canvas.className = 'viewer-canvas';
-        canvas.setAttribute('aria-label', prt.name + ' in 3D');
-        stage.appendChild(canvas);
         body.appendChild(stage);
 
         if (!diagramAvailable()) {
           stage.appendChild(el('div', 'viewer-empty', 'The 3D view is not available on this device.'));
           return;
         }
-        try {
-          viewer.handle = window.Diagram.mount(canvas, {
-            palette: diagramPalette(),
-            reducedMotion: prefersReducedMotion(),
-            interactive: true
-          });
-        } catch (e) {
-          viewer.handle = null;
-        }
-        if (!viewer.handle) {
+        /* Only one live GL context at a time: the button's goes away while the
+           viewer is open and is rebuilt on close. Opening the viewer used to
+           mount a SECOND context beside it, and after a few opens the browser
+           started dropping the oldest without a word (05 #7). */
+        destroyLiveCanvas();
+        if (!mountViewerCanvas(stage, prt, 0)) {
           stage.appendChild(el('div', 'viewer-empty', 'The 3D view could not start.'));
-          return;
         }
-        viewer.canvas = canvas;
-        canvas.diagram = viewer.handle;
-        if (typeof viewer.handle.setInteractive === 'function') {
-          try {
-            viewer.handle.setInteractive(true);
-          } catch (e2) {
-            /* ignore */
-          }
-        }
-        // The sheet is still animating in — size it once it has landed.
-        window.requestAnimationFrame(function () {
-          resizeDiagrams();
-          pushDiagram('none');
-        });
       },
       footer: [
         {
@@ -1794,6 +3198,7 @@
     var p = Store.project(projectId);
     if (!p) return;
     openSheet({
+      subject: projectId,
       title: 'Yarn colours',
       build: function (body) {
         var list = el('div', 'list');
@@ -1846,6 +3251,9 @@
     var chosenCraft = p ? p.craft || 'crochet' : 'crochet';
     var nameInput, notesArea, emoji, modeSeg, groupStep;
     var modeField, groupField, craftFieldsWrap, craftFieldsApi, pdfWrap;
+    var craftPdfWrap = null;
+    var craftZone = null;
+    var sheetApi = null;
     var pdf = null;
 
     /* Rows/Rounds and the stitch group size only mean something to crochet. */
@@ -1853,9 +3261,74 @@
       var crochet = chosenCraft === 'crochet';
       if (modeField) modeField.hidden = !crochet;
       if (groupField) groupField.hidden = !crochet;
-      // Importing a crochet pattern into a cross-stitch project makes no sense;
-      // those crafts have their own importers on the project screen.
+      // The crochet PDF block (sections, "From this PDF", save as template)
+      // is crochet's; another craft gets its own importer's drop zone below.
       if (pdfWrap) pdfWrap.hidden = !crochet;
+      mountCraftPdf();
+    }
+
+    /** What the Save button would create, as a patch for Store.createProject. */
+    function newProjectPatch(fallbackName) {
+      var patch = {
+        name: nameInput.value,
+        emoji: emoji.get(),
+        countMode: modeSeg.get(),
+        groupSize: groupStep.get(),
+        notes: notesArea.value
+      };
+      if (!patch.name.trim() && fallbackName) patch.name = fallbackName;
+      patch.templateId = chosenTemplate === PDF_TEMPLATE_ID ? 'blank' : chosenTemplate;
+      patch.craft = chosenCraft;
+      // Whatever the craft's own new-project fields collected.
+      var seed = null;
+      if (craftFieldsApi && typeof craftFieldsApi.get === 'function') {
+        try { seed = craftFieldsApi.get(); } catch (e) { seed = null; }
+      }
+      patch.craftData = seed && typeof seed === 'object' ? seed : {};
+      return patch;
+    }
+
+    /**
+     * Wave E (cross-stitch audit): the New project drop zone for a craft other
+     * than crochet. It catches the file without reading it, creates the
+     * project from the sheet as Save would, and hands the file to that craft's
+     * own importer — `def.openImportSheet`, the very sheet ⋯ → Import pattern
+     * opens — so its preview and its confirm step are the ones shown. Before
+     * this, a cross-stitch or sewing project could only get its PDF after it
+     * had been created, through the ⋯ menu.
+     */
+    function mountCraftPdf() {
+      if (!craftPdfWrap) return;
+      if (craftZone && craftZone.destroy) craftZone.destroy();
+      craftZone = null;
+      clear(craftPdfWrap);
+      var def = chosenCraft === 'crochet' ? null : craftDefs[chosenCraft];
+      craftPdfWrap.hidden = !(def && typeof def.openImportSheet === 'function');
+      if (craftPdfWrap.hidden) return;
+      var accept = Array.isArray(def.importAccept) && def.importAccept.length ? def.importAccept : ['.pdf'];
+      var extra = accept.filter(function (a) { return a !== '.pdf' && a !== '.xml'; });
+      var info = craftInfo(chosenCraft);
+      craftZone = pdfDropZone({
+        accept: accept,
+        icon: info.emoji,
+        ariaLabel: 'Choose a ' + info.name.toLowerCase() + ' pattern file',
+        label: 'Drop a ' + info.name.toLowerCase() + ' PDF' +
+          (extra.length ? ' or ' + extra.join(' / ') + ' file' : '') + ' here, or choose a file',
+        rejectMessage: 'That needs to be a PDF' + (extra.length ? ' or ' + extra.join(' / ') : ''),
+        handOff: function (file) {
+          var base = String(file.name || '').replace(/\.[a-z0-9]+$/i, '').trim();
+          var created = Store.createProject(newProjectPatch(base));
+          Store.setActiveProject(created.id);
+          if (sheetApi) sheetApi.close();
+          render();
+          importFileIntoCraft(def, created.id, file);
+        }
+      });
+      craftPdfWrap.appendChild(craftZone);
+      craftPdfWrap.appendChild(
+        el('p', 'muted craft-pdf-hint', 'The project is made from this sheet, then the ' +
+          info.name.toLowerCase() + ' importer reads the file and shows you what it found before anything is saved into it.')
+      );
     }
 
     function mountCraftFields() {
@@ -1873,8 +3346,10 @@
     }
 
     openSheet({
+      subject: editing ? projectId : null,
       title: editing ? 'Edit project' : 'New project',
       build: function (body, api) {
+        sheetApi = api;
         nameInput = textInput(p ? p.name : '', 'Sunny the sheep');
         body.appendChild(field('Name', nameInput));
 
@@ -2008,6 +3483,11 @@
             function () { return modeSeg ? rowWord({ countMode: modeSeg.get() }) : 'Row'; }
           );
           body.appendChild(pdfWrap);
+
+          // Cross-stitch / sewing: the craft's own importer, fed from here.
+          craftPdfWrap = el('div', 'new-pdf new-craft-pdf');
+          craftPdfWrap.hidden = true;
+          body.appendChild(craftPdfWrap);
         }
 
         modeSeg = segmented(
@@ -2059,6 +3539,9 @@
         // The drop zone hangs a document-level guard on dragover/drop.
         if (pdf) pdf.destroy();
         pdf = null;
+        if (craftZone && craftZone.destroy) craftZone.destroy();
+        craftZone = null;
+        sheetApi = null;
       },
       footer: [
         { text: 'Cancel', cls: 'btn ghost', onClick: function (api) { api.close(); } },
@@ -2096,27 +3579,50 @@
             Store.setActiveProject(created.id);
 
             var bits = [];
+            var importRes = null;
             if (secs.length) {
-              var res = Store.importPatternSections(created.id, secs, { mode: 'parts', text: pdf.text() });
+              var res = Store.importPatternSections(created.id, secs, {
+                mode: 'parts', text: pdf.text(), noTargets: pdf.noTargets()
+              });
+              importRes = res;
               var extra = addChecklistItems(created.id, pdf.checkedChecklist());
               var fresh = Store.project(created.id);
               bits.push(plural(fresh ? fresh.parts.length : secs.length, 'part'));
               if (res && res.placed) bits.push('placing notes');
               if (extra) bits.push(plural(extra, 'checklist item'));
               if (pdf.wantsTemplate()) {
+                /* Wave E: the template is what the import MADE, not what went
+                   into it. The project's word after the import (it flips a
+                   rows project to rounds when every section is worked in
+                   rounds — the panda's template used to say "Row"), and each
+                   part's readings — above all the dialect the importer lends
+                   from the abbreviations page (the Stylecraft motif's own text
+                   says only tr/dc/ch, so a project made from its template read
+                   UK trebles as US ones). Matched on the text the part got. */
+                var madeParts = fresh ? fresh.parts : [];
+                var madeFor = function (s) {
+                  for (var k = 0; k < madeParts.length; k++) {
+                    if (madeParts[k].patternText === s.text) return madeParts[k];
+                  }
+                  return null;
+                };
                 try {
                   Store.saveTemplate({
                     name: pdf.templateName(),
                     emoji: patch.emoji,
-                    countMode: patch.countMode,
+                    countMode: fresh ? fresh.countMode : patch.countMode,
                     groupSize: patch.groupSize,
                     craft: 'crochet',
                     parts: secs.map(function (s) {
+                      var made = madeFor(s);
                       return {
                         name: s.name || 'Part',
                         makeCount: s.makeCount,
                         patternText: s.text,
-                        placementNotes: s.placement || ''
+                        placementNotes: s.placement || '',
+                        workMode: made ? made.workMode : 'auto',
+                        orientation: made ? made.orientation : 'auto',
+                        dialect: made ? made.dialect : 'auto'
                       };
                     }),
                     checklist: pdf.checkedChecklist()
@@ -2133,6 +3639,7 @@
             if (bits.length) {
               toast('Created ' + created.name + ' · ' + bits.join(' · '), { ms: 3600 });
             }
+            modeFlipToast(importRes);
           }
         }
       ]
@@ -2254,6 +3761,7 @@
       /** Pasted text gets the same card, under an honest name. */
       sourceLabel: function () { return fileBase ? 'From this PDF' : 'From this pattern'; },
       rerender: function () { picker.rerender(); },
+      noTargets: picker.noTargets,
       checkedSections: picker.checkedSections,
       checkedChecklist: picker.checkedChecklist,
       wantsTemplate: function () { return wantsTemplate; },
@@ -2305,6 +3813,7 @@
   function addPartFlow(projectId) {
     var nameInput, countStep;
     openSheet({
+      subject: projectId,
       title: 'Add a part',
       build: function (body) {
         nameInput = textInput('', 'Wing');
@@ -2333,7 +3842,8 @@
     if (!p || !prt) return;
 
     var nameInput, makeStep, targetInput, repEnable, repStart, repEnd, repTimes,
-      alertsInput, placeArea, patternArea, extras;
+      alertsInput, placeArea, patternArea, extras, modeSeg, syncModeHint,
+      orientSeg, syncOrientHint, dialectSeg, syncDialectHint;
     var repeatOn = !!prt.repeat.enabled;
     var sizeIndex = prt.sizeIndex || 0;
 
@@ -2356,7 +3866,10 @@
         alerts: parseNumberList(alertsInput.value),
         placementNotes: placeArea.value,
         patternText: patternArea.value,
-        sizeIndex: sizeIndex
+        sizeIndex: sizeIndex,
+        workMode: modeSeg ? modeSeg.get() : 'auto',
+        orientation: orientSeg ? orientSeg.get() : 'auto',
+        dialect: dialectSeg ? dialectSeg.get() : 'auto'
       };
     }
 
@@ -2368,10 +3881,10 @@
     function summaryLine(s, tmp) {
       var bits = [];
       if (!s.rows) {
-        bits.push('No numbered ' + rowWord(p).toLowerCase() + 's found yet');
+        bits.push('No numbered ' + partRowWord(p, prt).toLowerCase() + 's found yet');
       } else {
         bits.push(
-          s.rows + ' ' + rowWord(p).toLowerCase() + (s.rows === 1 ? '' : 's') +
+          s.rows + ' ' + partRowWord(p, prt).toLowerCase() + (s.rows === 1 ? '' : 's') +
           (s.maxRow ? ' (up to ' + s.maxRow + ')' : '')
         );
         if (!s.hasTargets) bits.push('no stitch counts');
@@ -2401,12 +3914,12 @@
     function suggestionBits(sug) {
       var out = [];
       if (sug.targetRows) {
-        out.push('Target ' + rowWord(p).toLowerCase() + 's: ' + sug.targetRows);
+        out.push('Target ' + partRowWord(p, prt).toLowerCase() + 's: ' + sug.targetRows);
       }
       var r = sug.repeat;
       if (r && r.startRow && r.endRow && r.endRow >= r.startRow) {
         out.push(
-          'Repeat ' + rowWord(p).toLowerCase() + 's ' + r.startRow + '–' + r.endRow +
+          'Repeat ' + partRowWord(p, prt).toLowerCase() + 's ' + r.startRow + '–' + r.endRow +
           ' × ' + suggestedTimes(r)
         );
       }
@@ -2433,6 +3946,16 @@
     }
 
     function refreshParsed() {
+      // Auto's answer follows the text in the box, so it is re-read here too.
+      if (syncModeHint) {
+        try { syncModeHint(); } catch (e) { /* ignore */ }
+      }
+      if (syncOrientHint) {
+        try { syncOrientHint(); } catch (e) { /* ignore */ }
+      }
+      if (syncDialectHint) {
+        try { syncDialectHint(); } catch (e) { /* ignore */ }
+      }
       if (!extras) return;
       clear(extras);
       if (!patternArea.value.trim()) {
@@ -2497,6 +4020,7 @@
     }
 
     openSheet({
+      subject: projectId,
       title: 'Part: ' + prt.name,
       build: function (body, api) {
         nameInput = textInput(prt.name, 'Body');
@@ -2505,8 +4029,88 @@
         makeStep = stepper(prt.makeCount, 1, 20, 'make count');
         body.appendChild(field('How many', makeStep.node));
 
+        /* 05 #2 — rounds vs rows, per piece. The project has one word for the
+           whole toy, and a Baphomet imported as 'rows' modelled a tail that
+           begins `R1: MR4` as a flat sheet. Auto asks the pattern text first
+           and says which way it went, so a wrong guess is one tap from fixed. */
+        var modeHint = el('div', 'field-hint');
+        modeSeg = segmented(
+          [{ id: 'auto', label: 'Auto' }, { id: 'rounds', label: 'Rounds' }, { id: 'rows', label: 'Rows' }],
+          prt.workMode === 'rounds' || prt.workMode === 'rows' ? prt.workMode : 'auto',
+          function () { syncModeHint(); }
+        );
+        var modeWrap = el('div', 'field');
+        modeWrap.appendChild(el('div', 'field-label', 'Worked in'));
+        modeWrap.appendChild(modeSeg.node);
+        modeWrap.appendChild(modeHint);
+        body.appendChild(modeWrap);
+
+        syncModeHint = function () {
+          var pick = modeSeg.get();
+          if (pick !== 'auto') {
+            modeHint.textContent = pick === 'rounds'
+              ? 'Worked in rounds — the 3D piece is a solid of revolution.'
+              : 'Worked in rows — the 3D piece is a flat sheet.';
+            return;
+          }
+          var resolved = partMode(p, previewMode());
+          modeHint.textContent = 'Auto — this pattern reads as ' + resolved + '.';
+        };
+        /* what Auto resolves to for the text in the box right now, not for the
+           text that was saved */
+        function previewMode() {
+          var tmp = {};
+          for (var k in prt) if (prt.hasOwnProperty(k)) tmp[k] = prt[k];
+          tmp.id = prt.id + ':modepreview';
+          tmp.workMode = 'auto';
+          if (patternArea) tmp.patternText = patternArea.value;
+          return tmp;
+        }
+        syncModeHint();
+
+        /* 3D wave C — which way up, per piece. A Baphomet body whose round 1 is
+           its neck is worked from the BOTTOM, and drawing it the other way up
+           stood the toy on its head. Auto reads the pattern text and says which
+           way it went, so a wrong guess is one tap from fixed. */
+        var orientHint = el('div', 'field-hint');
+        orientSeg = segmented(ORIENT_OPTIONS, partOrientation(prt), function () {
+          syncOrientHint();
+        });
+        orientSeg.node.setAttribute('aria-label', 'Worked top-down or bottom-up');
+        var orientWrap = el('div', 'field');
+        orientWrap.appendChild(el('div', 'field-label', 'Orientation'));
+        orientWrap.appendChild(orientSeg.node);
+        orientWrap.appendChild(orientHint);
+        body.appendChild(orientWrap);
+
+        syncOrientHint = function () {
+          orientHint.textContent = orientationHint(orientSeg.get(), previewMode());
+        };
+        syncOrientHint();
+
+        /* Wave E — UK or US stitch names, per piece (`Part.dialect`). The
+           importer lends a section the document's answer, but a section the
+           document could not decide for had no way to be corrected by hand.
+           Saved with the rest of the sheet, so it is one Undo like the two
+           above; Auto reads the text in the box, as they do. */
+        var dialectHintEl = el('div', 'field-hint');
+        dialectSeg = segmented(DIALECT_OPTIONS, partDialectPick(prt), function () {
+          syncDialectHint();
+        });
+        dialectSeg.node.setAttribute('aria-label', 'Stitch terms: UK or US');
+        var dialectWrap = el('div', 'field');
+        dialectWrap.appendChild(el('div', 'field-label', 'Terms'));
+        dialectWrap.appendChild(dialectSeg.node);
+        dialectWrap.appendChild(dialectHintEl);
+        body.appendChild(dialectWrap);
+
+        syncDialectHint = function () {
+          dialectHintEl.textContent = dialectHint(dialectSeg.get(), previewMode());
+        };
+        syncDialectHint();
+
         targetInput = numInput(prt.targetRows == null ? '' : prt.targetRows, 1, 999999, 'e.g. 40');
-        body.appendChild(field('Target ' + rowWord(p).toLowerCase() + 's', targetInput, 'Leave blank for open-ended.'));
+        body.appendChild(field('Target ' + partRowWord(p, prt).toLowerCase() + 's', targetInput, 'Leave blank for open-ended.'));
 
         // Repeat
         var repWrap = el('div', 'field');
@@ -2583,19 +4187,46 @@
           text: 'Save',
           cls: 'btn primary',
           onClick: function (api) {
-            Store.updatePart(p.id, prt.id, collectPatch());
-            api.close();
-            render();
+            savePart(api);
           }
         }
       ]
     });
+
+    /**
+     * 13 #9: dropping the make-count clamps `piecesDone` and the finished
+     * pieces just vanish. Ask first, with the number in the question.
+     */
+    function savePart(api) {
+      var patch = collectPatch();
+      var impact = Store.makeCountImpact(p.id, prt.id, patch.makeCount);
+      function commit() {
+        Store.updatePart(p.id, prt.id, patch);
+        api.close();
+        render();
+      }
+      if (!impact || impact.piecesLost <= 0) {
+        commit();
+        return;
+      }
+      confirmSheet({
+        title: 'Lose ' + plural(impact.piecesLost, 'finished piece') + '?',
+        message:
+          'This part has ' + impact.piecesDone + ' pieces done — drop to ' + impact.makeCount + '? ' +
+          'Undo puts them back if you change your mind.',
+        confirmText: 'Drop to ' + impact.makeCount,
+        danger: true
+      }).then(function (ok) {
+        if (ok) commit();
+      });
+    }
   }
 
   function openPartsSheet(projectId) {
     var p = Store.project(projectId);
     if (!p) return;
     openSheet({
+      subject: projectId,
       title: 'Parts',
       build: function (body, api) {
         var list = el('div', 'list');
@@ -2604,7 +4235,11 @@
           var item = button('menu-item');
           var main = el('div');
           main.appendChild(el('div', null, prt.name + (prt.makeCount > 1 ? ' ×' + prt.makeCount : '')));
-          var sub = shortRowWord(p) + ' ' + prt.row + (prt.targetRows ? ' / ' + prt.targetRows : '');
+          // The same "5 / 20" the counter's bar shows, in the piece's own word
+          // (it used the project's: "Row 5 / 20" for a round piece).
+          var sub = partFinished(prt)
+            ? 'done ✓'
+            : partShortRowWord(p, prt) + ' ' + prt.row + (prt.targetRows ? ' / ' + prt.targetRows : '');
           if (prt.makeCount > 1) sub += ' · ' + prt.piecesDone + ' of ' + prt.makeCount + ' done';
           main.appendChild(el('div', 'toggle-sub', sub));
           item.appendChild(main);
@@ -2747,7 +4382,20 @@
       parts: (source.parts || []).map(function (p) {
         // The pattern text rides along through renames, moves and saves; the
         // editor only ever shows a tag for it and offers to drop it.
-        return { name: p.name, makeCount: p.makeCount, patternText: typeof p.patternText === 'string' ? p.patternText : '' };
+        // Wave E: so do the placing notes and the three per-piece readings
+        // (Worked in / Orientation / Terms). The editor used to rebuild every
+        // part from name + count + text alone, so renaming a template — or
+        // saving a project as one, which goes through this sheet — quietly
+        // dropped all four, and the next project made from it lost them.
+        return {
+          name: p.name,
+          makeCount: p.makeCount,
+          patternText: typeof p.patternText === 'string' ? p.patternText : '',
+          placementNotes: typeof p.placementNotes === 'string' ? p.placementNotes : '',
+          workMode: p.workMode || 'auto',
+          orientation: p.orientation || 'auto',
+          dialect: p.dialect || 'auto'
+        };
       }),
       checklist: (source.checklist || []).slice()
     };
@@ -3002,8 +4650,55 @@
     '(e.g. “Rnd 1: 6 sc in MR (6)”).';
 
   function sectionRowInfo(text, seq) {
-    var s = Store.patternSummary({ id: 'import:' + seq, patternText: text, sizeIndex: 0 });
-    return { rows: s.rows, computedOnly: s.computedOnly, hasTargets: s.hasTargets };
+    var probe = { id: 'import:' + seq, patternText: text, sizeIndex: 0 };
+    var s = Store.patternSummary(probe);
+    // Wave E: rounds or rows is the SECTION's own reading, not the project's
+    // Count segment — the panda's seven parts were listed as "20 rows" while
+    // every line reads "Rnd 1: …" and the import itself flips the project to
+    // rounds. Null when the text does not say.
+    var mode = null;
+    if (window.Patterns && typeof window.Patterns.workMode === 'function') {
+      try { mode = window.Patterns.workMode(text); } catch (e) { mode = null; }
+    }
+    return {
+      rows: s.rows,
+      computedOnly: s.computedOnly,
+      hasTargets: s.hasTargets,
+      mode: mode === 'rounds' || mode === 'rows' ? mode : null,
+      // What Store.importPatternSections will set as targetRows (01 #1) —
+      // the Store's own rule, asked directly, so the preview can never quote
+      // a different number from the one the part gets.
+      target: typeof Store.targetRowsFromText === 'function'
+        ? Store.targetRowsFromText(text)
+        : contiguousTarget(probe)
+    };
+  }
+
+  /** Mirrors Store's own targetRowsFromText so the picker can show it first. */
+  function contiguousTarget(probePart) {
+    var lines;
+    try {
+      lines = Store.linesFor(probePart) || [];
+    } catch (e) {
+      return null;
+    }
+    var seen = Object.create(null);
+    var max = 0;
+    for (var i = 0; i < lines.length; i++) {
+      var l = lines[i];
+      if (!l || l.kind !== 'row') continue;
+      var a = typeof l.row === 'number' && isFinite(l.row) ? Math.floor(l.row) : 0;
+      if (a < 1) continue;
+      var b = typeof l.rowEnd === 'number' && isFinite(l.rowEnd) && l.rowEnd >= a ? Math.floor(l.rowEnd) : a;
+      if (b - a > 9999) continue;
+      for (var r = a; r <= b; r++) {
+        seen[r] = true;
+        if (r > max) max = r;
+      }
+    }
+    if (max < 2) return null;
+    for (var k = 1; k <= max; k++) if (!seen[k]) return null;
+    return max;
   }
 
   function plural(n, word) {
@@ -3100,6 +4795,23 @@
 
     var resultLine = el('p', 'dz-result muted');
     resultLine.hidden = true;
+    /** "Pages 12–20 had no readable text" (06 #4) — never the word "failed". */
+    var emptyLine = el('p', 'dz-result dz-empty muted');
+    emptyLine.hidden = true;
+
+    // 06 #6: there was no way to abort an import at all.
+    var signal = null;
+    var cancelBtn = button('btn ghost block dz-cancel', 'Cancel');
+    cancelBtn.hidden = true;
+    on(cancelBtn, 'click', function () {
+      if (signal) signal.cancelled = true;
+      cancelBtn.disabled = true;
+      setBusyText('Stopping…');
+    });
+
+    function setBusyText(text) {
+      zoneLabel.textContent = text || '';
+    }
 
     function setBusy(text, frac) {
       reading = !!text;
@@ -3109,19 +4821,58 @@
       zoneLabel.hidden = !text;
       progress.hidden = !text;
       progressFill.style.width = Math.round(Math.max(0, Math.min(1, frac || 0)) * 100) + '%';
+      cancelBtn.hidden = !(reading && signal);
+      if (!reading) cancelBtn.disabled = false;
+    }
+
+    /** [12,13,14,17] → "12–14, 17" */
+    function pageRanges(nums) {
+      var sorted = nums.slice().sort(function (a, b) { return a - b; });
+      var out = [];
+      var i = 0;
+      while (i < sorted.length) {
+        var start = sorted[i];
+        var end = start;
+        while (i + 1 < sorted.length && sorted[i + 1] === end + 1) { i++; end = sorted[i]; }
+        out.push(start === end ? String(start) : start + '–' + end);
+        i++;
+      }
+      return out.join(', ');
     }
 
     function showResult(res) {
       if (!res) return;
-      var bits = [plural(res.pages, 'page')];
+      var bits = [];
+      // The page cap was used: say what was left out rather than pretending.
+      if (res.pagesTotal && res.pagesTotal > res.pages) {
+        bits.push(res.pages + ' of ' + res.pagesTotal + ' pages');
+      } else {
+        bits.push(plural(res.pages, 'page'));
+      }
       if (res.columnsDetected) bits.push(plural(res.columnsDetected, 'column') + ' untangled');
       bits.push(Number(res.chars).toLocaleString() + ' characters');
       resultLine.textContent = 'Read ' + bits.join(' · ');
       resultLine.hidden = false;
+
+      var empty = res.emptyPages && res.emptyPages.length ? res.emptyPages : null;
+      if (empty) {
+        emptyLine.textContent =
+          (empty.length === 1 ? 'Page ' : 'Pages ') + pageRanges(empty) +
+          (empty.length === 1 ? ' had' : ' had') +
+          ' no readable text (they are probably images).';
+        emptyLine.hidden = false;
+      } else {
+        emptyLine.hidden = true;
+      }
     }
 
     function fail(err) {
       setBusy('', 0);
+      // The user pressed Cancel: leave everything exactly as it was.
+      if (err && err.name === 'AbortError') {
+        toast('Import cancelled');
+        return;
+      }
       if (typeof opts.onError === 'function') {
         try {
           opts.onError(err);
@@ -3140,6 +4891,12 @@
       var chain = Promise.resolve();
       var step = function (n) {
         return function () {
+          // PdfText.open has no signal of its own, so Cancel is checked here.
+          if (signal && signal.cancelled) {
+            var err = new Error('Cancelled');
+            err.name = 'AbortError';
+            throw err;
+          }
           setBusy('Reading page ' + n + ' of ' + total + '…', total ? n / total : 0);
           return handle.textOf(n).then(function (txt) {
             blocks.push('=== PAGE ' + n + ' ===\n' + txt);
@@ -3148,6 +4905,7 @@
       };
       for (var n = 1; n <= total; n++) chain = chain.then(step(n));
       return chain.then(function () {
+        signal = null;
         setBusy('', 0);
         var text = blocks.join('\n\n').replace(/\n{3,}/g, '\n\n').trim();
         var res = { text: text, pages: total, chars: text.length, columnsDetected: 0 };
@@ -3156,7 +4914,9 @@
       }, fail);
     }
 
-    function readPdf(file) {
+    function readPdf(file, readOpts) {
+      readOpts = readOpts || {};
+      signal = { cancelled: false };
       setBusy('Reading page 1…', 0.02);
       if (typeof opts.onPages === 'function') {
         window.PdfText.open(file).then(function (handle) {
@@ -3168,20 +4928,27 @@
             return;
           }
           if (typeof opts.onText === 'function') gatherText(handle);
-        }, fail);
+          else signal = null;
+        }, function (err) { signal = null; fail(err); });
         return;
       }
       window.PdfText.extract(file, {
+        maxPages: readOpts.maxPages || 0,
+        signal: signal,
         onProgress: function (page, total) {
           setBusy('Reading page ' + page + ' of ' + total + '…', total ? page / total : 0);
         }
       }).then(function (res) {
+        signal = null;
         setBusy('', 0);
         showResult(res);
         if (typeof opts.onText === 'function') {
           try { opts.onText(res); } catch (e) { fail(e); }
         }
-      }, fail);
+      }, function (err) {
+        signal = null;
+        fail(err);
+      });
     }
 
     function matchesAccept(file) {
@@ -3194,6 +4961,16 @@
     function takeFile(file) {
       if (reading || !file) return;
       var isPdf = wantsPdf && isPdfFile(file);
+      // `handOff`: this zone only CATCHES the file and passes it on unread —
+      // the New project sheet for a craft whose own importer reads it.
+      if (typeof opts.handOff === 'function') {
+        if (!isPdf && !matchesAccept(file)) {
+          toast(opts.rejectMessage || (accept.length === 1 && wantsPdf ? 'That isn’t a PDF' : 'That file type isn’t supported'));
+          return;
+        }
+        try { opts.handOff(file); } catch (e) { fail(e); }
+        return;
+      }
       if (!isPdf) {
         if (matchesAccept(file) && typeof opts.onFile === 'function') {
           try { opts.onFile(file); } catch (e) { fail(e); }
@@ -3206,19 +4983,48 @@
         toast('The PDF reader isn’t available. Paste the text instead.', { ms: 4200 });
         return;
       }
-      if (typeof opts.confirm !== 'function') {
-        readPdf(file);
-        return;
-      }
-      var gate;
-      try {
-        gate = opts.confirm(file);
-      } catch (e) {
-        gate = false;
-      }
-      Promise.resolve(gate).then(function (ok) {
-        if (ok !== false) readPdf(file);
-      }, noop);
+      // Three gates, in the order that costs the user least: is there room,
+      // is the file huge, and whatever the caller wanted to ask.
+      guardQuota(file, 'the text in that PDF', PDF_TEXT_BUDGET)
+        .then(function (ok) {
+          if (!ok) return null;
+          return guardPdfSize(file);
+        })
+        .then(function (readOpts) {
+          if (!readOpts) return;
+          if (typeof opts.confirm !== 'function') {
+            readPdf(file, readOpts);
+            return;
+          }
+          var gate;
+          try {
+            gate = opts.confirm(file);
+          } catch (e) {
+            gate = false;
+          }
+          Promise.resolve(gate).then(function (ok2) {
+            if (ok2 !== false) readPdf(file, readOpts);
+          }, noop);
+        }, noop);
+    }
+
+    /**
+     * 06 #6: a 60 MB tiled PDF on a 3 GB phone kills the tab with no error to
+     * read. Over the threshold, offer the first 20 pages instead.
+     * @returns {Promise<object|null>} read options, or null to stop
+     */
+    function guardPdfSize(file) {
+      var warnAt = (window.PdfText && window.PdfText.SIZE_WARN_BYTES) || 25 * 1024 * 1024;
+      if (!file || file.size <= warnAt) return Promise.resolve({});
+      return confirmSheet({
+        title: 'That’s a ' + mb(file.size) + ' file',
+        message:
+          'Reading it may take a while or run out of memory on this phone. Read the first 20 pages?',
+        confirmText: 'Read 20 pages',
+        cancelText: 'Not now'
+      }).then(function (ok) {
+        return ok ? { maxPages: 20 } : null;
+      });
     }
 
     on(fileInput, 'change', function () {
@@ -3256,8 +5062,10 @@
     document.addEventListener('drop', docGuard);
 
     wrap.appendChild(zone);
+    wrap.appendChild(cancelBtn);
     wrap.appendChild(fileInput);
     wrap.appendChild(resultLine);
+    wrap.appendChild(emptyLine);
 
     wrap.zone = zone;
     wrap.fileInput = fileInput;
@@ -3272,7 +5080,42 @@
       document.removeEventListener('drop', docGuard);
       docGuard = null;
     };
+    // A file handed over by `importFileIntoCraft` (the New project sheet):
+    // the first zone built while it is pending reads it, once it is mounted —
+    // exactly as if it had been dropped here.
+    if (pendingZoneFile) {
+      var handed = pendingZoneFile;
+      pendingZoneFile = null;
+      window.setTimeout(function () {
+        if (document.contains(wrap)) takeFile(handed);
+      }, 0);
+    }
     return wrap;
+  }
+
+  /** See `importFileIntoCraft`. Only ever set for one synchronous call. */
+  var pendingZoneFile = null;
+
+  /**
+   * Open a craft's own importer (`def.openImportSheet`, the same sheet its
+   * ⋯ → Import pattern uses) with `file` already dropped into it, so its own
+   * preview / confirm step is the one the user sees. Both craft importers
+   * build their drop zone through `ctx.pdfDropZone` while the sheet opens, so
+   * the file is parked for exactly that call and cleared after it.
+   * @returns {boolean} whether the importer took the file
+   */
+  function importFileIntoCraft(def, projectId, file) {
+    if (!def || typeof def.openImportSheet !== 'function' || !file) return false;
+    pendingZoneFile = file;
+    try {
+      def.openImportSheet(projectId, ctx);
+    } catch (e) {
+      toast('That sheet could not open');
+    }
+    var taken = pendingZoneFile === null;
+    pendingZoneFile = null;
+    if (!taken) toast('Drop the file again in the import sheet');
+    return taken;
   }
 
   /* ================================================================== *
@@ -3303,12 +5146,39 @@
     var text = '';
     var rows = [];
     var checkItems = [];
+    /** 06 #3: informational only — the arithmetic is the same either way. */
+    var dialect = null;
+    /** 01 #1: the import sets targetRows unless the user says not to. */
+    var noTargets = false;
 
     var node = el('div', 'imp-picker');
+
+    var chips = el('div', 'imp-chips');
+    chips.hidden = true;
+    node.appendChild(chips);
 
     var list = el('div', 'imp-list');
     if (opts.tourList) list.setAttribute('data-tour', opts.tourList);
     var listField = field(opts.sectionsLabel || 'Sections detected', list, opts.sectionsHint);
+
+    // "Don't set targets" lives in the sections header, next to the numbers it
+    // turns off (06 #3, 01 #1).
+    var targetsRow = el('div', 'imp-targets');
+    var targetsChk = button('check', '✓', 'Don’t set targets');
+    targetsChk.setAttribute('role', 'checkbox');
+    targetsChk.setAttribute('aria-checked', 'false');
+    var targetsLabel = el('span', 'imp-targets-label', 'Don’t set targets');
+    on(targetsChk, 'click', function () {
+      noTargets = !noTargets;
+      targetsChk.setAttribute('aria-checked', noTargets ? 'true' : 'false');
+      renderList();
+      changed();
+    });
+    on(targetsLabel, 'click', function () { targetsChk.click(); });
+    targetsRow.appendChild(targetsChk);
+    targetsRow.appendChild(targetsLabel);
+    // After the <label>, before the list itself.
+    listField.insertBefore(targetsRow, list);
     node.appendChild(listField);
 
     var checkList = el('div', 'imp-list');
@@ -3341,9 +5211,25 @@
           placement: sec.placement || '',
           rows: info.rows,
           computedOnly: info.computedOnly,
-          hasTargets: info.hasTargets
+          hasTargets: info.hasTargets,
+          mode: info.mode,
+          target: info.target
         };
       });
+      dialect = null;
+      if (window.Patterns && typeof window.Patterns.dialectHints === 'function') {
+        try { dialect = window.Patterns.dialectHints(text); } catch (e) { dialect = null; }
+      }
+    }
+
+    function renderChips() {
+      clear(chips);
+      var any = false;
+      if (dialect && dialect.uk && !dialect.us) {
+        chips.appendChild(el('span', 'imp-chip', 'Looks like UK terms'));
+        any = true;
+      }
+      chips.hidden = !any;
     }
 
     function renderList() {
@@ -3354,10 +5240,13 @@
         // In the New project sheet there is nothing to explain until a PDF has
         // been read, so the whole field stays out of the way.
         listField.hidden = !!opts.hideWhenEmpty;
+        targetsRow.hidden = true;
         list.appendChild(el('p', 'muted', IMPORT_EMPTY));
         return;
       }
       listField.hidden = false;
+      // Only worth offering when at least one section would get a target.
+      targetsRow.hidden = !rows.some(function (r) { return r.rows > 0 && r.target; });
       rows.forEach(function (r, i) {
         var item = el('div', 'imp-item');
         var chk = button('check', '✓', 'Import ' + (r.name || 'section ' + (i + 1)));
@@ -3379,7 +5268,13 @@
 
         var meta = [];
         if (r.makeCount > 1) meta.push('×' + r.makeCount);
-        meta.push(r.rows ? r.rows + ' ' + word() + (r.rows === 1 ? '' : 's') : 'no rows');
+        // The section's own word when it has one; the rows it will COUNT (the
+        // target, which includes "Rep 3rd Rnd 3 times") when it has a target.
+        var w = r.mode ? (r.mode === 'rounds' ? 'round' : 'row') : word();
+        var n = r.rows && r.target && !noTargets ? r.target : r.rows;
+        meta.push(r.rows ? n + ' ' + w + (n === 1 ? '' : 's') : 'no ' + w + 's');
+        // 01 #1: say the target out loud so it is visible and correctable.
+        if (r.rows && r.target && !noTargets) meta.push('→ target ' + r.target);
         if (r.rows && r.computedOnly) meta.push('counts computed ≈');
         else if (r.rows && r.hasTargets) meta.push('counts found');
         // The parser found assembly prose for this piece - it lands in the
@@ -3404,9 +5299,17 @@
       }
       var was = {};
       checkItems.forEach(function (c) { was[c.text.toLowerCase()] = c.checked; });
-      checkItems = found.map(function (t) {
+      checkItems = found.map(function (s) {
+        // Store.suggestChecklist hands back { text, confidence }.
+        var t = String(s && s.text !== undefined ? s.text : s);
+        var conf = (s && s.confidence) === 'strong' ? 'strong' : 'weak';
         var key = t.toLowerCase();
-        return { text: t, checked: was[key] === undefined ? true : was[key] };
+        return {
+          text: t,
+          confidence: conf,
+          // 01 #3: anything we had to reconstruct arrives unticked.
+          checked: was[key] === undefined ? conf === 'strong' : was[key]
+        };
       });
     }
 
@@ -3425,13 +5328,18 @@
           changed();
         });
         item.appendChild(chk);
-        item.appendChild(el('div', 'imp-check-text', c.text));
+        var txt = el('div', 'imp-check-text', c.text);
+        if (c.confidence === 'weak') {
+          txt.appendChild(el('span', 'imp-weak', ' · check this one'));
+        }
+        item.appendChild(txt);
         checkList.appendChild(item);
       });
     }
 
     function refresh() {
       buildRows();
+      renderChips();
       renderList();
       buildChecks();
       renderChecks();
@@ -3464,6 +5372,8 @@
       getText: function () { return text; },
       /** Redraw the section list (the row word may have changed under it). */
       rerender: renderList,
+      /** `opts.noTargets` for Store.importPatternSections. */
+      noTargets: function () { return noTargets; },
       checkedSections: checkedSections,
       checkedChecklist: function () {
         return checkItems.filter(function (c) { return c.checked; }).map(function (c) { return c.text; });
@@ -3541,6 +5451,7 @@
     }
 
     openSheet({
+      subject: p.id,
       title: 'Import pattern',
       cls: 'sheet-import',
       build: function (body) {
@@ -3578,7 +5489,7 @@
             Store.importPatternSections(
               p.id,
               [{ name: activeName, makeCount: 1, text: area.value }],
-              { mode: 'active', text: area.value }
+              { mode: 'active', text: area.value, noTargets: picker.noTargets() }
             );
             var extra = addChecklistItems(p.id, picker.checkedChecklist());
             api.close();
@@ -3596,7 +5507,9 @@
               toast('Tick at least one section first');
               return;
             }
-            var res = Store.importPatternSections(p.id, secs, { mode: 'parts', text: area.value });
+            var res = Store.importPatternSections(p.id, secs, {
+              mode: 'parts', text: area.value, noTargets: picker.noTargets()
+            });
             var extra = addChecklistItems(p.id, picker.checkedChecklist());
             api.close();
             render();
@@ -3611,10 +5524,25 @@
               msg = 'Nothing imported';
             }
             toast(msg + placingSuffix(res.placed) + checklistSuffix(extra), { ms: 3600 });
+            modeFlipToast(res);
           }
         }
       ]
     });
+  }
+
+  /**
+   * 05 #2: the import decided this whole pattern is worked in rounds and moved
+   * the project off 'rows'. Say so once — the flip is the difference between a
+   * tail rendering as a tail and rendering as a blanket, and nothing else in
+   * the UI would ever mention it. `importPatternSections` only reports it on
+   * the import that actually changed the project, so it cannot repeat.
+   */
+  function modeFlipToast(res) {
+    if (!res || !res.modeFlipped) return;
+    window.setTimeout(function () {
+      toast('This pattern is worked in rounds — switched the project to Rounds', { ms: 4200 });
+    }, 900);
   }
 
   function checklistSuffix(n) {
@@ -3641,6 +5569,7 @@
     var currentSection = currentLine && typeof currentLine.section === 'number' ? currentLine.section : null;
 
     openSheet({
+      subject: projectId,
       title: 'Pattern · ' + prt.name,
       build: function (body, api) {
         if (!lines.length) {
@@ -3678,9 +5607,12 @@
           }
 
           var isCurrent =
-            hasRow &&
+            (hasRow &&
             lineCoversRow(line, ri.patternRow) &&
-            (currentSection === null || typeof line.section !== 'number' || line.section === currentSection);
+            (currentSection === null || typeof line.section !== 'number' || line.section === currentSection)) ||
+            // Past the written rows the repeat sentence that owns the row is
+            // the current line ("Rep 3rd Rnd 3 times" is rounds 4-6).
+            (!hasRow && line.kind === 'repeat' && line === currentLine);
           var cls = 'pline' + (hasRow ? ' has-row' : ' plain') + (isCurrent ? ' on' : '');
           var node = button(cls, line.text);
           if (hasRow && Store.isComputed(line)) {
@@ -3697,8 +5629,8 @@
           if (hasRow) {
             on(node, 'click', function () {
               confirmSheet({
-                title: 'Jump to ' + rowWord(p).toLowerCase() + ' ' + line.row + '?',
-                message: 'The counter will move to ' + rowWord(p).toLowerCase() + ' ' + line.row +
+                title: 'Jump to ' + partRowWord(p, prt).toLowerCase() + ' ' + line.row + '?',
+                message: 'The counter will move to ' + partRowWord(p, prt).toLowerCase() + ' ' + line.row +
                   ' and stitches reset to 0.',
                 confirmText: 'Jump'
               }).then(function (ok) {
@@ -3706,7 +5638,7 @@
                 Store.jumpToRow(p.id, prt.id, line.row);
                 api.close();
                 render();
-                announce(rowWord(p) + ' ' + Math.max(0, line.row - 1));
+                announce('Working ' + partRowWord(p, prt).toLowerCase() + ' ' + line.row);
               });
             });
           } else {
@@ -3753,6 +5685,7 @@
     if (!p) return;
 
     openSheet({
+      subject: projectId,
       title: 'Assembly checklist',
       build: function (body) {
         var count = el('p', 'muted');
@@ -3775,6 +5708,7 @@
           var row = el('div', 'list-item' + (item.done ? ' done' : ''));
 
           var chk = button('check', '✓', item.text);
+          chk.setAttribute('data-focus-key', 'chk:' + item.id);
           chk.setAttribute('role', 'checkbox');
           chk.setAttribute('aria-checked', item.done ? 'true' : 'false');
           on(chk, 'click', function () {
@@ -3788,6 +5722,7 @@
             var inp = textInput(item.text, 'Sew the tail on');
             inp.className = 'item-edit';
             inp.setAttribute('aria-label', 'Rename ' + item.text);
+            inp.setAttribute('data-focus-key', 'rename:' + item.id);
             var settled = false;
             function commit() {
               if (settled) return;
@@ -3822,6 +5757,7 @@
             }, 0);
           } else {
             var text = button('item-text item-text-btn', item.text, 'Rename ' + item.text);
+            text.setAttribute('data-focus-key', 'rename:' + item.id);
             on(text, 'click', function () {
               editingId = item.id;
               refresh();
@@ -3830,12 +5766,14 @@
           }
 
           var up = button('item-move', '▲', 'Move ' + item.text + ' up');
+          up.setAttribute('data-focus-key', 'up:' + item.id);
           up.disabled = idx === 0;
           on(up, 'click', function () {
             Store.moveChecklistItem(p.id, item.id, -1);
             refresh();
           });
           var down = button('item-move', '▼', 'Move ' + item.text + ' down');
+          down.setAttribute('data-focus-key', 'down:' + item.id);
           down.disabled = idx === p.checklist.length - 1;
           on(down, 'click', function () {
             Store.moveChecklistItem(p.id, item.id, 1);
@@ -3915,7 +5853,12 @@
           }
         }
 
+        // D5: rebuild the list without dropping keyboard focus.
         function refresh() {
+          preserveFocus(refreshNow);
+        }
+
+        function refreshNow() {
           var done = 0;
           p.checklist.forEach(function (i) { if (i.done) done++; });
           count.textContent = p.checklist.length ? done + ' of ' + p.checklist.length + ' done' : '';
@@ -3965,6 +5908,7 @@
     var p = Store.project(projectId);
     if (!p) return;
     openSheet({
+      subject: projectId,
       title: 'Project notes',
       build: function (body) {
         var area = textArea(p.notes, '', 'Hook 4mm · Paintbox DK · pattern link…');
@@ -3986,6 +5930,7 @@
     var prt = Store.part(p, partId);
     if (!p || !prt) return;
     openSheet({
+      subject: projectId,
       title: 'Placement notes · ' + prt.name,
       build: function (body) {
         var area = textArea(prt.placementNotes, '', 'Eyes between rnd 8–9, 6 sts apart');
@@ -4009,6 +5954,7 @@
     if (!p || !prt) return;
     var input;
     openSheet({
+      subject: projectId,
       title: 'Stitch alerts · ' + prt.name,
       build: function (body) {
         input = textInput(prt.alerts.join(', '), '40, 80');
@@ -4035,6 +5981,7 @@
     var p = Store.project(projectId);
     if (!p) return;
     openSheet({
+      subject: projectId,
       title: 'History',
       build: function (body, api) {
         if (!p.history.length) {
@@ -4045,7 +5992,9 @@
         for (var i = p.history.length - 1; i >= 0; i--) {
           var h = p.history[i];
           var row = el('div', 'hist-item');
-          row.appendChild(el('span', null, h.partName + ' · ' + shortRowWord(p) + ' ' + h.row));
+          // The piece's own word when the piece is still there.
+          var hp = Store.part(p, h.partId);
+          row.appendChild(el('span', null, h.partName + ' · ' + (hp ? partShortRowWord(p, hp) : shortRowWord(p)) + ' ' + h.row));
           row.appendChild(el('span', 'hist-when', fmtClock(h.ts)));
           list.appendChild(row);
         }
@@ -4073,6 +6022,7 @@
     var p = Store.project(projectId);
     if (!p) return;
     openSheet({
+      subject: projectId,
       title: 'Project status',
       build: function (body, api) {
         var list = el('div', 'list');
@@ -4081,8 +6031,21 @@
           b.appendChild(el('b', null, s.label));
           b.appendChild(el('span', null, s.desc));
           on(b, 'click', function () {
+            // "Finished" goes through finishProject so the parts that are not
+            // done get a say (02 #2); everything else is a plain status.
+            if (s.id === 'finished') {
+              var res = Store.finishProject(p.id);
+              api.close();
+              render();
+              if (res && res.ok) {
+                celebrate('project');
+                toast('Now finished');
+              } else {
+                showProjectDoneSheet(p, res ? res.blocking : []);
+              }
+              return;
+            }
             Store.setStatus(p.id, s.id);
-            if (s.id === 'finished') celebrate('project');
             api.close();
             render();
             toast('Now ' + s.label.toLowerCase());
@@ -4168,6 +6131,7 @@
       { icon: '❓', label: 'Show me around', run: function () { startTour('counter'); } }
     ];
     openSheet({
+      subject: projectId,
       title: p.name,
       build: function (body, api) {
         var list = el('div', 'list');
@@ -4201,23 +6165,19 @@
   }
 
   function exportBackup() {
+    var text;
     try {
-      var name = backupFilename();
-      var url = URL.createObjectURL(backupBlob());
-      var a = document.createElement('a');
-      a.href = url;
-      a.download = name;
-      a.style.display = 'none';
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      window.setTimeout(function () {
-        URL.revokeObjectURL(url);
-      }, 1500);
-      toast('Backup downloaded');
+      Store.flush();
+      text = Store.exportJSON();
     } catch (e) {
       toast('Could not create the backup file');
+      return;
     }
+    if (!downloadText(text, backupFilename(), 'application/json')) {
+      toast('Could not create the backup file');
+      return;
+    }
+    toast('Backup downloaded');
   }
 
   function canShareBackup() {
@@ -4241,6 +6201,168 @@
     }
   }
 
+  /* ---- import: preview first, then choose (09 #3, 12 #3) ---- */
+
+  var BACKUP_MAX_BYTES = 25 * 1024 * 1024;
+
+  function fmtBackupDate(ts) {
+    if (!ts) return 'never';
+    return fmtClock(ts);
+  }
+
+  /** The default each row starts on, per 12 #3. */
+  function defaultChoice(row) {
+    if (row.status === 'new') return 'replace';   // nothing local: just import
+    if (row.status === 'replace') return 'replace'; // the file is newer
+    return 'skip';                                  // identical, or local is newer
+  }
+
+  /**
+   * "Projects: 1 new · 1 newer in the file · 5 already here". Wave E: this
+   * used to be one line of `preview.counts`, which adds projects AND
+   * templates — the built-in ones included — so a backup of seven projects
+   * read "1 new · 1 will be replaced · 17 identical · 0 older", a number that
+   * matched nothing on the screen. Now it counts each list it sits above, and
+   * leaves out the zeroes.
+   */
+  function countsFor(rows) {
+    var c = { 'new': 0, replace: 0, identical: 0, older: 0 };
+    rows.forEach(function (r) { if (c[r.status] !== undefined) c[r.status]++; });
+    var bits = [];
+    if (c['new']) bits.push(c['new'] + ' new');
+    if (c.replace) bits.push(c.replace + ' newer in the file');
+    if (c.older) bits.push(c.older + ' older in the file');
+    if (c.identical) bits.push(c.identical + ' already here');
+    return bits.join(' · ');
+  }
+
+  function countsLine(preview) {
+    var lines = [];
+    var pl = countsFor(preview.projects || []);
+    // Built-in templates are in every backup and on every phone; they only
+    // count when the file changes one.
+    var tl = countsFor((preview.templates || []).filter(function (r) {
+      return !(r.builtIn && r.status === 'identical');
+    }));
+    if (pl) lines.push('Projects: ' + pl);
+    if (tl) lines.push('Templates: ' + tl);
+    return lines.join('\n') || 'Nothing in this file.';
+  }
+
+  function importRow(row, choices, label) {
+    var item = el('div', 'imp-row');
+    var main = el('div', 'imp-row-main');
+    main.appendChild(el('div', 'imp-row-name', row.name || '(unnamed)'));
+    var meta = [];
+    if (label) meta.push(label);
+    // The craft's own name ("Cross-stitch"), not its id ("crossstitch").
+    if (row.craft) meta.push(craftInfo(row.craft).name);
+    meta.push('in the file: ' + fmtBackupDate(row.updatedAt));
+    meta.push('on this phone: ' + (row.localUpdatedAt ? fmtBackupDate(row.localUpdatedAt) : 'not here yet'));
+    main.appendChild(el('div', 'imp-row-meta', meta.join(' · ')));
+    item.appendChild(main);
+
+    // Nothing here to replace or keep two of: it is in or it is out.
+    var options = row.status === 'new'
+      ? [{ id: 'skip', label: 'Skip' }, { id: 'replace', label: 'Import' }]
+      : [
+          { id: 'skip', label: 'Skip' },
+          { id: 'replace', label: 'Replace' },
+          { id: 'keepBoth', label: 'Keep both' }
+        ];
+    var seg = segmented(options, choices[row.id], function (v) { choices[row.id] = v; });
+    seg.node.setAttribute('aria-label', 'What to do with ' + (row.name || 'this item'));
+    item.appendChild(seg.node);
+    return item;
+  }
+
+  function openImportPreviewSheet(text, preview) {
+    var choices = { projects: Object.create(null), templates: Object.create(null) };
+    preview.projects.forEach(function (r) { choices.projects[r.id] = defaultChoice(r); });
+    preview.templates.forEach(function (r) { choices.templates[r.id] = defaultChoice(r); });
+
+    openSheet({
+      title: 'Import this backup?',
+      cls: 'sheet-import-preview',
+      build: function (body) {
+        countsLine(preview).split('\n').forEach(function (line) {
+          body.appendChild(el('p', 'imp-counts', line));
+        });
+
+        var changedProjects = preview.projects.filter(function (r) { return r.status !== 'identical'; });
+        var changedTemplates = preview.templates.filter(function (r) { return r.status !== 'identical'; });
+
+        if (!changedProjects.length && !changedTemplates.length) {
+          body.appendChild(el('p', 'muted', 'Everything in this file is already on this phone.'));
+        }
+
+        if (changedProjects.length) {
+          var pl = el('div', 'imp-rows');
+          changedProjects.forEach(function (r) { pl.appendChild(importRow(r, choices.projects)); });
+          body.appendChild(field('Projects', pl));
+        }
+        if (changedTemplates.length) {
+          var tl = el('div', 'imp-rows');
+          changedTemplates.forEach(function (r) { tl.appendChild(importRow(r, choices.templates, 'template')); });
+          body.appendChild(field('Templates', tl));
+        }
+
+        body.appendChild(
+          el('p', 'muted', 'A “Keep both” copy has no page images — those stay with the project that owns them.')
+        );
+      },
+      footer: [
+        { text: 'Cancel', cls: 'btn ghost', onClick: function (api) { api.close(); } },
+        {
+          text: 'Import',
+          cls: 'btn primary',
+          onClick: function (api) {
+            var n;
+            try {
+              n = Store.importJSON(text, choices);
+            } catch (err) {
+              api.close();
+              toast(importErrorText(err), { ms: 5200 });
+              return;
+            }
+            api.close();
+            applyTheme(Store.settings().theme, false);
+            render();
+            // Wave E: a templates-only import said "Imported 0 projects".
+            var tplsIn = preview.templates.filter(function (r) {
+              return r.status !== 'identical' && choices.templates[r.id] && choices.templates[r.id] !== 'skip';
+            }).length;
+            var what = [];
+            if (n || !tplsIn) what.push(plural(n, 'project'));
+            if (tplsIn) what.push(plural(tplsIn, 'template'));
+            toast('Imported ' + what.join(' and '), {
+              ms: 8000,
+              actionText: Store.canUndoImport() ? 'Undo import' : '',
+              onAction: Store.canUndoImport()
+                ? function () {
+                    if (!Store.undoImport()) {
+                      toast('That import can no longer be undone');
+                      return;
+                    }
+                    applyTheme(Store.settings().theme, false);
+                    render();
+                    toast('Import undone');
+                  }
+                : null
+            });
+          }
+        }
+      ]
+    });
+  }
+
+  function importErrorText(err) {
+    if (err && err.code === 'newerVersion') {
+      return 'This backup was made by a newer version. Update the app, then try again.';
+    }
+    return (err && err.message) || 'That backup could not be imported';
+  }
+
   function importBackup() {
     var input = document.createElement('input');
     input.type = 'file';
@@ -4251,21 +6373,31 @@
       var file = input.files && input.files[0];
       document.body.removeChild(input);
       if (!file) return;
-      var reader = new FileReader();
-      reader.onload = function () {
-        try {
-          var n = Store.importJSON(String(reader.result));
-          applyTheme(Store.settings().theme, false);
-          render();
-          toast('Imported ' + n + ' project' + (n === 1 ? '' : 's'));
-        } catch (err) {
-          toast(err && err.message ? err.message : 'That backup could not be imported');
-        }
-      };
-      reader.onerror = function () {
-        toast('Could not read that file');
-      };
-      reader.readAsText(file);
+      // A wrong file (a video, a disk image) would otherwise hang the main
+      // thread inside readAsText.
+      if (file.size > BACKUP_MAX_BYTES) {
+        toast('That file is ' + mb(file.size) + ' — a backup is never that big', { ms: 4200 });
+        return;
+      }
+      guardQuota(file, 'that backup').then(function (ok) {
+        if (!ok) return;
+        var reader = new FileReader();
+        reader.onload = function () {
+          var text = String(reader.result);
+          var preview;
+          try {
+            preview = Store.previewImport(text);
+          } catch (err) {
+            toast(importErrorText(err), { ms: 5200 });
+            return;
+          }
+          openImportPreviewSheet(text, preview);
+        };
+        reader.onerror = function () {
+          toast('Could not read that file');
+        };
+        reader.readAsText(file);
+      });
     });
     input.click();
   }
@@ -4699,10 +6831,14 @@
       var p = currentProject();
       var prt = currentPart();
       if (!p || !prt) return;
-      Store.untapRow(p.id, prt.id);
+      var res = Store.untapRow(p.id, prt.id);
+      // Nothing to step back off (row 0 of the first piece): no buzz, no
+      // announcement, and above all no history entry eaten (13 #4).
+      if (res && res.event === 'none') return;
       fb('undo');
       render();
-      announce(rowWord(p) + ' ' + Store.activePart(p).row);
+      var back = Store.activePart(p);
+      announce('Back to ' + partRowWord(p, back).toLowerCase() + ' ' + (back.row + 1));
     });
 
     // Pattern line
@@ -4821,6 +6957,9 @@
 
     applyTheme(Store.settings().theme, false);
     bindEvents();
+    // Save failures, a corrupt key and a second tab all have to be visible
+    // before the first tap (13 #1–#3).
+    watchStorage();
 
     // Craft modules registered while their scripts evaluated; now the shell is
     // ready they can add FAQ entries, tours and whatever else they need.
@@ -4855,7 +6994,9 @@
     crafts: craftList,
     ctx: ctx,
     pdfDropZone: pdfDropZone,
-    version: APP_VERSION
+    version: APP_VERSION,
+    /** QA only: open every sheet down the no-`showModal` path (UX sweep D3). */
+    __forceSheetFallback: function (on) { forceSheetFallback = !!on; return forceSheetFallback; }
   };
 
   if (document.readyState === 'loading') {

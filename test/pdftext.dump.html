@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>PdfText dump (dev only)</title>
+<style>
+  body { font: 12px/1.4 Menlo, Consolas, monospace; background:#111; color:#eee; padding:16px; }
+  h2 { font-size:14px; color:#9cf; margin:22px 0 4px; border-bottom:1px solid #333; }
+  pre { white-space:pre-wrap; margin:0 0 8px; }
+  .raw { color:#888; }
+  .lost { color:#ff6b6b; }
+  .note { color:#888; }
+  form { margin-bottom:12px; }
+</style>
+</head>
+<body>
+<h1>PdfText dump <span class="note">(dev only - reads ../tmp-pdf at runtime; nothing is committed)</span></h1>
+<p class="note">
+  <code>?f=&lt;file.pdf&gt;</code> dumps <code>PdfText.extract</code> per page, then the page's raw
+  pdf.js rows (every item, grouped by baseline only, with its y and height) and the items the
+  extractor did not emit. <code>&amp;route=open</code> dumps <code>open().textOf</code> instead.
+  <code>&amp;pages=3-5</code> limits the raw section. <code>?all=1&amp;sink=PORT</code> walks every
+  fixture and POSTs <code>&lt;name&gt;.extract.txt</code> / <code>&lt;name&gt;.raw.txt</code> to a local
+  scratch sink (add <code>&amp;heavy=1</code> for files over 17 MB, <code>&amp;only=a,b</code> to pick).
+</p>
+<form><input name="f" size="44" placeholder="bear.pdf"> <button>dump</button></form>
+<div id="out"></div>
+<div id="summary"></div>
+
+<script src="../js/vendor/pdf.min.js"></script>
+<script src="../js/pdftext.js"></script>
+<script>
+'use strict';
+(function () {
+  if (!window.pdfjsLib || !window.pdfjsLib.GlobalWorkerOptions) return;
+  var src = '../js/vendor/pdf.worker.min.js';
+  try {
+    Object.defineProperty(window.pdfjsLib.GlobalWorkerOptions, 'workerSrc', {
+      get: function () { return src; }, set: function () {}
+    });
+  } catch (e) { window.pdfjsLib.GlobalWorkerOptions.workerSrc = src; }
+})();
+
+var FILES = [
+  'bear.pdf', 'bee.pdf', 'cardigan.pdf', 'cato.pdf',
+  'crochet-allfree-stitches-ebook.pdf', 'crochet-apl-haekelarbeit-de.pdf', 'crochet-apl-klickmann.pdf',
+  'crochet-apl-orr-filet4.pdf', 'crochet-apl-priscilla-filet2.pdf', 'crochet-apl-weldons-K-WK013.pdf',
+  'crochet-archive-weldons-v24.pdf', 'crochet-baphomet.pdf', 'crochet-bernat-basketweave.pdf',
+  'crochet-bernat-lace-cardigan.pdf', 'crochet-caron-cuff-cardigan.pdf', 'crochet-fish.pdf',
+  'crochet-furls-frontier-shawl.pdf', 'crochet-gosyo-lace-doily.pdf', 'crochet-gosyo-motif-doily.pdf',
+  'crochet-hobbii-amarah-en.pdf', 'crochet-kingcole-festival-uk.pdf', 'crochet-kingcole-festival-us.pdf',
+  'crochet-kingcole-pumpkins.pdf', 'crochet-lionbrand-logcabin-pullover.pdf', 'crochet-magicyarn-c2c-mountain.pdf',
+  'crochet-panda.pdf', 'crochet-patons-mesh-cardigan.pdf', 'crochet-premier-simple-throw.pdf',
+  'crochet-premier-sparkling-wrap.pdf', 'crochet-redheart-persian-tiles.pdf', 'crochet-snowman.pdf',
+  'crochet-stylecraft-cabaret.pdf', 'crochet-stylecraft-cowl-mitts.pdf', 'crochet-stylecraft-guide.pdf',
+  'crochet-stylecraft-hex-socks.pdf', 'crochet-stylecraft-hood.pdf', 'crochet-turtle.pdf',
+  'knit-apl-nicoll.pdf', 'knit-bernat-topdown-pullover.pdf', 'knit-fromtheheart-magicloop-socks.pdf',
+  'knit-interweave-8-socks.pdf', 'knit-interweave-lace.pdf', 'knit-rico-triangular-shawl.pdf',
+  'knit-sandnes-0216.pdf', 'other-apl-macrame-herwig3.pdf', 'other-apl-tatting-riego.pdf',
+  'other-embroidery-stitchedstories-guide.pdf', 'other-embroidery-stitchedstories-onepage.pdf',
+  'other-punchneedle-koekoek.pdf', 'other-weaving-handwoven.pdf', 'sew-agf-catwalk-quilt.pdf',
+  'sew-agf-joyous-picnic-quilt.pdf', 'sew-freespirit-harmony-quilt.pdf', 'sew-pencilskirt-pattern.pdf',
+  'sew-pencilskirt.pdf', 'sew-peppermint-apron-A0.pdf', 'sew-peppermint-apron.pdf',
+  'sew-peppermint-bronte-bathers.pdf', 'sew-peppermint-samford-pants.pdf', 'sew-peppermint-westend-jacket.pdf',
+  'sew-rileyblake-triple-t-tote.pdf', 'sew-sundress-pattern.pdf', 'sew-sundress.pdf',
+  'sew-swoon-mabel-bag.pdf', 'sew-tianas-jogger-12m-6y.pdf', 'sew-tianas-jogger-7-12.pdf',
+  'xs-apl-dg003.pdf', 'xs-apl-dmc-motifs.pdf', 'xs-apl-dmc-pointdemarque.pdf', 'xs-apl-dmc-puntomarca.pdf',
+  'xs-apl-hkb383.pdf', 'xs-apl-nichols.pdf', 'xs-apl-orr-book14.pdf', 'xs-apl-priscilla-cross1.pdf',
+  'xs-apl-priscilla-cross2.pdf', 'xs-apl-tapestry-painted.pdf', 'xs-dmc-2168.pdf', 'xs-dmc-2173.pdf',
+  'xs-dmc-2234.pdf', 'xs-metalgreymon.pdf', 'xs-pacman.pdf', 'xs-pokemon-bl.pdf', 'xs-pokemon-br.pdf',
+  'xs-pokemon-tl.pdf', 'xs-pokemon-tr.pdf', 'xs-portal.pdf', 'xs-satsuma-stayhome-bw.pdf',
+  'xs-satsuma-stayhome-color.pdf', 'xs-satsuma-summersflight-bw.pdf', 'xs-satsuma-summersflight-color.pdf',
+  'xs-satsuma-sunshine.pdf', 'xs-tinymodernist-autumn.pdf', 'xs-tinymodernist-foxy.pdf',
+  'xs-tinymodernist-halloween.pdf', 'xs-tinymodernist-homestitchhome.pdf', 'xs-tinymodernist-matryoshka.pdf',
+  'xs-tinymodernist-welcome.pdf', 'xs-typechar.pdf', 'xs-wocs-caterpillars.pdf', 'xs-yarntree-alphabets.pdf'
+];
+var HEAVY_BYTES = 17 * 1024 * 1024;
+var Q = {};
+location.search.replace(/^\?/, '').split('&').forEach(function (kv) {
+  if (!kv) return;
+  var i = kv.indexOf('=');
+  Q[decodeURIComponent(i < 0 ? kv : kv.slice(0, i))] = i < 0 ? '1' : decodeURIComponent(kv.slice(i + 1));
+});
+
+function esc(s) { return String(s).replace(/[&<>]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]; }); }
+function squash(s) { return window.PdfText._normUnicode(String(s)).replace(/\s+/g, '').replace(/-$/, ''); }
+
+/** Raw rows of one page: every item, baseline-grouped, no rules applied. */
+function rawPage(page) {
+  return page.getTextContent().then(function (tc) {
+    var rows = [];
+    (tc.items || []).forEach(function (it) {
+      if (!it.str || !it.transform) return;
+      var t = it.transform;
+      var rot = Math.abs(t[1]) > Math.abs(t[0]) * 0.1;
+      var y = rot ? t[4] : t[5];
+      var row = null;
+      for (var r = 0; r < rows.length; r++) if (rows[r].rot === rot && Math.abs(rows[r].y - y) <= 2.5) { row = rows[r]; break; }
+      if (!row) { row = { y: y, rot: rot, items: [] }; rows.push(row); }
+      row.items.push({ x: rot ? t[5] : t[4], str: it.str, h: it.height || Math.abs(t[3]) });
+    });
+    rows.sort(function (a, b) { return (a.rot - b.rot) || (b.y - a.y); });
+    return rows.map(function (row) {
+      row.items.sort(function (a, b) { return a.x - b.x; });
+      var h = 0; row.items.forEach(function (i) { if (i.h > h) h = i.h; });
+      return { y: row.y, h: h, rot: row.rot, items: row.items,
+        text: row.items.map(function (i) { return i.str; }).join('|') };
+    });
+  });
+}
+
+/** Items (3+ ink chars) whose text never shows up in the extracted page. */
+function lostItems(rows, extracted) {
+  var hay = squash(extracted);
+  var lost = [];
+  rows.forEach(function (row) {
+    row.items.forEach(function (it) {
+      var s = squash(it.str);
+      if (s.length < 3) return;
+      if (hay.indexOf(s) < 0) lost.push({ y: row.y, h: row.h, rot: row.rot, str: it.str });
+    });
+  });
+  return lost;
+}
+
+function splitPages(text) {
+  var out = {};
+  String(text).split(/^=== PAGE (\d+) ===$/m).forEach(function (chunk, i, arr) {
+    if (i % 2 === 1) out[chunk] = (arr[i + 1] || '').replace(/^\n+|\n+$/g, '');
+  });
+  return out;
+}
+
+function pageRange(spec, n) {
+  if (!spec) return function () { return true; };
+  var m = /^(\d+)(?:-(\d+))?$/.exec(spec);
+  var lo = m ? +m[1] : 1, hi = m ? +(m[2] || m[1]) : n;
+  return function (p) { return p >= lo && p <= hi; };
+}
+
+/**
+ * Everything for one file: { extract, raw } as strings, plus page dicts.
+ */
+function dumpOne(name, opts) {
+  opts = opts || {};
+  return fetch('../tmp-pdf/' + name, { cache: 'no-store' }).then(function (r) {
+    if (!r.ok) throw new Error('missing');
+    return r.blob();
+  }).then(function (blob) {
+    var file = new File([blob], name, { type: 'application/pdf' });
+    var textP;
+    if (opts.route === 'open') {
+      textP = window.PdfText.open(file).then(function (h) {
+        var blocks = [], chain = Promise.resolve();
+        for (var p = 1; p <= h.numPages; p++) (function (p) {
+          chain = chain.then(function () { return h.textOf(p).then(function (t) { blocks.push('=== PAGE ' + p + ' ===\n' + t); }); });
+        })(p);
+        return chain.then(function () { h.destroy(); return { text: blocks.join('\n\n'), meta: 'open route' }; });
+      });
+    } else {
+      textP = window.PdfText.extract(file).then(function (res) {
+        return { text: res.text, meta: 'pages ' + res.pages + '/' + res.pagesTotal + ' cols ' + res.columnsDetected +
+          ' empty [' + res.emptyPages.join(',') + '] garbled ' + res.garbled + ' chars ' + res.chars };
+      }, function (err) { return { text: '', meta: 'ERROR ' + (err && err.message) }; });
+    }
+    return textP.then(function (ex) {
+      var pages = splitPages(ex.text);
+      return blob.arrayBuffer().then(function (buf) {
+        return window.pdfjsLib.getDocument({ data: buf, isEvalSupported: false, disableFontFace: true }).promise;
+      }).then(function (doc) {
+        var want = pageRange(opts.pages, doc.numPages);
+        var raw = [], chain = Promise.resolve();
+        for (var p = 1; p <= doc.numPages; p++) (function (p) {
+          if (!want(p)) return;
+          chain = chain.then(function () {
+            return doc.getPage(p).then(function (page) {
+              return rawPage(page).then(function (rows) {
+                var vp = page.getViewport({ scale: 1 });
+                var lost = lostItems(rows, pages[p] || '');
+                raw.push({ p: p, rotate: page.rotate, w: vp.width, h: vp.height, rows: rows, lost: lost });
+                page.cleanup();
+              });
+            });
+          });
+        })(p);
+        return chain.then(function () { doc.destroy(); return { name: name, meta: ex.meta, text: ex.text, pages: pages, raw: raw }; });
+      });
+    });
+  });
+}
+
+function rawText(d) {
+  return d.raw.map(function (pg) {
+    var head = '=== RAW PAGE ' + pg.p + ' (rotate ' + pg.rotate + ', ' + Math.round(pg.w) + 'x' + Math.round(pg.h) + ') ===';
+    var rows = pg.rows.map(function (r) {
+      return (r.rot ? 'R ' : '  ') + ('     ' + Math.round(r.y)).slice(-5) + ' h' + (Math.round(r.h * 10) / 10) + '  ' + r.text;
+    });
+    var lost = pg.lost.length ? ['--- not emitted (' + pg.lost.length + '):'].concat(pg.lost.map(function (l) {
+      return '  y' + Math.round(l.y) + ' h' + (Math.round(l.h * 10) / 10) + (l.rot ? ' ROT' : '') + ' ' + JSON.stringify(l.str);
+    })) : [];
+    return [head].concat(rows, lost).join('\n');
+  }).join('\n\n');
+}
+
+function show(d) {
+  var out = document.getElementById('out');
+  var html = '<h2>' + esc(d.name) + ' - ' + esc(d.meta) + '</h2>';
+  var want = pageRange(Q.pages, 9999);
+  Object.keys(d.pages).forEach(function (p) {
+    if (!want(+p)) return;
+    html += '<h2>PAGE ' + p + '</h2><pre>' + esc(d.pages[p]) + '</pre>';
+    var pg = d.raw.filter(function (r) { return r.p === +p; })[0];
+    if (pg && pg.lost.length) {
+      html += '<pre class="lost">not emitted:\n' + esc(pg.lost.map(function (l) {
+        return 'y' + Math.round(l.y) + ' h' + (Math.round(l.h * 10) / 10) + (l.rot ? ' ROT ' : ' ') + JSON.stringify(l.str);
+      }).join('\n')) + '</pre>';
+    }
+  });
+  if (Q.raw) html += '<h2>RAW</h2><pre class="raw">' + esc(rawText(d)) + '</pre>';
+  out.innerHTML = html;
+  document.getElementById('summary').textContent = 'done';
+}
+
+function sinkPost(port, name, body) {
+  return fetch('http://localhost:' + port + '/' + encodeURIComponent(name), {
+    method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: body
+  }).catch(function () { /* sink down */ });
+}
+
+function runAll() {
+  var list = Q.only ? Q.only.split(',') : FILES;
+  var out = document.getElementById('out');
+  var chain = Promise.resolve(), n = 0;
+  list.forEach(function (name) {
+    if (!/\.pdf$/.test(name)) name += '.pdf';
+    chain = chain.then(function () {
+      return fetch('../tmp-pdf/' + name, { method: 'HEAD', cache: 'no-store' }).then(function (r) {
+        var bytes = parseInt(r.headers.get('content-length'), 10) || 0;
+        if (bytes > HEAVY_BYTES && !Q.heavy) { out.insertAdjacentHTML('beforeend', '<div>skip heavy ' + esc(name) + '</div>'); return; }
+        var t0 = performance.now();
+        return dumpOne(name, { route: Q.route }).then(function (d) {
+          n++;
+          var base = name.replace(/\.pdf$/, '') + (Q.route === 'open' ? '.open' : '');
+          out.insertAdjacentHTML('beforeend', '<div>' + esc(name) + ' ' + esc(d.meta) + ' ' + Math.round(performance.now() - t0) + ' ms</div>');
+          return sinkPost(Q.sink, base + '.extract.txt', '### ' + d.meta + '\n' + d.text)
+            .then(function () { return Q.noraw ? null : sinkPost(Q.sink, base + '.raw.txt', rawText(d)); });
+        }, function (err) {
+          out.insertAdjacentHTML('beforeend', '<div class="lost">' + esc(name) + ' ' + esc(err && err.message) + '</div>');
+        });
+      });
+    });
+  });
+  chain.then(function () { document.getElementById('summary').textContent = 'all done: ' + n + ' files'; });
+}
+
+/** ?render=1&f=x.pdf&pages=3-5&scale=1.3&sink=PORT: page images for eyeballing. */
+function renderPages() {
+  // A background tab never fires requestAnimationFrame, and pdf.js paints on it.
+  window.requestAnimationFrame = function (cb) { return setTimeout(function () { cb(performance.now()); }, 0); };
+  if (Q.f) return renderOne(Q.f);
+  var list = Q.only ? Q.only.split(',') : FILES, chain = Promise.resolve();
+  list.forEach(function (name) {
+    if (!/\.pdf$/.test(name)) name += '.pdf';
+    chain = chain.then(function () { return renderOne(name); }).then(function () {
+      document.getElementById('out').insertAdjacentHTML('beforeend', '<div>' + esc(name) + '</div>');
+    }, function () {});
+  });
+  return chain.then(function () { document.getElementById('summary').textContent = 'all rendered'; });
+}
+
+function renderOne(name) {
+  var scale = +(Q.scale || 1.3), max = +(Q.max || 0);
+  return fetch('../tmp-pdf/' + name, { cache: 'no-store' }).then(function (r) { return r.arrayBuffer(); })
+    .then(function (buf) {
+      return window.pdfjsLib.getDocument({ data: buf, isEvalSupported: false, disableFontFace: true }).promise;
+    }).then(function (doc) {
+      var want = pageRange(Q.pages, doc.numPages), chain = Promise.resolve(), n = 0;
+      for (var p = 1; p <= doc.numPages; p++) (function (p) {
+        if (!want(p) || (max && p > max)) return;
+        chain = chain.then(function () {
+          return doc.getPage(p).then(function (page) {
+            var vp = page.getViewport({ scale: scale });
+            if (vp.width > 1400) vp = page.getViewport({ scale: scale * 1400 / vp.width });
+            var c = document.createElement('canvas');
+            c.width = Math.round(vp.width); c.height = Math.round(vp.height);
+            var g = c.getContext('2d');
+            g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height);
+            return page.render({ canvasContext: g, viewport: vp }).promise.then(function () {
+              n++;
+              return sinkPost(Q.sink, name.replace(/\.pdf$/, '') + '.p' + p + '.jpg', c.toDataURL('image/jpeg', 0.75));
+            });
+          });
+        });
+      })(p);
+      return chain.then(function () { doc.destroy(); document.getElementById('summary').textContent = 'rendered ' + n; });
+    });
+}
+
+if (Q.render) renderPages();
+else if (Q.all) runAll();
+else if (Q.f) {
+  document.querySelector('input[name=f]').value = Q.f;
+  dumpOne(Q.f, { route: Q.route, pages: Q.pages }).then(show, function (e) {
+    document.getElementById('summary').textContent = 'error ' + (e && e.message);
+  });
+}
+</script>
+</body>
+</html>

@@ -215,7 +215,7 @@
     '793|Cornflower Blue Medium|707da2',
     '3807|Cornflower Blue|60678c',
     '792|Cornflower Blue Dark|555b7b',
-    '158|Cornflower Blu Medium Very Dark|4c526e',
+    '158|Cornflower Blue Medium Very Dark|4c526e',
     '791|Cornflower Blue Very Dark|464563',
     '3840|Lavender Blue Light|b0c0da',
     '3839|Lavender Blue Medium|7b8eab',
@@ -2022,6 +2022,18 @@
 
   var OXS_BRAND_RE = /^(DMC|Anchor|Madeira|Cosmo|Olympus|Sullivans)$/i;
 
+  /* ---- ornament object types --------------------------------------- *
+   * The OXS note block only says "there is a wide variety of ways of treating
+   * part stitches, knots, beads and so on", so writers spell the ornament
+   * type however they like. Ursa Software's own reference chart
+   * (tmp-pdf/xs-ursa-piggies.oxs) writes `bead3mm`, and a size suffix is the
+   * commonest variation there is — matching on a prefix keeps `bead2mm`,
+   * `bead_11_0` and `frenchknot` out of the "unknown objecttype" bucket,
+   * where they would have been dropped silently.
+   * ------------------------------------------------------------------ */
+  var ORNAMENT_KNOT_RE = /^(?:french[_\s-]*)?knot/i;
+  var ORNAMENT_BEAD_RE = /^(?:bead|button|sequin|treasure|charm|ornament)/i;
+
   function attr(el, name) {
     var v = el.getAttribute(name);
     return v === null ? '' : v;
@@ -2314,10 +2326,9 @@
       var oy = num(attr(oe, 'y1'), num(attr(oe, 'y'), NaN));
       if (!isFinite(ox) || !isFinite(oy)) continue;
       var oi = mapIndex(attr(oe, 'palindex'));
-      if (type === 'knot' || type === 'frenchknot' || type === 'french_knot') {
+      if (ORNAMENT_KNOT_RE.test(type)) {
         knots.push({ x: ox, y: oy, i: oi, t: 'knot' });
-      } else if (type === 'bead' || type === 'button' || type === 'sequin' ||
-                 type === 'treasure' || type === 'charm') {
+      } else if (ORNAMENT_BEAD_RE.test(type)) {
         knots.push({ x: ox, y: oy, i: oi, t: 'bead' });
       } else if (type === 'tent' || type === 'quarter' ||
                  type === 'verticalhalf' || type === 'horizontalhalf') {
@@ -2565,6 +2576,17 @@
    * plausible floss code behind, so a real '10 / 38' is left alone.
    */
   function stripFooterGlue(s) {
+    /* The same footer can land on the other side of the code when the
+       extractor sorts by x: '340' under '62 / 62' comes out as
+       '34062 / 62 (1273 ct)'. The number after the slash is the page count
+       (the key is on the last page, so it is also the page number), and
+       what is left in front of it has to be a floss we know. */
+    var t = /^\s*(\d{4,8})\s*\/\s*(\d{1,3})(?=\s|$)/.exec(s);
+    if (t && t[1].length > t[2].length + 2 &&
+        t[1].slice(-t[2].length) === t[2]) {
+      var code = t[1].slice(0, t[1].length - t[2].length);
+      if (/^\d{3,5}$/.test(code) && hexFor('DMC', code)) return code + s.slice(t[0].length);
+    }
     var m = /^\s*(\d{1,4})\s*\/\s*(\d{2,8})\b/.exec(s);
     if (!m) return s;
     var head = m[1], rest = m[2];
@@ -2592,6 +2614,7 @@
   function cleanKeyLine(line) {
     var s = String(line == null ? '' : line);
     s = s.replace(/ | | | /g, ' ');
+    s = stripChartSoup(s);
     s = stripFooterGlue(s);
     s = unwrapCounts(s);
     // Some generators lose a hyphen in a colour name to the font: 'Red?Copper'.
@@ -2710,6 +2733,11 @@
     'thread\\s*(?:list|key)|palette|dmc\\s*$' +
     ')', 'i');
 
+  /* Magazine charts title the key after the design ("Caterpillar cards key",
+     "Spring wreath colour key"), so a short line that *ends* in "key" opens
+     a block too. Kept short so a sentence about a key does not qualify. */
+  var KEY_BLOCK_TAIL_RE = /^[A-Za-z][A-Za-z0-9'’\- ]{2,38}\s(?:colou?r\s+)?key\s*:?\s*$/i;
+
   /** Lines that close one: the cover-block metadata around a key. */
   var KEY_BLOCK_BREAK_RE =
     /^\s*(?:stitch(?:es)?\s*count|finished\s*size|fabric\b|cloth['’ʼ]?s?\b|design\s*(?:area|size)|#\s*of\s*colou?rs)/i;
@@ -2758,12 +2786,20 @@
     if (toks.length < 1 || toks[0] === '') return null;
     if (looksLikeGridLine(toks)) return null;
 
-    var codes = [], marks = [], i;
+    var codes = [], marks = [], lead = [], i;
     for (i = 0; i < toks.length; i++) {
       var t = toks[i];
       if (/^x$/i.test(t)) {
         var next = toks[i + 1];
-        if (next && /^\d{1,3}$/.test(next)) { marks.push(parseInt(next, 10)); i++; continue; }
+        if (next && /^\d{1,3}$/.test(next)) {
+          var mv = parseInt(next, 10);
+          /* A mark in front of the first code belongs to the column to the
+             LEFT of this one, whose codes the extractor handed over as a
+             block of their own. Keep it aside rather than throwing it. */
+          if (!codes.length) lead.push(mv); else marks.push(mv);
+          i++;
+          continue;
+        }
         return null;
       }
       if (isCodeToken(t)) { codes.push(t); continue; }
@@ -2772,17 +2808,488 @@
     }
     if (!codes.length) return [];
 
-    if (!marks.length) {
+    if (!marks.length && !lead.length) {
       // No 'x N' anywhere: only trust a run of numbers when the sheet has
       // told us how many skeins every colour takes, and every number is a
       // floss we actually know.
       if (!allowBare || codes.length < 2) return null;
-      for (i = 0; i < codes.length; i++) if (!hexFor('DMC', codes[i])) return null;
+      /* Light Effects E-codes (E677) are real DMC threads without a swatch here. */
+      for (i = 0; i < codes.length; i++) {
+        if (!hexFor('DMC', codes[i]) && !/^E\d{3,4}$/i.test(codes[i])) return null;
+      }
     }
 
     var skeins = marks.length ? marks[marks.length - 1] : null;
     var out = [];
     for (i = 0; i < codes.length; i++) out.push({ code: codes[i], skeins: skeins });
+    /* One mark ahead of the codes: the left-hand column's skein for this
+       row. parseKey collects them into a column of their own. */
+    out.lead = lead.length === 1 ? lead[0] : null;
+    return out;
+  }
+
+  /* ---- cross-brand column headers ----------------------------------- *
+   * Magazine charts (The World of Cross Stitching) and the Tiny Modernist
+   * freebies print one column per brand and one row per colour:
+   *
+   *   DMC Anchor Madeira            X BS DMC Cosmo         X BS DMC Name:
+   *   Z B5200 1 2401 white          725 701                453 Shell Grey LT
+   *
+   * Without the header the Anchor and Madeira numbers land in the colour
+   * name ("1 2401 white") or, worse, in the stitch count. The header line
+   * tells us how many code columns to skip after the first one, and it also
+   * vouches for the rows beneath it the way "Colour key" does — which is
+   * what lets a one-character symbol like `2` or `7` be read as a symbol
+   * instead of being rejected as an impossible floss code.
+   * -------------------------------------------------------------------- */
+
+  /* Column captions that sit beside the brand columns in such a header. */
+  var COLUMN_WORD_RE = new RegExp('^(?:x|xx|bs|b\\/s|b\\.s\\.?|sym|symb|symbol|sign|chart|' +
+    'colou?r|name|names|note|notes|shade|strands?|skeins?|qty|' +
+    'stitch|stitches|count|#|no|nr)[.:]?$', 'i');
+
+  /**
+   * A cross-brand key header -> { brand, cols } (cols = how many brand
+   * columns the table has), or null. Requires at least one brand word and
+   * nothing on the line except brand words and column captions, so a prose
+   * line that happens to mention DMC cannot open a key block.
+   */
+  function brandColumnHeader(line) {
+    var s = String(line == null ? '' : line).trim();
+    if (!s || s.length > 64) return null;
+    var toks = s.replace(/[|,]/g, ' ').split(/\s+/);
+    if (!toks.length || toks.length > 8) return null;
+    var brands = [], captions = 0, i;
+    for (i = 0; i < toks.length; i++) {
+      var t = toks[i].replace(/[.:]+$/, '');
+      if (!t) continue;
+      var b = canonBrand(t);
+      if (b) { brands.push(b); continue; }
+      if (COLUMN_WORD_RE.test(toks[i])) { captions++; continue; }
+      /* a lone glyph is the symbol column's caption on most sheets */
+      if (t.length === 1) { captions++; continue; }
+      return null;
+    }
+    /* One brand word on its own is just the word: a header names a brand
+       and at least one more column. */
+    if (!brands.length || brands.length + captions < 2) return null;
+    return { brand: brands[0], cols: brands.length };
+  }
+
+  /* ---- transposed keys: one row per brand ---------------------------- *
+   * A page whose text runs at 90 degrees comes out of the extractor grouped
+   * along the wrong axis, and a Tiny Modernist key then arrives as one line
+   * per brand with every code glued together:
+   *
+   *   DMCEcru3855385433473848
+   *
+   * Splitting that is only safe when the whole run decomposes into codes the
+   * floss table actually knows, so the split is tried longest-first with
+   * backtracking and abandoned unless every piece resolves. A brand whose
+   * swatches we do not carry (Anchor, Madeira) never decomposes, which is
+   * exactly right: its row is the equivalents column, not the key.
+   * -------------------------------------------------------------------- */
+
+  var GLUED_BRAND_RE = /^(DMC|Anchor|Madeira|Cosmo|Olympus|Sullivans)([A-Za-z0-9]{6,})$/i;
+  var GLUED_PIECE_RES = [/^(B5200)/i, /^(Blanc|White|Ecru)/i, /^(E\d{3,4})/, /^(\d{3,5})/];
+
+  /** Greedy-with-backtracking decomposition of `run` into known codes. */
+  function decomposeCodes(run, brand) {
+    var out = [];
+    function walk(rest) {
+      if (!rest.length) return out.length >= 2;
+      /* longest plausible piece first, so 3855 wins over 385 */
+      var cands = [];
+      for (var r = 0; r < GLUED_PIECE_RES.length; r++) {
+        var m = GLUED_PIECE_RES[r].exec(rest);
+        if (m) cands.push(m[1]);
+      }
+      var extra = /^\d{4}/.exec(rest);
+      if (extra) cands.push(extra[0]);
+      var tri = /^\d{3}/.exec(rest);
+      if (tri) cands.push(tri[0]);
+      cands.sort(function (a, b) { return b.length - a.length; });
+      for (var c = 0; c < cands.length; c++) {
+        var piece = cands[c];
+        if (!hexFor(brand, piece)) continue;
+        out.push(piece);
+        if (walk(rest.slice(piece.length))) return true;
+        out.pop();
+      }
+      return false;
+    }
+    return walk(run) ? out : null;
+  }
+
+  /**
+   * '<Brand><code><code>...' -> { brand, codes } when every piece is a floss
+   * the table knows and there are at least two of them, else null.
+   */
+  function splitBrandGlued(token) {
+    var m = GLUED_BRAND_RE.exec(String(token == null ? '' : token));
+    if (!m) return null;
+    var brand = canonBrand(m[1]);
+    var codes = decomposeCodes(m[2], brand);
+    if (!codes || codes.length < 2) return null;
+    return { brand: brand, codes: codes };
+  }
+
+  /* ---- chart glyph soup ---------------------------------------------- *
+   * When a chart's symbols are real text (Tiny Modernist's "foxy") and the
+   * key sits in a sidebar beside the grid, every key row arrives with a few
+   * hundred characters of chart glyphs glued to its right-hand end:
+   *
+   *   '3854 313 16-ct 4.2" x 4.2" p 222222222 u E u E 2222 O 2 O ...'
+   *
+   * The glyphs give themselves away by repetition: a handful of characters
+   * carry most of the line. Characters that occur six times or more are
+   * treated as chart ink and the line is cut at the first token built only
+   * out of them, which leaves the sidebar text and throws the grid away.
+   * -------------------------------------------------------------------- */
+
+  var SOUP_MIN_LEN = 30;        // shorter than this is never chart soup
+  var SOUP_MIN_TOKENS = 6;      // the soup has to be a run, not one stray glyph
+  var SOUP_MIN_SHARE = 0.9;     // how pure that run has to be
+  var SOUP_LONG_RUN = 12;       // a single very long low-entropy token
+
+  /** Distinct characters in a token, counted up to `cap`. */
+  function distinctChars(t, cap) {
+    var seen = {}, n = 0;
+    for (var i = 0; i < t.length; i++) {
+      var c = t.charAt(i);
+      if (seen[c]) continue;
+      seen[c] = 1;
+      if (++n > cap) return n;
+    }
+    return n;
+  }
+
+  /** A token that carries no key information: a chart glyph or a run of them. */
+  function glyphyToken(t) {
+    if (!t || t.length <= 2) return true;             // a lone chart glyph
+    /* '222' and '8888' are runs of one chart symbol, not floss codes; a
+       real code has more than one distinct digit in it. */
+    if (/^\d{3,5}$/.test(t)) return distinctChars(t, 2) < 2;
+    if (isWordToken(t)) return false;                 // a colour name
+    return distinctChars(t, 3) <= 3;                  // 'OO888OO', '«««', '2222'
+  }
+
+  function stripChartSoup(line) {
+    var s = String(line == null ? '' : line);
+    if (s.length < SOUP_MIN_LEN) return s;
+
+    /* Tokens with their offsets, so the cut keeps the original spacing.
+       Runs of spaces are not tokens: a key row padded out into columns
+       would otherwise look like a page of blanks. */
+    var toks = [], at = [], m, i;
+    var re = /\S+/g;
+    while ((m = re.exec(s)) !== null) { toks.push(m[0]); at.push(m.index); }
+    if (toks.length < SOUP_MIN_TOKENS + 1) return s;
+
+    /* Walk in from the right: the longest suffix that is almost all chart
+       glyphs is the grid, and everything before it is the sidebar. */
+    var glyphs = 0, cut = -1;
+    for (i = toks.length - 1; i >= 0; i--) {
+      if (glyphyToken(toks[i])) glyphs++;
+      var run = toks.length - i;
+      if (run >= SOUP_MIN_TOKENS && glyphs / run >= SOUP_MIN_SHARE && i > 0) cut = i;
+    }
+
+    /* A single enormous token of two or three characters is a whole row of
+       the chart run together; cut in front of it whatever else is around. */
+    for (i = 0; i < toks.length; i++) {
+      if (i > 0 && toks[i].length >= SOUP_LONG_RUN && distinctChars(toks[i], 3) <= 3) {
+        if (cut < 0 || i < cut) cut = i;
+        break;
+      }
+    }
+
+    /* A key row's own code can look like a glyph run: DMC sells 333, 444,
+       666 and 777. When one stands in the first two places ('O 666 46 p
+       22222 ...') the cut goes after it, and after the equivalents number
+       beside it. */
+    if (cut > 0) {
+      for (i = 0; i < 2 && i < toks.length; i++) {
+        if (/^\d{3,4}$/.test(toks[i]) && hexFor('DMC', toks[i]) && cut <= i) {
+          cut = i + 1;
+          while (cut < toks.length && /^\d{2,5}$/.test(toks[cut]) && distinctChars(toks[cut], 2) >= 2) cut++;
+          break;
+        }
+      }
+    }
+    if (cut <= 0 || cut >= toks.length) return s;
+    return s.slice(0, at[cut]).replace(/\s+$/, '');
+  }
+
+  /* ---- a detached stitch-count column -------------------------------- *
+   * A sidebar key is two tables side by side, and the extractor's column
+   * splitter hands them over one after the other:
+   *
+   *   X BS DMC Name:        Stitches Length
+   *   453 Shell Grey LT     132 28.8 in.
+   *   ...                   ...
+   *
+   * When a 'Stitches' block holds exactly as many numeric rows as the key
+   * has countless entries, the two were the same rows on the page and the
+   * counts are zipped back on in order. Anything else is left alone.
+   * -------------------------------------------------------------------- */
+
+  var COUNT_COLUMN_HEAD_RE = /^\s*(?:stitches|stitch\s*count|no\.?\s*of\s*stitches)(?:\s+(?:and\s+)?(?:length|len|floss|thread|metres?|meters?|inches|in\.?))?\s*:?\s*$/i;
+  var COUNT_COLUMN_ROW_RE = /^\s*(\d{1,6})(?:\s+\d+(?:[.,]\d+)?\s*(?:in\.?|inches|cm|m|mm|yd|yds)?\.?)?\s*$/i;
+
+  /**
+   * A key row hiding at the end of a line of other furniture: the trailing
+   * run of code tokens, when it is no longer than the table's brand columns
+   * and its first code is one the floss table knows. Returns that code or
+   * null (with opts.withRun, `{ code, run }`, so the caller knows how many
+   * of the table's columns the line actually carried). Only ever called
+   * inside a cross-brand key block.
+   */
+  function trailingCodeRow(rawLine, cols, brand, opts) {
+    var toks = tokenizeKeyLine(cleanKeyLine(rawLine));
+    if (toks.length < 2) return null;
+    if (looksLikeGridLine(toks)) return null;
+    var start = toks.length;
+    while (start > 0 && CODE_TOKEN_RE.test(toks[start - 1])) start--;
+    var run = toks.length - start;
+    if (run < 1 || run > cols || start === 0) return null;
+    /* the token in front has to be something else, or this is a plain
+       number run that the ordinary row parser already had its chance at */
+    if (CODE_TOKEN_RE.test(toks[start - 1])) return null;
+    var code = toks[start];
+    if (!hexFor(brand || 'DMC', code)) return null;
+    return opts && opts.withRun ? { code: code, run: run } : code;
+  }
+
+  var COLUMN_FIELD_WORDS = { stitchCount: 'stitch counts', skeins: 'skein numbers' };
+
+  /**
+   * Zip the detached columns a page handed over, in the order they were
+   * found. Each is `{ field, values }`.
+   */
+  function zipCountColumns(entries, columns, warnings) {
+    for (var c = 0; c < columns.length; c++) {
+      if (zipColumn(entries, columns[c].values, columns[c].field)) continue;
+      pushOnce(warnings, 'a column of ' +
+        (COLUMN_FIELD_WORDS[columns[c].field] || columns[c].field) +
+        ' did not line up with the colours');
+    }
+  }
+
+  /* ---- a detached colour-name column --------------------------------- *
+   * The same column splitter that detaches a 'Stitches' column detaches the
+   * colour names of a magazine key, which then arrive as a block of bare
+   * words a long way below the codes they belong to:
+   *
+   *   DMC Anchor Madeira            white
+   *   Z B5200 1 2401                black
+   *   W 310 403 2400                grey
+   *
+   * A run of plain words with no digits in it, exactly as long as the key
+   * has nameless rows, is that column. 'white' would otherwise be read as
+   * a key row of its own, so consuming the run fixes two things at once.
+   * -------------------------------------------------------------------- */
+
+  var NAME_COLUMN_LINE_RE = /^[A-Za-z][A-Za-z'’\/\- ]{1,23}$/;
+  var NAME_COLUMN_MIN = 3;
+
+  /** The run of name-only lines starting at `from`, or null. */
+  function nameColumnAt(rawLines, from) {
+    var names = [];
+    for (var i = from; i < rawLines.length; i++) {
+      var line = String(rawLines[i] == null ? '' : rawLines[i]).trim();
+      if (!NAME_COLUMN_LINE_RE.test(line)) break;
+      if (line.split(/\s+/).length > 3) break;
+      if (sectionKindFor(line) || KEY_BLOCK_HEADER_RE.test(line) ||
+          brandColumnHeader(line)) break;
+      names.push(line);
+    }
+    return names.length >= NAME_COLUMN_MIN ? { names: names, end: from + names.length - 1 } : null;
+  }
+
+  /* ---- zipping a detached column back on -----------------------------
+   * A detached column belongs to one block of rows, not to the whole key:
+   * a two-column legend hands its skeins over a column at a time, so what
+   * we look for is a run of consecutive rows that still have nothing in
+   * this field and is exactly as long as the column. Exactly as long, or
+   * not at all — a wrong count or a wrong skein number is worse than none.
+   * When two runs would fit, the later one wins: columns arrive in reading
+   * order, so the block nearest the end is the one just handed over.
+   * -------------------------------------------------------------------- */
+
+  function isUnset(v) { return v === null || v === undefined || v === ''; }
+
+  /** Every maximal run of consecutive entries with nothing in `field`. */
+  function openRuns(entries, field) {
+    var runs = [], cur = null;
+    for (var i = 0; i < entries.length; i++) {
+      if (isUnset(entries[i][field])) {
+        if (!cur) { cur = []; runs.push(cur); }
+        cur.push(entries[i]);
+      } else {
+        cur = null;
+      }
+    }
+    return runs;
+  }
+
+  /** Zip one column onto the run it fits. -> true when it fitted. */
+  function zipColumn(entries, values, field) {
+    if (!values.length) return false;
+    var runs = openRuns(entries, field);
+    for (var r = runs.length - 1; r >= 0; r--) {
+      if (runs[r].length !== values.length) continue;
+      for (var i = 0; i < values.length; i++) runs[r][i][field] = values[i];
+      return true;
+    }
+    return false;
+  }
+
+  /** Zip a detached name column onto the rows that have no name yet. */
+  function zipNameColumn(entries, names) {
+    return zipColumn(entries, names, 'name');
+  }
+
+  /** The run of numeric rows under a 'Stitches' heading, or null. */
+  function countColumnAt(rawLines, from) {
+    if (!COUNT_COLUMN_HEAD_RE.test(rawLines[from])) return null;
+    var nums = [];
+    for (var i = from + 1; i < rawLines.length; i++) {
+      var line = rawLines[i];
+      if (!String(line).replace(/\s+/g, '')) break;
+      var m = COUNT_COLUMN_ROW_RE.exec(line);
+      if (!m) break;
+      nums.push(parseInt(m[1], 10));
+    }
+    return nums.length >= 2 ? { nums: nums, end: from + nums.length } : null;
+  }
+
+  /* ---- a detached skein column --------------------------------------- *
+   * The DMC library legends print two colour columns side by side, each
+   * with its own "nº skeins*" column. When the extractor splits them the
+   * skein marks arrive on their own:
+   *
+   *   946                       nº skeins*
+   *   947                       no d'echevettes*
+   *   967          ->           x1
+   *   970                       x1
+   *                             x1
+   *                             x1
+   *
+   * A run of lines that is nothing but 'x1' is that column. The header
+   * lines above it are left to the ordinary parser, which ignores them.
+   * -------------------------------------------------------------------- */
+
+  var SKEIN_COLUMN_ROW_RE = /^\s*(?:x\s*(\d{1,3})|(\d{1,3})\s*(?:x|skeins?|sk))\s*\*?\s*$/i;
+
+  /** The run of bare skein marks starting at `from`, or null. */
+  function skeinColumnAt(rawLines, from) {
+    var nums = [];
+    for (var i = from; i < rawLines.length; i++) {
+      var m = SKEIN_COLUMN_ROW_RE.exec(String(rawLines[i] == null ? '' : rawLines[i]));
+      if (!m) break;
+      nums.push(parseInt(m[1] === undefined ? m[2] : m[1], 10));
+    }
+    return nums.length >= 2 ? { nums: nums, end: from + nums.length - 1 } : null;
+  }
+
+  /* ---- name hygiene --------------------------------------------------- *
+   * Fabric counts and finished sizes sit next to the key on a one-page
+   * chart and can survive into a colour name when the extractor interleaves
+   * the two columns. None of them is ever part of a floss name.
+   * --------------------------------------------------------------------- */
+  var NAME_JUNK_RE = /^(?:\d{1,2}-?ct|\d+(?:[.,]\d+)?\s*["”']|n\/a|-{2,})$/i;
+
+  function tidyName(name) {
+    var toks = String(name == null ? '' : name).split(/\s+/);
+    var out = [];
+    for (var i = 0; i < toks.length; i++) {
+      var t = toks[i];
+      if (!t) continue;
+      if (NAME_JUNK_RE.test(t)) continue;
+      /* a lone 'x' only survives when it joins two real words */
+      if (/^x$/i.test(t) && (!out.length || i === toks.length - 1)) continue;
+      out.push(t);
+    }
+    /* a trailing measurement separator left behind by the cuts above */
+    while (out.length && /^x$/i.test(out[out.length - 1])) out.pop();
+    return out.join(' ').trim();
+  }
+
+  /* Spelled-out strand counts: 'Cross stitch in two strands'. */
+  var WORD_NUMS = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6 };
+  var WORD_STRAND_RE = /\b(one|two|three|four|five|six)\s+(?:strands?|threads?)\b/i;
+
+  /* ---- a key printed in newspaper columns, read across --------------- *
+   * KG-Chart prints a long key as three columns of 'code (N ct)' read top
+   * to bottom. An extractor that treats the page as a table (or pdftotext
+   * -layout) hands it over one visual row at a time:
+   *
+   *   Cross Stitch 798 (2003 ct) 926 (2868 ct)
+   *   310 (21207 ct) 3810 (1188 ct) 3837 (827 ct)
+   *   ...
+   *   3838 (384 ct) 3746 (1158 ct)
+   *
+   * Such a run is split back into its columns and re-emitted column by
+   * column, so the key comes out in printed order. A row that carries words
+   * in front of its first cell ('Cross Stitch ...') is missing its left-hand
+   * cells, so its cells are right-aligned; any other short row is missing
+   * its right-hand ones. The words themselves are kept as a line of their
+   * own ahead of the run, where they still switch the section.
+   * -------------------------------------------------------------------- */
+
+  var COUNT_CELL_RE = /(?:^|\s)((?:\S{1,2}\s+)?(?:\d{1,5}|B5200|BLANC|Blanc|ECRU|Ecru|WHITE|White)\s*\(\s*\d[\d,]*\s*ct\s*\))/g;
+
+  /* The page footer ('38 / 38', '62 / 62') glued onto a count cell, in
+     the middle of a row as well as at its start (see stripFooterGlue). */
+  function unglueFooters(line) {
+    return String(line)
+      .replace(/(^|\s)(\d{1,3})\s*\/\s*\2(\d{3,5})(?=\s*\()/g, '$1$3')
+      .replace(/(^|\s)(\d{3,5}?)(\d{1,3})\s*\/\s*\3(?=\s*\()/g, function (all, sp, code, n) {
+        return hexFor('DMC', code) ? sp + code : all;
+      });
+  }
+
+  function countCells(line) {
+    line = unglueFooters(line);
+    var out = [], m, first = -1;
+    COUNT_CELL_RE.lastIndex = 0;
+    while ((m = COUNT_CELL_RE.exec(line)) !== null) {
+      if (first < 0) first = m.index + (m[0].length - m[1].length);
+      out.push(m[1].trim());
+    }
+    return { cells: out, lead: first > 0 ? line.slice(0, first).trim() : '' };
+  }
+
+  function expandCountColumns(lines) {
+    var out = [], i = 0;
+    while (i < lines.length) {
+      var c = countCells(lines[i]);
+      if (c.cells.length < 2) { out.push(lines[i]); i++; continue; }
+      /* a run: this line and every following line that holds count cells */
+      var run = [];
+      var j = i;
+      while (j < lines.length) {
+        var cj = j === i ? c : countCells(lines[j]);
+        if (!cj.cells.length) break;
+        /* a lead that is not plain words (a footer, a stray number) belongs
+           to the cell, not to the run */
+        if (cj.lead && !/[A-Za-z]{3,}/.test(cj.lead)) { cj.cells[0] = cj.lead + ' ' + cj.cells[0]; cj.lead = ''; }
+        run.push(cj);
+        j++;
+      }
+      var width = 0, r;
+      for (r = 0; r < run.length; r++) width = Math.max(width, run[r].cells.length);
+      var cols = [];
+      for (r = 0; r < width; r++) cols.push([]);
+      for (r = 0; r < run.length; r++) {
+        if (run[r].lead) out.push(run[r].lead);
+        var shift = run[r].lead ? width - run[r].cells.length : 0;
+        for (var k = 0; k < run[r].cells.length; k++) cols[k + shift].push(run[r].cells[k]);
+      }
+      for (r = 0; r < width; r++) out.push.apply(out, cols[r]);
+      i = j;
+    }
     return out;
   }
 
@@ -2794,13 +3301,32 @@
     { kind: 'cross', re: /cross\s*stitch|full\s*stitch/i }
   ];
 
+  /**
+   * A section header names exactly ONE technique. A line that names two —
+   * 'Stitches used: Cross Stitch, Back Stitch', or the trilingual DMC
+   * sheets' 'backstitch / point arriere' beside a cross-stitch label — is a
+   * summary, not a switch, and letting it switch the section is how a whole
+   * key ends up marked as backstitch (brainstorm 04 #17).
+   */
+  /** Every technique a line names, in the order they appear on it. */
+  function kindsNamedIn(line) {
+    var found = [];
+    for (var t = 0; t < SECTION_TESTS.length; t++) {
+      var m = SECTION_TESTS[t].re.exec(String(line));
+      if (m) found.push({ kind: SECTION_TESTS[t].kind, at: m.index });
+    }
+    found.sort(function (a, b) { return a.at - b.at; });
+    return found.map(function (f) { return f.kind; });
+  }
+
   function sectionKindFor(line) {
     var s = line.trim();
     if (!s || s.length > 48) return null;
+    var hit = null, n = 0;
     for (var i = 0; i < SECTION_TESTS.length; i++) {
-      if (SECTION_TESTS[i].re.test(s)) return SECTION_TESTS[i].kind;
+      if (SECTION_TESTS[i].re.test(s)) { n++; if (!hit) hit = SECTION_TESTS[i].kind; }
     }
-    return null;
+    return n === 1 ? hit : null;
   }
 
   /**
@@ -2825,17 +3351,32 @@
       copyrightLines: [],
       declaredColors: null,
       bsStrands: null,
+      knotStrands: null,
       confidence: 0,
+      /** 'cross-stitch' | 'embroidery' | 'none' — B3.3 step 6. */
+      kind: 'none',
+      /** true when the file carries no text at all, only page images. */
+      imageOnly: false,
       warnings: warnings
     };
 
+    result.kind = 'none';
+    result.imageOnly = false;
+
     var raw = typeof text === 'string' ? text : '';
-    if (!raw.replace(/\s+/g, '')) {
+    /* An image-only chart (a flattened scan, or a Satsuma Street PDF whose
+       single page is one big JPEG) has page markers and nothing else. Say so
+       in the words a stitcher needs — the pages are still worth importing. */
+    var body = raw.replace(/^=== PAGE \d+ ===$/gm, '');
+    if (!body.replace(/[\s ]+/g, '')) {
       pushOnce(warnings, 'no text in this file');
+      pushOnce(warnings, 'this chart is a picture with no readable text — ' +
+        'import the pages as images and add the colours by hand');
+      result.imageOnly = true;
       return result;
     }
 
-    var rawLines = raw.split(/\r\n|\r|\n/);
+    var rawLines = expandCountColumns(raw.split(/\r\n|\r|\n/));
 
     /* document-level brand hint */
     var docBrand = '';
@@ -2849,6 +3390,22 @@
     var entries = [];
     var byKey = {};
     var inBlock = false;
+    /* A cross-brand header is a much stronger signal than 'Colour key' and
+       it has to survive the fabric / size furniture that a one-page chart
+       interleaves with its sidebar, so it gets its own flag: only a page
+       break or a real gap closes it. */
+    var brandBlock = false;
+    var altCols = 0;            // extra brand columns a cross-brand header declared
+    /* Equivalents columns the last key row did not carry. The extractor can
+       wrap a row's second brand onto a line of its own ('57h x 80w 958' then
+       '844', which is Cosmo 844, not DMC 844), and that line is owed to the
+       row above rather than being a colour of its own. */
+    var owedAlt = 0;
+    var lastRowDmc = false;     // the previous line was a key row we have a swatch for
+    var queuedKinds = [];       // side-by-side legends still to come (see kindsNamedIn)
+    var headerBrand = '';       // the primary brand that header named
+    var countColumns = [];      // detached 'Stitches'/skein columns, zipped on below
+    var leadSkeins = [];        // skein marks that belonged to the column left of this one
 
     /* Document-level facts the row parser needs before it starts. */
     var mEach = SKEIN_EACH_RE.exec(raw);
@@ -2856,7 +3413,7 @@
 
     /** Add a row, merging it onto an earlier row for the same floss. */
     function addEntry(entry) {
-      var mk = (entry.brand || '') + ' ' + entry.code.toLowerCase() + ' ' + entry.kind;
+      var mk = (entry.brand || '') + '\u0000' + entry.code.toLowerCase() + '\u0000' + entry.kind;
       var prev = byKey[mk];
       if (!prev) {
         byKey[mk] = entry;
@@ -2879,22 +3436,102 @@
       var rawLine = rawLines[li];
       if (/^\s*={2,}\s*PAGE\b/i.test(rawLine)) {                 // PdfText page marker
         inBlock = false;
+        brandBlock = false;
+        altCols = 0;
         continue;
       }
       // page furniture: '(c) 2026 A Stitcher' would otherwise read as code 2026
       if (/©|\(c\)|copyright|all rights reserved/i.test(rawLine)) continue;
       if (!rawLine.replace(/\s+/g, '')) {
         blankRun++;
-        if (blankRun >= 2) { kind = 'cross'; inBlock = false; }
+        if (blankRun >= 2) { kind = 'cross'; inBlock = false; brandBlock = false; altCols = 0; }
         continue;
       }
       blankRun = 0;
+      var prevRowDmc = lastRowDmc;
+      lastRowDmc = false;
+
+      if (owedAlt > 0 && brandBlock) {
+        var owedToks = tokenizeKeyLine(cleanKeyLine(rawLine));
+        var owedAll = owedToks.length > 0 && owedToks.length <= owedAlt;
+        for (var ot = 0; owedAll && ot < owedToks.length; ot++) {
+          if (!CODE_TOKEN_RE.test(owedToks[ot])) owedAll = false;
+        }
+        owedAlt = 0;
+        if (owedAll) continue;
+      }
+      owedAlt = 0;
+
+      /* A sidebar key is two tables side by side and the extractor hands
+         them over one after the other, so a 'Stitches' column arrives as a
+         detached run of numbers. It closes the key block (its rows are not
+         key rows) and its numbers are zipped back on at the end. */
+      var col = countColumnAt(rawLines, li);
+      if (col) {
+        countColumns.push({ field: 'stitchCount', values: col.nums });
+        inBlock = false;
+        li = col.end;
+        continue;
+      }
+
+      /* ... and the skein marks of a two-column legend, the same way. */
+      var skCol = skeinColumnAt(rawLines, li);
+      if (skCol) {
+        countColumns.push({ field: 'skeins', values: skCol.nums });
+        inBlock = false;
+        li = skCol.end;
+        continue;
+      }
+
+      /* ... and the colour names, when they were split off the same way. */
+      if (entries.length) {
+        var nameCol = nameColumnAt(rawLines, li);
+        if (nameCol && zipNameColumn(entries, nameCol.names)) {
+          li = nameCol.end;
+          inBlock = false;
+          continue;
+        }
+      }
+
+      /* A cross-brand header both opens a key block and says how many
+         equivalents columns follow the primary brand's. */
+      var hdr = brandColumnHeader(stripChartSoup(rawLine));
+      if (hdr) {
+        brandBlock = true;
+        altCols = hdr.cols - 1;
+        headerBrand = hdr.brand;
+        continue;
+      }
 
       if (KEY_BLOCK_BREAK_RE.test(rawLine)) inBlock = false;
-      else if (KEY_BLOCK_HEADER_RE.test(rawLine)) inBlock = true;
+      else if (KEY_BLOCK_HEADER_RE.test(rawLine) || KEY_BLOCK_TAIL_RE.test(rawLine)) inBlock = true;
 
-      /* The bare-numbers legend shapes first: they never look like prose. */
-      var listed = codeListRow(rawLine, defaultSkeins !== null);
+      /* A transposed key: one line per brand, every code glued together. */
+      var glued = splitBrandGlued(cleanKeyLine(rawLine));
+      if (glued) {
+        for (var gi = 0; gi < glued.codes.length; gi++) {
+          var gCode = glued.codes[gi];
+          if (NAMED_CODE_RE.test(gCode)) {
+            gCode = gCode.charAt(0).toUpperCase() + gCode.slice(1).toLowerCase();
+            if (/^b5200$/i.test(gCode)) gCode = 'B5200';
+          }
+          addEntry({
+            symbol: '', brand: glued.brand, code: gCode, name: '',
+            strands: null, stitchCount: null, skeins: defaultSkeins,
+            kind: kind, blendCode: null,
+            hex: hexFor(glued.brand, gCode), line: String(rawLine).trim()
+          });
+        }
+        inBlock = true;
+        continue;
+      }
+
+      /* The bare-numbers legend shapes first: they never look like prose.
+         Not inside a cross-brand table though: there the second number on
+         the row is another brand's code, and the 'x N' skein marker would
+         swallow a symbol column of letters ('x 741 304 202'). */
+      var listed = brandBlock ? null : codeListRow(rawLine, defaultSkeins !== null);
+      if (listed && listed.lead !== null && listed.lead !== undefined) leadSkeins.push(listed.lead);
       if (listed && listed.length) {
         for (var ci = 0; ci < listed.length; ci++) {
           var lc = listed[ci];
@@ -2916,17 +3553,56 @@
       }
       if (listed) continue;   // recognised as a legend line, but no codes on it
 
-      var entry = parseKeyRow(rawLine, kind, brandRe, docBrand, defaultStrands, inBlock);
+      /* DMC's two-digit 2017 colours only count when the line sits inside
+         the DMC column itself: a DMC row above it, a DMC code below it.
+         A bare '9' or '20' anywhere else is an Anchor number or a ruler. */
+      var dmcTable = brandBlock && headerBrand === 'DMC' && prevRowDmc &&
+        nextStartsWithDmc(rawLines, li);
+      var entry = parseKeyRow(rawLine, kind, brandRe, docBrand, defaultStrands,
+        inBlock || brandBlock, altCols, dmcTable);
       if (entry) {
+        if (entry.hex) lastRowDmc = true;
         if (entry.symbolUnreadable) anyUnreadable = true;
         delete entry.symbolUnreadable;
+        owedAlt = entry.altOwed || 0;
+        delete entry.altOwed;
         addEntry(entry);
         continue;
       }
 
+      /* A one-page chart interleaves its sidebar key with the fabric and
+         size block, so a key row can arrive with furniture in front of it
+         ('14-ct 4" x 5.7" 725 701'). Inside a cross-brand block the tail of
+         such a line is still the key's own columns. */
+      var tail = altCols > 0
+        ? trailingCodeRow(rawLine, altCols + 1, headerBrand, { withRun: true }) : null;
+      if (tail) {
+        addEntry({
+          symbol: '', brand: headerBrand || docBrand || 'DMC', code: tail.code,
+          name: '', strands: null, stitchCount: null, skeins: defaultSkeins,
+          kind: kind, blendCode: null,
+          hex: hexFor(headerBrand || 'DMC', tail.code), line: String(rawLine).trim()
+        });
+        owedAlt = altCols + 1 - tail.run;
+        continue;
+      }
+
       var sk = sectionKindFor(rawLine);
-      if (sk) kind = sk;
+      if (sk) { kind = sk; queuedKinds = []; continue; }
+      /* Two legends side by side under one row of headings ('cross stitch
+         Use 2 strands  backstitch Use 1 strand'), each closed by its own
+         '* 1 skein in each colour': the headings say which table comes
+         first, and each footnote moves on to the next one. */
+      var both = kindsNamedIn(rawLine);
+      if (both.length >= 2) { kind = both[0]; queuedKinds = both.slice(1); continue; }
+      if (queuedKinds.length && SKEIN_EACH_RE.test(rawLine)) kind = queuedKinds.shift();
     }
+
+    /* Zip the detached columns back onto the rows they belonged to. The
+       marks that were read off the front of a legend row go last, because
+       by then the column they sit beside is the only one still open. */
+    if (leadSkeins.length >= 2) countColumns.push({ field: 'skeins', values: leadSkeins });
+    zipCountColumns(entries, countColumns, warnings);
 
     /* '* 1 skein in each colour' fills in every row that had no number. */
     if (defaultSkeins !== null) {
@@ -2998,6 +3674,14 @@
         if (m) {
           result.design.w = parseInt(m[1], 10);
           result.design.h = parseInt(m[2], 10);
+        } else {
+          /* Height first is just as common: '35h x 49w' (Tiny Modernist),
+             'MAXIMUM STITCH COUNT 32 high x 56 wide' (a magazine chart). */
+          m = /\b(\d+)\s*(?:h\b|high)\s*(?:x|×|by)\s*(\d+)\s*(?:w\b|wide)/i.exec(line);
+          if (m) {
+            result.design.w = parseInt(m[2], 10);
+            result.design.h = parseInt(m[1], 10);
+          }
         }
       }
 
@@ -3030,20 +3714,94 @@
       }
     }
 
+    /* '14 HPI (28-count evenweave)': holes per inch at half the thread count
+       is the magazine way of saying "stitched over two". */
+    if (result.fabric.over === null && result.fabric.count) {
+      for (i = 0; i < rawLines.length; i++) {
+        m = /\b(\d{1,2})\s*(?:hpi|holes\s*per\s*inch|stitches\s*per\s*inch)\b/i.exec(rawLines[i]);
+        if (m && parseInt(m[1], 10) * 2 === result.fabric.count) { result.fabric.over = 2; break; }
+      }
+    }
+
+    /* Printed finished sizes, checked against the design they belong to.
+       Tiny Modernist prints them in the stitch count's own order ('35h x 49w'
+       then '2.5" x 3.5"'), so a row that fits better the other way round is
+       turned round. KG-Chart prints every size exactly twice what the
+       design gives at the stated count (500 stitches at '14 ct./inch' as
+       181.42 cm): on linen or evenweave that is the usual over-two, and
+       saying so makes the app's own size agree with the sheet; on aida it
+       is simply wrong, and the stitcher is told what it really comes to. */
+    if (result.design.w && result.design.h && result.sizes.length) {
+      var dW = result.design.w, dH = result.design.h, overTwoSeen = false;
+      var near2 = function (a, b) { return b > 0 && Math.abs(a / b - 2) <= 0.03; };
+      for (z = 0; z < result.sizes.length; z++) {
+        var srow = result.sizes[z];
+        if (!(srow.count > 0)) continue;
+        var ew = dW / srow.count, eh = dH / srow.count;
+        var straight = Math.abs(srow.wIn - ew) + Math.abs(srow.hIn - eh);
+        var turned = Math.abs(srow.wIn - eh) + Math.abs(srow.hIn - ew);
+        if (turned < straight) {
+          var tmpW = srow.wIn; srow.wIn = srow.hIn; srow.hIn = tmpW;
+        }
+        if (near2(srow.wIn, ew) && near2(srow.hIn, eh)) overTwoSeen = srow;
+      }
+      if (overTwoSeen) {
+        var evenish = result.fabric.kind === 'linen' || result.fabric.kind === 'evenweave';
+        if (evenish && result.fabric.over === null && result.fabric.count === overTwoSeen.count) {
+          result.fabric.over = 2;
+        } else if (!evenish && result.fabric.over !== 2) {
+          for (z = 0; z < result.sizes.length; z++) {
+            var fix = result.sizes[z];
+            if (!(fix.count > 0)) continue;
+            if (Math.abs(fix.wIn / (dW / fix.count) - 2) <= 0.03) {
+              fix.wIn = round2(dW / fix.count);
+              fix.hIn = round2(dH / fix.count);
+            }
+          }
+          pushOnce(warnings, 'the printed finished size is twice what ' + dW + ' x ' + dH +
+            ' stitches come to on ' + overTwoSeen.count + '-count ' +
+            (result.fabric.kind || 'fabric') + ' (it assumes stitching over two): it is really ' +
+            round1(dW / overTwoSeen.count) + ' x ' + round1(dH / overTwoSeen.count) + ' in');
+        }
+      }
+    }
+
     /* strandsDefault: a strand hint near "cross stitch" wins, else any hint.
        Backstitch lines are counted separately; when a sheet contradicts
        itself (the DMC library ones do, because the FR and EN columns bleed
        together) the smaller number is the safer one for backstitch. */
     var strandHint = null;
     var bsHint = null;
+    var knotHint = null;
     for (i = 0; i < rawLines.length; i++) {
       line = rawLines[i];
       m = STRAND_RE.exec(line);
+      /* Magazines spell it out: 'Cross stitch in two strands'. */
+      if (!m) {
+        var wm = WORD_STRAND_RE.exec(line);
+        if (wm) m = [wm[0], String(WORD_NUMS[wm[1].toLowerCase()])];
+      }
       if (!m) continue;
       var v = parseInt(m[1], 10);
       if (!(v >= 1 && v <= 6)) continue;
-      if (/back\s*stitch|point\s*arri/i.test(line)) {
+      var bsAt = /back\s*stitch|point\s*arri/i.exec(line);
+      if (bsAt) {
+        /* 'cross stitch Use 2 strands  backstitch Use 1 strand': two
+           headings on one line, and the backstitch number is the one after
+           its own word, while the one before it is the cross stitch's. */
+        var after = STRAND_RE.exec(line.slice(bsAt.index));
+        if (after && m.index < bsAt.index) {
+          var bv = parseInt(after[1], 10);
+          if (bv >= 1 && bv <= 6 && (bsHint === null || bv < bsHint)) bsHint = bv;
+          if (/cross\s*stitch|point\s*de\s*croix/i.test(line.slice(0, bsAt.index))) strandHint = v;
+          continue;
+        }
         if (bsHint === null || v < bsHint) bsHint = v;
+        continue;
+      }
+      /* 'French knots in one strand' is not the cross-stitch default. */
+      if (/french\s*knots?|point\s*de\s*n(?:oe|œ)ud/i.test(line)) {
+        if (knotHint === null) knotHint = v;
         continue;
       }
       if (/cross\s*stitch|point\s*de\s*croix/i.test(line)) { strandHint = v; continue; }
@@ -3051,6 +3809,7 @@
     }
     if (strandHint !== null) result.strandsDefault = strandHint;
     if (bsHint !== null) result.bsStrands = bsHint;
+    if (knotHint !== null) result.knotStrands = knotHint;
 
     /* stitchesUsed */
     result.stitchesUsed = stitchesUsedFrom(raw, rawLines);
@@ -3111,35 +3870,106 @@
     /* Surface embroidery sheets rather than half-parsing them: they use
        straight, stem, satin and buttonhole stitch on plain fabric, so there
        is no grid, no count and nothing for a stitch counter to count. */
-    if (EMBROIDERY_STITCH_RE.test(raw) && !/cross\s*stitch|point\s*de\s*croix/i.test(raw) &&
-        !/\baida\b/i.test(raw) && !result.fabric.count) {
+    var isEmbroidery = EMBROIDERY_STITCH_RE.test(raw) &&
+      !/cross\s*stitch|point\s*de\s*croix/i.test(raw) &&
+      !/\baida\b/i.test(raw) && !result.fabric.count;
+    if (isEmbroidery) {
       pushOnce(warnings, 'this looks like an embroidery pattern, not a counted chart');
       if (result.confidence > 0.2) result.confidence = 0.2;
     }
 
     if (!nEntries) pushOnce(warnings, 'no colour key found');
+
+    /* What kind of thing did we just read? The importer needs one word for
+       the banner, and 'none' is a perfectly good answer for a page of
+       alphabets with no key at all. */
+    result.kind = isEmbroidery ? 'embroidery'
+      : (nEntries || result.design.w || result.fabric.count ? 'cross-stitch' : 'none');
     return result;
   }
 
-  /* One key row, or null when the line is not a key row. */
-  function parseKeyRow(rawLine, kind, brandRe, docBrand, defaultStrands, inBlock) {
+  /** The next non-blank line opens with a DMC code we know (after an optional symbol). */
+  function nextStartsWithDmc(rawLines, li) {
+    for (var j = li + 1; j < rawLines.length && j <= li + 3; j++) {
+      var toks = tokenizeKeyLine(cleanKeyLine(rawLines[j]));
+      if (!toks.length) continue;
+      if (hexFor('DMC', toks[0])) return true;
+      return toks.length > 1 && toks[0].length <= 2 && !!hexFor('DMC', toks[1]);
+    }
+    return false;
+  }
+
+  /** Does this token name a floss the table actually knows? */
+  function resolvesAsCode(tok, brand) {
+    if (!tok) return false;
+    if (NAMED_CODE_RE.test(tok)) return true;
+    if (!CODE_TOKEN_RE.test(tok)) return false;
+    return !!hexFor(brand || 'DMC', tok) || /^\d{3,5}$/.test(tok);
+  }
+
+  /**
+   * One key row, or null when the line is not a key row.
+   * `altCols` is the number of *extra* brand columns a cross-brand header
+   * declared, so `Z B5200 1 2401 white` drops the Anchor and Madeira numbers
+   * instead of reading them as a colour name or a stitch count.
+   */
+  function parseKeyRow(rawLine, kind, brandRe, docBrand, defaultStrands, inBlock, altCols, dmcTable) {
     var cleaned = cleanKeyLine(rawLine);
     if (!cleaned) return null;
     if (cleaned.length > 160) return null;
+    altCols = altCols > 0 ? altCols : 0;
+    /* A 'Stitches Length' pair on the end of the row ('453 Shell Grey LT
+       132 28.8 in.'): the length is floss to buy, not part of the name,
+       and the count in front of it is the stitch count. */
+    cleaned = cleaned.replace(/(\d)\s+\d+(?:[.,]\d+)?\s*(?:in|inches|cm|mm|m|yds?)\.?$/i, '$1');
 
     var toks = tokenizeKeyLine(cleaned);
     if (!toks.length) return null;
 
-    // Chart furniture, whatever the surrounding context.
-    if (looksLikeGridLine(toks)) return null;
+    /* Chart furniture, whatever the surrounding context — except that a row
+       of a cross-brand table is a run of bare ascending numbers too
+       ('310 403 2400' is DMC / Anchor / Madeira), so a row that is exactly
+       as wide as the header promised and starts with a floss we know is
+       spared the margin-ruler test. */
+    var brandRow = altCols > 0 && toks.length === altCols + 1 &&
+      !!hexFor(docBrand || 'DMC', toks[0]);
+    if (!brandRow && looksLikeGridLine(toks)) return null;
+    /* A line of nothing but chart glyphs ('p 22222 888 <<<<< p') is a row of
+       the grid that shared a line with the key. A run of one digit is a
+       glyph, not a floss code, so '8888' never becomes DMC 8888. */
+    if (toks.length >= 2) {
+      var allGlyphs = true;
+      for (var g = 0; g < toks.length; g++) {
+        if (!glyphyToken(toks[g])) { allGlyphs = false; break; }
+        /* ... except that DMC really does sell 333, 444, 666 and 777. On a
+           short line ('O 666', a symbol and its code) such a token is the
+           floss; a row of the grid is never this short. */
+        if (toks.length <= 3 && /^\d{3,4}$/.test(toks[g]) && hexFor('DMC', toks[g])) {
+          allGlyphs = false;
+          break;
+        }
+      }
+      if (allGlyphs) return null;
+    }
     // Any other bare run of numbers needs a key header to vouch for it.
     if (!inBlock && allIntegers(toks)) return null;
+
+    /* A symbol column of bare digits ('2', '7', '9' in a magazine key) reads
+       as an impossible floss code and the whole row would be thrown away.
+       Inside a key block, a short leading token that no floss table knows,
+       standing in front of one that every table knows, is the symbol. */
+    var forcedSymbol = '';
+    if (inBlock && toks.length >= 2 && toks[0].length <= 2 &&
+        !resolvesAsCode(toks[0], docBrand) && resolvesAsCode(toks[1], docBrand)) {
+      forcedSymbol = toks[0];
+      toks = toks.slice(1);
+    }
 
     /* blend, spotted before tokens are consumed */
     var blendCode = null;
     var bm = /\b(\d{3,5}|B5200|Blanc|Ecru|White)\s*(?:\+|\/|&|\band\b)\s*(\d{3,5}|B5200|Blanc|Ecru|White)\b/i.exec(cleaned);
 
-    var i = 0, symbol = '', brand = '';
+    var i = 0, symbol = forcedSymbol, brand = '';
     while (i < toks.length) {
       var t = toks[i];
       if (!brand && brandRe.test(t)) { brand = canonBrand(t) || t; i++; continue; }
@@ -3161,13 +3991,35 @@
 
     /* Reject prose: a bare short number with no brand and no DMC match is
        almost always "2 strands throughout" or a margin ruler. A document-level
-       brand (an Anchor-only chart) vouches for two-digit codes too. */
-    var codeOk = !!hex || !!brand || NAMED_CODE_RE.test(code) ||
-      /^\d{3,5}$/.test(code) || (!!docBrand && /^\d{2,5}$/.test(code));
+       brand (an Anchor-only chart) vouches for two-digit codes too, but a
+       document-level hint is weak evidence on its own — an Antique Pattern
+       Library scan reads "ANCHOR ... 65 BROAD STREET BOSTON MASS." as an
+       Anchor 65 — so that case also wants a key header above it. */
+    /* DMC's 2017 colours are numbered 1 to 35 ('19' is Medium Light Autumn
+       Gold). The floss table has no swatches for them, so they only count
+       as codes under a header that names DMC as a column. */
+    var newDmc = !!dmcTable && !brand && /^(?:[1-9]|[12]\d|3[0-5])$/.test(code) &&
+      !symbol && !(i < toks.length && normUnitWord(toks[i])) &&   // '(2 strands)'
+      !new RegExp('\\(\\s*' + code + '\\b').test(rawLine);
+    var codeOk = !!hex || !!brand || NAMED_CODE_RE.test(code) || newDmc ||
+      /^\d{3,5}$/.test(code) || (!!docBrand && inBlock && /^\d{2}$/.test(code));
     if (!codeOk) return null;
 
     /* ---- name + trailing numbers ---- */
     var rest = toks.slice(i);
+
+    /* The equivalents columns a cross-brand header promised: drop that many
+       code-shaped tokens straight after the primary code. They are the same
+       colour in another brand, never a count and never part of the name. */
+    var dropped = 0;
+    while (dropped < altCols && rest.length && CODE_TOKEN_RE.test(rest[0])) {
+      rest.shift();
+      dropped++;
+    }
+    /* A row that stops short of the table's columns, with nothing after its
+       codes, may have had the rest wrapped onto the next line. */
+    var altOwed = rest.length ? 0 : altCols - dropped;
+
     if (bm) {
       blendCode = bm[2];
       // drop the '+ 3799' half of the blend so it never lands in the name
@@ -3217,13 +4069,18 @@
     }
 
     var fit = fitNums(unlabelled, have);
-    var name = nameToks.concat(fit.extra.map(String)).join(' ')
-      .replace(/^[-:|\s]+/, '').replace(/[-:|\s]+$/, '').trim();
+    var name = tidyName(nameToks.concat(fit.extra.map(String)).join(' ')
+      .replace(/^[-:|\s]+/, '').replace(/[-:|\s]+$/, '').trim());
 
     /* prose guard: key rows are short */
     var nameWords = name ? name.split(/\s+/).length : 0;
     if (nameWords > 8) return null;
-    if (!name && fit.strands === null && fit.stitchCount === null && fit.skeins === null) return null;
+    if (!name && fit.strands === null && fit.stitchCount === null && fit.skeins === null) {
+      /* A bare code row is a key row when a key header vouched for the block
+         and the code is one we can actually colour in — which is how the
+         cross-brand tables ('725 701', '905 327') survive. */
+      if (!(inBlock && (hex || symbol || newDmc))) return null;
+    }
 
     /* A key row has to look like one: a counted quantity, a colour name, a
        symbol glyph, a brand word, or a key header vouching for the block. */
@@ -3245,7 +4102,8 @@
       blendCode: blendCode,
       hex: hex,
       line: String(rawLine).trim(),
-      symbolUnreadable: unreadable
+      symbolUnreadable: unreadable,
+      altOwed: altOwed
     };
   }
 
@@ -3262,21 +4120,25 @@
     return out || null;
   }
 
-  /* 'in', 'inch', 'inches' or a double-quote mark */
-  var IN = '(?:in\\b|inch(?:es)?\\b|")';
+  /* 'in', 'inch', 'inches' or a double-quote mark, straight or curly
+     (Tiny Modernist prints '14-ct 2.5” x 3.5”' and '16-ct 2" x 3"' on
+     consecutive lines). */
+  var IN = '(?:in\\b|inch(?:es)?\\b|["”“″])';
+  /* '14 ct', '14ct', '14-ct', '14 count', '14-count' */
+  var CT = '\\s*-?\\s*(?:ct\\b|count\\b)';
 
   /* Built once: parseKey runs these over every line of a 100 kB extraction,
      and `new RegExp` per line was the single most expensive thing it did. */
   var SIZE_RES = [
     /* '5.1" x 5.1" on 14 ct' — the unit after the first number */
-    { re: new RegExp('(\\d+(?:\\.\\d+)?)\\s*' + IN + '\\s*(?:x|\u00D7)\\s*(\\d+(?:\\.\\d+)?)\\s*' + IN + '?[^\\n]*?(\\d{2})\\s*(?:ct\\b|count\\b)', 'i'), c: 3, w: 1, h: 2, cm: false },
+    { re: new RegExp('(\\d+(?:\\.\\d+)?)\\s*' + IN + '\\s*(?:x|\u00D7)\\s*(\\d+(?:\\.\\d+)?)\\s*' + IN + '?[^\\n]*?(\\d{2})' + CT, 'i'), c: 3, w: 1, h: 2, cm: false },
     /* '6.36 x 5.29 in on 14 ct' — the unit only after the second number */
-    { re: new RegExp('(\\d+(?:\\.\\d+)?)\\s*(?:x|\u00D7)\\s*(\\d+(?:\\.\\d+)?)\\s*' + IN + '[^\\n]*?(\\d{2})\\s*(?:ct\\b|count\\b)', 'i'), c: 3, w: 1, h: 2, cm: false },
+    { re: new RegExp('(\\d+(?:\\.\\d+)?)\\s*(?:x|\u00D7)\\s*(\\d+(?:\\.\\d+)?)\\s*' + IN + '[^\\n]*?(\\d{2})' + CT, 'i'), c: 3, w: 1, h: 2, cm: false },
     /* '14 ct: 6.36 x 5.29 inches' */
-    { re: new RegExp('(\\d{2})\\s*(?:ct\\b|count\\b)[^\\n]*?(\\d+(?:\\.\\d+)?)\\s*' + IN + '?\\s*(?:x|\u00D7)\\s*(\\d+(?:\\.\\d+)?)\\s*' + IN, 'i'), c: 1, w: 2, h: 3, cm: false },
+    { re: new RegExp('(\\d{2})' + CT + '[^\\n]*?(\\d+(?:\\.\\d+)?)\\s*' + IN + '?\\s*(?:x|\u00D7)\\s*(\\d+(?:\\.\\d+)?)\\s*' + IN, 'i'), c: 1, w: 2, h: 3, cm: false },
     /* '71.12 cm x 91.44 cm (16 ct./inch)' */
-    { re: new RegExp('(\\d+(?:\\.\\d+)?)\\s*cm\\s*(?:x|\u00D7)\\s*(\\d+(?:\\.\\d+)?)\\s*cm[^\\n]*?(\\d{2})\\s*(?:ct\\b|count\\b)', 'i'), c: 3, w: 1, h: 2, cm: true },
-    { re: new RegExp('(\\d{2})\\s*(?:ct\\b|count\\b)[^\\n]*?(\\d+(?:\\.\\d+)?)\\s*(?:cm)?\\s*(?:x|\u00D7)\\s*(\\d+(?:\\.\\d+)?)\\s*cm', 'i'), c: 1, w: 2, h: 3, cm: true }
+    { re: new RegExp('(\\d+(?:\\.\\d+)?)\\s*cm\\s*(?:x|\u00D7)\\s*(\\d+(?:\\.\\d+)?)\\s*cm[^\\n]*?(\\d{2})' + CT, 'i'), c: 3, w: 1, h: 2, cm: true },
+    { re: new RegExp('(\\d{2})' + CT + '[^\\n]*?(\\d+(?:\\.\\d+)?)\\s*(?:cm)?\\s*(?:x|\u00D7)\\s*(\\d+(?:\\.\\d+)?)\\s*cm', 'i'), c: 1, w: 2, h: 3, cm: true }
   ];
 
   function sizeRowFrom(line) {
@@ -3894,7 +4756,7 @@
       var x = num(it.transform[4], 0), y = num(it.transform[5], 0);
       if (/^\d{1,4}$/.test(trimmed)) { nums.push({ v: parseInt(trimmed, 10), x: x, y: y }); continue; }
       if (trimmed.length !== 1) continue;
-      out.push({ x: x, y: y, w: 1, h: 1, id: str(it.fontName, 'f') + '' + trimmed });
+      out.push({ x: x, y: y, w: 1, h: 1, id: str(it.fontName, 'f') + '\u0001' + trimmed });
     }
     return { marks: out, nums: nums };
   }
@@ -4156,7 +5018,7 @@
 
     /* 1. the symbol the key printed, when the mark is a real text glyph */
     for (i = 0; i < marks.length; i++) {
-      var glyph = marks[i].id.indexOf('') > 0 ? marks[i].id.split('')[1] : '';
+      var glyph = marks[i].id.indexOf('\u0001') > 0 ? marks[i].id.split('\u0001')[1] : '';
       if (!glyph) continue;
       for (j = 0; j < entries.length; j++) {
         if (usedE[j]) continue;
@@ -4232,6 +5094,10 @@
    *            glyphs: string[], counts: number[], palette, colors, matched,
    *            agree, confidence, ms, pages, tiles, warnings }
    */
+  /* How much of the budget may go on pages with no chart on them before the
+     reader stops looking. */
+  var EARLY_OUT_SHARE = 0.4;
+
   function extractGrid(doc, pageNo, opts) {
     opts = isObj(opts) ? opts : {};
     var warnings = [];
@@ -4279,8 +5145,16 @@
         else {
           misses++;
           /* Nothing that looks like a chart in the first handful of pages:
-             stop early so a PDF with no grid fails in under a second. */
-          if (!tiles.length && misses >= 6 && !pageNo) { stopped = true; return; }
+             stop early so a PDF with no grid fails in under a second.
+             A page of a scanned book is a single huge JPEG and can cost
+             more than a second to build an operator list for, so six of
+             them would blow any sane budget — once a share of the budget
+             has gone on misses alone, two are enough to call it. */
+          if (!tiles.length && !pageNo &&
+              (misses >= 6 || (misses >= 2 && now() > budget * EARLY_OUT_SHARE))) {
+            stopped = true;
+            return;
+          }
         }
         return new Promise(function (r) { window.setTimeout(r, 0); }).then(function () {
           return step(n + 1);
@@ -4540,6 +5414,23 @@
     printableHTML: printableHTML,
 
     /* internals, exposed for test/xstitch.test.html only */
+    _key: {
+      brandColumnHeader: brandColumnHeader,
+      splitBrandGlued: splitBrandGlued,
+      decomposeCodes: decomposeCodes,
+      stripChartSoup: stripChartSoup,
+      countColumnAt: countColumnAt,
+      skeinColumnAt: skeinColumnAt,
+      zipCountColumns: zipCountColumns,
+      zipColumn: zipColumn,
+      openRuns: openRuns,
+      nameColumnAt: nameColumnAt,
+      zipNameColumn: zipNameColumn,
+      trailingCodeRow: trailingCodeRow,
+      tidyName: tidyName,
+      cleanKeyLine: cleanKeyLine
+    },
+
     _grid: {
       combFit: combFit,
       latticeOf: latticeOf,

@@ -122,10 +122,73 @@ p { margin: 0 0 0.6em; }
 .screen {
   position: fixed;
   inset: 0;
+  /* A persistent top banner pushes every screen down rather than covering it. */
+  top: var(--banner-h, 0px);
   display: flex;
   flex-direction: column;
-  height: 100dvh;
+  height: calc(100dvh - var(--banner-h, 0px));
 }
+
+/* --------------------------------------------------------------------------
+   3b. Top banners — a save that failed, private browsing, a second tab
+   (13 #1–#3, 09 #2). Never dismissable; the user has to act or accept.
+   -------------------------------------------------------------------------- */
+
+.banners {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 80;
+  display: flex;
+  flex-direction: column;
+}
+.banners:empty { display: none; }
+
+.banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 10px var(--pad);
+  padding-top: calc(10px + env(safe-area-inset-top));
+  border-bottom: 1px solid var(--border);
+  background: var(--danger);
+  color: var(--primary-text);
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+.banner-calm {
+  background: var(--surface-2);
+  color: var(--text);
+}
+.banner-text { flex: 1 1 200px; margin: 0; min-width: 0; }
+.banner-actions { flex: 0 0 auto; display: flex; gap: 8px; flex-wrap: wrap; }
+.banner .btn {
+  min-height: 40px;
+  padding: 6px 12px;
+  font-size: 14px;
+  background: var(--surface);
+  color: var(--text);
+  border-color: var(--surface);
+}
+.banner-calm .btn { border-color: var(--border); }
+
+/* "Your work lives only on this phone" (12 #1) — dismissible, on Home. */
+.nag-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+}
+.nag-text { flex: 1 1 180px; margin: 0; font-size: 14px; font-weight: 700; line-height: 1.35; }
+.nag-actions { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; }
+.btn.small { min-height: 40px; padding: 6px 12px; font-size: 14px; }
 
 .screen-body {
   flex: 1 1 auto;
@@ -386,6 +449,18 @@ p { margin: 0 0 0.6em; }
   font-weight: 700;
   font-size: 14px;
   white-space: nowrap;
+  /* 13 #10: a very long part name used to wrap into a block that filled the
+     whole strip and pushed "＋ part" out of reach. */
+  max-width: 11em;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.tab-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .tab.active {
   background: var(--primary);
@@ -600,6 +675,14 @@ p { margin: 0 0 0.6em; }
   65% { background: var(--primary); }
 }
 
+/* Without the 3D piece this is just the old centred stack. */
+.stitch-head {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+}
 .stitch-caption {
   font-family: var(--font-display);
   font-size: 13px;
@@ -627,56 +710,85 @@ p { margin: 0 0 0.6em; }
   border-radius: inherit;
   pointer-events: none;
 }
-/* The piece is behind the text, so the text needs its own edge. A halo in the
-   button colour works for every theme: the text was designed to contrast with
-   --primary, so a --primary halo always separates it from the yarn. */
-.stitch-btn.has-diagram .stitch-caption,
-.stitch-btn.has-diagram .stitch-number,
-.stitch-btn.has-diagram .stitch-hint {
+/* 05 #1 — get the piece out from under the number.
+   `STITCHES`, a 90 px numeral and the `TAP` pill used to run straight down the
+   vertical axis of the button, which is exactly where a round-worked solid of
+   revolution is: on the 6-round Ear the whole model sat behind the `STITCHES`
+   pill. Now the readout is a single row pinned to the TOP of the button and
+   everything below it belongs to the piece (app.js measures this row and hands
+   the renderer matching `safeInsets`, so the fit box is the free area, not the
+   canvas). The number stays the biggest, most legible thing on screen. */
+.stitch-btn.has-diagram {
+  justify-content: flex-start;
+  gap: 0;
+}
+.stitch-btn.has-diagram .stitch-head {
   position: relative;
   z-index: 1;
+  flex: 0 0 auto;
+  flex-direction: row;
+  align-items: baseline;
+  justify-content: center;
+  gap: 10px;
+  width: 100%;
+  padding: 6px 14px 2px;
 }
 .stitch-btn.has-diagram .stitch-number {
+  /* Smaller, because it no longer has to hold a whole button on its own: it
+     is a pinned readout with the piece under it, not a backdrop. At 375 px
+     this is still a ~65 px numeral — the largest thing on the screen after
+     the round number — and it buys the piece 60 % more room. */
+  font-size: calc(var(--counter-size) * 0.68);
   text-shadow:
     0 0 2px var(--primary),
     0 0 6px var(--primary),
     0 0 14px var(--primary),
-    0 0 28px var(--primary),
     0 2px 3px rgba(0, 0, 0, 0.35);
 }
-.stitch-btn.has-diagram .stitch-caption,
+.stitch-btn.has-diagram .stitch-caption {
+  font-size: 11px;
+  letter-spacing: 2px;
+  opacity: 0.9;
+  text-shadow: 0 0 6px var(--primary), 0 0 12px var(--primary);
+}
+/* The hint is a hairline at the very bottom, out of the piece's way. */
 .stitch-btn.has-diagram .stitch-hint {
-  opacity: 1;
-  padding: 3px 10px;
-  border-radius: var(--radius-sm);
-  background: var(--primary);
-  background: color-mix(in srgb, var(--primary) 82%, transparent);
-  -webkit-backdrop-filter: blur(6px);
-  backdrop-filter: blur(6px);
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.18);
-}
-.stitch-btn.has-diagram .stitch-caption { margin-bottom: 6px; }
-.stitch-btn.has-diagram .stitch-hint { margin-top: 6px; }
-
-.stitch-3d {
   position: absolute;
-  top: 8px;
-  right: 8px;
-  z-index: 2;
-  width: 44px;
-  height: 44px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: var(--radius-sm);
-  font-size: 17px;
-  line-height: 1;
-  color: var(--primary-text);
-  background: rgba(0, 0, 0, 0.55);
-  border: 1px solid rgba(255, 255, 255, 0.45);
-  backdrop-filter: blur(2px);
+  left: 0;
+  right: 0;
+  bottom: 6px;
+  z-index: 1;
+  opacity: 0.55;
+  font-size: 11px;
+  text-shadow: 0 0 6px var(--primary), 0 0 12px var(--primary);
+  pointer-events: none;
 }
-.stitch-3d:active { transform: scale(0.94); }
+/* Once counting has started the hint has done its job. */
+.stitch-btn.has-diagram.counted .stitch-hint { opacity: 0; }
+
+/* The deviation cue (05 #6): quiet, inline, under the stitch readout. */
+.stitch-dev {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--danger);
+  text-align: center;
+  padding: 0 4px;
+}
+
+/* 02 #8 / 07 #7–#8: out of the tap surface and into the actions row. It is a
+   plain .btn now, so its colours come from --surface-2 / --text and pass
+   contrast in all six themes (the old rule painted --primary-text on a fixed
+   black scrim, which measured 1.81:1 in dragon-pixel and 2.53:1 in
+   dragon-fury). */
+.stitch-3d {
+  flex: 0 0 auto;
+  gap: 6px;
+  min-height: 44px;
+  padding: 6px 12px;
+  font-size: 14px;
+}
+.stitch-3d-glyph { font-size: 16px; line-height: 1; }
+.stitch-3d:active { transform: translateY(1px); }
 
 /* --- 3D viewer sheet --- */
 
@@ -691,6 +803,17 @@ dialog.sheet.sheet-viewer .sheet-body {
   color: var(--text-muted);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+}
+/* "Pattern says 36 · instructions add up to 24" under the round readout. */
+.viewer-readout-note {
+  display: block;
+  max-width: 150px;
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.25;
+  white-space: normal;
+  text-align: right;
 }
 .viewer-stage {
   flex: 1 1 auto;
@@ -716,6 +839,78 @@ dialog.sheet.sheet-viewer .sheet-body {
   text-align: center;
   color: var(--primary-text);
   opacity: 0.85;
+}
+/* What the geometry made of this piece: "Sphere · 15 rounds · 48 around"
+   (05 #2 / 12), plus the Rounds/Rows override that writes Part.workMode. */
+.viewer-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px var(--pad);
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+  flex-wrap: wrap;
+}
+.viewer-shape {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+  min-width: 0;
+}
+.viewer-shape .viewer-shape-sub {
+  display: block;
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.viewer-bar .seg { flex: 0 0 auto; }
+.viewer-bar .seg button { font-size: 12px; padding: 5px 9px; }
+/* Second row of the bar: the Auto/Top-down/Bottom-up chips and what Auto read
+   out of the pattern. Its own line, so 375 wide never squeezes the chips. */
+.viewer-bar-row {
+  flex: 1 0 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+/* "Top-down" / "Bottom-up" stay on one line — a chip broken over two lines
+   reads as two chips — so the hint takes the line under them. */
+.viewer-bar-row .seg button { white-space: nowrap; }
+.viewer-bar-hint {
+  flex: 1 0 100%;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+/* "Terms" in front of the Auto/UK/US chips, so they never read as a second
+   copy of the Auto/Top-down/Bottom-up row above them. */
+.viewer-bar-label {
+  flex: 0 0 auto;
+  font-size: 12px;
+  font-weight: 800;
+  color: var(--text-muted);
+}
+/* The Terms row keeps its (short) hint beside the chips: a third two-line
+   row would take ~75 px off the piece at 375×812. */
+.viewer-bar-row-inline { flex-wrap: nowrap; }
+.viewer-bar-row-inline .viewer-bar-hint { flex: 1 1 0; }
+/* "Showing a simple outline — 3D isn't available right now." */
+.viewer-note {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 2;
+  padding: 8px var(--pad);
+  font-size: 12px;
+  text-align: center;
+  color: var(--primary-text);
+  background: rgba(0, 0, 0, 0.35);
 }
 dialog.sheet.sheet-viewer .sheet-inner { height: 92dvh; }
 @media (min-width: 700px) {
@@ -776,6 +971,7 @@ dialog.sheet.sheet-viewer .sheet-inner { height: 92dvh; }
   align-items: center;
   justify-content: space-between;
   gap: 10px;
+  flex-wrap: wrap;
 }
 
 /* --------------------------------------------------------------------------
@@ -952,6 +1148,24 @@ dialog.sheet {
   overflow: hidden;
 }
 dialog.sheet::backdrop { background: var(--overlay); }
+/* No showModal() (older iOS Safari): no top layer and no ::backdrop, so the
+   dialog — which already fills the viewport — paints the tint itself and sits
+   above the app's own fixed layers (banners 60-80), under the tour (200). A
+   tap on the tint is a tap on the dialog, which closes it (UX sweep D3). */
+dialog.sheet.sheet-fallback {
+  z-index: 150;
+  background: var(--overlay);
+}
+
+/* The corrupt-state recovery covers everything: the next write would destroy
+   the evidence, so there is nothing else to do first (13 #3). */
+dialog.sheet.sheet-corrupt .sheet-inner {
+  top: 0;
+  max-height: none;
+  border-radius: 0;
+  border: none;
+}
+dialog.sheet.sheet-corrupt .sheet-grab { display: none; }
 
 dialog.sheet .sheet-inner {
   position: absolute;
@@ -1387,6 +1601,42 @@ textarea.mono {
   line-height: 1.3;
   overflow-wrap: anywhere;
 }
+/* 01 #3: a suggestion we had to reconstruct arrives unticked and says so. */
+.imp-weak { color: var(--text-muted); font-weight: 700; font-size: 12px; }
+
+/* "Looks like UK terms" and friends (06 #3) — informational only. */
+.imp-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.imp-chip {
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  font-size: 12px;
+  font-weight: 800;
+  color: var(--text-muted);
+}
+
+/* "Don't set targets", in the sections header (01 #1) */
+.imp-targets { display: flex; align-items: center; gap: 8px; margin: -4px 0 2px; }
+.imp-targets-label { font-size: 13px; font-weight: 700; color: var(--text-muted); }
+
+/* Backup import preview (09 #3, 12 #3) */
+.imp-counts { margin: 0; font-weight: 800; }
+.imp-rows { display: flex; flex-direction: column; gap: 10px; }
+.imp-row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+}
+.imp-row-name { font-weight: 800; overflow-wrap: anywhere; }
+.imp-row-meta { font-size: 12px; font-weight: 700; color: var(--text-muted); line-height: 1.4; }
+
+/* "These parts are not finished yet" on the project-done sheet (02 #2) */
+.blocking-list { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 2px; }
 
 /* PDF drop zone */
 .dz-wrap { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
@@ -1444,6 +1694,10 @@ textarea.mono {
 }
 
 .dz-result { font-size: 12px; font-weight: 700; margin: 0; }
+/* "Pages 12–20 had no readable text" (06 #4) */
+.dz-empty { line-height: 1.4; }
+/* 06 #6: the only way out of a long read */
+.dz-cancel { min-height: 40px; font-size: 14px; }
 
 /* "Have a pattern PDF?" pointer on the empty state and the new-project sheet */
 .pdf-hint {
@@ -1811,6 +2065,32 @@ textarea.mono {
 
 @media (min-height: 900px) {
   .stitch-btn { min-height: 44vh; }
+}
+
+/* UX sweep D4 / L10 (Wave E) — short phones. Below ~760 px of viewport the
+   counter overflowed and −1 / reset sat under the bottom bar with no scroll
+   cue (93 px over at 375×640; 76 px over even at 812 on a round with a setup
+   line and a three-line instruction). The order of things is unchanged; the
+   row card sheds whitespace, the instruction lines clamp tighter, and the big
+   button gives up its fixed floor first — it is still the largest target on
+   the screen, and it grows back as soon as there is room. */
+@media (max-height: 860px) {
+  .project-body .stitch-btn { min-height: max(20vh, 140px); }
+  .setup-line-text { -webkit-line-clamp: 1; }
+}
+@media (max-height: 760px) {
+  .project-body { gap: 8px; padding-top: 8px; }
+  .project-body .counter-card { padding: 4px var(--pad) 8px; }
+  .project-body .counter-card .big-number { font-size: min(var(--counter-size), 60px); }
+  .project-body .counter-card .round-btn { width: 50px; height: 50px; font-size: 26px; }
+  .project-body .counter-card .progress { margin-top: 2px; }
+  .project-body .counter-card .bar-label { margin-top: 2px; font-size: 12px; }
+  .project-body .tabs { padding-bottom: 2px; }
+  .pattern-line { padding: 6px 10px; }
+  .pattern-line-text { -webkit-line-clamp: 2; font-size: 14px; }
+  .setup-line { padding: 4px 10px; }
+  .project-body .stitch-section { gap: 4px; }
+  .project-body .stitch-btn { min-height: 120px; }
 }
 
 /* --------------------------------------------------------------------------

@@ -67,6 +67,15 @@ Template.craftData: object|null                        // seed craftData for pro
   `craft` wins when `opts.craft` is missing. For non-crochet crafts `parts` is
   still created (one part named `Main`) so nothing in the shell that expects
   `parts.length >= 1` breaks, but the craft UI may ignore parts entirely.
+- **`Part.workMode`, `Part.orientation` and `Part.dialect` are crochet-only**
+  (added by the 3D diagram work; see SPEC.md). They are normalised on load for
+  every project whatever its craft, because `Part` is one shape shell-wide and a
+  missing field would be `undefined` rather than `'auto'` — but nothing outside
+  the crochet paths reads them: they only feed `Store.diagramModel` /
+  `DiagramGeo`, and the part editor's chips for them (Worked in, Orientation,
+  Terms) sit with the other crochet-only fields the craft UIs hide. A
+  craft module must not repurpose
+  them; per-craft state belongs in `craftData`.
 - `Store.templates(craft?)` filters by craft when given. Built-in templates
   for the new crafts are declared by the craft module via
   `Store.registerCraft({ ..., templates: Template[] })` and seeded with the same
@@ -143,20 +152,37 @@ def = {
   // Theme changed while this craft's project is open (recolour canvases). Optional.
   onTheme(),
   // Called once at App.init after the shell is ready (register FAQ entries, etc.). Optional.
-  onInit(ctx)
+  onInit(ctx),
+  // Quota banner: while this craft's project is open, a "Free up space" button calls this.
+  // Optional; cross-stitch publishes its switch to counts-only mode (drops page images and caches).
+  freeUpSpace(projectId, ctx),
+  // Accept list for this craft's drop zone in the New project sheet. Optional, default ['.pdf'];
+  // cross-stitch: ['.pdf', '.oxs', '.xml'].
+  importAccept: string[]
 }
 ctx = {
   // the shell's helpers, so craft UIs look identical to the rest of the app
   el, button, on, clear, field, textInput, numInput, textArea, stepper, segmented, switchRow,
-  openSheet, confirmSheet, toast, announce, fb,            // fb('tap'|'group'|'row'|'alert'|'done'|'undo')
+  openSheet, confirmSheet, closeAllSheets, toast, announce, fb,   // fb('tap'|'group'|'row'|'alert'|'done'|'undo')
+  preserveFocus(fn),                                         // wrap a list rebuild so keyboard focus survives it
   wake: { supported, isOn(), toggle() → bool },            // screen wake lock (the lock follows any open project)
   render,                                                    // full re-render (use sparingly)
   currentProject, openProjectEditor, openChecklistSheet, openNotesSheet, openHistorySheet, openStatusSheet,
   celebrate,                                                 // celebrate('project'|'part'|'piece')
   prefersReducedMotion, cssVar,                              // cssVar(getComputedStyle(root), '--primary', fallback)
-  isPdfFile, firstFile, readPdfInto(zoneOpts) → node        // the existing PDF drop zone, reusable: see below
+  isPdfFile, firstFile, pdfDropZone(zoneOpts) → node        // the existing PDF drop zone, reusable: see below
+                                                             // (`readPdfInto` is the same builder under its old name)
 }
 ```
+
+- **Announcements** (`ctx.announce`) follow one policy in every craft: milestones only —
+  a row/round, group, piece, part or project done, a colour done, a step done, a block or
+  cut count moved, and every 50th stitch only where there is no grouping — never a single
+  stitch. Calls landing together are spoken together. (Cross-stitch still announces every
+  100th stitch.)
+- **Focus**: a craft that rebuilds a list by clearing it (steps, cutting chips, page
+  thumbnails) wraps the rebuild in `ctx.preserveFocus(fn)`; give controls a
+  `data-focus-key` so the replacement can be found.
 
 - `#screen-craft` is a third `<section class="screen" hidden>` in `index.html`
   with the same topbar markup as `#screen-project` (`#c-back`, `#c-title`,
@@ -176,6 +202,14 @@ ctx = {
   `newProjectFields`. `Save` passes `craft` and the merged `craftData` to
   `Store.createProject`. **Edit project** shows the craft as a read-only tag
   (crafts are not switchable after creation).
+  For a craft other than crochet the sheet also shows a **craft drop zone** in place
+  of the crochet PDF block (accept list from `def.importAccept`). Dropping a file
+  there creates the project exactly as Save would (an empty name takes the file's
+  base name), makes it active, closes the sheet, and calls
+  `def.openImportSheet(projectId)` with the file already waiting: the **first**
+  `ctx.pdfDropZone` the importer builds during that call takes it once mounted. So
+  the user sees the craft's own preview and confirm step, and an importer needs no
+  code for this beyond building its drop zone synchronously in `openImportSheet`.
 - The **home card** shows `Store.summaryFor(p)` and a small craft emoji badge
   when more than one craft is registered.
 - The **⋯ menu** for a non-crochet project: `Import pattern` → `def.openImportSheet`;
@@ -208,6 +242,9 @@ ctx.pdfDropZone({
   onText(res) {},            // res = PdfText.extract result { text, pages, chars, columnsDetected }
   onPages?(pdfDoc) {},       // optional: the loaded pdf.js document, for page.render() to canvas
   onFile?(file) {},          // a non-PDF file that matched `accept` (e.g. an .oxs chart), read it yourself
+  confirm?(file) {},         // gate before reading → boolean | Promise<boolean>
+  handOff?(file) {},         // catch the file UNREAD (type checked against `accept`, no quota/size
+                             // gates, no read) and pass it on; used by the New project craft zone
   onError(err) {}
 }) → HTMLElement            // append it wherever the sheet wants it
 ```
@@ -237,14 +274,91 @@ caption + big number inside exactly like the crochet one so themes style it),
 `.readout`, `.dz*` (drop zone), `.check`, `.item-*` (checklist rows), `.tpl-*`
 (template cards), `.muted`, `.sr-only`. Sheets come from `ctx.openSheet`.
 
+## Cross-stitch importer rules (`js/xstitch.js`, wave E)
+
+The ground truth, discrepancy table and residuals are in `docs/wave-e/xstitch-audit.md`.
+What `XStitch.parseKey` now promises beyond the research spec:
+
+- **Strands per stitch type.** The key result carries `strandsDefault` (cross),
+  `bsStrands` (backstitch) and `knotStrands` (French knots, from "French knots in N
+  strand(s)"); on a line holding two headings, the number after "backstitch" is the
+  backstitch one. The app gives back and knot rows their own count (`key.bsStrands` /
+  `key.knotStrands`), never the cross default.
+- **Over two.** `fabric.over = 2` when the text says so, when `N HPI` / "holes per inch"
+  is half the fabric count (WOCS "14 HPI (28-count evenweave)"), or when a printed size
+  is exactly 2× design/count on **linen or evenweave**. KG-Chart prints that doubled
+  size on **aida** too; there the size is corrected to design/count and a warning says
+  so ("…it is really 35.7 x 35.7 in"), and aida is never turned into over two.
+- **Printed sizes** (`sizes`): `14-ct`, `14-count` and curly or prime inch marks are
+  read, and each row is turned to w × h against the design size.
+- **Codes.** A page footer glued before or after a code (`34062 / 62` → 340) is
+  stripped; an equivalents number wrapped onto its own line belongs to the row above
+  (Cosmo 844 is not DMC 844); on a short line a known DMC 333/444/666/777 is a code, not
+  a glyph run; **DMC 1–35** (the 2017 shades) are accepted only inside a column headed
+  DMC, between DMC rows, never in brackets or before a unit — they have no swatch
+  ("no colour data for DMC 19", grey); Light Effects E-codes pass the DMC-library
+  bare-row check.
+- **Layouts.** A multi-column `code (N ct)` key read across the gutter is put back in
+  column order (`expandCountColumns`); a heading line naming two techniques takes its
+  kinds in heading order, each "* N skein" footnote advancing to the next; a trailing
+  "N 28.8 in." is a stitch count plus a floss length, not part of the name.
+- **Brand columns.** A key with DMC / Anchor / Madeira (or Cosmo) columns reads one
+  colour per row from the DMC column; the other brands are equivalents, never colours of
+  their own.
+- **Symbols.** Symbol fonts extract as their font codes and KG-Chart draws glyphs as
+  paths, so `applyPdf` always assigns the app's own symbol set; the app key and the
+  paper chart can differ.
+
+## Sewing importer rules (`js/sewing.js`, wave E)
+
+Ground truth and residuals: `docs/wave-e/sewing-audit.md`.
+
+- **Printed step numbering.** `Sewing.printedSteps(steps)` groups consecutive
+  construction cards that share a printed number (`step.n`) into one printed step —
+  "(continued)" cards and titled sub-paragraphs ("Centre Back Seam:" under step 4) —
+  and starts a new run when a number drops (bathers top 1–10, briefs 1–5). A run's count
+  is its highest printed number, so a missed step never reads "22 of 21"; unnumbered
+  paragraph and bullet steps fall back to card order. `Sewing.printedDone(steps, ps?)`
+  counts printed steps whose cards are all ticked. The UI follows the paper: header and
+  ring "Step 4 of 6", a "card 2 of 3" chip only when a step spans cards, the step list
+  "4 · 2/3", announcements "Step 4 of 6, card 2 of 3", progress and finish by printed
+  steps, home card "step 4 of 6" / "all 8 steps done".
+- **Long steps** (over 800 characters) carry on to "(continued)" cards, split at a
+  sentence, at most three cards, instead of being cut.
+- **Optional extras** (variations, care notes; `step.optional`) are shown after the
+  construction as "Optional extra n of m" and never count toward progress or finishing.
+- **Placeholder pieces.** A real import that finds no cutting list removes the
+  template's untouched placeholder pieces (and, with no notions, its placeholder
+  notions); rows the user ticked or edited stay, and "Just keep the text" changes nothing.
+- **Fabric rows.** A row printed without a bolt width (`LINING 1m / 1 yd`) is kept and
+  reads "<name> · any width"; a width-only row with no amount is dropped with "The
+  fabric requirements table could not be read — add the yardage yourself."; Metres and
+  Yards lines of one fabric are one row; BINDING / BACKING labels name the row under
+  them and "(Included)" is its amount; a column-printed table is zipped back together;
+  improper yardage "11/8 yard" is 1 1/8.
+- **Cutting.** The same piece under two groups is kept twice, labelled; elastic lengths
+  are not pieces; diagram captions ("…: Cut N") are skipped when the table's rows lead
+  with "(N)"; overprinted size-layer labels on pattern sheets are stripped; ® / ™ are
+  not part of a product code ("Pellon® Peltex® 70").
+- **Pattern names from the text.** "Instructions & Pattern <name>" is the name; a line
+  printed twice scores higher; letter-spaced lines, credits ("designed by", "X by Y",
+  "featuring"), labels, test squares and tile labels are never names. A name that is
+  only cover artwork stays blank rather than wrong.
+- **Not steps, not sections.** Running heads, "DIAGRAM n" / "Fig. n", rows of diagram
+  letters, capitals magazine decks and boilerplate (web addresses, ©, logos,
+  disclaimers) never become steps or sections; "sewing instructions - X" names the
+  section; a short caption inside a running step does not end it.
+
 ## Testing and verification (every craft)
 
 - `test/<craft>.test.html`: parser unit tests on committed synthetic snippets
   (aim for ≥ 60 assertions at launch), same style as `test/patterns.test.html`.
 - `test/<craft>.fixtures.html`: runs against real PDFs/files in `tmp-pdf/`
-  (gitignored, copyrighted, never committed); skips gracefully when absent.
-- Browser check at 375×812 in the Browser pane: clear the service worker and
-  caches before every check (`HANDOFF.md` has the snippet), exercise create →
+  (gitignored, copyrighted, never committed); skips gracefully when absent. It
+  extracts through `PdfText` and caches the text in sessionStorage, so after a
+  change to `js/pdftext.js` run it in a fresh tab.
+- Browser check at 375×812 in the Browser pane (on localhost the service worker
+  is network-first, so a reload is enough; see `HANDOFF.md`), exercise create →
   import → count → undo → export/import round-trip → delete, then confirm a
   crochet project still works.
 - Performance: a stitch tap or "mark done" must update the DOM in < 5 ms; chart

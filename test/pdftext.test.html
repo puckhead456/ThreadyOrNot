@@ -1,0 +1,449 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>PdfText extractor tests</title>
+<style>
+  body { font: 13px/1.4 Menlo, Consolas, monospace; background:#111; color:#eee; padding:16px; }
+  .pass { color:#7bd389; }
+  .fail { color:#ff6b6b; background:#2a1414; }
+  .skip { color:#888; }
+  .group { margin-top:18px; font-weight:bold; color:#9cf; border-bottom:1px solid #333; padding-bottom:4px; }
+  #summary { margin-top:20px; font-size:18px; font-weight:bold; }
+  #summary.ok { color:#7bd389; }
+  #summary.bad { color:#ff6b6b; }
+</style>
+</head>
+<body>
+<h1>PdfText extractor tests <span class="skip">(dev only - the fixture half reads ../tmp-pdf at
+runtime and skips what is not there; nothing copyrighted is committed)</span></h1>
+<p class="skip">Every rule added in the wave E extractor audit (docs/wave-e/pdftext-audit.md) has an
+assertion here: first on synthetic pdf.js items, then against the real fixture it was found in.
+Add <code>?heavy=1</code> to include the files over 17 MB.</p>
+<div id="out"></div>
+<div id="summary">running…</div>
+
+<script src="../js/vendor/pdf.min.js"></script>
+<script src="../js/pdftext.js"></script>
+<script>
+'use strict';
+
+(function () {
+  if (!window.pdfjsLib || !window.pdfjsLib.GlobalWorkerOptions) return;
+  var src = '../js/vendor/pdf.worker.min.js';
+  try {
+    Object.defineProperty(window.pdfjsLib.GlobalWorkerOptions, 'workerSrc', {
+      get: function () { return src; }, set: function () {}
+    });
+  } catch (e) { window.pdfjsLib.GlobalWorkerOptions.workerSrc = src; }
+})();
+
+var out = document.getElementById('out');
+var passed = 0, failed = 0, skipped = 0;
+var HEAVY = /(?:^|[?&])heavy=1(?:&|$)/.test(location.search);
+
+function line(cls, text) {
+  var div = document.createElement('div');
+  div.className = cls;
+  div.textContent = text;
+  out.appendChild(div);
+}
+function log(ok, label, detail) {
+  if (ok) passed++; else failed++;
+  line(ok ? 'pass' : 'fail', (ok ? 'PASS' : 'FAIL') + ' - ' + label + (detail ? '  (' + detail + ')' : ''));
+}
+function skip(label, why) { skipped++; line('skip', 'SKIP - ' + label + ' (' + why + ')'); }
+function group(title) { line('group', title); }
+function eq(actual, expected, label) {
+  var a = JSON.stringify(actual), e = JSON.stringify(expected);
+  log(a === e, label, a === e ? '' : 'expected ' + e + ' got ' + a);
+}
+function ok(cond, label, detail) { log(!!cond, label, cond ? '' : detail); }
+
+/* ---- synthetic pdf.js items ---------------------------------------- */
+/** An upright text item: str at (x, y), font height h, width w (default ~0.5 em a glyph). */
+function item(str, x, y, h, w) {
+  h = h || 10;
+  return { str: str, transform: [h, 0, 0, h, x, y], width: w == null ? str.length * h * 0.5 : w, height: h };
+}
+function lines(items, w, h) {
+  return window.PdfText._pageLines(items, w || 612, h || 792, 0).lines.map(function (l) { return l.text; });
+}
+
+/* ---- fixtures --------------------------------------------------------- */
+var cache = {};
+function blobOf(name) {
+  return fetch('../tmp-pdf/' + name, { cache: 'no-store' }).then(function (r) {
+    return r.ok ? r.blob() : null;
+  }, function () { return null; });
+}
+/** -> { res, pages: {n: text} } | { missing } | { heavy } | { error } */
+function fixture(name) {
+  if (cache[name]) return cache[name];
+  cache[name] = blobOf(name).then(function (blob) {
+    if (!blob) return { missing: true };
+    if (blob.size > 17 * 1048576 && !HEAVY) return { heavy: true };
+    return window.PdfText.extract(blob).then(function (res) {
+      var pages = {};
+      res.text.split(/^=== PAGE (\d+) ===$/m).forEach(function (chunk, i, arr) {
+        if (i % 2 === 1) pages[chunk] = (arr[i + 1] || '').replace(/^\n+|\n+$/g, '');
+      });
+      return { res: res, pages: pages, blob: blob };
+    }, function (err) { return { error: String((err && err.message) || err), blob: blob }; });
+  });
+  return cache[name];
+}
+/** Run checks(f) when the fixture is readable; otherwise count a skip. */
+function withFixture(name, label, checks) {
+  return fixture(name).then(function (f) {
+    if (f.missing) return skip(label, name + ' not in tmp-pdf');
+    if (f.heavy) return skip(label, name + ' is over 17 MB, add ?heavy=1');
+    return checks(f);
+  });
+}
+function pageLines(f, n) { return String(f.pages[n] || '').split('\n'); }
+function hasLine(f, n, text) { return pageLines(f, n).indexOf(text) >= 0; }
+function lineIndex(f, n, text) { return pageLines(f, n).indexOf(text); }
+
+var chain = Promise.resolve();
+function step(fn) { chain = chain.then(fn).catch(function (e) { log(false, 'threw', String(e && e.stack || e)); }); }
+
+/* ===================================================================== */
+step(function () {
+  group('Superscripts and stacked fractions (attachScripts)');
+  // "26 (27" then a raised small "1", a fraction slash and a small "2" on the baseline.
+  var its = [
+    item('Finished Size 26 (27', 50, 500, 9, 90),
+    item('1', 140, 503.6, 5, 2.5),
+    item('⁄', 142.5, 500, 9, 2),
+    item('2', 144.5, 500, 5, 2.5),
+    item(')', 147, 500, 9, 3)
+  ];
+  eq(lines(its), ['Finished Size 26 (27 1⁄2)'],
+    'a raised numerator joins its line, set apart from the whole number');
+  var ord = [item('Hdc in 3', 50, 500, 11, 40), item('rd', 90, 504, 6.4, 6), item(' ch from hook', 96, 500, 11, 60)];
+  eq(lines(ord), ['Hdc in 3rd ch from hook'], 'an ordinal superscript joins its line ("3rd", premier-simple-throw)');
+  // Two OCR lines drifting into each other are not scripts of one another.
+  var ocr = [item('By following the instructions on', 50, 500, 11, 170), item('especially when worked in white', 52, 504, 8, 150)];
+  eq(lines(ocr).length, 2, 'a smaller line lying ON another line stays a line of its own');
+  eq(window.PdfText._normUnicode('Finished Size 71⁄2 (9, 101⁄2)'), 'Finished Size 7 1/2 (9, 10 1/2)',
+    'a proper fraction glued to a whole number is split off it, and the fraction slash folds to "/"');
+  eq(window.PdfText._normUnicode('Finished Size 71/2 (9, 101/2)" and 11/2 yds'),
+    'Finished Size 7 1/2 (9, 10 1/2)" and 1 1/2 yds', '...also when the run itself says "71/2" with an ASCII slash');
+  eq(window.PdfText._normUnicode('dated 21/4/2024, page 12/24, ratio 3/5'), 'dated 21/4/2024, page 12/24, ratio 3/5',
+    '...but never a date, a page count or an improper fraction');
+});
+
+step(function () {
+  group('Overprint and tracked headings');
+  var faux = [item('C U T T I N G', 50, 700, 14, 90), item('C U T T I N G', 50.2, 700, 14, 90),
+    item(' ', 140, 700, 14, 6), item('D I R E C T I O N S', 146, 700, 14, 120), item('D I R E C T I O N S', 146.2, 700, 14, 120)];
+  eq(lines(faux.concat([item('Cut 2 strips 2 1/2" x WOF.', 50, 680, 14, 180)])),
+    ['CUTTING DIRECTIONS', 'Cut 2 strips 2 1/2" x WOF.'],
+    'a faux-bold heading drawn twice comes out once, letter spacing repaired (sew-agf-catwalk-quilt)');
+  var pre = [item('Finished', 50, 700, 12, 50), item('Finished Block Sizes:', 50.3, 700, 12, 120)];
+  eq(lines(pre), ['Finished Block Sizes:'], 'a short overprinted copy of a run is dropped ("Finished Finished")');
+  var r = { items: [{ x: 0, end: 60, h: 10, str: 'A B C D' }] };
+  eq(window.PdfText._rowIsTracked(r), false, 'a photo key "A B C D" is not a tracked word');
+  r = { items: [{ x: 0, end: 60, h: 10, str: 'X X X O O' }] };
+  eq(window.PdfText._rowIsTracked(r), false, 'a chart row that repeats a symbol is not a tracked word');
+  r = { items: [{ x: 0, end: 60, h: 10, str: 'F R E E' }, { x: 60, end: 64, h: 10, str: ' ' }, { x: 64, end: 140, h: 10, str: 'P A T T E R N' }] };
+  eq(window.PdfText._rowIsTracked(r), true, '"F R E E  P A T T E R N" is a tracked heading');
+});
+
+step(function () {
+  group('Full-width bands, captions, photo letters');
+  // Two columns of 14 lines, then a full-width paragraph of 3 lines under both.
+  var its = [], i;
+  for (i = 0; i < 14; i++) {
+    its.push(item('left column line ' + i + ' of body text', 40, 700 - i * 14, 10, 220));
+    its.push(item('right column line ' + i + ' of body text', 330, 700 - i * 14, 10, 220));
+  }
+  its.push(item('This paragraph runs across the whole page under both columns and', 40, 480, 10, 510));
+  its.push(item('keeps going across the gutter on its second line as well, like', 40, 466, 10, 510));
+  its.push(item('the legal box.', 40, 452, 10, 70));
+  var got = lines(its);
+  eq(got.slice(-3), ['This paragraph runs across the whole page under both columns and',
+    'keeps going across the gutter on its second line as well, like', 'the legal box.'],
+    'a full-width block under two columns is read whole, after both columns (bear p2)');
+  eq(got[0] + ' / ' + got[14], 'left column line 0 of body text / right column line 0 of body text',
+    '...and the columns above it are still read one after the other');
+  var joined = window.PdfText._joinHyphenated(['the second sec-', 'tion is worked', 'next ch-', 'sp, turn', 'can-', 'not be ga-', 'ined']);
+  eq(joined, ['the second section is worked', 'next ch-sp, turn', 'cannot be gained'],
+    'line-end hyphens: split words join, craft tokens keep their hyphen, joins chain');
+  eq(window.PdfText._joinHyphenated(['at the commence-', 'ment of the round']), ['at the commencement of the round'],
+    'the OCR hyphen case still joins');
+});
+
+step(function () {
+  group('PdfText.open: {signal} (HANDOFF 14) and handle.extract (HANDOFF 6)');
+  return blobOf('bear.pdf').then(function (blob) {
+    if (!blob) return skip('open() signal contract', 'bear.pdf not in tmp-pdf');
+    return window.PdfText.open(blob, { signal: { cancelled: true } }).then(function () {
+      log(false, 'open() with a cancelled signal rejects');
+    }, function (err) {
+      eq(err && err.name, 'AbortError', 'open() with a cancelled signal rejects with AbortError');
+    }).then(function () {
+      var sig = { cancelled: false };
+      return window.PdfText.open(blob, { signal: sig }).then(function (h) {
+        return h.textOf(3).then(function (t) {
+          ok(/Head/.test(t), 'textOf still works on an open handle');
+          sig.cancelled = true;
+          return h.textOf(4).then(function () { log(false, 'textOf after cancel rejects'); },
+            function (err) { eq(err && err.name, 'AbortError', 'textOf after cancel rejects with AbortError'); });
+        }).then(function () {
+          return h.renderPage(1, { maxWidth: 50 }).then(function () { log(false, 'renderPage after cancel rejects'); },
+            function (err) { eq(err && err.name, 'AbortError', 'renderPage after cancel rejects with AbortError'); });
+        }).then(function () { h.destroy(); });
+      });
+    }).then(function () {
+      return Promise.all([window.PdfText.open(blob), window.PdfText.extract(blob)]).then(function (both) {
+        var h = both[0];
+        var stop = { cancelled: false };
+        return h.extract({ signal: stop }).then(function (res) {
+          eq(res.text, both[1].text, 'handle.extract() gives exactly PdfText.extract()\'s text');
+          ok(res.text.indexOf('Snor the Sleeping Bear') < 0,
+            '...including the cross-page running-head pass textOf never had');
+          eq(res.emptyPages, both[1].emptyPages, '...and the same emptyPages');
+          stop.cancelled = true;
+          return h.extract({ signal: stop }).then(function () { log(false, 'handle.extract with a cancelled signal rejects'); },
+            function (err) { eq(err && err.name, 'AbortError', 'handle.extract with a cancelled signal rejects'); });
+        }).then(function () { h.destroy(); });
+      });
+    });
+  });
+});
+
+/* ---- the real fixtures ----------------------------------------------- */
+step(function () {
+  group('bear.pdf');
+  return withFixture('bear.pdf', 'bear', function (f) {
+    ok(hasLine(f, 2, 'This pattern is intended for personal use only. All patterns, designs and photos included'),
+      'p2 legal box line read whole across the gutter', f.pages[2]);
+    ok(hasLine(f, 2, 'Willow&Wild. Copyright 2024.'), 'p2 the legal box\'s short last line stays with it');
+    ok(lineIndex(f, 2, 'Legal') >= 0 && lineIndex(f, 2, 'Legal') + 1 === lineIndex(f, 2,
+      'This pattern is intended for personal use only. All patterns, designs and photos included'),
+      'p2 the "Legal" heading sits right above its paragraph');
+    ok(hasLine(f, 2, 'You can use a different') && hasLine(f, 2, 'the finished size.'),
+      'p2 the tip bubble is read (prose, not a caption)');
+    ok(hasLine(f, 3, 'Stuff the head until the desired firmness is'), 'p3 photo letter C is not glued to the line');
+    ok(hasLine(f, 5, 'Legs') && !hasLine(f, 5, 'Legs G'), 'p5 photo letter G is not glued to the heading');
+  });
+});
+
+step(function () {
+  group('crochet-baphomet.pdf (callouts stay out)');
+  return withFixture('crochet-baphomet.pdf', 'baphomet', function (f) {
+    ['Crochet arms', '5 4 3 2 1', '4 sc between', 'Eye placement'].forEach(function (c) {
+      ok(f.res.text.split('\n').indexOf(c) < 0, 'diagram callout "' + c + '" is not in the text');
+    });
+  });
+});
+
+step(function () {
+  group('knit-interweave-lace.pdf / knit-interweave-8-socks.pdf / sew-freespirit-harmony-quilt.pdf (fractions)');
+  return withFixture('knit-interweave-lace.pdf', 'interweave lace', function (f) {
+    ok(/Finished Size 26 \(27 1\/2 ?, 28 3\/4\)" wide from cuff to cuff/.test(f.res.text),
+      'stacked fractions keep their numerators: "26 (27 1/2, 28 3/4)"');
+    ok(!/^1 3$/m.test(f.res.text), 'no numerator-only line "1 3"');
+  }).then(function () {
+    return withFixture('knit-interweave-8-socks.pdf', 'interweave socks', function (f) {
+      ok(/Finished Size 7 1\/2 \(9, 10 1\/2\)"/.test(f.res.text), 'same-baseline fraction: "7 1/2 (9, 10 1/2)"');
+    });
+  }).then(function () {
+    return withFixture('sew-freespirit-harmony-quilt.pdf', 'freespirit', function (f) {
+      ok(f.res.text.indexOf('64 1/2" x 64 1/2" (1.64m x 1.64m)') >= 0, 'faux-bold stacked fraction: 64 1/2" x 64 1/2"');
+      ok(f.res.text.indexOf('⁄') < 0, 'no fraction slash left in the output');
+    });
+  });
+});
+
+step(function () {
+  group('Superscript ordinals and marks');
+  return withFixture('crochet-premier-simple-throw.pdf', 'premier throw', function (f) {
+    ok(f.res.text.indexOf('Row 1: Hdc in 3rd ch from hook') >= 0, '"Hdc in 3rd ch from hook"');
+  }).then(function () {
+    return withFixture('crochet-stylecraft-cowl-mitts.pdf', 'stylecraft cowl', function (f) {
+      ok(f.res.text.indexOf('3tr in 6th ch from hook') >= 0, '"3tr in 6th ch from hook"');
+      ok(!/^th$/m.test(f.res.text), 'no orphan "th" line');
+    });
+  }).then(function () {
+    return withFixture('knit-fromtheheart-magicloop-socks.pdf', 'magic loop socks', function (f) {
+      ok(f.res.text.indexOf('between 18th (20th, 24th) and 19th (21st, 25th) stitches') >= 0,
+        'size list keeps its ordinals and punctuation');
+    });
+  }).then(function () {
+    return withFixture('sew-swoon-mabel-bag.pdf', 'mabel', function (f) {
+      ok(hasLine(f, 2, '- 1 yard sew-in Pellon® Peltex® 70 stabilizer'), 'Peltex line whole, ® marks in place');
+      ok(!/^® ®$/m.test(f.res.text), 'no "® ®" line');
+      ok(!/^SEWING PATTERNS$/m.test(f.res.text), 'the 3 pt logo tagline stays out');
+    });
+  }).then(function () {
+    return withFixture('sew-peppermint-westend-jacket.pdf', 'westend', function (f) {
+      ok(/60" 1 7\/8 yds/.test(f.res.text), 'the raised 7/8 stays with its 1: "1 7/8 yds"');
+    });
+  });
+});
+
+step(function () {
+  group('sew-agf-catwalk-quilt.pdf (overprinted, tracked headings)');
+  return withFixture('sew-agf-catwalk-quilt.pdf', 'catwalk', function (f) {
+    ok(hasLine(f, 1, 'FREE PATTERN'), 'p1 "FREE PATTERN"');
+    ok(hasLine(f, 4, 'CUTTING DIRECTIONS'), 'p4 "CUTTING DIRECTIONS"');
+    ok(hasLine(f, 5, 'CONSTRUCTION'), 'p5 "CONSTRUCTION"');
+  });
+});
+
+step(function () {
+  group('Colour keys (xs-dmc-2168, xs-pokemon-tr, xs-tinymodernist-*)');
+  return withFixture('xs-dmc-2168.pdf', 'dmc 2168', function (f) {
+    var p = pageLines(f, 4);
+    ok(p.indexOf('162 x1') >= 0 && p.indexOf('722 x1') >= 0 && p.indexOf('946 x1') >= 0,
+      'p4 each key block reads as "code x1" records');
+    ok(p.indexOf('162 x1') < p.indexOf('721 x1') && p.indexOf('721 x1') < p.indexOf('722 x1'),
+      'p4 block by block: 162..721, then 722..');
+  }).then(function () {
+    return withFixture('xs-pokemon-tr.pdf', 'pokemon tr', function (f) {
+      var last = f.res.pages;
+      var p = pageLines(f, last);
+      var a = p.indexOf('310 (12711 ct)'), b = p.indexOf('815 (1561 ct)'), c = p.indexOf('972 (1651 ct)');
+      ok(a >= 0 && b === a + 1, 'key page: column-major order, "310 (12711 ct)" then "815 (1561 ct)"', 'at ' + a + ',' + b);
+      ok(c > b, '...and the second key column comes after the first');
+    });
+  }).then(function () {
+    return withFixture('xs-tinymodernist-halloween.pdf', 'halloween', function (f) {
+      ok(hasLine(f, 1, '453 Shell Grey LT'), 'key row "453 Shell Grey LT"');
+      ok(hasLine(f, 1, '132 28.8 in.'), 'the Stitches/Length block stays its own column');
+    });
+  }).then(function () {
+    return withFixture('xs-tinymodernist-foxy.pdf', 'foxy', function (f) {
+      ok(hasLine(f, 1, 'X DMC'), 'the "X" leading the key header is not taken for a photo letter');
+    });
+  }).then(function () {
+    return withFixture('crochet-kingcole-pumpkins.pdf', 'pumpkins', function (f) {
+      ok(/3312 Mustard/.test(f.pages[2]) && /3491 Burnt Orange/.test(f.pages[2]),
+        'p2 shade labels under the swatches are key cells, not captions');
+    });
+  });
+});
+
+step(function () {
+  group('Captions that are instructions, © lines, invisible text');
+  return withFixture('sew-rileyblake-triple-t-tote.pdf', 'tote', function (f) {
+    ok(hasLine(f, 4, 'Cut off your zipper excess.'), 'p4 a one-sentence step between figures is kept');
+    ok(f.res.text.indexOf('backstitch!') >= 0 && f.res.text.indexOf('�') < 0,
+      'the unmapped "ti" ligature reads "backstitch", not "backs�tch"');
+  }).then(function () {
+    return withFixture('sew-freespirit-harmony-quilt.pdf', 'freespirit p2', function (f) {
+      ok(!/^[A-Z](?: [A-Z])*$/m.test(f.res.text),
+        'cutting-diagram letters ("I \\u001f I") are furniture once the control codes are ignored');
+      ok(/^\(4\) each J¹, J², J³, J4, and J5, oriented as shown/m.test(f.res.text),
+        'superscript piece numbers stay on their line (J4, J5)');
+      ok(/4 1\/8 yards \(3\.77m\)/.test(f.pages[2]),
+        'p2 a numerator level with bigger swatch labels still joins its fraction ("4 1/8 yards")');
+    });
+  }).then(function () {
+    return withFixture('sew-tianas-jogger-12m-6y.pdf', 'tianas', function (f) {
+      ok(/^SIZE 12M SIZE 18M SIZE 24M SIZE 3T SIZE 4T SIZE 5T SIZE 6$/m.test(f.res.text),
+        'upright size layers printed at one spot stay separate words (the sideways labels are a known gap)');
+    });
+  }).then(function () {
+    return withFixture('crochet-archive-weldons-v24.pdf', 'weldons v24', function (f) {
+      ok(/Repeat from \* to end of round\./.test(f.res.text) && /1 tr\. between next two treble/.test(f.res.text),
+        'an OCR "©" smudge does not throw a whole instruction line away');
+    });
+  }).then(function () {
+    return withFixture('cardigan.pdf', 'cardigan', function (f) {
+      ok(f.res.text.indexOf('WHEAT STITCH CROCHET CARDIGAN PAGE') < 0, 'the © running head is still furniture');
+      ok(/second section\. To finish/.test(f.res.text) && f.res.text.indexOf('sec-tion') < 0, '"sec-tion" joins to "section"');
+      ok(f.res.text.indexOf('stitch pattern repeats') >= 0, '"pat-tern" joins to "pattern"');
+    });
+  }).then(function () {
+    return withFixture('crochet-hobbii-amarah-en.pdf', 'amarah', function (f) {
+      ok(f.res.text.indexOf('hobbii-pattern-sku') < 0, 'the 1 pt SKU stamp is invisible and stays out');
+    });
+  }).then(function () {
+    return withFixture('crochet-allfree-stitches-ebook.pdf', 'allfree', function (f) {
+      ok(f.res.text.indexOf('') < 0, 'no private-use Symbol bullets left');
+    });
+  });
+});
+
+step(function () {
+  group('Tables under columns, side headings, OCR noise');
+  return withFixture('sew-peppermint-samford-pants.pdf', 'samford', function (f) {
+    var p = pageLines(f, 5);
+    ok(p.indexOf('140CM 1.5 1.65 1.5 1.9 2.6 2.85') >= 0 && p.indexOf('113CM 2 2.2 2.1 2.3 3.7 4') >= 0,
+      'p5 the fabric table under the columns is read row by row');
+    ok(p.indexOf('TOP SHORTS PANTS') >= 0 && p.indexOf('METERS YARDS METERS YARDS METERS YARDS') >= 0,
+      'p5 ...headers included');
+    ok(p.indexOf('- 2" (5cm) Elastic (Use provided elastic chart for') > p.indexOf('MATERIALS REQUIRED') &&
+      p.indexOf('1.5') < 0, 'p5 no stray table cells ahead of the notions');
+    ok(p.indexOf('NOTIONS') >= 0 && p.indexOf('INTERFACING') >= 0, 'p5 the side headings are kept');
+  }).then(function () {
+    return withFixture('crochet-stylecraft-hex-socks.pdf', 'hex socks', function (f) {
+      ok(/^LEG LENGTHENING RNDS$/m.test(f.res.text), 'p3 three prose columns are not zipped into table rows');
+    });
+  }).then(function () {
+    return withFixture('xs-apl-dmc-puntomarca.pdf', 'puntomarca', function (f) {
+      ok(f.res.ocrNoise >= 0.2 && f.res.garbled === false, 'a poor OCR layer scores ocrNoise >= 0.2 (garbled stays false)',
+        'ocrNoise ' + f.res.ocrNoise);
+    });
+  }).then(function () {
+    return withFixture('crochet-archive-weldons-v24.pdf', 'weldons noise', function (f) {
+      ok(f.res.ocrNoise < 0.05, 'a good OCR layer scores low', 'ocrNoise ' + f.res.ocrNoise);
+    });
+  }).then(function () {
+    return withFixture('bear.pdf', 'bear noise', function (f) {
+      eq(f.res.ocrNoise, 0, 'born-digital text has no OCR noise');
+    });
+  });
+});
+
+step(function () {
+  group('Running furniture, folios, watermarks');
+  return withFixture('crochet-turtle.pdf', 'turtle', function (f) {
+    ok(!/^[1-5]$/m.test(f.res.text), 'folios 1-5 set above the margin band are dropped');
+    ok(f.res.text.indexOf('Leave long yarn tails at the end of each piece – for sewing together') >= 0,
+      'p1 the line crossing the gutter is read whole');
+  }).then(function () {
+    return withFixture('crochet-caron-cuff-cardigan.pdf', 'caron', function (f) {
+      ok(f.res.text.indexOf('CAC0129-026985M') < 0 && f.res.text.indexOf('CUFF TO CUFF CROCHET CARDIGAN | CROCHET') < 0,
+        'a footer printed as one line on some pages and two on others is still a running footer');
+    });
+  }).then(function () {
+    return withFixture('crochet-redheart-persian-tiles.pdf', 'persian tiles', function (f) {
+      ok(f.res.text.indexOf('For more ideas & inspiration') < 0,
+        'a two-page leaflet\'s identical footer is dropped (it landed inside BORDER Rnd 1)');
+    });
+  }).then(function () {
+    return withFixture('crochet-bernat-basketweave.pdf', 'basketweave', function (f) {
+      ok(hasLine(f, 1, 'Size U.S. M/13 (9 mm) Susan Bates® Silvalume® crochet hook or size'),
+        'p1 "or size" stays on its line instead of jumping into 1st row');
+    });
+  }).then(function () {
+    return withFixture('xs-pacman.pdf', 'pacman', function (f) {
+      var n = (f.res.text.match(/KG-Chart LE for Cross Stitch/g) || []).length;
+      ok(n <= 5, 'the KG-Chart footer at 10% of the sheet is dropped on most pages', n + ' left');
+    });
+  }).then(function () {
+    return withFixture('other-apl-tatting-riego.pdf', 'riego', function (f) {
+      ok([2, 6, 17].every(function (n) { return String(f.pages[n] || '').indexOf('Antique Pattern Library') < 0; }),
+        'the diagonal APL watermark is never text (plates p2, p6, p17)');
+      eq(f.res.emptyPages, [2, 6, 17], 'image-only plates are reported (they only held the watermark)');
+    });
+  }).then(function () {
+    return withFixture('crochet-lionbrand-logcabin-pullover.pdf', 'lionbrand', function (f) {
+      eq(f.res.emptyPages, [7], 'p7 (schematic art + footer only) has no readable text');
+    });
+  });
+});
+
+chain.then(function () {
+  var el = document.getElementById('summary');
+  el.textContent = passed + ' passed, ' + failed + ' failed' + (skipped ? ', ' + skipped + ' skipped' : '');
+  el.className = failed === 0 ? 'ok' : 'bad';
+});
+</script>
+</body>
+</html>

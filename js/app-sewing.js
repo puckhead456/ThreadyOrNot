@@ -116,13 +116,30 @@
     for (var i = 0; i < d.notions.length; i++) if (d.notions[i].have) n++;
     return n;
   }
+  /**
+   * 'Step 4 of 6, card 2 of 3' in the pattern's own numbering, for
+   * announcements. Optional variation / care extras are not counted steps
+   * (sewing-audit: the sundress read "Step 1 of 15" for its 8 printed steps).
+   */
+  function stepWhere(d, index) {
+    if (!d.steps.length) return 'No steps';
+    var i = Math.max(0, Math.min(index, d.steps.length - 1));
+    var pos = S.printedSteps(d.steps).of[i];
+    if (!pos) return 'Optional extra';
+    return 'Step ' + pos.n + ' of ' + pos.runTotal + (pos.cards > 1 ? ', card ' + pos.card + ' of ' + pos.cards : '');
+  }
   function stepsDone(d) {
     var n = 0;
     for (var i = 0; i < d.steps.length; i++) if (d.steps[i].done) n++;
     return n;
   }
 
-  /** 'SA 1.5 cm (5/8")' for the step meta line, or ''. */
+  /**
+   * 'Seam allowance 1.5 cm (5/8")' for the step card, or ''. Spelled out
+   * (HANDOFF small item 0 / UX D8): measured at 375 px it fits one line beside
+   * the page chip ('Seam allowance 1 cm (3/8") +1' is 197 px), so the
+   * unexplained 'SA' is gone.
+   */
   function saLabel(d) {
     var sa = d.seamAllowance;
     if (!sa) return '';
@@ -131,8 +148,8 @@
       bits.push(sa.mm >= 10 ? (sa.mm / 10) + ' cm' : sa.mm + ' mm');
     }
     if (sa.inches) bits.push('(' + sa.inches + '")');
-    if (!bits.length) return sa.included === true ? 'SA included' : '';
-    return 'SA ' + bits.join(' ') + (sa.exceptions && sa.exceptions.length ? ' +' + sa.exceptions.length : '');
+    if (!bits.length) return sa.included === true ? 'Seam allowance included' : '';
+    return 'Seam allowance ' + bits.join(' ') + (sa.exceptions && sa.exceptions.length ? ' +' + sa.exceptions.length : '');
   }
 
   /* ================================================================== *
@@ -175,6 +192,10 @@
     v.stepSection = el('span', 'sw-step-section');
     head.appendChild(v.stepN);
     head.appendChild(v.ring.node);
+    // 'card 2 of 3' when one printed step spans several cards.
+    v.cardChip = el('span', 'sw-card-chip');
+    v.cardChip.hidden = true;
+    head.appendChild(v.cardChip);
     head.appendChild(v.stepSection);
     v.stepText = el('div', 'sw-step-text');
     v.card.appendChild(head);
@@ -286,19 +307,37 @@
     var d = dataOf(p);
     var total = d.steps.length;
     var at = total ? Math.min(d.currentStep, total - 1) : 0;
-    var done = stepsDone(d);
-    var pct = total ? Math.round((done / total) * 100) : 0;
+    // The pattern's own numbering (coordinator, Wave E): the user reads the
+    // paper alongside, so "Step 4 of 6" is the printed step 4 of the pencil
+    // skirt's 6, whichever of its cards is showing. The card position is a
+    // secondary chip only when a printed step spans several cards.
+    var ps = S.printedSteps(d.steps);
+    var pos = total ? ps.of[at] : null;
+    var done = S.printedDone(d.steps, ps);
+    var pct = ps.total ? Math.round((done / ps.total) * 100) : 0;
+    var step = total ? d.steps[at] : null;
+    var optAt = 0, optAll = 0;
+    for (var oi = 0; oi < total; oi++) {
+      if (!d.steps[oi].optional) continue;
+      optAll++;
+      if (oi <= at) optAt = optAll;
+    }
+    var where = !total ? '' : (pos
+      ? 'Step ' + pos.n + ' of ' + pos.runTotal
+      : 'Optional extra ' + optAt + ' of ' + optAll);
+    view.cardChip.textContent = pos && pos.cards > 1 ? 'card ' + pos.card + ' of ' + pos.cards : '';
+    view.cardChip.hidden = !(pos && pos.cards > 1);
 
     view.progressFill.style.width = pct + '%';
     view.progressLabel.textContent = total
-      ? 'Step ' + (at + 1) + ' of ' + total + ' · ' + pct + '%'
+      ? where + ' · ' + pct + '%'
       : 'No steps yet — import or add some';
     view.progress.setAttribute('aria-label',
-      total ? 'Step ' + (at + 1) + ' of ' + total + ', open the step list' : 'Add steps');
+      total ? where + ', open the step list' : 'Add steps');
 
-    var step = total ? d.steps[at] : null;
-    view.stepN.textContent = total ? 'STEP' : 'NO STEPS';
-    view.ring.set(at + 1, total);
+    view.stepN.textContent = total ? (step && step.optional ? 'EXTRA' : 'STEP') : 'NO STEPS';
+    if (pos) view.ring.set(pos.n, Math.max(pos.n, pos.runTotal));
+    else view.ring.set(optAt, optAll);
     view.stepSection.textContent = step && step.section ? step.section : '';
     view.stepText.textContent = step
       ? step.text
@@ -324,7 +363,7 @@
     view.sa.textContent = sa;
     view.sa.hidden = !sa;
 
-    var isDone = total > 0 && done >= total;
+    var isDone = ps.total > 0 && done >= ps.total;
     view.btn.disabled = !total;
     view.btnCaption.textContent = isDone ? 'ALL DONE' : 'STEP DONE';
     view.btnMark.textContent = isDone ? '🎉' : '✓';
@@ -510,13 +549,18 @@
 
     var fresh = Store.project(p.id);
     var d = dataOf(fresh);
-    var done = stepsDone(d);
-    var total = d.steps.length;
+    // Counted in PRINTED steps (a step is done when all its cards are); the
+    // optional extras never block finishing, and ticking one later does not
+    // re-celebrate.
+    var ps = S.printedSteps(d.steps), psB = S.printedSteps(before.steps);
+    var total = ps.total || d.steps.length;
+    var done = ps.total ? S.printedDone(d.steps, ps) : stepsDone(d);
+    var doneBefore = psB.total ? S.printedDone(before.steps, psB) : stepsDone(before);
 
     C.fb('row');
     paint(fresh);
 
-    if (done >= total) {
+    if (done >= total && doneBefore < total) {
       C.announce('All ' + total + ' steps done');
       C.celebrate('project');
       try { Store.setStatus(fresh.id, 'finished'); } catch (e) { /* ignore */ }
@@ -525,8 +569,8 @@
       return;
     }
 
-    C.announce('Step ' + (Math.min(d.currentStep, total - 1) + 1) + ' of ' + total);
-    if (done > 0 && done % 10 === 0) {
+    C.announce(stepWhere(d, d.currentStep));
+    if (done > doneBefore && done % 10 === 0) {
       C.celebrate('piece');
       C.toast(done + ' steps done');
     }
@@ -642,7 +686,12 @@
 
   function stepRow(proj, d, st, index, rerender, body) {
     var row = C.el('div', 'list-item sw-step-row' + (st.done ? ' done' : '') + (index === d.currentStep ? ' current' : ''));
-    var check = C.button('check', '✓', (st.done ? 'Mark step ' + (index + 1) + ' not done' : 'Mark step ' + (index + 1) + ' done'));
+    // The printed number, as on the paper; a step on several cards shows its
+    // card ('4 · 2/3'); an optional extra shows '+'.
+    var pos = S.printedSteps(d.steps).of[index];
+    var rowN = pos ? (pos.cards > 1 ? pos.n + ' · ' + pos.card + '/' + pos.cards : pos.n + '.') : '+';
+    var rowName = pos ? 'step ' + pos.n + (pos.cards > 1 ? ', card ' + pos.card + ' of ' + pos.cards : '') : 'optional extra';
+    var check = C.button('check', '✓', (st.done ? 'Mark ' + rowName + ' not done' : 'Mark ' + rowName + ' done'));
     check.setAttribute('role', 'checkbox');
     check.setAttribute('aria-checked', st.done ? 'true' : 'false');
     C.on(check, 'click', function () {
@@ -654,8 +703,8 @@
       paint(Store.project(proj.id));
     });
 
-    var textBtn = C.button('item-text sw-step-jump', null, 'Jump to step ' + (index + 1));
-    textBtn.appendChild(C.el('span', 'sw-step-row-n', (index + 1) + '.'));
+    var textBtn = C.button('item-text sw-step-jump', null, 'Jump to ' + rowName);
+    textBtn.appendChild(C.el('span', 'sw-step-row-n', rowN));
     textBtn.appendChild(C.el('span', 'sw-step-row-text', clip(st.text, 70)));
     C.on(textBtn, 'click', function () {
       jumpToStep(proj.id, index, function () { rerender(body); });
@@ -680,7 +729,7 @@
     function go() {
       edit(projectId, function (dd) { dd.currentStep = Math.max(0, Math.min(index, dd.steps.length - 1)); });
       paint(Store.project(projectId));
-      C.announce('Step ' + (index + 1) + ' of ' + d.steps.length);
+      C.announce(stepWhere(dataOf(Store.project(projectId)), index));
       if (after) after();
     }
 
@@ -1206,7 +1255,7 @@
           b.appendChild(C.el('p', 'muted', 'The pattern did not say. Check the first page of the instructions.'));
           return;
         }
-        b.appendChild(C.el('p', 'sw-sa-big', saLabel(d).replace(/^SA /, '')));
+        b.appendChild(C.el('p', 'sw-sa-big', saLabel(d).replace(/^Seam allowance /, '')));
         if (d.seamAllowance.text) b.appendChild(C.el('p', 'muted', d.seamAllowance.text));
         if (d.seamAllowance.included !== null) {
           b.appendChild(C.el('p', 'muted', d.seamAllowance.included
@@ -1404,7 +1453,11 @@
               line0.appendChild(C.el('span', 'sw-fabric-mine-size', 'Size ' + d.size.chosen));
               line0.appendChild(C.el('span', 'sw-fabric-mine-amount', r.amount));
               line0.appendChild(C.el('span', 'sw-fabric-mine-at',
-                'at ' + (r.width || 'this width') + (r.name && !/^fabric$/i.test(r.name) ? ' · ' + r.name : '')));
+                // A row printed without a bolt width ('LINING 1m / 1 yd') is
+                // named, not "at this width" (HANDOFF item 5, sewing-audit).
+                r.width
+                  ? 'at ' + r.width + (r.name && !/^fabric$/i.test(r.name) ? ' · ' + r.name : '')
+                  : (r.name || 'Fabric') + ' · any width'));
               card0.appendChild(line0);
             });
             b.appendChild(card0);
@@ -2028,7 +2081,14 @@
       return '(' + l[0] + '–' + l[l.length - 1] + ')';
     } },
     { id: 'fabric', label: 'Fabric', count: function (pr) { return pr.fabric.length; }, note: function (pr) {
-      return pr.fabric.length ? '(' + plural(pr.fabric.length, 'width') + ')' : '';
+      // Distinct printed bolt widths: a quilt's yardage rows and a lining row
+      // print none, and "13 found (13 widths)" was wrong (sewing-audit).
+      var seenW = {}, nW = 0;
+      pr.fabric.forEach(function (r) {
+        var k = String(r.width || '').replace(/\s+/g, '').toLowerCase();
+        if (k && !seenW[k]) { seenW[k] = 1; nW++; }
+      });
+      return nW ? '(' + plural(nW, 'bolt width') + ')' : '';
     } },
     { id: 'seamAllowance', label: 'Seam allowance', count: function (pr) { return pr.seamAllowance ? 1 : 0; }, note: function (pr) {
       if (!pr.seamAllowance) return '';

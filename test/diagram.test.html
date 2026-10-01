@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Live 3D diagram — demo</title>
+<title>Live 3D diagram — geometry tests + demo</title>
 <style>
   :root {
     --btn: #4f9868;
@@ -84,12 +84,53 @@
   .ok { color: #7bd9a0; }
   #log { max-height: 130px; overflow: auto; font-family: ui-monospace, Consolas, monospace; font-size: 11px; color: var(--dim); }
   label.chk { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; cursor: pointer; }
+
+  /* ------------------------------------------------------------- tests */
+  #tests { max-width: 1180px; margin: 0 auto 18px; }
+  #summary {
+    font-family: ui-monospace, Consolas, monospace; font-size: 16px; font-weight: 700;
+    border-radius: 10px; padding: 10px 13px; border: 1px solid var(--line);
+    background: #1d2531; color: var(--fg);
+  }
+  #summary.pass { background: #17301f; border-color: #3f7d55; color: #9ff0bd; }
+  #summary.fail { background: #331b1b; border-color: #8a4040; color: #ffb3b3; }
+  #summary.busy { background: #2c2a1a; border-color: #857a3f; color: #ffe9a8; }
+  .tgroup { margin: 12px 0 0; }
+  .tgroup h3 {
+    font-size: 11px; text-transform: uppercase; letter-spacing: .09em; color: var(--dim);
+    margin: 14px 0 6px; font-weight: 600;
+  }
+  table.t { border-collapse: collapse; width: 100%; font-family: ui-monospace, Consolas, monospace; font-size: 11.5px; }
+  table.t td { border-bottom: 1px solid #2a2f3b; padding: 2px 6px; vertical-align: top; }
+  table.t td.st { width: 5ch; font-weight: 700; }
+  table.t td.st.p { color: #7bd9a0; }
+  table.t td.st.f { color: #ff8d8d; }
+  table.t td.st.s { color: #9aa3b4; }
+  table.t td.nm { width: 44ch; color: var(--fg); }
+  table.t td.dt { color: var(--dim); }
+  table.t tr.f td.nm { color: #ffc9c9; }
 </style>
 </head>
 <body>
 
-<h1>Live 3D diagram — <code>js/diagram.js</code></h1>
-<p class="sub">The canvas is transparent and sits inside the big stitch button, so the theme's <code>--primary</code> shows through.</p>
+<h1>Live 3D diagram — <code>js/diagram-geo.js</code> + <code>js/diagram.js</code></h1>
+<p class="sub">
+  Assertive page: the tests below build synthetic Model v2 objects and check them through
+  <code>DiagramGeo</code>, then load real fixture PDFs from <code>../tmp-pdf</code> and check the
+  reference table in <code>docs/brainstorm/3d/01-geometry-truth.md</code> §2.
+  The demo canvas and gesture controls are unchanged and live under the tests.
+</p>
+
+<div id="tests">
+  <div id="summary" class="busy">running…</div>
+  <div class="row" style="margin-top:8px">
+    <button class="b" id="rerun">Re-run unit tests</button>
+    <button class="b" id="runfix">Load reference fixtures</button>
+    <label class="chk"><input type="checkbox" id="showpass" checked> show passing</label>
+    <span class="stats" id="tstatus"></span>
+  </div>
+  <div id="tout"></div>
+</div>
 
 <div class="wrap">
   <div class="stagecol">
@@ -197,7 +238,29 @@
   }
 }());
 </script>
+<script src="../js/patterns.js?v=dev"></script>
+<script src="../js/vendor/pdf.min.js"></script>
+<script src="../js/pdftext.js?v=dev"></script>
+<script src="../js/store.js?v=dev"></script>
+<script src="../js/diagram-geo.js?v=dev"></script>
 <script src="../js/diagram.js?v=dev"></script>
+<script>
+/* pdftext.js points the pdf.js worker at './js/vendor/...', right for the app at
+   the repo root but wrong from /test/ — pin it, same as diagram.gallery.html. */
+(function () {
+  if (!window.pdfjsLib || !window.pdfjsLib.GlobalWorkerOptions) return;
+  var src = '../js/vendor/pdf.worker.min.js';
+  try {
+    Object.defineProperty(window.pdfjsLib.GlobalWorkerOptions, 'workerSrc', {
+      get: function () { return src; },
+      set: function () { /* ignore the page-relative path */ },
+      configurable: true
+    });
+  } catch (e) { window.pdfjsLib.GlobalWorkerOptions.workerSrc = src; }
+}());
+/* Never touch the app's real state. */
+try { window.Store.__setKeyForTests('ZDGEO_test_store'); } catch (e) { /* ignore */ }
+</script>
 <script>
 (function () {
   'use strict';
@@ -310,7 +373,7 @@
     return p;
   }
 
-  function decorate(p, mode) {
+  function decorate(p, mode, shape) {
     for (var i = 0; i < p.length; i++) {
       var r = p[i];
       if (!r.height) r.height = 1;
@@ -322,7 +385,25 @@
       }
     }
     p.mode = mode || 'rounds';
+    /* Model v2 carries the start, so the cap is a real magic-ring test now
+       (04 defect D) — a chain ring is open at the top. */
+    if (shape) p.shape = shape;
+    else if (p.mode === 'rows') {
+      p.shape = { start: 'chain-row', chainLen: p.length ? p[0].count : 0, ringCount: 0, stuffed: false };
+    } else {
+      p.shape = {
+        start: 'magic-ring', chainLen: 0,
+        ringCount: p.length ? p[0].count : 0, stuffed: null
+      };
+    }
     return p;
+  }
+
+  /* An open tube worked into a joined chain: no cap at either end. */
+  function planTube() {
+    var p = [], i;
+    for (i = 0; i < 12; i++) p.push({ count: 24, color: SAGE });
+    return decorate(p, 'rounds', { start: 'chain-ring', chainLen: 24, ringCount: 24, stuffed: false });
   }
 
   var DEMOS = {
@@ -330,6 +411,7 @@
     bear:     { label: 'Bear head',      plan: planBear(),     start: [10, 18], def: NAVY },
     horn:     { label: 'Horn 6→24',      plan: planHorn(),     start: [8, 10],  def: TERRA },
     stripes:  { label: 'Striped tube',   plan: planStripes(),  start: [11, 9],  def: PLUM },
+    tube:     { label: 'Open tube (chain ring)', plan: planTube(), start: [11, 24], def: SAGE },
     blanket:  { label: 'Blanket (rows)', plan: planBlanket(),  start: [19, 22], def: SAGE },
     quad:     { label: 'Quadrants',      plan: planQuad(),     start: [12, 12], def: CREAM },
     started:  { label: 'Just started',   plan: planJustStarted(), start: [0, 2], def: CREAM },
@@ -360,7 +442,8 @@
       mode: p.mode,
       rounds: rounds,
       current: cur.round,
-      defaultColor: DEMOS[cur.key].def
+      defaultColor: DEMOS[cur.key].def,
+      shape: p.shape || null
     };
   }
 
@@ -622,6 +705,2386 @@
   mountIt();
   setBg('#4f9868');
   loadDemo('sphere');
+}());
+</script>
+
+<script>
+/* =====================================================================
+   Assertions. Everything here goes through DiagramGeo (pure geometry) —
+   no WebGL, no pixels — so a failure names a number, not a vibe.
+   ===================================================================== */
+(function () {
+  'use strict';
+
+  var G = window.DiagramGeo;
+  var out = document.getElementById('tout');
+  var sumEl = document.getElementById('summary');
+  var statusEl = document.getElementById('tstatus');
+  var passed = 0, failed = 0, skipped = 0;
+  var rows = [];
+
+  function render() {
+    var showPass = document.getElementById('showpass').checked;
+    var html = '', group = null;
+    for (var i = 0; i < rows.length; i++) {
+      var r = rows[i];
+      if (r.group !== group) {
+        if (group !== null) html += '</table>';
+        group = r.group;
+        html += '<h3>' + esc(group) + '</h3><table class="t">';
+      }
+      if (!showPass && r.state === 'p') continue;
+      html += '<tr class="' + r.state + '"><td class="st ' + r.state + '">' +
+        (r.state === 'p' ? 'PASS' : r.state === 'f' ? 'FAIL' : 'SKIP') +
+        '</td><td class="nm">' + esc(r.name) + '</td><td class="dt">' + esc(r.detail || '') + '</td></tr>';
+    }
+    if (group !== null) html += '</table>';
+    out.innerHTML = html;
+    sumEl.textContent = passed + ' passed, ' + failed + ' failed' +
+      (skipped ? ', ' + skipped + ' skipped' : '');
+    sumEl.className = failed ? 'fail' : 'pass';
+  }
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>]/g, function (c) {
+      return c === '&' ? '&amp;' : c === '<' ? '&lt;' : '&gt;';
+    });
+  }
+
+  var curGroup = '';
+  function group(name) { curGroup = name; }
+  function ok(name, cond, detail) {
+    if (cond) passed++; else failed++;
+    rows.push({ group: curGroup, name: name, state: cond ? 'p' : 'f', detail: detail });
+    return !!cond;
+  }
+  function skip(name, detail) {
+    skipped++;
+    rows.push({ group: curGroup, name: name, state: 's', detail: detail });
+  }
+  function near(a, b, tol) { return isFinite(a) && isFinite(b) && Math.abs(a - b) <= Math.abs(b) * tol + 1e-9; }
+  function n(v, d) { return isFinite(v) ? (Math.round(v * Math.pow(10, d == null ? 3 : d)) / Math.pow(10, d == null ? 3 : d)) : v; }
+
+  /* ------------------------------------------------------- model builders */
+
+  function sts(count, t, h, w) {
+    var a = [];
+    for (var i = 0; i < count; i++) {
+      a.push({ t: t || 'sc', c: null,
+        h: h == null ? G.stitchH(t || 'sc') : h,
+        w: w == null ? G.stitchW(t || 'sc') : w });
+    }
+    return a;
+  }
+  /**
+   * counts -> Model v2.
+   * opt: { t, mode, shape, inc(i,count), dec(i,count), outlier(i,count),
+   *        done(i,count) }
+   */
+  function model(counts, opt) {
+    opt = opt || {};
+    var rs = [], i;
+    for (i = 0; i < counts.length; i++) {
+      var c = counts[i];
+      rs.push({
+        count: c, done: opt.done ? opt.done(i, c) : c,
+        stitches: sts(c, opt.t), color: '#f1e3c8',
+        height: G.stitchH(opt.t || 'sc'), ghost: false, row: i + 1,
+        inc: opt.inc ? opt.inc(i, c) : null,
+        dec: opt.dec ? opt.dec(i, c) : null,
+        outlier: opt.outlier ? !!opt.outlier(i, c) : undefined
+      });
+    }
+    return {
+      mode: opt.mode || 'rounds', rounds: rs, current: rs.length - 1,
+      defaultColor: '#f1e3c8',
+      shape: opt.shape || { start: 'magic-ring', chainLen: 0, ringCount: counts[0] || 0, stuffed: null },
+      window: { first: 1, total: counts.length },
+      deviation: { expected: 0, actual: 0 }
+    };
+  }
+  function ramp(a, b, step) { var o = []; for (var v = a; step > 0 ? v <= b : v >= b; v += step) o.push(v); return o; }
+  function rep(v, k) { var o = []; while (k-- > 0) o.push(v); return o; }
+
+  /* ------------------------------------------------- the arc walk, unlofted
+     01 §1.1 + §1.3 in four lines, so "the loft MOVES the rise, it does not
+     add any" is checked against the formula rather than against a number
+     copied out of a run. sc only (h constant, kf = 1), which is every
+     amigurumi part in the corpus. */
+  function plainWalkHeight(counts, slack) {
+    var h = G.SH_SC, i, H = 0;
+    var first = 0;
+    for (i = 0; i < counts.length; i++) if (counts[i] > 0) { first = counts[i] / (2 * Math.PI); break; }
+    var prev = G.startRadius(G.shapeOf(model(counts)), first);
+    for (i = 0; i < counts.length; i++) {
+      if (!(counts[i] > 0)) continue;
+      var r = counts[i] / (2 * Math.PI);
+      var q = Math.min(1, (1 - slack) * Math.abs(r - prev) / h);
+      H += Math.max(0.02 * h, h * Math.sqrt(Math.max(0, 1 - q * q)));
+      prev = r;
+    }
+    return H;
+  }
+
+  /* ------------------------------------------------------ the dome, measured
+     The TOP CAP is every round from the pole out to the first round that stops
+     growing — the stretch 06 defect 2 says renders as an ice-cream cone.
+     Three numbers decide whether it is a dome instead:
+       `rise[]`   dy / h per round. The sphere law makes this sin(phi), so it
+                  must GROW from ~0 at the pole toward 1 at the equator.
+       `slope[]`  |dr| / dy, the profile's own slope. It must FALL — that is
+                  "the second differences of r(y) are negative near the pole",
+                  i.e. horizontal at the pole steepening toward vertical.
+       `flat`     the longest run of consecutive rounds whose slope agrees
+                  within 5%: a straight-sided segment. A cone is ONE run of
+                  every round in the cap, which is how the defect was found. */
+  function capOf(cls) {
+    var firstR = 0, i, e;
+    for (i = 0; i < cls.rounds.length; i++) {
+      e = cls.rounds[i];
+      if (!e.empty && !e.outlier) { firstR = e.radius; break; }
+    }
+    var prev = G.startRadius(cls.shape, firstR);
+    var rise = [], slope = [], flat = 1, run = 1;
+    for (i = 0; i < cls.rounds.length; i++) {
+      e = cls.rounds[i];
+      if (e.empty || e.outlier) continue;
+      if (!(e.radius > prev + 1e-9)) break;
+      rise.push(e.h > 0 ? e.dy / e.h : 0);
+      slope.push(e.dy > 0 ? (e.radius - prev) / e.dy : Infinity);
+      prev = e.radius;
+      var k = rise.length - 1;
+      if (k > 0) {
+        run = Math.abs(slope[k] - slope[k - 1]) <= 0.05 * Math.abs(slope[k - 1]) ? run + 1 : 1;
+        if (run > flat) flat = run;
+      }
+    }
+    var grows = rise.length >= 3, steepens = slope.length >= 3;
+    for (i = 1; i < rise.length; i++) if (!(rise[i] > rise[i - 1] - 1e-9)) grows = false;
+    for (i = 1; i < Math.min(3, slope.length); i++) if (!(slope[i] < slope[i - 1])) steepens = false;
+    return {
+      n: rise.length, rise: rise, slope: slope, flat: flat,
+      dome: grows && steepens && flat <= 3, grows: grows, steepens: steepens
+    };
+  }
+  /** The meridian's worst turn between two consecutive rounds, in degrees:
+      a staircase alternates vertical risers with near-flat ledges (wave E,
+      04 defect J). Frills are skipped — a buckle is its own shape. */
+  function stairOf(cls, from, to, only) {
+    var list = [], q2, e;
+    for (q2 = 0; q2 < cls.rounds.length; q2++) {
+      e = cls.rounds[q2];
+      if (!e.empty && !e.outlier) list.push(e);
+    }
+    if (!list.length) return { worst: 0, at: -1 };
+    var R = [G.startRadius(cls.shape, list[0].radius)], worst = 0, at = -1;
+    for (q2 = 0; q2 < list.length; q2++) R.push(list[q2].radius);
+    var ang = [];
+    for (q2 = 0; q2 < list.length; q2++) ang.push(Math.atan2(Math.abs(R[q2 + 1] - R[q2]), list[q2].dy) * 180 / Math.PI);
+    for (q2 = Math.max(1, from || 1); q2 < Math.min(ang.length, to || ang.length); q2++) {
+      if (list[q2].ruffle || list[q2 - 1].ruffle) continue;
+      if (only && !only(q2)) continue;
+      var t = Math.abs(ang[q2] - ang[q2 - 1]);
+      if (t > worst) { worst = t; at = q2; }
+    }
+    return { worst: worst, at: at };
+  }
+
+  function capDetail(cap) {
+    return 'cap ' + cap.n + ' rounds · rise dy/h ' +
+      cap.rise.map(function (v) { return n(v, 2); }).join('→') +
+      (cap.grows ? ' (grows ✓)' : ' (NOT monotone ✗)') +
+      ' · slope |dr|/dy ' + cap.slope.map(function (v) { return n(v, 2); }).join('→') +
+      (cap.steepens ? ' (steepens ✓)' : ' (does NOT steepen ✗)') +
+      ' · longest straight segment ' + cap.flat + ' round' + (cap.flat === 1 ? '' : 's');
+  }
+
+  /* ===================================================== 1. unit tests */
+
+  function runUnits() {
+    passed = 0; failed = 0; skipped = 0; rows.length = 0;
+
+    /* -------------------------------------------------- stitch metrics */
+    group('Stitch metrics (01 §1.2)');
+    ok('SW = 1, SH_SC = 0.95', G.SW === 1 && G.SH_SC === 0.95, 'SW ' + G.SW + '  SH_SC ' + G.SH_SC);
+    ok('sc height 1, dc 2.01, sl 0.3, ch space 0',
+      G.stitchH('sc') === 1 && G.stitchH('dc') === 2.01 && G.stitchH('sl') === 0.3 && G.stitchH('ch') === 0,
+      'sc ' + G.stitchH('sc') + ' hdc ' + G.stitchH('hdc') + ' dc ' + G.stitchH('dc') + ' tr ' + G.stitchH('tr'));
+    ok('sl is 0.7 wide, everything else 1', G.stitchW('sl') === 0.7 && G.stitchW('dc') === 1,
+      'sl ' + G.stitchW('sl'));
+    var mSl = G.roundMetrics({ count: 24, stitches: sts(24, 'sl') });
+    ok('perimeter is SUM of stitch widths, not count × SW (24 sl)',
+      near(mSl.perimeter, 16.8, 0.001) && !near(mSl.perimeter, 24, 0.001),
+      'perimeter ' + n(mSl.perimeter) + ' (count×SW would be 24), radius ' + n(mSl.perimeter / (2 * Math.PI)));
+    var mDc = G.roundMetrics({ count: 20, stitches: sts(20, 'dc') });
+    ok('a dc round is 2.01 × SH_SC tall', near(mDc.hw, 2.01 * 0.95, 0.001),
+      'h ' + n(mDc.h) + '  world ' + n(mDc.hw));
+    var mMix = G.roundMetrics({ count: 4, stitches: [
+      { t: 'tr', h: 2.68, w: 1 }, { t: 'dc', h: 2.01, w: 1 },
+      { t: 'hdc', h: 1.34, w: 1 }, { t: 'sc', h: 1, w: 1 }] });
+    // A row stands as tall as its tallest stitch (each of these covers 25%
+    // of the row, well over the 10% floor): a shell row of (sc, ch 3, tr,
+    // dc, hdc, sc) is treble-high in the real fabric.
+    ok('a mixed row is as tall as its tallest stitch', near(mMix.h, 2.68, 0.01),
+      'h ' + n(mMix.h));
+    var mLone = G.roundMetrics({ count: 20, stitches: sts(19, 'sc').concat([{ t: 'tr', h: 2.68, w: 1 }]) });
+    ok('a lone tall stitch (5% of the row) does not lift an sc round', near(mLone.h, 1, 0.01),
+      'h ' + n(mLone.h));
+    var mV1 = G.roundMetrics({ count: 12, height: 2 });   // Model v1: no stitches
+    ok('Model v1 falls back to the round height + count', mV1.perimeter === 12 && near(mV1.hw, 1.9, 0.001),
+      'perimeter ' + mV1.perimeter + '  world h ' + n(mV1.hw));
+    ok('flat rate: sc 5.97, hdc 8.4, dc 12.6',
+      near(G.flatRate(1 * 0.95, 1), 5.969, 0.01) && near(G.flatRate(2.01 * 0.95, 1), 12.0, 0.05),
+      'sc ' + n(G.flatRate(0.95, 1), 2) + '  hdc ' + n(G.flatRate(1.34 * 0.95, 1), 2) +
+      '  dc ' + n(G.flatRate(2.01 * 0.95, 1), 2));
+
+    /* --------------------------------------------------- the arc walk */
+    group('Arc-length walk with stuffing (01 §1.1, §1.3)');
+
+    // the classic stuffed ball: 6→48 at +6, five straight rounds, 48→6
+    var ballCounts = ramp(6, 48, 6).concat(rep(48, 5)).concat(ramp(42, 6, -6));
+    var ball = G.classify(model(ballCounts));
+    ok('sphere 6→48→6: aspect 0.95–1.10',
+      ball.aspect >= 0.95 && ball.aspect <= 1.10,
+      'aspect ' + n(ball.aspect) + '  H ' + n(ball.height) + '  Ø ' + n(2 * ball.maxRadius) +
+      '  slack ' + ball.slack + '  rounds ' + ballCounts.length);
+    ok('sphere: max radius at 45–55% of the height',
+      ball.equatorFrac >= 0.45 && ball.equatorFrac <= 0.55,
+      'equator ' + n(ball.equatorFrac) + ' (round ' + (ball.equatorRound + 1) + ' of ' + ballCounts.length + ')');
+    ok('sphere: stuffed slack 0.35 picked automatically (closes to 6)',
+      ball.slack === G.SLACK.stuffed, 'slack ' + ball.slack);
+
+    // 0 change is a cylinder: every round is exactly h tall
+    var cylN = 20, cylH = cylN * 0.95, cylD = 24 / Math.PI;
+    var cyl = G.classify(model(rep(24, cylN), {
+      shape: { start: 'chain-ring', chainLen: 24, ringCount: 24, stuffed: false }
+    }));
+    ok('cylinder 24 × 20: aspect = 20·0.95 / (24/2π·2), within 5%',
+      near(cyl.aspect, cylH / cylD, 0.05),
+      'aspect ' + n(cyl.aspect, 4) + '  want ' + n(cylH / cylD, 4) + '  H ' + n(cyl.height) + ' (want ' + n(cylH) + ')');
+
+    // +6 per round lies flat
+    var discCounts = ramp(6, 60, 6);
+    var disc = G.classify(model(discCounts));
+    ok('+6 disc 6→60: total height < 0.15 × radius',
+      disc.height < 0.15 * disc.maxRadius,
+      'H ' + n(disc.height) + '  R ' + n(disc.maxRadius) + '  limit ' + n(0.15 * disc.maxRadius) +
+      '  slack ' + disc.slack + '  aspect ' + n(disc.aspect));
+    ok('+6 disc: no round is flagged as a ruffle', disc.ruffles === 0, 'ruffles ' + disc.ruffles);
+
+    // a ruffle: more than the flat rate has no surface of revolution
+    var frill = G.classify(model([21, 21, 60], {
+      shape: { start: 'chain-ring', chainLen: 21, ringCount: 21, stuffed: false }
+    }));
+    var fr = frill.rounds[2];
+    ok('ruffle flagged when Δn > the flat rate (21 → 60 sc)',
+      fr.ruffle === true && fr.lobes >= 5 && fr.prof,
+      'ruffle ' + fr.ruffle + '  lobes ' + fr.lobes + '  dy ' + n(fr.dy) +
+      ' (= ' + n(fr.dy / fr.h, 2) + '·h)  radius ' + n(fr.radius) +
+      ' vs flat-circle ' + n(60 / (2 * Math.PI)));
+    ok('a ruffled round still rises a little, not the full h',
+      near(fr.dy, G.RUFFLE_RISE * fr.h, 0.01), 'dy/h ' + n(fr.dy / fr.h, 3));
+
+    /* ------------------------------------ the gate sees the slack (06 #1) */
+    /* The rise spends (1 - s)·|dr|, so the GATE has to measure the same
+       quantity. Testing the raw |dr| against h·kf cut a firmly stuffed piece
+       off at 1.08·h where it can stretch over 1.54·h, so every ordinary
+       amigurumi shaping round (Δn ≥ 7 sc) was declared a frill: 13 of the
+       baphomet Body/Head's 33 rounds, the whole crown of the bear Head, the
+       cato Head's gathered close. */
+    group('The ruffle gate sees the stuffing slack (06 defect 1)');
+    var HW = G.SH_SC, TAU2 = 2 * Math.PI;
+    var adr8 = 8 / TAU2, adr12 = 12 / TAU2;
+    ok('a Δn = 8 round is past the RAW gate and inside the slack-adjusted one',
+      adr8 > HW * (1 + G.RUFFLE_EPS) && (1 - G.SLACK.stuffed) * adr8 <= HW * (1 + G.RUFFLE_EPS),
+      '|dr| ' + n(adr8, 3) + ' = ' + n(adr8 / HW, 2) + '·h  (raw gate cuts at ' +
+      n(1 + G.RUFFLE_EPS, 2) + '·h) → (1 − 0.35)·|dr| = ' + n((1 - G.SLACK.stuffed) * adr8, 3) +
+      ' = ' + n((1 - G.SLACK.stuffed) * adr8 / HW, 2) + '·h  ✓ a pole, not a frill');
+    // the bear Head's real counts: 8 → 16 → 24 was 2 ruffled rounds, i.e. the
+    // whole crown flattened into a serrated lid in 0.22 of the height
+    var bearH = G.classify(model([8, 16, 24, 30, 30, 30, 30, 30, 30, 24, 18, 12, 6]));
+    ok('bear Head 8→16→24: no ruffle, and the crown rises like a crown',
+      bearH.ruffles === 0 && bearH.rounds[1].dy > 0.3 && bearH.rounds[2].dy > 0.3,
+      'ruffles ' + bearH.ruffles + '  R2 dy ' + n(bearH.rounds[1].dy) + '  R3 dy ' +
+      n(bearH.rounds[2].dy) + ' (were ' + n(G.RUFFLE_RISE * HW, 3) + ' each)  aspect ' +
+      n(bearH.aspect) + '  slack ' + bearH.slack);
+    // Δn = 12 on a stuffed piece: past even the slack-adjusted rate, so there
+    // IS surplus — but stuffing presses it into the ball's curve. Flat, not
+    // frilled: a wide annulus, still a ring.
+    var over12 = G.classify(model([8, 16, 24, 36, 36, 36, 36, 24, 16, 8]));
+    ok('Δn = 12 on a stuffed piece is FLATTENED, not frilled',
+      over12.ruffles === 0 && over12.rounds[3].flattened === true && over12.flattened >= 1 &&
+      (1 - G.SLACK.stuffed) * adr12 > HW * (1 + G.RUFFLE_EPS) &&
+      (1 - G.SLACK.stuffed) * adr12 <= HW * G.STUFFED_FLAT_TOL,
+      '(1 − 0.35)·|dr| = ' + n((1 - G.SLACK.stuffed) * adr12, 3) + ' = ' +
+      n((1 - G.SLACK.stuffed) * adr12 / HW, 2) + '·h — past ' + n(1 + G.RUFFLE_EPS, 2) +
+      '·h, inside STUFFED_FLAT_TOL ' + G.STUFFED_FLAT_TOL + '·h  ⇒ ruffles ' +
+      over12.ruffles + ', flattened ' + over12.flattened +
+      ', and the loft still gives R4 dy ' + n(over12.rounds[3].dy) +
+      ' (the DY_MIN floor alone would be ' + n(0.02 * HW, 3) + ')');
+    // and a genuine over-increase on an unstuffed OPEN piece still frills
+    var doily = G.classify(model([6, 24, 60], {
+      shape: { start: 'chain-ring', chainLen: 6, ringCount: 6, stuffed: false }
+    }));
+    ok('6→60 in three rounds, open and unstuffed: still a frill',
+      doily.ruffles === 2 && doily.slack === G.SLACK.unstuffed &&
+      doily.rounds[1].ruffle === true && doily.rounds[2].ruffle === true &&
+      doily.rounds[2].prof && doily.rounds[2].prof.kind === 'wave',
+      'ruffles ' + doily.ruffles + ' of 3  slack ' + doily.slack +
+      '  (1 − 0.05)·|dr| = ' + n(0.95 * (60 - 24) / TAU2, 2) + ' = ' +
+      n(0.95 * (60 - 24) / TAU2 / HW, 1) + '·h  lobes ' + doily.rounds[2].lobes +
+      '  cross-section "' + doily.rounds[2].prof.kind + '"');
+    ok('...and the stuffed allowance is not a blank cheque: 6→60 stuffed frills too',
+      G.classify(model([6, 24, 60], {
+        shape: { start: 'magic-ring', chainLen: 0, ringCount: 6, stuffed: true }
+      })).ruffles === 2,
+      '(1 − 0.35)·|dr| = ' + n(0.65 * (60 - 24) / TAU2 / HW, 1) +
+      '·h  >  STUFFED_FLAT_TOL ' + G.STUFFED_FLAT_TOL + '·h');
+    ok('the flat rate itself never frills, at any slack',
+      G.classify(model(ramp(6, 60, 6))).ruffles === 0 &&
+      G.classify(model(ramp(6, 60, 6), { shape: { start: 'magic-ring', chainLen: 0, ringCount: 6, stuffed: true } })).ruffles === 0,
+      '+6 per round, slack 0 and slack 0.35: 0 ruffles either way');
+
+    /* ------------------------------------------ a dome, not a cone (06 #2) */
+    group('A magic-ring spiral is a dome, not a cone (06 defect 2)');
+    /* Constant |dr| with constant h gives every round the same rise — one
+       slope, i.e. a cone, however right the aspect is (the panda Head was
+       1.12 against 01's 1.11 and still an ice-cream cone with a needle apex).
+       The loft walks the run on the stuffed sphere's own law instead:
+       r = R·sin φ, y = R·(1 − cos φ), cumulative fabric arc mapped to φ. */
+    var openCounts = ramp(6, 48, 6);
+    var openCap = G.classify(model(openCounts, {
+      shape: { start: 'magic-ring', chainLen: 0, ringCount: 6, stuffed: true }
+    }));
+    var oc = capOf(openCap);
+    ok('6→48 magic-ring opening: a convex dome, no straight run over 3 rounds',
+      oc.n === 8 && oc.dome, capDetail(oc));
+    ok('6→48: the rise per round is ~0 at the pole and ~h at the equator',
+      oc.rise[0] < 0.25 && oc.rise[oc.n - 1] > 0.9 && oc.rise[oc.n - 1] < 1 / (1 - G.SLACK.stuffed),
+      'pole ' + n(oc.rise[0], 3) + '·h → equator ' + n(oc.rise[oc.n - 1], 3) +
+      '·h  (the stretch ceiling is ' + n(1 / (1 - G.SLACK.stuffed), 2) + '·h)');
+    ok('the loft MOVES the rise, it does not add any: height = the arc walk’s',
+      near(openCap.height, plainWalkHeight(openCounts, G.SLACK.stuffed), 1e-9),
+      'H ' + n(openCap.height, 6) + '  arc walk ' +
+      n(plainWalkHeight(openCounts, G.SLACK.stuffed), 6) + '  (01 §1.1 dy = h·√(1 − ((1−s)|dr|/h)²))');
+    ok('...so the ball’s aspect and equator are exactly what 01 §1.3 walked',
+      near(ball.aspect, plainWalkHeight(ballCounts, G.SLACK.stuffed) / (2 * ball.maxRadius), 1e-9) &&
+      ball.equatorFrac >= 0.45 && ball.equatorFrac <= 0.55,
+      'aspect ' + n(ball.aspect, 4) + '  equator ' + n(ball.equatorFrac, 3) +
+      '  H ' + n(ball.height, 4) + ' = arc walk ' + n(plainWalkHeight(ballCounts, G.SLACK.stuffed), 4));
+    var ballCap = capOf(ball);
+    ok('the closed sphere 6→48→6 is domed at the pole too',
+      ballCap.dome, capDetail(ballCap));
+    // slack 0 is the unlofted truth: a doily must stay dead flat
+    var flatCounts = ramp(6, 60, 6);
+    var flatCls = G.classify(model(flatCounts));
+    var flatCap = capOf(flatCls);
+    ok('slack 0 → no loft at all (a disc is not a dome)',
+      flatCls.slack === G.SLACK.open && flatCap.n >= 6 && !flatCap.grows &&
+      flatCap.flat >= flatCap.n - 1 && G.LOFT.blendAt === G.SLACK.stuffed &&
+      near(flatCls.height, plainWalkHeight(flatCounts, 0), 1e-9),
+      flatCap.flat + ' of the ' + flatCap.n + ' rounds share one slope ' +
+      n(flatCap.slope[flatCap.n - 1], 2) + ' — a single straight segment, as a flat disc' +
+      ' must be, and H ' + n(flatCls.height, 4) + ' is the arc walk’s ' +
+      n(plainWalkHeight(flatCounts, 0), 4) +
+      '  (the loft reaches full strength at slack ' + G.LOFT.blendAt + ', none at 0)');
+    // the sphere the loft solves for, straight out of 01 §1.3's geometry
+    var Rs = G.loftRadius(0, 5, 5 * Math.PI / 2);
+    ok('loftRadius: an arc of R·π/2 from the pole is the hemisphere R',
+      near(Rs, 5, 1e-6) && near(G.sphereArc(0, 5, 5), 5 * Math.PI / 2, 1e-9) &&
+      G.loftRadius(0, 5, 5) === 0,
+      'R ' + n(Rs, 6) + ' for arc ' + n(5 * Math.PI / 2, 4) + ' out to r 5;  arc = r (a flat ' +
+      'annulus) → R ' + G.loftRadius(0, 5, 5) + ' = no dome to loft');
+
+    /* ------------------------------ the stuffed profile (06 defect 7, 1.3.0) */
+    group('A stuffed closed segment is not a drum either (06 defect 7)');
+    /* With the ruffle gate and the loft in, the baphomet Body/Head still drew as
+       TWO STACKED DRUMS in the viewer: the fast-increase rounds a nearly flat
+       lid, the straight rounds a perfectly vertical wall, and a hard shoulder
+       where the two meet — at a perfectly correct aspect 1.499, equator 0.71,
+       closed, 0 ruffles. The numbers were right and the curvature was wrong.
+       Three passes fix the curvature and NOTHING else (the STUFF_* note in
+       js/diagram-geo.js): a profile fillet, a cosmetic wall bow and a lid dome.
+       Every one of them is paid for out of the straight run, so these rows check
+       the geometry AND that the arc walk's own height survives it untouched —
+       which is what makes "every aspect within ±3%" exactly 0%. */
+    var limit = G.STUFF.filletBend;
+    /** The widest ring the stitch counts themselves ask for. */
+    function widestRing(counts) {
+      var mx = 0, q;
+      for (q = 0; q < counts.length; q++) if (counts[q] > mx) mx = counts[q];
+      return mx / (2 * Math.PI);
+    }
+    /** How many rings sit anywhere other than count / 2π, and the tallest rise. */
+    function ringCheck(cls) {
+      var moved = 0, bowed = 0, maxRise = 0, q, e, f;
+      for (q = 0; q < cls.rounds.length; q++) {
+        e = cls.rounds[q];
+        if (e.empty || e.outlier) continue;
+        if (e.count > 0 && Math.abs(e.radius - e.count / (2 * Math.PI)) > 1e-12) moved++;
+        f = ((e.radiusDraw > 0 ? e.radiusDraw : e.radius) / Math.max(e.radius, 1e-12)) - 1;
+        if (f > bowed) bowed = f;
+        if (e.h > 0 && e.dy / e.h > maxRise) maxRise = e.dy / e.h;
+      }
+      return { moved: moved, bow: bowed, maxRise: maxRise };
+    }
+
+    // the parsed counts of baphomet "Body/Head", so these are the viewer's numbers
+    var BAPH = [8, 16, 24, 36, 36, 36, 36, 36, 36, 36, 27, 18, 18, 16, 24, 32, 40,
+                48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 36, 36, 24, 16, 8];
+    var baph = G.classify(model(BAPH, {
+      shape: { start: 'magic-ring', chainLen: 0, ringCount: 8, stuffed: true }
+    }));
+    var baphB = G.bendProfile(baph);
+    var baphWalk = plainWalkHeight(BAPH, G.SLACK.stuffed);
+    var baphRing = ringCheck(baph);
+    ok('baphomet Body/Head: no corner of the meridian bends tighter than ' + limit +
+       ' stitch heights (it was 0.72 — a hard shoulder)',
+      baphB.min >= limit * 0.995 && baph.stuff.applied,
+      'tightest bend ' + n(baphB.min, 3) + '·h at ring ' + baphB.at + ' of ' + baphB.n +
+      ' · lids domed ' + baph.stuff.lids + ' (+' + n(baph.stuff.lidRise, 3) + ' of rise)' +
+      ' · fillet ' + baph.stuff.filletPasses + ' passes moving ' + n(baph.stuff.filletRise, 3) +
+      ' · rings eased ' + baph.stuff.eased + ' by at most ' + n(100 * baph.stuff.easeMax, 2) + '%');
+    ok('...and it costs no height, so aspect 1.499 and Ø 15.28 do not move at all',
+      near(baph.height, baphWalk, 1e-9) &&
+      near(baph.aspect, baphWalk / (2 * baph.maxRadius), 1e-9) &&
+      near(baph.maxRadius, widestRing(BAPH), 1e-9) && baph.ruffles === 0,
+      'H ' + n(baph.height, 6) + ' = the arc walk’s ' + n(baphWalk, 6) +
+      ' · aspect ' + n(baph.aspect, 4) + ' · Ø ' + n(2 * baph.maxRadius, 3) +
+      ' = 2 × the widest ring ' + n(widestRing(BAPH), 3) +
+      ' · equator ' + n(baph.equatorFrac, 3) + ' · ruffles ' + baph.ruffles +
+      ' · renorm ×' + n(baph.stuff.renorm, 9));
+    ok('the radial ease is the last resort: at most ' + (100 * G.STUFF.filletEase) +
+       '% and never on the widest ring',
+      baph.stuff.easeMax <= G.STUFF.filletEase + 1e-9 &&
+      baphRing.moved === baph.stuff.eased &&
+      near(baph.maxRadius, widestRing(BAPH), 1e-9),
+      baph.stuff.eased + ' of ' + BAPH.length + ' rings eased, largest ' +
+      n(100 * baph.stuff.easeMax, 2) + '% of its own radius (cap ' +
+      (100 * G.STUFF.filletEase) + '%); every other ring is exactly count / 2π');
+    ok('no round is stretched past h / (1 − s), 01 §1.1’s own ceiling',
+      baphRing.maxRise <= 1 / (1 - baph.slack) + 1e-9,
+      'tallest rise ' + n(baphRing.maxRise, 3) + '·h against the ' +
+      n(1 / (1 - baph.slack), 3) + '·h a slack-' + baph.slack + ' fabric can spend');
+
+    // a plain sphere: the loft already domed it, so the fillet has almost
+    // nothing to do and must leave the dome, the height and the aspect alone
+    var sphCounts = ramp(6, 48, 6).concat(ramp(42, 6, -6));
+    var sph = G.classify(model(sphCounts, {
+      shape: { start: 'magic-ring', chainLen: 0, ringCount: 6, stuffed: true }
+    }));
+    var sphCap = capOf(sph);
+    ok('a plain 6→48→6 sphere keeps its dome, its height and its aspect',
+      sphCap.dome && G.bendProfile(sph).min >= limit * 0.995 &&
+      near(sph.height, plainWalkHeight(sphCounts, G.SLACK.stuffed), 1e-9) &&
+      sph.stuff.bowRuns === 0 && sph.stuff.eased === 0 && ringCheck(sph).moved === 0,
+      'bend ' + n(G.bendProfile(sph).min, 3) + '·h · H ' + n(sph.height, 6) + ' = arc walk ' +
+      n(plainWalkHeight(sphCounts, G.SLACK.stuffed), 6) + ' · aspect ' + n(sph.aspect, 4) +
+      ' · no straight run to bow, no ring eased · ' + capDetail(sphCap));
+
+    // the wall bow, on the one shape that is nothing but wall
+    var tubeCounts = rep(24, 20);
+    var tube = G.classify(model(tubeCounts, {
+      shape: { start: 'magic-ring', chainLen: 0, ringCount: 24, stuffed: true }
+    }));
+    var tubeRing = ringCheck(tube);
+    var tubeMid = tube.rounds[Math.floor(tube.rounds.length / 2)];
+    ok('a stuffed 24 × 20 tube bows out in the middle, by at most ' +
+       (100 * G.STUFF.wallBow) + '%, pinned at both ends of the run',
+      tube.stuff.bowRuns === 1 &&
+      tubeRing.bow > 0.02 && tubeRing.bow <= G.STUFF.wallBow + 1e-9 &&
+      !(tube.rounds[1].bow > 0) && !(tube.rounds[19].bow > 0) &&
+      near(tubeMid.bow, G.STUFF.wallBow, 0.02),
+      'widest bow ' + n(100 * tubeRing.bow, 2) + '% (cap ' + (100 * G.STUFF.wallBow) +
+      '%) · round 2 (first of the run) ' + n(100 * (tube.rounds[1].bow || 0), 2) +
+      '% · round 11 ' + n(100 * (tubeMid.bow || 0), 2) + '% · round 20 (last) ' +
+      n(100 * (tube.rounds[19].bow || 0), 2) + '%');
+    ok('...and the bow is COSMETIC: no ring’s own radius moves and no number does',
+      tubeRing.moved === 0 &&
+      near(tube.maxRadius, widestRing(tubeCounts), 1e-9) &&
+      near(tube.height, plainWalkHeight(tubeCounts, G.SLACK.stuffed), 1e-9) &&
+      tube.rounds[10].radiusDraw > tube.rounds[10].radius &&
+      tube.rounds[10].radiusMax > tube.rounds[10].radius,
+      'every radius is still count / 2π; `radiusDraw` carries the bow (' +
+      n(tube.rounds[10].radius, 3) + ' → ' + n(tube.rounds[10].radiusDraw, 3) +
+      ') and `radiusMax` reserves it · maxRadius ' + n(tube.maxRadius, 4) +
+      ' = the widest ring · aspect ' + n(tube.aspect, 4) + ' · H ' + n(tube.height, 4));
+
+    // the lid dome: a run past the flat rate that no sphere fits at all
+    var lidCounts = [8, 20, 32, 44].concat(rep(44, 8));
+    var lid = G.classify(model(lidCounts, {
+      shape: { start: 'magic-ring', chainLen: 0, ringCount: 8, stuffed: true }
+    }));
+    var lidCap = capOf(lid);
+    var lidWalk = plainWalkHeight(lidCounts, G.SLACK.stuffed);
+    ok('8 → 44 at +12 a round is past the flat rate, so NO sphere fits it — and the ' +
+       'stuffing domes it anyway, to a sagitta of ' + (100 * G.STUFF.lidSag) + '% of its radius',
+      G.loftRadius(8 / (2 * Math.PI), 44 / (2 * Math.PI), 3 * G.SH_SC / (1 - G.SLACK.stuffed)) === 0 &&
+      lid.stuff.lids === 1 && lidCap.dome && lidCap.n === 4 &&
+      lid.rounds[3].dy > 10 * lid.rounds[0].dy,
+      'lid rise ' + [0, 1, 2, 3].map(function (q) { return n(lid.rounds[q].dy, 3); }).join('→') +
+      ' where the flat walk gave 0.749→0.019→0.019→0.019 · ' + capDetail(lidCap));
+    ok('...paid for out of the straight run, so the segment’s height is unchanged',
+      near(lid.height, lidWalk, 1e-9) &&
+      lid.rounds[7].dy < lid.rounds[4].dy &&
+      near(lid.maxRadius, widestRing(lidCounts), 1e-9),
+      'H ' + n(lid.height, 6) + ' = the arc walk’s ' + n(lidWalk, 6) +
+      ' · the lid took ' + n(lid.stuff.lidRise, 3) + ' and the fillet ' +
+      n(lid.stuff.filletRise, 3) + ', all of it off the wall (round 5 ' +
+      n(lid.rounds[4].dy, 3) + ' → round 8 ' + n(lid.rounds[7].dy, 3) +
+      ') · aspect ' + n(lid.aspect, 4));
+
+    // ...and the gate: slack 0 must come out bit for bit as it went in
+    var doilyCounts = ramp(6, 120, 6);
+    var doily = G.classify(model(doilyCounts));
+    var doilyRing = ringCheck(doily);
+    ok('a doily at slack 0 is not touched by any of the three (gate STUFF.minSlack = ' +
+       G.STUFF.minSlack + ')',
+      doily.slack === G.SLACK.open && doily.stuff && doily.stuff.applied === false &&
+      doilyRing.moved === 0 && doilyRing.bow === 0 &&
+      near(doily.height, plainWalkHeight(doilyCounts, 0), 1e-9) &&
+      G.STUFF.minSlack === G.SLACK.shaped,
+      'slack ' + doily.slack + ' · stuffed profile applied ' + doily.stuff.applied +
+      ' · rings moved ' + doilyRing.moved + ' · bow ' + doilyRing.bow +
+      ' · H ' + n(doily.height, 6) + ' = the arc walk’s ' +
+      n(plainWalkHeight(doilyCounts, 0), 6) + ' · aspect ' + n(doily.aspect, 4) +
+      '  (a cup at ' + G.SLACK.shaped + ' is the least stuffed thing that IS touched)');
+
+    /* ------------------------------------- orientation (1.3.0, round 1 down) */
+    group('Orientation — round 1 at the bottom (layout upsideDown)');
+    /* A part the text works from the bottom up — "starting from the bottom of
+       the body", "start at the base" — is the same fabric the other way up. The
+       store reads the phrase into `shape.upsideDown`; `layout(model, {upsideDown})`
+       overrides it. Nothing about the fabric changes: only the finished piece is
+       mirrored about its own mid-height, so it still occupies [-height, 0]. */
+    var flipCounts = ramp(8, 32, 8).concat(rep(32, 4)).concat(ramp(24, 8, -8));
+    var flipOpt = { start: 'magic-ring', chainLen: 0, ringCount: 8, stuffed: true };
+    var plainM = model(flipCounts, { shape: flipOpt });
+    var downCls = G.classify(plainM);
+    var upCls = G.classify(plainM, { upsideDown: true });
+    function yRange(cls) {
+      var lo = Infinity, hi = -Infinity, q, e;
+      for (q = 0; q < cls.rounds.length; q++) {
+        e = cls.rounds[q];
+        if (e.empty || e.outlier) continue;
+        lo = Math.min(lo, e.y, e.yTop); hi = Math.max(hi, e.y, e.yTop);
+      }
+      return { lo: lo, hi: hi };
+    }
+    var dR = yRange(downCls), uR = yRange(upCls);
+    var firstDown = downCls.rounds[0], firstUp = upCls.rounds[0];
+    var lastUp = upCls.rounds[upCls.rounds.length - 1];
+    ok('upsideDown: round 1 moves to the BOTTOM, the last round to the top',
+      near(firstDown.yTop, 0, 1e-9) && near(firstUp.yTop, -upCls.height, 1e-9) &&
+      near(lastUp.y, 0, 1e-9) && firstUp.y > firstUp.yTop,
+      'round 1 spans y ' + n(firstDown.yTop, 3) + '→' + n(firstDown.y, 3) +
+      ' the usual way up and ' + n(firstUp.yTop, 3) + '→' + n(firstUp.y, 3) +
+      ' flipped; the last round ends at y ' + n(lastUp.y, 3));
+    ok('...and the piece still occupies [−height, 0], so the fit and the shadow are unchanged',
+      near(dR.lo, uR.lo, 1e-9) && near(dR.hi, uR.hi, 1e-9) &&
+      near(dR.lo, -downCls.height, 1e-9) && near(dR.hi, 0, 1e-9),
+      'y ' + n(dR.lo, 4) + '…' + n(dR.hi, 4) + ' either way up, height ' + n(downCls.height, 4));
+    ok('nothing about the fabric changes: same height, same aspect, same bend profile',
+      near(upCls.height, downCls.height, 1e-12) &&
+      near(upCls.aspect, downCls.aspect, 1e-12) &&
+      near(upCls.maxRadius, downCls.maxRadius, 1e-12) &&
+      near(G.bendProfile(upCls).min, G.bendProfile(downCls).min, 1e-9) &&
+      upCls.upsideDown === true && downCls.upsideDown === false,
+      'H ' + n(upCls.height, 6) + ' · aspect ' + n(upCls.aspect, 6) + ' · bend ' +
+      n(G.bendProfile(upCls).min, 4) + '·h — identical both ways up');
+    ok('the equator is still measured from the geometric TOP, so it mirrors',
+      near(upCls.equatorFrac, 1 - downCls.equatorFrac, 1e-9) &&
+      upCls.equatorRound === downCls.equatorRound,
+      'equator ' + n(downCls.equatorFrac, 3) + ' → ' + n(upCls.equatorFrac, 3) +
+      ' (round ' + upCls.equatorRound + ' either way)');
+    /* A closed top over an OPEN bottom is where the swap is visible, and it is
+       the one the renderer has to read: `closedTop`/`closedBottom` name the
+       piece's geometric ENDS, while `shape.closedTop`/`shape.closedBottom` keep
+       naming round 1's ring and the gathered close — i.e. WHICH BAND each cap
+       belongs to. */
+    var cupCounts = ramp(6, 36, 6).concat(rep(36, 6));
+    var cupDown = G.classify(model(cupCounts, { shape: { start: 'magic-ring', chainLen: 0, ringCount: 6, stuffed: true } }));
+    var cupUp = G.classify(model(cupCounts, { shape: { start: 'magic-ring', chainLen: 0, ringCount: 6, stuffed: true } }), { upsideDown: true });
+    ok('closedTop / closedBottom swap, and shape.* still names round 1 and the gather',
+      cupDown.closedTop === true && cupDown.closedBottom === false &&
+      cupUp.closedTop === false && cupUp.closedBottom === true &&
+      cupUp.shape.closedTop === true && cupUp.shape.closedBottom === false,
+      'the usual way up cap T' + (cupDown.closedTop ? '+' : '–') +
+      ' B' + (cupDown.closedBottom ? '+' : '–') + ', flipped T' +
+      (cupUp.closedTop ? '+' : '–') + ' B' + (cupUp.closedBottom ? '+' : '–') +
+      '; shape.closedTop ' + cupUp.shape.closedTop + ' (round 1’s magic ring, wherever it now is)');
+    // the model's own flag, and the override
+    var flagM = model(flipCounts, { shape: {
+      start: 'magic-ring', chainLen: 0, ringCount: 8, stuffed: true, upsideDown: true } });
+    var byFlag = G.classify(flagM);
+    var override = G.classify(flagM, { upsideDown: false });
+    var laidOut = G.layout(flagM);
+    ok('shape.upsideDown is honoured, and an explicit opts.upsideDown overrides it',
+      byFlag.upsideDown === true && byFlag.shape.upsideDown === true &&
+      override.upsideDown === false &&
+      near(byFlag.height, override.height, 1e-12) &&
+      near(laidOut.bands[0].yTop, -laidOut.height, 1e-9) &&
+      laidOut.bands[laidOut.bands.length - 1].yBot >= -1e-9,
+      'shape.upsideDown → cls.upsideDown ' + byFlag.upsideDown +
+      ', opts {upsideDown:false} → ' + override.upsideDown +
+      ' · layout band 1 yTop ' + n(laidOut.bands[0].yTop, 3) + ' (= −height ' +
+      n(-laidOut.height, 3) + '), last band yBot ' +
+      n(laidOut.bands[laidOut.bands.length - 1].yBot, 3));
+    ok('only `true` flips: a junk or missing flag leaves the piece the usual way up',
+      G.classify(model(flipCounts, { shape: { start: 'magic-ring', upsideDown: 'yes' } })).upsideDown === false &&
+      G.classify(model(flipCounts, { shape: { start: 'magic-ring', upsideDown: 1 } })).upsideDown === false &&
+      G.classify(model(flipCounts, { shape: { start: 'magic-ring' } })).upsideDown === false &&
+      G.classify(model(flipCounts, { mode: 'rows' })).upsideDown === false,
+      'shape.upsideDown "yes" / 1 / absent all stay upright; rows mode already walks upward, ' +
+      'so a sheet is worked from the bottom up by construction');
+
+    /* ------------------------------------------- the open-rim rule (§1.3) */
+    /* 01 §1.3 gives EVERY piece that ends at its widest round slack 0, which
+       flattens a turtle shell and a snowman hat into discs. "Open rim" is
+       three shapes, and the count sequence says which: see the DEVIATION note
+       at the top of js/diagram-geo.js. The four cases, synthetically. */
+    group('Open rim is three shapes, not one (01 §1.3 — geo DEVIATION)');
+
+    // (1) cup / dome / hat: increases, then straight rounds, then stop open.
+    // The straight rounds can only be WALL, and a piece with a wall is a
+    // vessel that holds a dome up — 0.20 slack, not 0.
+    var domeCounts = ramp(6, 48, 6).concat(rep(48, 6));
+    var dome = G.classify(model(domeCounts));
+    ok('open dome 6→48 then 6 straight: form "cup", slack 0.20',
+      dome.form === 'cup' && dome.slack === G.SLACK.shaped,
+      'form ' + dome.form + '  slack ' + dome.slack + '  rounds ' + domeCounts.length);
+    ok('open dome: aspect 0.40–0.70 (a dome, not a disc with a rim)',
+      dome.aspect >= 0.40 && dome.aspect <= 0.70,
+      'aspect ' + n(dome.aspect) + '  H ' + n(dome.height) + '  Ø ' + n(2 * dome.maxRadius) +
+      '  (at slack 0 the 7 increase rounds rise ~0 and it reads ' +
+      n(G.classify(model(domeCounts, { shape: { start: 'magic-ring', chainLen: 0, ringCount: 6, stuffed: false } })).aspect, 2) +
+      ' at slack 0.05)');
+
+    // the turtle shell's real sequence, so the REF row's floor is checked
+    // against a number this file computes rather than a number it asserts
+    var shellFull = G.classify(model(ramp(6, 42, 6).concat([42, 42])));
+    ok('turtle shell 6→42, 42, 42 (full sequence): aspect 0.40–0.50',
+      shellFull.form === 'cup' && shellFull.aspect >= 0.40 && shellFull.aspect <= 0.50,
+      'aspect ' + n(shellFull.aspect) + '  H ' + n(shellFull.height) + '  Ø ' + n(2 * shellFull.maxRadius) +
+      '  — the parser drops round 1 (6 sc in a magic ring), so the REF row sees ' +
+      n(G.classify(model(ramp(12, 42, 6).concat([42, 42]))).aspect, 3));
+
+    // (2) flat disc: stops open the MOMENT the increases stop. No wall,
+    // nothing to hold it — slack stays 0 and the sqrt makes it flat.
+    var disc2Counts = ramp(6, 60, 6);
+    var disc2 = G.classify(model(disc2Counts));
+    ok('flat disc 6→60, no straight rounds: form "disc", slack 0',
+      disc2.form === 'disc' && disc2.slack === G.SLACK.open,
+      'form ' + disc2.form + '  slack ' + disc2.slack +
+      '  straight rounds ' + disc2.shape.counts.straight + ' (cup needs ≥ ' + G.CUP_STRAIGHT + ')');
+    ok('flat disc 6→60: height < 0.15 × radius',
+      disc2.height < 0.15 * disc2.maxRadius,
+      'H ' + n(disc2.height) + '  R ' + n(disc2.maxRadius) + '  limit ' + n(0.15 * disc2.maxRadius));
+    // ...and a single straight round is still a disc: one round of wall is a
+    // turned edge, not a side. (The baphomet ear, 6→30, 30.)
+    var lip = G.classify(model(ramp(6, 30, 6).concat([30])));
+    ok('one straight round is a turned edge, not a wall: still a disc',
+      lip.form === 'disc' && lip.aspect < 0.35,
+      'form ' + lip.form + '  aspect ' + n(lip.aspect) + '  straight ' + lip.shape.counts.straight);
+
+    // (3) shallow bowl: a small unstuffed piece that turns a little way back
+    // in. A cupped brim on a hand's worth of body — the panda ear.
+    var earS = G.classify(model([6, 12, 18, 18, 15]));
+    ok('shallow ear 6→18, 18, →15: form "shallow-bowl", slack 0.10',
+      earS.form === 'shallow-bowl' && earS.slack === G.SLACK.bowl,
+      'form ' + earS.form + '  slack ' + earS.slack);
+    ok('shallow ear: aspect 0.45–0.90',
+      earS.aspect >= 0.45 && earS.aspect <= 0.90,
+      'aspect ' + n(earS.aspect) + '  H ' + n(earS.height) + '  Ø ' + n(2 * earS.maxRadius));
+
+    // (4) and none of it moves a closed, stuffed sphere.
+    var ball2 = G.classify(model(ballCounts));
+    ok('a stuffed closed sphere is untouched by the rule',
+      ball2.form === 'closed' && ball2.slack === G.SLACK.stuffed &&
+      near(ball2.aspect, ball.aspect, 1e-9),
+      'form ' + ball2.form + '  slack ' + ball2.slack + '  aspect ' + n(ball2.aspect));
+    // the text always wins over the count sequence
+    ok('"do not stuff" overrides the cup rule (slack 0.05, not 0.20)',
+      G.classify(model(domeCounts, {
+        shape: { start: 'magic-ring', chainLen: 0, ringCount: 6, stuffed: false }
+      })).slack === G.SLACK.unstuffed, 'a cup the pattern says to leave empty');
+    ok('"stuff" overrides the cup rule the other way (slack 0.35)',
+      G.classify(model(domeCounts, {
+        shape: { start: 'magic-ring', chainLen: 0, ringCount: 6, stuffed: true }
+      })).slack === G.SLACK.stuffed, 'a cup the pattern says to stuff');
+    // a cylinder has straight rounds but no increases: not a cup
+    ok('a cylinder (no increases) is a tube, not a cup',
+      G.classify(model(rep(24, 5), {
+        shape: { start: 'chain-oval', chainLen: 10, ringCount: 24, stuffed: null }
+      })).form === 'tube', 'the baphomet muzzle: 24 × 5, no increase ever');
+
+    /* ----------------------------------------------------- shape classes */
+    group('Shape classification (01 §1.4, §1.5)');
+
+    /* granny square: 4 corner increases, same phase, 5 rounds. +8 sc per round
+       is N_flat,4(sc) = 1.273 × 5.97 = 7.6, i.e. a square that lies flat. */
+    var sq = G.classify(model([8, 16, 24, 32, 40], {
+      inc: function (i, c) { return [0, Math.round(c / 4), Math.round(c / 2), Math.round(3 * c / 4)]; }
+    }));
+    var sqK = sq.rounds[3];
+    ok('granny square: increases at 4 positions → corners = 4',
+      sqK.kind === 'polygon' && sqK.corners === 4,
+      'kind ' + sqK.kind + '  corners ' + sqK.corners + '  piece corners ' + sq.corners);
+    if (sqK.prof) {
+      var rc = G.profileRange(sqK.prof);
+      ok('square: corners ~11% out, mid-sides ~21% in (blended by sharp)',
+        rc.max > 1.0 && rc.min < 1.0,
+        'multiplier ' + n(rc.min) + ' … ' + n(rc.max) + '  sharp ' + n(sqK.prof.sharp, 2) +
+        '  (unblended 0.785 … 1.111)');
+    }
+    ok('square: flat — H / Ø < 0.10', sq.aspect < 0.10,
+      'aspect ' + n(sq.aspect) + '  H ' + n(sq.height) + '  Ø ' + n(2 * sq.maxRadius));
+
+    // one round of corner increases is a dart, not a polygon
+    var dart = G.classify(model([24, 32, 40], {
+      inc: function (i, c) { return i === 1 ? [0, Math.round(c / 4), Math.round(c / 2), Math.round(3 * c / 4)] : null; }
+    }));
+    ok('one round of corner increases is a dart, not a polygon',
+      dart.rounds[1].kind !== 'polygon', 'kind ' + dart.rounds[1].kind + ' (needs ≥ 3 consecutive rounds)');
+
+    // hexagon: 6 × 3tr groups = 18 increases in 6 clusters, +18 tr per round
+    var hex = G.classify(model([18, 36, 54, 72], {
+      t: 'tr',
+      inc: function (i, c) {
+        var o = [], j, k;
+        for (j = 0; j < 6; j++) { var b = Math.round(j * c / 6); for (k = 0; k < 3; k++) o.push(b + k); }
+        return o;
+      }
+    }));
+    var hexK = hex.rounds[2];
+    ok('hex socks: 18 increases in 6 clusters → corners = 6',
+      hexK.kind === 'polygon' && hexK.corners === 6,
+      'kind ' + hexK.kind + '  corners ' + hexK.corners + '  aspect ' + n(hex.aspect) +
+      '  (tr, +18/round vs N_flat,6 = ' + n(G.flatRate(2.68 * 0.95, 1) * (6 * Math.tan(Math.PI / 6) / Math.PI), 1) + ')');
+    ok('hexagon: flat — H / Ø < 0.06 (the pattern warns "6 corners. This is normal")',
+      hex.aspect < 0.06, 'aspect ' + n(hex.aspect) + '  H ' + n(hex.height) + '  Ø ' + n(2 * hex.maxRadius));
+    ok('adjacent inc runs collapse to one site',
+      G.sites({ count: 36, inc: [0, 1, 2, 6, 7, 8, 12, 13, 14] }).inc.length === 3,
+      'sites ' + JSON.stringify(G.sites({ count: 36, inc: [0, 1, 2, 6, 7, 8, 12, 13, 14] }).inc));
+
+    /* the one that matters most: "+6 sc per round" is six increases at six
+       evenly spaced positions, every round, for the whole of an amigurumi
+       sphere. It is a spread increase, not a hexagon. */
+    var spread = G.classify(model(ramp(6, 48, 6), {
+      inc: function (i, c) { var o = [], j; for (j = 0; j < 6; j++) o.push(Math.round(j * c / 6)); return o; }
+    }));
+    var spreadPoly = 0;
+    for (var si = 0; si < spread.rounds.length; si++) if (spread.rounds[si].kind === 'polygon') spreadPoly++;
+    ok('+6 sc at 6 spread positions is a circle, not a hexagon',
+      spread.corners === 0 && spreadPoly === 0,
+      'corners ' + spread.corners + '  polygon rounds ' + spreadPoly +
+      '  (1 stitch per site; a corner takes ≥ ' + 1.8 + ')');
+
+    // chevron veto: k increases AND k decreases at net zero is never a polygon
+    var rip = G.classify(model(rep(40, 5), {
+      shape: { start: 'chain-ring', chainLen: 40, ringCount: 40, stuffed: false },
+      inc: function (i, c) { var o = [], j; for (j = 0; j < 10; j++) o.push(Math.round(j * c / 10)); return o; },
+      dec: function (i, c) { var o = [], j; for (j = 0; j < 10; j++) o.push(Math.round(j * c / 10) + 2); return o; }
+    }));
+    var ripK = rip.rounds[2];
+    ok('ripple veto: 10 inc + 10 dec at net 0 → a ring, never a polygon',
+      ripK.kind === 'ripple' && ripK.corners === 0,
+      'kind ' + ripK.kind + '  corners ' + ripK.corners + '  lobes ' + ripK.lobes);
+    ok('ripple stays circular: mean radius = perimeter / 2π',
+      near(ripK.radius, 40 / (2 * Math.PI), 1e-6),
+      'radius ' + n(ripK.radius, 4) + '  P/2π ' + n(40 / (2 * Math.PI), 4));
+
+    // chain-oval start: a stadium whose straight run never changes
+    var ov = G.classify(model(rep(24, 5), {
+      shape: { start: 'chain-oval', chainLen: 10, ringCount: 24, stuffed: true }
+    }));
+    var ovK = ov.rounds[3];
+    ok('chain-oval chainLen 10 → stadium with a 10-long straight side',
+      ovK.kind === 'oval' && near(ovK.straight, 10, 1e-9),
+      'kind ' + ovK.kind + '  straight ' + n(ovK.straight) + '  end radius ' + n(ovK.endR) +
+      '  perimeter ' + n(ovK.perimeter) + ' (2·10 + 2π·' + n(ovK.endR) + ' = ' + n(20 + 2 * Math.PI * ovK.endR) + ')');
+    if (ovK.prof) {
+      var rLong = ovK.prof(0) * ovK.radius, rShort = ovK.prof(Math.PI / 2) * ovK.radius;
+      ok('stadium: long half-axis = straight/2 + r, short = r',
+        near(rLong, 5 + ovK.endR, 0.01) && near(rShort, ovK.endR, 0.01),
+        'long ' + n(rLong) + ' (want ' + n(5 + ovK.endR) + ')  short ' + n(rShort) + ' (want ' + n(ovK.endR) + ')');
+      var cum = G.arcTable(ovK.prof, 720);
+      ok('stadium arc length = perimeter (stitches fit)',
+        near(cum[cum.length - 1] * ovK.radius, ovK.perimeter, 0.01),
+        'arc ' + n(cum[cum.length - 1] * ovK.radius) + '  perimeter ' + n(ovK.perimeter));
+    }
+
+    /* equal-arc-length slices: a stitch is a fixed amount of fabric, so on a
+       non-circular ring its angular width is not 2π/n */
+    group('Equal-arc-length slices');
+    var ai, wt24 = []; for (ai = 0; ai < 24; ai++) wt24.push(1);
+    var ovSl = G.arcSlices(ovK.prof, wt24, 24);
+    var sum = 0, minAw = Infinity, maxAw = -Infinity, finite = true;
+    for (ai = 0; ai < 24; ai++) {
+      sum += ovSl.aw[ai];
+      if (!isFinite(ovSl.a0[ai]) || !isFinite(ovSl.aw[ai]) || ovSl.aw[ai] <= 0) finite = false;
+      minAw = Math.min(minAw, ovSl.aw[ai]); maxAw = Math.max(maxAw, ovSl.aw[ai]);
+    }
+    ok('stadium slices are positive, finite and cover exactly 2π',
+      finite && near(sum, 2 * Math.PI, 1e-9),
+      'Σ aw ' + n(sum, 6) + '  narrowest ' + n(minAw, 4) + '  widest ' + n(maxAw, 4));
+    ok('stadium: the flat sides take more angle per stitch than the round ends',
+      maxAw / minAw > 1.5, 'widest / narrowest ' + n(maxAw / minAw, 2));
+    var sqSl = G.arcSlices(sqK.prof, wt24, 24);
+    var sqSum = 0; for (ai = 0; ai < 24; ai++) sqSum += sqSl.aw[ai];
+    ok('polygon slices cover exactly 2π too', near(sqSum, 2 * Math.PI, 1e-9), 'Σ aw ' + n(sqSum, 6));
+    ok('a circle keeps the fast path: every slice is 2π/n',
+      near(G.arcSlices(null, wt24, 24).aw[5], 2 * Math.PI / 24, 1e-12),
+      'aw ' + n(G.arcSlices(null, wt24, 24).aw[5], 6));
+
+    /* ------------------------------------- the polygon prior (07 D1) */
+    /* `Patterns.expand` returns a flat count for `(3 dc, ch 3, 3 dc) in corner
+       sp`, so `polygonFit` — which is driven by increase-site indices — has
+       nothing to fit and every granny square, hexagon and star in the corpus
+       rendered as a solid of revolution. 01 §1.4.7 always specified the escape
+       hatch: a text fallback for k, carried on the model as `shape.corners`
+       (0|3|4|6|8) with `shape.cornersSource` 'sites' | 'text'. */
+    group('Polygon prior — shape.corners (01 §1.4.7, 07 D1)');
+
+    var R4 = G.polygonRatios(4), R6 = G.polygonRatios(6);
+    ok('k = 4: corners 11.1% out, mid-sides 21.5% in, flat rate ×1.273',
+      near(R4.corner, 1.111, 0.001) && near(R4.side, 0.785, 0.001) &&
+      near(R4.flat, 1.273, 0.001) && near(R4.swing, 1.414, 0.001),
+      'corner ' + n(R4.corner, 4) + '  side ' + n(R4.side, 4) + '  N_flat,4/N_flat,circle ' +
+      n(R4.flat, 4) + '  swing ' + n(R4.swing, 3) + ' (01 §1.4: 1.111 / 0.785 / 1.273 / 1.41)');
+    ok('k = 6: 1.047 / 0.907 / 1.103, and k = 3 / k = 8 derive too',
+      near(R6.corner, 1.047, 0.001) && near(R6.side, 0.907, 0.001) && near(R6.flat, 1.103, 0.001) &&
+      near(G.polygonRatios(3).corner, 1.2092, 0.001) && near(G.polygonRatios(3).side, 0.6046, 0.001) &&
+      near(G.polygonRatios(8).corner, 1.0261, 0.001) && near(G.polygonRatios(8).side, 0.9481, 0.001),
+      'k6 ' + n(R6.corner, 4) + '/' + n(R6.side, 4) + '/' + n(R6.flat, 4) +
+      '  k3 ' + n(G.polygonRatios(3).corner, 4) + '/' + n(G.polygonRatios(3).side, 4) +
+      '  k8 ' + n(G.polygonRatios(8).corner, 4) + '/' + n(G.polygonRatios(8).side, 4));
+
+    ok('polygonFit with no sites at all answers from the prior',
+      G.polygonFit(null, 48, 4) && G.polygonFit(null, 48, 4).k === 4 &&
+      G.polygonFit(null, 48, 4).prior === true &&
+      G.polygonFit([0, 1], 48, 6).k === 6,
+      'null sites + prior 4 → ' + JSON.stringify(G.polygonFit(null, 48, 4)) +
+      ' · 2 sites (under the 3 it needs) + prior 6 → k ' + G.polygonFit([0, 1], 48, 6).k);
+    var sixSites = [0, 8, 16, 24, 32, 40];
+    ok('READABLE sites still win: 6 clusters beat a prior of 4',
+      G.polygonFit(sixSites, 48, 4).k === 6 && G.polygonFit(sixSites, 48, 4).prior === false,
+      'sites ' + JSON.stringify(sixSites) + ' + prior 4 → k ' + G.polygonFit(sixSites, 48, 4).k +
+      ' (measured, prior ' + G.polygonFit(sixSites, 48, 4).prior + ')');
+    ok('a prior that is not 3 / 4 / 6 / 8 is dropped, not guessed at',
+      !G.polygonFit(null, 48, 5) && !G.polygonFit(null, 48, 0) &&
+      !G.polygonFit(null, 48, 'square') && !G.polygonFit(null, 48, 12),
+      'k = 5, 0, "square", 12 all → null (POLY.priorKs ' + JSON.stringify(G.POLY.priorKs) + ')');
+
+    /* The three motif fixtures, at the count sequence 01 §2.2 states for each,
+       with NO increase sites (what the parser actually hands us today) and the
+       text prior in `shape.corners`. Counts are each stitch's own k-gon flat
+       rate, rounded up to a whole stitch — the case 01 §1.4 says must lie flat:
+         dc  N_flat,4 = 2π·1.9095·1.2732 = 15.3  → +16   (persian tiles)
+         tr  N_flat,4 = 2π·2.546 ·1.2732 = 20.4  → +21   (stylecraft hood)
+         tr  N_flat,6 = 2π·2.546 ·1.1027 = 17.6  → +18   (hex socks, k = 6) */
+    function motif(counts, t, k, chain) {
+      return G.classify(model(counts, {
+        t: t,
+        shape: { start: 'chain-ring', chainLen: chain, ringCount: counts[0],
+          stuffed: null, corners: k, cornersSource: 'text' }
+      }));
+    }
+    function motifCheck(label, cls, k, ref) {
+      var polys = 0, rings = 0, straight = true, i, r;
+      for (i = 0; i < cls.rounds.length; i++) {
+        r = cls.rounds[i];
+        if (r.kind === 'polygon') {
+          polys++;
+          if (!(r.prof && r.prof.kind === 'polygon' && r.prof.corners === k)) straight = false;
+        } else rings++;
+      }
+      var flatFrac = cls.maxRadius > 0 ? cls.height / cls.maxRadius : 99;
+      ok(label + ': k = ' + k + ' polygon, flat, straight sides',
+        cls.corners === k && polys === cls.rounds.length - 2 && rings === 2 &&
+        straight && cls.ruffles === 0 && flatFrac < 0.15,
+        'corners ' + cls.corners + ' (' + cls.cornersSource + ')  polygon rounds ' + polys +
+        ' of ' + cls.rounds.length + ' (first 2 stay circular)  H ' + n(cls.height, 3) +
+        ' = ' + n(flatFrac, 3) + '·radius (want < 0.15)  Ø ' + n(2 * cls.maxRadius, 2) +
+        '  aspect ' + n(cls.aspect, 4) + '  ruffles ' + cls.ruffles);
+      /* the cross-section IS the k-gon of 01 §1.4, blended by `sharp`. Sampled
+         at the corner (u = 0) and the mid-side (u = π/k) exactly; the 180-sample
+         profileRange scan is then only asked to agree to within 0.5%. */
+      var last = cls.rounds[cls.rounds.length - 1];
+      if (last && last.prof) {
+        var ph = last.prof.phase, sh = last.prof.sharp;
+        var atCorner = last.prof(-ph), atSide = last.prof(-ph + Math.PI / k);
+        var wantC = 1 + sh * (ref.corner - 1), wantS = 1 + sh * (ref.side - 1);
+        var rng = G.profileRange(last.prof, 720);
+        ok(label + ': corner / mid-side multipliers are the k = ' + k + ' numbers',
+          near(atCorner, wantC, 1e-12) && near(atSide, wantS, 1e-12) &&
+          sh === G.POLY.sharpFlat && near(rng.max, wantC, 0.005) && near(rng.min, wantS, 0.005),
+          'corner ×' + n(atCorner, 5) + ' mid-side ×' + n(atSide, 5) + '  = 1 + ' + sh + '·(' +
+          n(ref.corner, 4) + '−1) / 1 + ' + sh + '·(' + n(ref.side, 4) +
+          '−1)  unblended ' + n(ref.side, 3) + ' … ' + n(ref.corner, 3) + ', swing ' +
+          n(ref.swing, 3) + '  sharp ' + sh + ' (worked at its own flat rate)' +
+          '  scanned range ' + n(rng.min, 4) + ' … ' + n(rng.max, 4));
+      }
+    }
+    var persian = motif([16, 32, 48, 64, 80, 96], 'dc', 4, 4);
+    motifCheck('persian tiles square (ch-4 ring, 6 rnds of dc, +16)', persian, 4, R4);
+    var hoodSq = motif([20, 41, 62, 83, 104, 125], 'tr', 4, 6);
+    motifCheck('stylecraft hood square (ch-6 ring, 6 rnds of UK tr, +21)', hoodSq, 4, R4);
+    var hexPrior = motif([18, 36, 54, 72, 90, 108], 'tr', 6, 4);
+    motifCheck('hex socks hexagon (6 × 3tr groups, +18 tr)', hexPrior, 6, R6);
+
+    /* the point of carrying `kf` into the walk rather than only into the
+       cross-section: without it, round 2 of a square worked at the SQUARE's
+       flat rate is measured against the CIRCLE's, |dr| > h, and a flat granny
+       square ruffles — which is exactly what the gallery showed. */
+    var noPrior = G.classify(model([16, 32, 48, 64, 80, 96], {
+      t: 'dc', shape: { start: 'chain-ring', chainLen: 4, ringCount: 16, stuffed: null }
+    }));
+    ok('the k-gon flat rate is what stops a flat square ruffling',
+      noPrior.ruffles >= 4 && persian.ruffles === 0 &&
+      noPrior.rounds[3].prof && noPrior.rounds[3].prof.kind === 'wave' &&
+      persian.rounds[3].prof && persian.rounds[3].prof.kind === 'polygon',
+      'same counts, no prior: ruffles ' + noPrior.ruffles + ' of ' + noPrior.rounds.length +
+      ', round 4 cross-section "' + noPrior.rounds[3].prof.kind + '" with ' +
+      noPrior.rounds[3].lobes + ' lobes — a frill   →   with prior k = 4: ruffles ' +
+      persian.ruffles + ', round 4 "' + persian.rounds[3].prof.kind + '" with ' +
+      persian.rounds[3].prof.corners + ' straight sides' +
+      ' (kf = k·tan(π/k)/π = ' + n(R4.flat, 4) + ', so |dr| ≤ h·kf and the sqrt stays real)');
+
+    /* The hex socks as the parser really hands it over: `6 x 3tr groups`,
+       +18/round, but UK tr converted to US dc so h arrives as 2.01 where 01
+       §1.1 derives the +18 flat rate from tr's 2.68. Measured against h = 2.01
+       every round is 36% past the hexagon's flat rate and the whole motif
+       frills — the "spinning top" in the review. A TEXT-asserted k is
+       independent evidence (01 §1.4.5: the rate test "does not veto"), so up to
+       POLY_FLAT_TOL past the rate the round is laid flat and flagged
+       `flattened` instead. Beyond that it is a real frill. */
+    var hexDc = motif([18, 36, 54, 72, 90, 108, 126], 'dc', 6, 4);
+    ok('a text-asserted k-gon 36% past its flat rate is laid flat, not frilled',
+      hexDc.ruffles === 0 && hexDc.flattened >= 5 && hexDc.corners === 6 &&
+      hexDc.height / hexDc.maxRadius < 0.15 && G.POLY.flatTol === 1.5,
+      'ruffles ' + hexDc.ruffles + '  flattened ' + hexDc.flattened + '  corners ' +
+      hexDc.corners + '  H ' + n(hexDc.height, 3) + ' = ' +
+      n(hexDc.height / hexDc.maxRadius, 3) + '·radius  ·  |dr| / (h·kf) = ' +
+      n((18 / (2 * Math.PI)) / (2.01 * 0.95 * R6.flat), 3) + ' ≤ POLY.flatTol ' + G.POLY.flatTol);
+    var frill = motif([18, 60, 130, 230, 360], 'dc', 6, 4);
+    ok('...but a genuine frill (2×+ past the rate) still frills',
+      frill.ruffles >= 2,
+      'ruffles ' + frill.ruffles + ' of ' + frill.rounds.length +
+      '  (a doily’s picot round, a deliberate ruffle — the prior does not silence it)');
+
+    /* ---------------------------------------------- granny clusters splay
+       The other side of POLY_FLAT_TOL. A real granny square grows +12 TREBLE
+       widths a round — four corners, three trebles a group — and lies FLAT,
+       yet the k = 4 flat rate at the height a treble arrives with is 15–16
+       widths a round (2pi·h·kf = 15.3 at h 2.01, 19.4 at h 2.55). The arc walk
+       spent the 20–40% shortfall as RISE, so the Stylecraft hood motif climbed
+       into a cup at aspect 0.49 against 01 §2.2 #43's < 0.08.
+       Three trebles worked into ONE chain space fan out, so the round's
+       effective height is lower than a plain dc/tr row's and +12 really does
+       cover the rate. Read it off the growth instead of guessing a second
+       height table: a k-gon round growing at GRANNY_FLAT or more of its own
+       flat rate lies FLAT. Under that it may still cup (a bowl deliberately
+       worked in the round with stacked corners), over POLY_FLAT_TOL it still
+       frills, and a plain ring — kf = 1 — is never asked.
+       `wmotif` is the hood as the store hands it over: the count and Σw differ,
+       because a chain space is a fraction of a stitch wide (Σw 16 over 24). */
+    function wmotif(sumW, counts, h, k, chain) {
+      var rs = [], i, j;
+      for (i = 0; i < counts.length; i++) {
+        var c = counts[i], w = sumW[i] / c, a = [];
+        for (j = 0; j < c; j++) a.push({ t: 'dc', c: null, h: h, w: w });
+        rs.push({ count: c, done: c, stitches: a, color: '#f1e3c8', height: h,
+          ghost: false, row: i + 1, inc: null, dec: null });
+      }
+      return G.classify({
+        mode: 'rounds', rounds: rs, current: rs.length - 1, defaultColor: '#f1e3c8',
+        shape: { start: 'chain-ring', chainLen: chain, ringCount: counts[0],
+          stuffed: null, corners: k, cornersSource: 'text' },
+        window: { first: 1, total: counts.length },
+        deviation: { expected: 0, actual: 0 }
+      });
+    }
+    /* every polygon round carries the k-gon cross-section, i.e. straight sides */
+    function straightSides(cls, k) {
+      var np = 0, good = true;
+      for (var i = 0; i < cls.rounds.length; i++) {
+        if (cls.rounds[i].kind !== 'polygon') continue;
+        np++;
+        if (!(cls.rounds[i].prof && cls.rounds[i].prof.kind === 'polygon' &&
+              cls.rounds[i].prof.corners === k)) good = false;
+      }
+      return np >= 1 && good;
+    }
+    function grannyRounds(cls) {
+      var k = 0;
+      for (var i = 0; i < cls.rounds.length; i++) if (cls.rounds[i].granny) k++;
+      return k;
+    }
+    /* 2pi·h·kf — the flat rate in whole stitch widths a round, 01 §1.4 */
+    function kRate(h, k) {
+      return 2 * Math.PI * h * G.SH_SC * G.polygonRatios(k).flat;
+    }
+
+    var hoodW = [16, 25, 40, 52, 64, 76], hoodN = [24, 33, 48, 60, 72, 84];
+    /* the hood's `3tr` groups arrive as US dc (h 2.01) or as tr (h 2.546)
+       depending on the UK/US conversion, which moves the ratio from 0.79 to
+       0.62 — the rule has to lay the motif flat either way */
+    var hoodDc = wmotif(hoodW, hoodN, 2.01, 4, 6);
+    var hoodTr = wmotif(hoodW, hoodN, 2.546, 4, 6);
+    ok('the hood motif (Σw +12 a round, text k = 4) lies FLAT: aspect ≤ 0.08',
+      hoodDc.aspect <= 0.08 && hoodTr.aspect <= 0.08 &&
+      hoodDc.ruffles === 0 && hoodTr.ruffles === 0 &&
+      straightSides(hoodDc, 4) && straightSides(hoodTr, 4) &&
+      hoodDc.corners === 4 && hoodTr.corners === 4 &&
+      grannyRounds(hoodDc) === 6 && grannyRounds(hoodTr) === 6 &&
+      hoodDc.grannyFabric === true && hoodTr.grannyFabric === true &&
+      G.POLY.grannyFlat === 0.55,
+      'Σw ' + hoodW.join(',') + ' (counts ' + hoodN.join(',') + ')' +
+      '  ·  as dc h 2.01: aspect ' + n(hoodDc.aspect, 4) + '  H ' + n(hoodDc.height, 3) +
+      '  Ø ' + n(2 * hoodDc.maxRadius, 2) + '  granny ' + grannyRounds(hoodDc) + '/' +
+      hoodDc.rounds.length + '  ruffles ' + hoodDc.ruffles +
+      '  ·  as tr h 2.546: aspect ' + n(hoodTr.aspect, 4) + '  H ' + n(hoodTr.height, 3) +
+      '  Ø ' + n(2 * hoodTr.maxRadius, 2) + '  granny ' + grannyRounds(hoodTr) +
+      '/' + hoodTr.rounds.length + '  ruffles ' + hoodTr.ruffles +
+      '  ·  +12 against N_flat,4 = ' + n(kRate(2.01, 4), 1) + ' (dc) / ' +
+      n(kRate(2.546, 4), 1) + ' (tr) = ' + n(12 / kRate(2.01, 4), 3) + ' / ' +
+      n(12 / kRate(2.546, 4), 3) + ' ≥ POLY.grannyFlat ' + G.POLY.grannyFlat +
+      '  (was aspect 0.26 / 0.45 — a cup)');
+    ok('...with straight k = 4 sides and the GRANNY corner sharpness, both ways up',
+      hoodDc.rounds[5].prof.sharp === G.POLY.sharpFlat &&
+      hoodTr.rounds[5].prof.sharp === G.POLY.sharpFlat &&
+      near(hoodDc.rounds[5].dy, G.DY_MIN * 2.01 * G.SH_SC, 1e-9) &&
+      near(hoodTr.rounds[5].dy, G.DY_MIN * 2.546 * G.SH_SC, 1e-9),
+      'sharp ' + hoodDc.rounds[5].prof.sharp + ' / ' + hoodTr.rounds[5].prof.sharp +
+      ' (SHARP_FLAT, "granny corners" — the cross-section no longer changes when ' +
+      'the trebles change height)  ·  last dy ' + n(hoodDc.rounds[5].dy, 4) + ' / ' +
+      n(hoodTr.rounds[5].dy, 4) + ' = the DY_MIN floor, not a rise');
+
+    var g12 = wmotif([16, 28, 40, 52, 64, 76], [16, 28, 40, 52, 64, 76],
+      G.stitchH('dc'), 4, 4);
+    ok('a Persian-like +12 dc a round (0.83 of the k = 4 rate) is flat, not a cup',
+      g12.aspect <= 0.08 && g12.ruffles === 0 && g12.corners === 4 &&
+      straightSides(g12, 4) && grannyRounds(g12) === 6 && g12.grannyFabric === true,
+      'aspect ' + n(g12.aspect, 4) + '  H ' + n(g12.height, 3) + '  Ø ' +
+      n(2 * g12.maxRadius, 2) + '  granny ' + grannyRounds(g12) + ' of ' +
+      g12.rounds.length + '  ruffles ' + g12.ruffles + '  ·  12 / ' +
+      n(kRate(G.stitchH('dc'), 4), 1) + ' = ' + n(12 / kRate(G.stitchH('dc'), 4), 3) +
+      '  (was aspect 0.27)');
+
+    /* the case the 0.55 bar is there to protect: stacked corners worked at HALF
+       the flat rate is a real bowl, and it must keep every bit of its rise */
+    var gBowl = wmotif([16, 22, 28, 34, 40, 46, 52], [16, 22, 28, 34, 40, 46, 52],
+      2.01, 4, 4);
+    ok('...but a stacked-corner BOWL at +6 (0.37 of the rate) still CUPS',
+      gBowl.aspect > 0.40 && gBowl.grannyFabric === false &&
+      grannyRounds(gBowl) <= 1 && gBowl.corners === 4 && gBowl.ruffles === 0,
+      'aspect ' + n(gBowl.aspect, 3) + '  H ' + n(gBowl.height, 2) + '  Ø ' +
+      n(2 * gBowl.maxRadius, 2) + '  granny rounds ' + grannyRounds(gBowl) +
+      ' (only the ch-4 ring opening)  grannyFabric ' + gBowl.grannyFabric +
+      '  ·  6 / ' + n(kRate(2.01, 4), 1) + ' = ' + n(6 / kRate(2.01, 4), 3) +
+      ' < POLY.grannyFlat ' + G.POLY.grannyFlat +
+      '  ·  sharp ' + gBowl.rounds[6].prof.sharp + ' (SHARP_SOFT — a dart, not a granny corner)');
+
+    /* the rule may not reach a plain ring: kf = 1, so no round of a sphere, a
+       tube or a disc is ever measured against a k-gon rate at all */
+    var gRing = [
+      G.classify(model(ramp(6, 48, 6).concat(ramp(42, 6, -6)), { shape: { start: 'magic-ring', chainLen: 0, ringCount: 6, stuffed: true } })),
+      G.classify(model(rep(24, 20))),
+      G.classify(model(ramp(6, 90, 6)))
+    ];
+    ok('a plain ring is never asked: sphere, tube and disc get no granny round',
+      gRing[0].granny === 0 && gRing[1].granny === 0 && gRing[2].granny === 0 &&
+      gRing[0].grannyFabric === false && gRing[1].grannyFabric === false &&
+      gRing[2].grannyFabric === false,
+      'granny ' + gRing.map(function (c) { return c.granny; }).join(',') +
+      '  fabric ' + gRing.map(function (c) { return c.grannyFabric; }).join(',') +
+      '  aspects ' + gRing.map(function (c) { return n(c.aspect, 3); }).join(', ') +
+      ' (sphere / tube / disc, all pinned by their own rows above)');
+
+    ok('the prior does not touch rounds 1–2: they are the ring and its first round',
+      persian.rounds[0].kind === 'ring' && persian.rounds[1].kind === 'ring' &&
+      persian.rounds[2].kind === 'polygon' && G.POLY.priorFrom === 2,
+      'kinds ' + persian.rounds.slice(0, 4).map(function (r) { return r.kind; }).join(',') +
+      '  (POLY.priorFrom ' + G.POLY.priorFrom + ')');
+
+    /* a positive verdict from readable sites is not a gap the prior may fill:
+       "+6 sc per round" is a spread increase and stays a circle even when the
+       text says the part is a hexagon. */
+    var spreadPrior = G.classify(model(ramp(6, 48, 6), {
+      shape: { start: 'magic-ring', ringCount: 6, stuffed: true, corners: 6, cornersSource: 'text' },
+      inc: function (i, c) { var o = [], j; for (j = 0; j < 6; j++) o.push(Math.round(j * c / 6)); return o; }
+    }));
+    var spreadPriorPoly = 0;
+    for (si = 0; si < spreadPrior.rounds.length; si++) {
+      if (spreadPrior.rounds[si].kind === 'polygon') spreadPriorPoly++;
+    }
+    ok('a spread increase beats a text prior: +6 sc stays a sphere, not a hexagon',
+      spreadPrior.corners === 0 && spreadPriorPoly === 0 && spreadPrior.priorRounds === 0,
+      'corners ' + spreadPrior.corners + '  polygon rounds ' + spreadPriorPoly +
+      '  prior rounds used ' + spreadPrior.priorRounds + '  aspect ' + n(spreadPrior.aspect, 2));
+    ok('the chevron veto also beats the prior (01 §1.4.6)',
+      G.classify(model(rep(40, 5), {
+        shape: { start: 'chain-ring', chainLen: 40, ringCount: 40, stuffed: false, corners: 4 },
+        inc: function (i, c) { var o = [], j; for (j = 0; j < 10; j++) o.push(Math.round(j * c / 10)); return o; },
+        dec: function (i, c) { var o = [], j; for (j = 0; j < 10; j++) o.push(Math.round(j * c / 10) + 2); return o; }
+      })).corners === 0, 'a 10-lobe chevron with corners: 4 on the model → corners 0');
+    ok('rows mode ignores the prior (a panel has no cross-section)',
+      G.classify(model(rep(20, 8), { mode: 'rows',
+        shape: { start: 'chain-row', chainLen: 20, corners: 4 } })).priorK === 0,
+      'priorK 0');
+
+    /* 07 D1 side-effect: a round 1 worked INTO a small chain ring opens out
+       from the RING, the way a magic ring's does — not from its own
+       circumference, which made every motif rise a full stitch height it does
+       not have. Guarded by chainR < firstR so the cowl is untouched. */
+    var ringShape = G.shapeOf(model([16, 32], { t: 'dc',
+      shape: { start: 'chain-ring', chainLen: 4, ringCount: 16, stuffed: null } }));
+    ok('a ch-4 ring with 16 dc in it starts from the ring, not from round 1',
+      near(G.startRadius(ringShape, 16 / (2 * Math.PI)), 4 / (2 * Math.PI), 1e-9),
+      'start radius ' + n(G.startRadius(ringShape, 16 / (2 * Math.PI)), 4) +
+      '  (ch 4 → ' + n(4 / (2 * Math.PI), 4) + ', round 1 → ' + n(16 / (2 * Math.PI), 4) + ')');
+    var cowlShape = G.shapeOf(model([23, 23], {
+      shape: { start: 'chain-ring', chainLen: 240, ringCount: 240, stuffed: false } }));
+    ok('...but the cowl’s 240-ch ring is BIGGER than its round 1, so nothing moves',
+      near(G.startRadius(cowlShape, 23 / (2 * Math.PI)), 23 / (2 * Math.PI), 1e-9),
+      'start radius ' + n(G.startRadius(cowlShape, 23 / (2 * Math.PI)), 4) +
+      ' = round 1 (ch 240 would be ' + n(240 / (2 * Math.PI), 2) + ')');
+
+    /* ------------------------------------------------------------- caps */
+    /* ------------------------------ wave E: lace loops, fans, terraces (1.4.0) */
+    group('Lace loops, fan-and-fill, spread fixes (1.4.0, wave E)');
+    /** A round from a compact spec: [[t, h, w, times], …] repeated `rep` times. */
+    function recs(spec, rep) {
+      var a = [], r, i, k;
+      for (r = 0; r < (rep || 1); r++) {
+        for (i = 0; i < spec.length; i++) {
+          for (k = 0; k < (spec[i][3] || 1); k++) a.push({ t: spec[i][0], c: null, h: spec[i][1], w: spec[i][2] });
+        }
+      }
+      return a;
+    }
+    function countOf(list) { var c = 0; for (var q = 0; q < list.length; q++) if (list[q].t !== 'ch') c++; return c; }
+    function lroundOf(list, inc) {
+      return { count: countOf(list), done: countOf(list), stitches: list, color: '#f1e3c8', height: 1,
+        ghost: false, inc: inc || null, dec: [] };
+    }
+    function incSites(list) {
+      var s = [], q, prev = '';
+      for (q = 0; q < list.length; q++) {
+        if (list[q].t === 'inc' && prev !== 'inc') s.push(q);
+        prev = list[q].t;
+      }
+      return s;
+    }
+    var LW = G.LOOP.w, DC = 2.01;
+    ok('LOOP.w is Patterns.LOOP_CHAIN_W, and a ch-3 loop arches 0.80 of a stitch past its anchors',
+      LW === (window.Patterns && window.Patterns.LOOP_CHAIN_W) && near(G.loopSag(3), 0.795, 0.01) &&
+      G.loopSag(0) === 0,
+      'LOOP.w ' + LW + ' = Patterns.LOOP_CHAIN_W ' + (window.Patterns && window.Patterns.LOOP_CHAIN_W) +
+      ' · sagitta of arc 3 over chord 2.25 ≈ √(3·2.25·0.75/8) = ' + n(G.loopSag(3), 3));
+    // Persian Tiles round 5: [sc, ch-3 loop] around
+    var loopRound = lroundOf(recs([['sc', 1, 1], ['ch', 0, LW, 3]], 20));
+    var lm = G.roundMetrics(loopRound);
+    ok('a round of sc + ch-3 LOOPS stands as tall as its loops arch (sc 1 + 0.80/0.95)',
+      near(lm.h, 1 + G.loopSag(3) / G.SH_SC, 1e-6) && lm.loop > 0,
+      'h ' + n(lm.h, 3) + ' sc heights (was 1, an sc round) · perimeter ' + n(lm.perimeter, 2));
+    var loopTall = G.roundMetrics(lroundOf(recs([['dc', DC, 1, 3], ['sc', 1, 1], ['ch', 0, LW, 3], ['sc', 1, 1]], 8)));
+    var bridge = G.roundMetrics(lroundOf(recs([['sc', 1, 1], ['ch', 0, 1, 3]], 20)));
+    ok('...but loops never LOWER a round, and a full-width chain (a bridge, not a loop) adds nothing',
+      near(loopTall.h, DC, 1e-9) && near(bridge.h, 1, 1e-9) && !(bridge.loop > 0),
+      'dc round with sc-anchored loops: h ' + n(loopTall.h, 3) + ' (the dc) · sc + ch-3 bridges at w 1: h ' + n(bridge.h, 3));
+    var chVote = G.roundMetrics(lroundOf(recs([['sc', 1, 1], ['ch', 0, 1, 5], ['dc', DC, 1]], 10)));
+    ok('a chain is a SPACE (h 0): chain records never vote on a round’s height',
+      near(chVote.h, DC, 1e-9),
+      'sc + ch 5 + dc: h ' + n(chVote.h, 3) + ' — the dc covers 50% of the STITCH width (with the chains ' +
+      'standing at h 1, as js/store.js used to hand them over, it was 1/7 of the round)');
+    var sp1 = G.sitePositions({ count: 12, stitches: sts(12) }, [0, 3, 6, 9]);
+    var lace4 = recs([['dc', DC, 1, 3], ['ch', 0, 1, 3], ['inc', 1, 1], ['ch', 0, 1, 2], ['inc+', 1, 1], ['ch', 0, 1, 3]], 4);
+    var sp2 = G.sitePositions(lroundOf(lace4), incSites(lace4));
+    ok('increase sites are placed by record WIDTH around the round, not by the stitch count',
+      JSON.stringify(sp1) === JSON.stringify({ pos: [0, 3, 6, 9], mod: 12 }) &&
+      sp2.mod === 52 && JSON.stringify(sp2.pos) === '[6,19,32,45]' &&
+      G.polygonFit(sp2.pos, sp2.mod).k === 4,
+      'amigurumi: positions = indices, mod = count · Persian round 4 (count ' + countOf(lace4) +
+      ', 52 records): sites ' + JSON.stringify(sp2.pos) + ' of ' + sp2.mod + ' → k ' +
+      G.polygonFit(sp2.pos, sp2.mod).k + ' (by count: ' +
+      JSON.stringify(G.polygonFit(incSites(lace4), countOf(lace4))) + ')');
+    ok('cornerGroups: (sc, ch 2, sc) in one place is a corner; an ordinary increase is not',
+      G.cornerGroups(lroundOf(lace4)) === 4 &&
+      G.cornerGroups(lroundOf(recs([['sc', 1, 1, 2], ['inc', 1, 1], ['inc+', 1, 1]], 6))) === 0,
+      'Persian round 4: ' + G.cornerGroups(lroundOf(lace4)) + ' · [2 sc, inc] × 6: 0');
+
+    /* The Persian Tiles First Square, record for record (the real fixture is
+       checked in the reference section below). */
+    var P1 = recs([['dc', DC, 1]], 16);
+    var P2 = recs([['sc', 1, 1], ['inc', 1, 1], ['inc+', 1, 1]], 8);
+    var P3 = recs([['sc', 1, 1, 3], ['inc', DC, 1], ['inc+', DC, 1, 2], ['ch', 0, 1, 3], ['inc+', DC, 1, 3]], 4);
+    var P4 = lace4;
+    var P5 = recs([['sc', 1, 1], ['ch', 0, 1, 3], ['sc', 1, 1], ['ch', 0, LW, 3], ['sc', 1, 1], ['ch', 0, LW, 3],
+      ['sc', 1, 1], ['ch', 0, LW, 3], ['sc', 1, 1], ['ch', 0, 1, 3]], 4);
+    var P6 = recs([['inc', DC, 1], ['inc+', DC, 1, 2], ['ch', 0, 1, 5], ['inc+', DC, 1, 3], ['ch', 0, 1, 3],
+      ['sc', 1, 1], ['ch', 0, LW, 3], ['sc', 1, 1], ['ch', 0, 1, 3]], 4);
+    function persianModel(lists, corners) {
+      var rs = lists.map(function (l, q) { var r = lroundOf(l, incSites(l)); r.row = q + 1; return r; });
+      return { mode: 'rounds', rounds: rs, current: rs.length - 1, defaultColor: '#f1e3c8',
+        shape: { start: 'chain-ring', chainLen: 4, ringCount: 15, stuffed: null,
+          corners: corners, cornersSource: 'text' } };
+    }
+    var persM = persianModel([P1, P2, P3, P4, P5, P6], 4);
+    var pers = G.classify(persM);
+    var ringOf = function (q3) { return G.roundMetrics(persM.rounds[q3]).perimeter / (2 * Math.PI); };
+    var pr = pers.rounds, reachOf = function (e) { return e.h * (e.kf || 1); };
+    var steps = [], stepOk = true, flatOk = true, q;
+    for (q = 0; q < pr.length; q++) {
+      var r0 = q ? pr[q - 1].radius : G.startRadius(pers.shape, pr[0].radius);
+      steps.push(pr[q].radius - r0);
+      if (q > 0 && !(steps[q] >= 0.6 * reachOf(pr[q]) && steps[q] <= G.POLY.flatTol * reachOf(pr[q]))) stepOk = false;
+      if (!(pr[q].dy <= 0.06 * pr[q].h)) flatOk = false;
+    }
+    ok('Persian round 3 is a FAN and round 4 its FILL: round 4 steps out a round’s width, flat',
+      pr[2].fan === true && pers.fans === 1 && !pr[3].fan &&
+      steps[3] >= 0.6 * reachOf(pr[3]) && pr[3].dy <= 0.06 * pr[3].h && pr[3].kind === 'polygon' &&
+      near(pr[3].radius, ringOf(3), 1e-9),
+      'rings ' + pr.map(function (e) { return n(e.radius, 2); }).join(' → ') +
+      ' · round 3 moved in by ' + n(pr[2].fanShift, 2) + ' (Σw 48 → ring ' + n(pr[2].radiusCount, 2) +
+      ' drawn at ' + n(pr[2].radius, 2) + ') · round 4 steps ' + n(steps[3], 2) + ' = ' +
+      n(steps[3] / reachOf(pr[3]), 2) + '× a dc round’s k = 4 reach, dy ' + n(pr[3].dy, 3) +
+      ' (was a 1.86-tall wall stepping 0.48) · kind ' + pr[3].kind);
+    ok('...and rounds 3, 5 and 6 stay right: every round flat, none ruffled, every step 0.6–1.5 of its reach',
+      flatOk && stepOk && pers.ruffles === 0 && pr[2].kind === 'polygon' && pr[5].kind === 'polygon' &&
+      pr[4].loop === true && pers.slack === 0 && pers.form === 'disc' && pers.aspect < 0.02 &&
+      near(pr[5].radius, ringOf(5), 1e-9) && near(pr[4].radius, ringOf(4), 1e-9),
+      'steps/reach ' + steps.map(function (s, q2) { return n(s / reachOf(pr[q2]), 2); }).join(', ') +
+      ' · dy/h ≤ ' + n(Math.max.apply(null, pr.map(function (e) { return e.dy / e.h; })), 3) +
+      ' · ruffles ' + pers.ruffles + ' (round 2 was a frill at 1.34× the circle rate, round 5 at 2.3× an sc round) · ' +
+      'round 5 h ' + n(pr[4].h / G.SH_SC, 2) + ' sc (its loops) · slack ' + pers.slack + ' form ' + pers.form +
+      ' (was "shallow-bowl" 0.10 off the stitch counts 16,24,36,19,20,31) · final ring ' + n(pr[5].radius, 2) +
+      ' = Σw / 2π — rounds 4–6 keep their own perimeters, so the finished size never moved');
+    // the steady granny (no fill round) is untouched by the fan rule
+    var steady = G.classify(persianModel([P1, recs([['dc', DC, 1]], 28), recs([['dc', DC, 1]], 40),
+      recs([['dc', DC, 1]], 52), recs([['dc', DC, 1]], 64)], 4));
+    ok('a steady granny motif (+12 dc every round) has no fan round, so no ring moves',
+      steady.fans === 0 && steady.rounds.every(function (e) { return near(e.radius, e.radiusCount, 1e-12); }),
+      'fans ' + steady.fans + ' · every ring = Σw / 2π');
+    var spreadDrop = G.classify(persianModel([P1, P2, P3, P4, P3, P4], 0));
+    ok('a lace round whose COUNT falls is not a "spread increase": its corner sites still read as k = 4',
+      spreadDrop.rounds[3].kind !== 'ring' || spreadDrop.corners === 4,
+      'no prior at all: round 4 kind ' + spreadDrop.rounds[3].kind + ' · piece corners ' + spreadDrop.corners +
+      ' (it was "spread → circle" off 36 → 19 stitches)');
+    var sp2r = G.classify(persianModel([P1, P2, P3, P4, P5, P6], 4)).rounds[1];
+    ok('a spread round in a text-prior motif gets the motif’s allowance: flattened, not frilled',
+      sp2r.kind === 'ring' && sp2r.ruffle === false && sp2r.flattened === true && (sp2r.kf || 1) === 1,
+      'Persian round 2 (24 sc around 16 dc, 1.34× the circle rate): ruffle ' + sp2r.ruffle +
+      ' · flattened ' + sp2r.flattened + ' · kf ' + sp2r.kf + ' (still a circle’s rate — its sites say circle)');
+
+    /* ---------------------------------------------------- terraces (04 J) */
+    group('Terraces are smoothed, genuine steps are not (04 defect J, 06 defect 7)');
+    var stuffedShape = { start: 'magic-ring', chainLen: 0, ringCount: 6, stuffed: true };
+    var PLAT = ramp(6, 30, 6).concat([36, 36, 42, 42, 48, 48]).concat(rep(48, 4)).concat(ramp(42, 6, -6));
+    var platOn = G.classify(model(PLAT, { shape: stuffedShape }));
+    var platOff = G.classify(model(PLAT, { shape: stuffedShape }), { terrace: false });
+    var sOn = stairOf(platOn, 5, 12), sOff = stairOf(platOff, 5, 12);
+    ok('a stuffed 36,36,42,42,48,48 plateau body is a slope, not a wedding cake',
+      platOn.terrace.applied && platOn.terrace.rings >= 4 && sOn.worst <= 0.6 * sOff.worst,
+      'worst turn between rounds 6–12: ' + n(sOff.worst, 1) + '° as a staircase → ' + n(sOn.worst, 1) +
+      '° smoothed · ' + platOn.terrace.rings + ' rings moved, largest ' + n(platOn.terrace.maxShift, 3) +
+      ' (a = ' + n(platOn.terrace.alpha, 3) + ')');
+    ok('...and it costs nothing measured: height, width, aspect and equator are the staircase’s',
+      near(platOn.height, platOff.height, 1e-9) && near(platOn.maxRadius, platOff.maxRadius, 1e-12) &&
+      near(platOn.aspect, platOff.aspect, 1e-9) && near(platOn.equatorFrac, platOff.equatorFrac, 0.02) &&
+      platOn.ruffles === 0,
+      'H ' + n(platOn.height, 6) + ' = ' + n(platOff.height, 6) + ' · Ø ' + n(2 * platOn.maxRadius, 4) +
+      ' · aspect ' + n(platOn.aspect, 4) + ' · equator ' + n(platOn.equatorFrac, 3) + ' vs ' + n(platOff.equatorFrac, 3));
+    var HORN = [5, 5, 5, 10, 10, 10, 15, 15];
+    var hornShape = { start: 'magic-ring', chainLen: 0, ringCount: 5, stuffed: true };
+    var hOn = G.classify(model(HORN, { shape: hornShape })), hOff = G.classify(model(HORN, { shape: hornShape }), { terrace: false });
+    ok('the cato horn 5,5,5,10,10,10,15,15 is a cone, not a 3-tier pagoda',
+      hOn.terrace.rings >= 3 && stairOf(hOn).worst <= 0.7 * stairOf(hOff).worst &&
+      near(hOn.height, hOff.height, 1e-9) &&
+      near(hOn.rounds[7].radius, 15 / (2 * Math.PI), 1e-12) && near(hOn.rounds[0].radius, hOff.rounds[0].radius, 1e-12),
+      'worst turn ' + n(stairOf(hOff).worst, 1) + '° → ' + n(stairOf(hOn).worst, 1) + '° · rings ' +
+      hOn.rounds.map(function (e) { return n(e.radius, 2); }).join(' ') + ' (were ' +
+      hOff.rounds.map(function (e) { return n(e.radius, 2); }).join(' ') + ') — the 15, 15 rim is the widest ring, ' +
+      'which never moves, so the last step stays');
+    var bare = G.classify(model(HORN, { shape: { start: 'magic-ring', chainLen: 0, ringCount: 5, stuffed: false } }));
+    ok('the strength is scaled by the stuffing: an unstuffed piece gets TERRACE.yarn of it',
+      near(bare.terrace.alpha, G.TERRACE.alpha * (G.TERRACE.yarn + (1 - G.TERRACE.yarn) * G.SLACK.unstuffed / G.SLACK.stuffed), 1e-9) &&
+      near(hOn.terrace.alpha, G.TERRACE.alpha, 1e-9) && bare.terrace.maxShift < hOn.terrace.maxShift,
+      'a = ' + n(bare.terrace.alpha, 3) + ' at slack ' + bare.slack + ', ' + n(hOn.terrace.alpha, 3) +
+      ' at slack ' + hOn.slack + ' · largest ring move ' + n(bare.terrace.maxShift, 3) + ' vs ' + n(hOn.terrace.maxShift, 3));
+
+    // GENUINE STEPS
+    var HAT = ramp(6, 36, 6).concat([36, 42, 42, 48, 48, 72]);
+    var hat = G.classify(model(HAT));
+    var hatN = hat.rounds.length;
+    ok('a hat BRIM is kept: the 48 → 72 flare is still a frill, at its own ring, on an unmoved base',
+      hat.form === 'cup' && hat.rounds[hatN - 1].ruffle === true &&
+      near(hat.rounds[hatN - 1].radius, 72 / (2 * Math.PI), 1e-12) &&
+      near(hat.rounds[hatN - 2].radius, 48 / (2 * Math.PI), 1e-12) && hat.terrace.rings >= 3,
+      'brim ring ' + n(hat.rounds[hatN - 1].radius, 3) + ' (72/2π) ruffle ' + hat.rounds[hatN - 1].ruffle +
+      ' · the 48 it flares from ' + n(hat.rounds[hatN - 2].radius, 3) + ' · the wall above it smoothed (' +
+      hat.terrace.rings + ' rings)');
+    var CUP = ramp(6, 36, 6).concat(rep(36, 5)).concat([54]);
+    var cup = G.classify(model(CUP));
+    ok('a cup’s wall and its flared RIM are kept: a plateau over TERRACE.flatMax is a wall, not a tread',
+      cup.terrace.rings === 0 && near(cup.rounds[CUP.length - 1].radius, 54 / (2 * Math.PI), 1e-12),
+      'rings moved ' + cup.terrace.rings + ' · rim ' + n(cup.rounds[CUP.length - 1].radius, 3) +
+      ' (flattened ' + !!cup.rounds[CUP.length - 1].flattened + ', ruffle ' + cup.rounds[CUP.length - 1].ruffle + ')');
+    var NECK = ramp(6, 48, 6).concat([48, 48]).concat(ramp(42, 18, -6)).concat([18, 24, 24, 30, 30, 36, 36])
+      .concat(rep(36, 3)).concat(ramp(30, 6, -6));
+    var neck = G.classify(model(NECK, { shape: stuffedShape }));
+    var neckIdx = NECK.indexOf(18, NECK.indexOf(48));
+    var neckT = neck.rounds[neckIdx].terrace || neck.rounds[neckIdx + 1].terrace ||
+      neck.rounds[neckIdx - 1].terrace;
+    ok('a NECK is a run end: the terrace pass never moves its rings, and the widest ring never moves',
+      !neckT && neck.terrace.rings > 0 &&
+      near(neck.rounds[neckIdx].radius, 18 / (2 * Math.PI), G.STUFF.filletEase + 1e-9) &&
+      near(neck.rounds[neckIdx + 1].radius, 18 / (2 * Math.PI), G.STUFF.filletEase + 1e-9) &&
+      near(neck.maxRadius, 48 / (2 * Math.PI), 1e-12),
+      'neck rings ' + n(neck.rounds[neckIdx].radius, 3) + ', ' + n(neck.rounds[neckIdx + 1].radius, 3) +
+      ' (18/2π = ' + n(18 / (2 * Math.PI), 3) + '; only the fillet’s own ≤ ' + (100 * G.STUFF.filletEase) +
+      '% ease) · terrace shift at the neck ' + (neckT || 0) + ' · widest ' + n(neck.maxRadius, 3) +
+      ' · the head above it smoothed: ' + neck.terrace.rings + ' rings');
+    ok('a ramp, a ball and a motif are never terraced',
+      G.classify(model(ballCounts)).terrace.rings === 0 && G.classify(model(ramp(6, 60, 6))).terrace.rings === 0 &&
+      G.classify(model([8, 16, 24, 36, 36, 36, 36, 24, 16, 8])).terrace.rings === 0 && pers.terrace.rings === 0,
+      '6→48→6, 6→60 and one plateau at the widest round: no treads to smooth; a text-prior motif is flat');
+
+    group('Gallery review fixes (wave E): stray rounds, walls, silent stuffing');
+    var EAR = [6, 6, 6, 9, 12, 12, 15, 18, 21, 21, 2];
+    var earOpen = G.classify(model(EAR, {
+      shape: { start: 'magic-ring', chainLen: 0, ringCount: 6, stuffed: false },
+      outlier: function (i) { return i === EAR.length - 1; }
+    }));
+    var earShut = G.classify(model(EAR, { shape: { start: 'magic-ring', chainLen: 0, ringCount: 6, stuffed: false } }));
+    ok('a round the store flags as not-fabric is not the piece’s last round either (cato Ears, 21, 21, 2)',
+      earOpen.closedBottom === false && earOpen.form === 'cup' && earOpen.ruffles === 0 &&
+      earShut.closedBottom === true,
+      'flagged: form ' + earOpen.form + ', closedBottom ' + earOpen.closedBottom + ', ruffles ' + earOpen.ruffles +
+      ' · unflagged: form ' + earShut.form + ', closedBottom ' + earShut.closedBottom + ' (the 2 capped an open cup shut)');
+    var arm = G.classify(model([6, 9, 9, 9, 8, 6]));
+    ok('a tapering tube with a 3-round WALL is not a shallow bowl (bear Arms 6, 9, 9, 9, 8, 6)',
+      arm.form === 'open' && arm.slack === G.SLACK.stuffed && earS.form === 'shallow-bowl',
+      'form ' + arm.form + ' slack ' + arm.slack + ' · the panda ear 6,18,18,15 (one straight) is still ' + earS.form);
+    var BODY = [18, 36, 40, 40, 40, 40, 40, 36, 30, 24];
+    var bodyU = G.classify(model(BODY, { shape: { start: 'unknown', chainLen: 0, ringCount: 0, stuffed: null } }));
+    var bodyN = G.classify(model(BODY, { shape: { start: 'unknown', chainLen: 0, ringCount: 0, stuffed: false } }));
+    ok('a body that turns back in by a fifth, text silent, is stuffed; "do not stuff" still wins',
+      bodyU.slack === G.SLACK.stuffed && bodyN.slack === G.SLACK.unstuffed && G.OPEN_TURN_IN === 0.8 &&
+      G.classify(model(ramp(6, 36, 6).concat([36, 32]))).slack !== G.SLACK.stuffed,
+      'bear Body 18 → 40 → 24: slack ' + bodyU.slack + ' (was 0.05) · with stuffed:false ' + bodyN.slack +
+      ' · a cup that ends at 32 of 36 (89%) is not a body');
+
+    group('Caps (SPEC "cap when round 1 is a magic ring", 04 defect D)');
+    ok('magic-ring start → the top is capped', ball.closedTop === true, 'closedTop ' + ball.closedTop);
+    ok('chain-ring start → the top is OPEN', cyl.closedTop === false, 'closedTop ' + cyl.closedTop);
+    var ovCap = G.classify(model(rep(24, 4), { shape: { start: 'chain-oval', chainLen: 10, ringCount: 24, stuffed: true } }));
+    ok('chain-oval start → the top is OPEN', ovCap.closedTop === false, 'closedTop ' + ovCap.closedTop);
+    ok('closes to 6 and stops → the bottom is closed too', ball.closedBottom === true,
+      'closedBottom ' + ball.closedBottom + '  last count ' + ballCounts[ballCounts.length - 1]);
+    ok('an open rim is not closed at the bottom', disc.closedBottom === false && cyl.closedBottom === false,
+      'disc ' + disc.closedBottom + '  cylinder ' + cyl.closedBottom);
+
+    /* ONE threshold for "the yarn was pulled shut" (06 honourable mention).
+       `closedBottom` gathered at 6 while `closesIn` closed at 8, so a piece
+       ending at 8 or 9 after a decrease run took the stuffed slack from
+       `closesIn` — it is a ball, something is inside it — and was then left
+       with an open hole where the pattern says `pull to close`. The baphomet
+       Body/Head ends on `Dec ×8` at 8 stitches, the cato Head at 9. */
+    var g8 = G.classify(model(ramp(6, 48, 6).concat(rep(48, 3)).concat(ramp(40, 8, -8))));
+    var g9 = G.classify(model(ramp(6, 42, 6).concat(rep(42, 3)).concat([36, 27, 18, 9])));
+    ok('ends at 8 after a decrease run → closes in AND is capped',
+      g8.closedBottom === true && g8.form === 'closed' && g8.slack === G.SLACK.stuffed,
+      'last count 8: closedBottom ' + g8.closedBottom + '  slack ' + g8.slack +
+      '  form ' + g8.form + '  (CLOSE_COUNT ' + G.CLOSE_COUNT + ')');
+    ok('ends at 9 after a decrease run → closes in AND is capped',
+      g9.closedBottom === true && g9.slack === G.SLACK.stuffed && g9.form === 'closed',
+      'last count 9: closedBottom ' + g9.closedBottom + '  slack ' + g9.slack +
+      '  form ' + g9.form);
+    ok('one threshold, not two: the slack and the cap ask the same question',
+      G.CLOSE_COUNT === 9 &&
+      G.classify(model(ramp(6, 48, 6).concat(rep(48, 3)).concat(ramp(40, 12, -8)))).closedBottom === false,
+      'CLOSE_COUNT ' + G.CLOSE_COUNT + '; a piece that stops at 12 is still open');
+    ok('a narrow tube that was never wider than 9 is not "gathered" either',
+      G.classify(model(rep(8, 6), {
+        shape: { start: 'chain-ring', chainLen: 8, ringCount: 8, stuffed: null }
+      })).closedBottom === false,
+      '8 × 6 rounds: nothing was pulled shut, the hem is open (max ≤ 12)');
+
+    var unk = G.classify(model([6, 12, 18, 24], { shape: { start: 'unknown', chainLen: 0, ringCount: 6, stuffed: null } }));
+    ok('unknown start with ringCount ≤ CLOSE_COUNT and no chain → capped', unk.closedTop === true, 'closedTop ' + unk.closedTop);
+    var unk2 = G.classify(model([24, 24, 24], { shape: { start: 'unknown', chainLen: 26, ringCount: 24, stuffed: null } }));
+    ok('unknown start with a chain length → open', unk2.closedTop === false, 'closedTop ' + unk2.closedTop);
+
+    /* ------------------------------------------------------- rows mode */
+    group('Rows mode (01 §1.2 rows column, ranked change 7)');
+    var scRows = G.classify(model(rep(20, 10), { mode: 'rows', t: 'sc', shape: { start: 'chain-row', chainLen: 20 } }));
+    var dcRows = G.classify(model(rep(20, 10), { mode: 'rows', t: 'dc', shape: { start: 'chain-row', chainLen: 20 } }));
+    ok('dc rows are ~2× as tall as sc rows', near(dcRows.height / scRows.height, 2.01, 0.05),
+      'sc H ' + n(scRows.height) + '  dc H ' + n(dcRows.height) + '  ratio ' + n(dcRows.height / scRows.height));
+    ok('row width = Σ w × SW', near(scRows.width, 20, 1e-9), 'width ' + n(scRows.width));
+    var slRows = G.classify(model(rep(20, 3), { mode: 'rows', t: 'sl', shape: { start: 'chain-row', chainLen: 20 } }));
+    ok('a row of slip stitches is 14 wide, not 20', near(slRows.width, 14, 1e-9), 'width ' + n(slRows.width));
+
+    var leftRows = G.classify(model(ramp(4, 22, 2), {
+      mode: 'rows', shape: { start: 'chain-row', chainLen: 4 },
+      inc: function (i, c) { return i === 0 ? null : [0]; }
+    }));
+    var lr = leftRows.rounds[leftRows.rounds.length - 1];
+    var lr0 = leftRows.rounds[0];
+    ok('rows: increases at index 0 → the row grows to the left edge',
+      leftRows.anchor === 'left' && near(lr0.x0 + lr0.width, leftRows.width / 2, 1e-9),
+      'anchor ' + leftRows.anchor + '  right edge of row 1 ' + n(lr0.x0 + lr0.width) +
+      ' = right edge of the last row ' + n(lr.x0 + lr.width) + ' (straight)');
+    var rightRows = G.classify(model(ramp(4, 22, 2), {
+      mode: 'rows', shape: { start: 'chain-row', chainLen: 4 },
+      inc: function (i, c) { return i === 0 ? null : [c - 1]; }
+    }));
+    ok('rows: increases at the end → the row grows to the right edge',
+      rightRows.anchor === 'right' && near(rightRows.rounds[0].x0, -rightRows.width / 2, 1e-9),
+      'anchor ' + rightRows.anchor + '  left edge ' + n(rightRows.rounds[0].x0));
+    var bothRows = G.classify(model(ramp(4, 22, 2), {
+      mode: 'rows', shape: { start: 'chain-row', chainLen: 4 },
+      inc: function (i, c) { return i === 0 ? null : [0, c - 1]; }
+    }));
+    ok('rows: increases at both ends → centred', bothRows.anchor === 'center',
+      'anchor ' + bothRows.anchor + '  x0 ' + n(bothRows.rounds[0].x0));
+    var spineRows = G.classify(model(ramp(5, 23, 2), {
+      mode: 'rows', shape: { start: 'chain-row', chainLen: 5 },
+      inc: function (i, c) { return i === 0 ? null : [Math.floor(c / 2)]; }
+    }));
+    ok('rows: a centre spine increase every row → a triangle from a point',
+      spineRows.anchor === 'spine', 'anchor ' + spineRows.anchor);
+    ok('rows: no increases anywhere → centred',
+      G.classify(model(rep(20, 6), { mode: 'rows', shape: { start: 'chain-row', chainLen: 20 } })).anchor === 'center',
+      'anchor center');
+
+    /* 07 honourable mention: a rows sheet's height is the SUM of each row's own
+       dominant h, not rows × one h. Built by hand because `model()` gives every
+       row the same stitch. */
+    var mixedRows = G.classify({
+      mode: 'rows', current: 3, defaultColor: '#fff',
+      shape: { start: 'chain-row', chainLen: 10 },
+      rounds: [
+        { count: 10, done: 10, stitches: sts(10, 'sc'), height: 1 },
+        { count: 10, done: 10, stitches: sts(10, 'dc'), height: 2.01 },
+        { count: 10, done: 10, stitches: sts(10, 'sc'), height: 1 },
+        { count: 10, done: 10, stitches: sts(10, 'tr'), height: 2.68 }]
+    });
+    ok('rows height = Σ of each row’s own dominant h (sc + dc + sc + tr)',
+      near(mixedRows.height, (1 + 2.01 + 1 + 2.68) * 0.95, 1e-9) &&
+      near(mixedRows.rounds[1].h, 2.01 * 0.95, 1e-9),
+      'H ' + n(mixedRows.height, 4) + ' = (1 + 2.01 + 1 + 2.68)·0.95 = ' +
+      n((1 + 2.01 + 1 + 2.68) * 0.95, 4) + '  per-row h ' +
+      mixedRows.rounds.map(function (r) { return n(r.h, 2); }).join(', '));
+    /* What this buys the sparkling wrap (01 §2.3 #48, truth asp 0.216): the
+       model is NOT all sc — Store hands us 46 rows whose dominant heights are
+       mostly sc 1.0 with the mesh rows at tr 2.68, and classify walks each row
+       at its own h, so the finished sheet lands at asp 0.19 (−12% of truth,
+       inside the reference table's 0.17–0.27) instead of the 0.112 it would get
+       if every row were forced to sc. The remaining gap is `ch-5` spaces
+       carrying w 1 / h 1 instead of 01 §1.2's w k / h 0 — js/patterns.js, not
+       here. See the reference section for the measured number. */
+
+    /* --------------------------------------------- outlier rows (07 D4) */
+    /* A row of 2 or 5 among rows of 405 is not fabric, it is a line the parser
+       misread — and laid out at full width ratio it visibly tore the sheet in
+       two (the wrap's floating hairline strip, the cardigan swatch's capital
+       T). The store flags them `outlier`; absent the flag a rows-mode row under
+       20% of the running median of the rows before it is the same defect. */
+    group('Outlier rows / rounds (07 D4)');
+
+    var wrapCounts = [405].concat([2, 5, 2]).concat(rep(405, 41)).concat([406]);
+    var wrapRows = G.classify(model(wrapCounts, { mode: 'rows',
+      shape: { start: 'chain-row', chainLen: 406 } }));
+    var wrapOut = [], wi;
+    for (wi = 0; wi < wrapRows.rounds.length; wi++) {
+      if (wrapRows.rounds[wi].outlier) wrapOut.push(wi);
+    }
+    ok('wrap 405,2,5,2,405…406: rows 2–4 are outliers, not fabric',
+      wrapRows.outliers === 3 && wrapOut.join(',') === '1,2,3' && wrapRows.rowsDrawn === 43,
+      'outliers ' + wrapRows.outliers + ' at rows ' + wrapOut.map(function (v) { return v + 1; }).join(',') +
+      '  drawn ' + wrapRows.rowsDrawn + ' of ' + wrapCounts.length +
+      '  (running median 405, threshold ' + n(G.OUTLIER.frac * 405, 1) + ')');
+    ok('wrap: the rows above and below the gap JOIN — no detached strip',
+      near(wrapRows.rounds[0].y + wrapRows.rounds[0].h, wrapRows.rounds[4].y, 1e-9) &&
+      wrapRows.rounds[2].dy === 0 && wrapRows.rounds[2].h === 0,
+      'row 1 top edge y ' + n(wrapRows.rounds[0].y + wrapRows.rounds[0].h, 4) +
+      ' = row 5 base y ' + n(wrapRows.rounds[4].y, 4) + '  bridged rows dy ' +
+      wrapOut.map(function (v) { return wrapRows.rounds[v].dy; }).join('/'));
+    ok('wrap: width and aspect ignore the outliers (406 wide, 43 rows tall)',
+      near(wrapRows.width, 406, 1e-9) && near(wrapRows.height, 43 * 0.95, 1e-9) &&
+      near(wrapRows.aspect, 43 * 0.95 / 406, 1e-9),
+      'Ø ' + n(wrapRows.width, 2) + '  H ' + n(wrapRows.height, 3) + '  aspect ' +
+      n(wrapRows.aspect, 4) + '  (with the 3 misread rows counted in: H ' + n(46 * 0.95, 3) + ')');
+    var wrapBands = G.layout(model(wrapCounts, { mode: 'rows',
+      shape: { start: 'chain-row', chainLen: 406 } })).bands;
+    ok('wrap: no band is built for an outlier, and every index still lines up',
+      wrapBands.length === wrapCounts.length && wrapBands[1] === null &&
+      wrapBands[2] === null && wrapBands[3] === null && wrapBands[4] !== null,
+      'bands ' + wrapBands.length + ' = rounds ' + wrapCounts.length +
+      '  bands[1..3] null, bands[0] and bands[4] built' +
+      ' (js/diagram.js skips a null band in buildRoundBand, bandExtent and the 2D fallback)');
+
+    var swatch = G.classify(model([18, 18, 2, 2, 2, 2], { mode: 'rows',
+      shape: { start: 'chain-row', chainLen: 19 } }));
+    ok('cardigan swatch 18,18,2,2,2,2: the 2-wide tower goes, the band stays',
+      swatch.outliers === 4 && swatch.rowsDrawn === 2 && near(swatch.width, 18, 1e-9) &&
+      near(swatch.height, 2 * 0.95, 1e-9),
+      'outliers ' + swatch.outliers + '  drawn ' + swatch.rowsDrawn + '  Ø ' +
+      n(swatch.width, 2) + '  H ' + n(swatch.height, 3) + '  aspect ' + n(swatch.aspect, 3) +
+      '  (was an 18-wide band with a 2-stitch stack of 4 rows standing out of its middle)');
+
+    ok('an explicit outlier flag from the store wins with no median in sight',
+      G.classify(model([20, 20, 20], { mode: 'rows',
+        shape: { start: 'chain-row', chainLen: 20 },
+        outlier: function (i) { return i === 1; } })).outliers === 1,
+      'three identical rows, row 2 flagged → 1 outlier');
+    var ringOut = G.classify(model([22, 22, 1, 22, 22], {
+      shape: { start: 'chain-ring', chainLen: 22, ringCount: 22, stuffed: false },
+      outlier: function (i) { return i === 2; } }));
+    ok('rounds mode: a flagged round is BRIDGED — the ring above carries on',
+      ringOut.outliers === 1 && ringOut.rounds[2].outlier === true &&
+      ringOut.rounds[2].dy === 0 &&
+      near(ringOut.rounds[2].radius, ringOut.rounds[1].radius, 1e-9) &&
+      near(ringOut.rounds[3].radius, ringOut.rounds[1].radius, 1e-9),
+      'round 3 radius ' + n(ringOut.rounds[2].radius, 4) + ' = round 2 ' +
+      n(ringOut.rounds[1].radius, 4) + ' = round 4 ' + n(ringOut.rounds[3].radius, 4) +
+      '  dy 0  (a 1-stitch round between rounds of 22 would have pinched the tube shut)');
+    ok('rounds mode: the bridged round gets no band either',
+      G.layout(model([22, 22, 1, 22, 22], {
+        shape: { start: 'chain-ring', chainLen: 22, ringCount: 22, stuffed: false },
+        outlier: function (i) { return i === 2; } })).bands[2] === null,
+      'bands[2] null, bands.length 5');
+
+    /* the two ways the fallback heuristic must NOT fire */
+    var shawl = [];
+    for (wi = 0; wi < 40; wi++) shawl.push(3 + wi * 2);
+    ok('a piece that GROWS from 3 stitches is never flagged (the amarah shawl)',
+      G.classify(model(shawl, { mode: 'rows', shape: { start: 'chain-row', chainLen: 4 },
+        inc: function (i, c) { return i === 0 ? null : [0]; } })).outliers === 0,
+      '3,5,7 … ' + shawl[shawl.length - 1] + ' over ' + shawl.length +
+      ' rows → 0 outliers (the median is always of the SMALLER rows behind it)');
+    ok('row 1 is never flagged, so a piece cannot lose its own beginning',
+      G.classify(model([2, 94, 94, 94], { mode: 'rows',
+        shape: { start: 'chain-row', chainLen: 96 } })).outliers === 0 &&
+      G.classify(model([3, 3, 3, 3], { mode: 'rows',
+        shape: { start: 'chain-row', chainLen: 4 } })).outliers === 0,
+      '2,94,94,94 → 0 outliers (nothing behind row 1 to measure it against) and 3,3,3,3 → 0' +
+      ' (the median never reaches OUTLIER.minMedian ' + G.OUTLIER.minMedian + ')');
+    ok('rounds mode has NO median fallback: an amigurumi closing to 6 is fabric',
+      G.classify(model(ballCounts)).outliers === 0 &&
+      G.classify(model([48, 48, 6], { shape: { start: 'magic-ring', ringCount: 6, stuffed: true } })).outliers === 0,
+      'the sphere 6→48→6 and 48,48,6 → 0 outliers (only the store’s flag bridges a round)');
+    ok('a zero-count round is still `empty`, not an outlier',
+      G.classify(model([0, 71, 71], { shape: { start: 'chain-row', chainLen: 71 } })).outliers === 0,
+      '04 defect F and 07 D4 are different defects and stay so');
+
+    /* -------------------------------------------------------- bulge gone */
+    group('Per-round bulge (02 #2)');
+    var cs = window.Diagram && window.Diagram._consts ? window.Diagram._consts : {};
+    ok('SH = 1.5 is gone from the renderer', cs.SH === undefined && cs.SH_SC === 0.95,
+      'SH ' + cs.SH + '  SH_SC ' + cs.SH_SC);
+    ok('the radial bulge is a groove ≤ 0.04 SW and never swings outward',
+      cs.GROOVE != null && cs.GROOVE <= 0.04 && cs.BLG_MAX <= 0,
+      'GROOVE ' + cs.GROOVE + '  max radial offset ' + cs.BLG_MAX + '  (was +0.084 / −0.038, a 0.12 SW swing)');
+    ok('the band edges still agree, so rounds stay watertight',
+      cs.BLG_EDGES_EQUAL === true, 'top edge = bottom edge: ' + cs.BLG_EDGES_EQUAL);
+
+    /* --------------------------------------------------------------- fit */
+    group('Fit clamps (ranked change 8)');
+    var FOV = 30 * Math.PI / 180, CAM = 34, PITCH = 20 * Math.PI / 180;
+    var halfH = CAM * Math.tan(FOV / 2), halfW = halfH * (375 / 612);
+    var cp = Math.cos(PITCH), sp = Math.abs(Math.sin(PITCH));
+    function fitOf(cls, curY, extra) {
+      var ymin = Infinity, ymax = -Infinity, rad = 0, i, r;
+      for (i = 0; i < cls.rounds.length; i++) {
+        r = cls.rounds[i];
+        if (r.empty || r.outlier) continue;
+        rad = Math.max(rad, cls.mode === 'rows' ? cls.width / 2 : (r.radiusMax || r.radius));
+        ymin = Math.min(ymin, r.y, r.yTop); ymax = Math.max(ymax, r.y, r.yTop);
+      }
+      var spec = { rad: rad, ymin: ymin, ymax: ymax, halfW: halfW, halfH: halfH,
+        cp: cp, sp: sp, curY: curY, mode: cls.mode };
+      if (extra) for (var kk in extra) if (extra.hasOwnProperty(kk)) spec[kk] = extra[kk];
+      return G.fit(spec);
+    }
+    var tail = G.classify(model(rep(6, 42), { shape: { start: 'magic-ring', ringCount: 6, stuffed: false } }));
+    var tf = fitOf(tail);
+    ok('42-round tail (aspect > 4) fits by height and keeps a visible radius',
+      tail.aspect > 4 && tf.clamp === '' && tf.radFrac >= G.FIT.minRadiusFrac && tf.heightFrac <= 1.02,
+      'aspect ' + n(tail.aspect, 2) + '  scale ' + n(tf.scale, 4) + '  clamp "' + tf.clamp +
+      '"  radius ' + n(tf.radFrac * 100, 2) + '% of the half-width  height ' + n(tf.heightFrac * 100, 1) + '%');
+    var longTail = G.classify(model(rep(6, 400), { shape: { start: 'magic-ring', ringCount: 6, stuffed: false } }));
+    var ltf = fitOf(longTail);
+    ok('a 400-round tail is clamped so it never becomes a hairline',
+      ltf.clamp === 'radius' && ltf.scale > ltf.base && ltf.radFrac >= 0.02,
+      'scale ' + n(ltf.scale, 4) + ' vs honest ' + n(ltf.base, 4) + '  clamp "' + ltf.clamp +
+      '"  radius ' + n(ltf.radFrac * 100, 2) + '%');
+    /* 07 D2. One fit policy was two policies' worth of work: the height clamp
+       is right for the sheet being COUNTED (a 405-stitch row fitted to the
+       width is a hairline) and wrong for the FINISHED piece, where it meant no
+       rows-mode rectangle in the corpus was ever seen as a rectangle — the wrap
+       overflowed the frame by 4.5×, the throw and the cardigan panels by 8×, so
+       you saw ~90 of 405 stitches and neither end. */
+    var wide = G.classify(model(rep(405, 46), { mode: 'rows', shape: { start: 'chain-row', chainLen: 406 } }));
+    var wf = fitOf(wide, wide.rounds[40].y);
+    ok('counting a 405 × 46 sheet: still clamped up off the hairline…',
+      wf.clamp === 'height' && wf.purpose === 'button' && wf.letterbox === false &&
+      wf.scale > wf.base,
+      'scale ' + n(wf.scale, 4) + ' vs honest ' + n(wf.base, 4) + ' (' + n(wf.scale / wf.base, 2) +
+      '×)  clamp "' + wf.clamp + '"  purpose ' + wf.purpose + '  height ' +
+      n(wf.heightFrac * 100, 1) + '%  aspect ' + n(wide.aspect, 3));
+    ok('…but BOUNDED: the button overflows the frame by ≤ 50%, never 451% or 800%',
+      near(wf.radFrac, G.FIT.maxWidthFrac, 1e-9) && wf.radFrac <= 1.5,
+      'silhouette ' + n(wf.radFrac * 100, 1) + '% of the half-width (FIT.maxWidthFrac ' +
+      G.FIT.maxWidthFrac + ')  — the review measured 451% on the wrap, 800% on the throw' +
+      ' and the cardigan panels');
+    ok('the clamped sheet centres on the current row', near(wf.cy, wide.rounds[40].y, 1e-9),
+      'cy ' + n(wf.cy) + '  current row y ' + n(wide.rounds[40].y));
+
+    var wfFin = fitOf(wide, wide.rounds[40].y, { finished: true });
+    ok('the FINISHED 405 × 46 wrap is letterboxed at its honest scale: fits the width',
+      wfFin.clamp === '' && near(wfFin.scale, wfFin.base, 1e-12) &&
+      near(wfFin.radFrac, 1, 0.02) && wfFin.letterbox === true && wfFin.finished === true &&
+      near(wfFin.cy, (wide.rounds[0].y + wide.rounds[45].yTop) / 2, 1e-9),
+      'scale ' + n(wfFin.scale, 5) + ' = honest ' + n(wfFin.base, 5) + '  clamp "' + wfFin.clamp +
+      '"  silhouette ' + n(wfFin.radFrac * 100, 1) + '% of the half-width  height ' +
+      n(wfFin.heightFrac * 100, 2) + '%  purpose "' + wfFin.purpose +
+      '" (the caller’s; `letterbox ' + wfFin.letterbox + '` is the policy that ran)' +
+      '  centred on the piece, not on a row');
+    var wfGal = fitOf(wide, wide.rounds[40].y, { purpose: 'gallery' });
+    var wfView = fitOf(wide, wide.rounds[40].y, { purpose: 'viewer' });
+    ok('purpose "gallery" and "viewer" letterbox too, and the result says which ran',
+      wfGal.clamp === '' && wfGal.purpose === 'gallery' && wfGal.letterbox === true &&
+      wfView.clamp === '' && wfView.purpose === 'viewer' &&
+      near(wfGal.scale, wfView.scale, 1e-12) && near(wfGal.scale, wfGal.base, 1e-12),
+      'gallery ' + n(wfGal.scale, 5) + ' / viewer ' + n(wfView.scale, 5) + ' / honest ' +
+      n(wfGal.base, 5) + '  purposes "' + wfGal.purpose + '" "' + wfView.purpose + '"');
+    ok('an unknown purpose falls back to the button, and that is the default',
+      fitOf(wide, null, { purpose: 'nonsense' }).purpose === 'button' &&
+      fitOf(wide, null).purpose === 'button' && fitOf(wide, null).letterbox === false,
+      'purpose "nonsense" → ' + fitOf(wide, null, { purpose: 'nonsense' }).purpose +
+      ', omitted → ' + fitOf(wide, null).purpose);
+
+    /* "finished" can also be read off the model: every round worked, no ghosts */
+    var wrapDone = model(rep(405, 46), { mode: 'rows', shape: { start: 'chain-row', chainLen: 406 } });
+    var wrapPart = model(rep(405, 46), { mode: 'rows', shape: { start: 'chain-row', chainLen: 406 },
+      done: function (i, c) { return i <= 20 ? c : 0; } });
+    ok('isFinished: all rounds worked → letterbox; one row left → keep counting',
+      G.isFinished(wrapDone) === true && G.isFinished(wrapPart) === false &&
+      fitOf(wide, null, { model: wrapDone }).clamp === '' &&
+      fitOf(wide, wide.rounds[20].y, { model: wrapPart }).clamp === 'height',
+      'finished model → clamp "" (honest), part-worked model → clamp "height" (counting)');
+    ok('an explicit finished:false overrides a finished model (the button keeps counting)',
+      fitOf(wide, wide.rounds[40].y, { model: wrapDone, finished: false }).clamp === 'height',
+      'clamp "height", scale ' + n(fitOf(wide, wide.rounds[40].y, { model: wrapDone, finished: false }).scale, 4));
+
+    /* the case D2 is really about: a 94 × 88 blanket is a PORTRAIT rectangle,
+       and the counting clamp turned it into a cord running off both edges */
+    var throwCls = G.classify(model(rep(94, 88), { mode: 'rows', t: 'hdc',
+      shape: { start: 'chain-row', chainLen: 96 } }));
+    var thFin = fitOf(throwCls, null, { finished: true });
+    var thBtn = fitOf(throwCls, throwCls.rounds[80].y);
+    ok('a 94 × 88 hdc blanket finished: fits, aspect 1.25, nothing cropped',
+      thFin.clamp === '' && thFin.radFrac <= 1.02 && thFin.heightFrac <= 1.02 &&
+      thBtn.radFrac <= G.FIT.maxWidthFrac,
+      'finished: silhouette ' + n(thFin.radFrac * 100, 1) + '%  height ' +
+      n(thFin.heightFrac * 100, 1) + '%  clamp "' + thFin.clamp + '"   ·   button: ' +
+      n(thBtn.radFrac * 100, 1) + '% wide, clamp "' + thBtn.clamp + '" (was 800%)' +
+      '  ·  aspect ' + n(throwCls.aspect, 3));
+    var plain = G.classify(model(ballCounts));
+    var pf = fitOf(plain);
+    ok('an ordinary piece is not clamped at all', pf.clamp === '' && near(pf.scale, pf.base, 1e-9),
+      'scale ' + n(pf.scale, 4) + '  base ' + n(pf.base, 4));
+    var df = fitOf(disc);
+    ok('a flat disc is shown whole, not cropped to fill the height',
+      df.clamp === '' && near(df.scale, df.base, 1e-9),
+      'scale ' + n(df.scale, 4) + '  base ' + n(df.base, 4) + '  aspect ' + n(disc.aspect, 3) +
+      '  height on screen ' + n(df.heightFrac * 100, 1) + '%');
+
+    /* ------------------------------------------------------- robustness */
+    group('Degrading to Model v1 and to junk');
+    var v1 = { mode: 'rounds', current: 3, defaultColor: '#fff', rounds: [
+      { count: 6, done: 6, stitches: [], color: '#fff', height: 1, ghost: false },
+      { count: 12, done: 12, stitches: [], color: '#fff', height: 1, ghost: false },
+      { count: 18, done: 18, stitches: [], color: '#fff', height: 1, ghost: false },
+      { count: 24, done: 24, stitches: [], color: '#fff', height: 1, ghost: false }] };
+    var v1c = G.classify(v1);
+    ok('Model v1 (no shape, no inc/dec, no per-stitch h/w) still lays out',
+      v1c.rounds.length === 4 && v1c.height > 0 && v1c.rounds[3].kind === 'ring',
+      'H ' + n(v1c.height) + '  Ø ' + n(2 * v1c.maxRadius) + '  closedTop ' + v1c.closedTop + ' (guessed)');
+    var zeros = G.classify(model([0, 71, 71], { shape: { start: 'chain-row', chainLen: 71 } }));
+    ok('a zero-count round does not punch a hole (04 defect F)',
+      zeros.rounds[0].empty === true && zeros.rounds[0].dy === 0 &&
+      near(zeros.rounds[0].radius, zeros.rounds[1].radius, 1e-9),
+      'round 1 radius ' + n(zeros.rounds[0].radius) + ' = round 2 radius ' + n(zeros.rounds[1].radius) +
+      ' (R_MIN 0.42 would pinch)');
+    var empty = G.classify({ mode: 'rounds', rounds: [] });
+    ok('an empty model classifies without throwing',
+      empty.rounds.length === 0 && empty.height === 0, 'height ' + empty.height);
+    ok('layout() gives one band per round with a y range',
+      G.layout(model(ballCounts)).bands.length === ballCounts.length,
+      'bands ' + G.layout(model(ballCounts)).bands.length);
+
+    // renderer ----------------------------------------------------------------
+    /* Renderer assertions (wave E, docs/wave-e/3d-renderer.md). Owned by the
+       js/diagram.js agent and self-contained: it builds bands on the CPU
+       through `Diagram._relief`, so nothing here needs a GL context or reads a
+       pixel. Uses only group/ok/n/near/rep from this file. */
+    (function rendererBlock() {
+      var RX = window.Diagram && window.Diagram._relief;
+      var DC = (window.Diagram && window.Diagram._consts) || {};
+      group('Renderer — stitch relief and LOD (wave E)');
+      if (!RX) { ok('Diagram._relief is exposed', false, 'js/diagram.js did not load'); return; }
+      function desc(t, h, extra, holeOK) {
+        var st = { t: t, c: null, h: h, w: 1 }, k;
+        if (extra) for (k in extra) if (extra.hasOwnProperty(k)) st[k] = extra[k];
+        return RX.descOf(st, h, !!holeOK);
+      }
+      function R(D, u, s) { return RX.relief(u, s, D); }
+      function peakOf(D) {
+        var m = -Infinity;
+        for (var a = 1; a < 40; a++) for (var b = 1; b < 40; b++) m = Math.max(m, R(D, a / 40, b / 40));
+        return m;
+      }
+      var sc = desc('sc', 1), hdc = desc('hdc', 1.34), dc = desc('dc', 2.01), tr = desc('tr', 2.68);
+      var fp = desc('dc', 2.01, { post: 'front' }), bp = desc('bpdc', 2.01);
+      var blo = desc('sc', 1, { lp: 'blo' }), flo = desc('sc', 1, { loop: 'front' });
+      var bbl = desc('bbl', 1.68), puff = desc('puff', 1.79), sl = desc('sl', 0.3);
+      var chHole = desc('ch', 0, null, true), chFlat = desc('ch', 0, null, false);
+      var inc = desc('inc', 1), inc2 = desc('inc+', 1);
+      var all = [sc, hdc, dc, tr, fp, bp, blo, flo, bbl, puff, sl, chHole, chFlat, inc, inc2];
+
+      var edgeMax = 0, i, a;
+      for (i = 0; i < all.length; i++) {
+        for (a = 0; a <= 20; a++) {
+          edgeMax = Math.max(edgeMax, Math.abs(R(all[i], 0, a / 20)), Math.abs(R(all[i], 1, a / 20)),
+            Math.abs(R(all[i], a / 20, 0)), Math.abs(R(all[i], a / 20, 1)));
+        }
+      }
+      ok('every relief kind is zero on all four edges of its cell (watertight at any count/phase)',
+        edgeMax === 0, all.length + ' kinds, max |relief| on the edges ' + edgeMax);
+
+      ok('an sc is a V: two lobes near its top with a valley between, one point at its base',
+        R(sc, 0.3, 0.75) > 1.15 * R(sc, 0.5, 0.75) && R(sc, 0.7, 0.75) > 1.15 * R(sc, 0.5, 0.75) &&
+        R(sc, 0.5, 0.15) > R(sc, 0.25, 0.15) + 0.1 && R(sc, 0.5, 0.75) > 0.1,
+        's 0.75: lobes ' + n(R(sc, 0.3, 0.75), 2) + ' / ' + n(R(sc, 0.7, 0.75), 2) + ' vs valley ' +
+        n(R(sc, 0.5, 0.75), 2) + ' (the body of the stitch, not a cut)   s 0.15: point ' +
+        n(R(sc, 0.5, 0.15), 2) + ' vs side ' + n(R(sc, 0.25, 0.15), 2));
+      ok('tall stitches carry a post under the V, and a yarn-over wrap per extra turn',
+        sc.vf === 1 && sc.wraps === 0 && hdc.wraps === 0 && hdc.vf < 1 &&
+        near(dc.vf, 1 / 2.0, 0.03) && dc.wraps === 1 && tr.wraps === 2 &&
+        R(dc, 0.5, 0.25) > 0.4 && R(dc, 0.12, 0.25) < 0.1,
+        'V share of the stitch: sc ' + sc.vf + ', hdc ' + n(hdc.vf, 2) + ', dc ' + n(dc.vf, 2) +
+        ', tr ' + n(tr.vf, 2) + '  wraps: hdc ' + hdc.wraps + ', dc ' + dc.wraps + ', tr ' + tr.wraps +
+        '  dc post at s 0.25: centre ' + n(R(dc, 0.5, 0.25), 2) + ', beside it ' + n(R(dc, 0.12, 0.25), 2));
+      ok('front-post stands proud and back-post sinks (07 D9 basketweave), from `post` or an fp/bp type',
+        fp.post === 1 && bp.post === -1 && R(fp, 0.5, 0.5) > R(dc, 0.5, 0.5) + 0.3 &&
+        R(bp, 0.5, 0.5) < 0,
+        'centre of the stitch: FPdc ' + n(R(fp, 0.5, 0.5), 2) + ', dc ' + n(R(dc, 0.5, 0.5), 2) +
+        ', BPdc ' + n(R(bp, 0.5, 0.5), 2));
+      ok('BLO leaves a ridge at the base of the stitch; FLO pulls the base in',
+        blo.lp === 1 && flo.lp === -1 && R(blo, 0.2, 0.09) > R(sc, 0.2, 0.09) + 0.5 &&
+        R(flo, 0.5, 0.12) < R(sc, 0.5, 0.12),
+        'at u 0.2, s 0.09: BLO ' + n(R(blo, 0.2, 0.09), 2) + ' vs sc ' + n(R(sc, 0.2, 0.09), 2) +
+        '   at the base centre: FLO ' + n(R(flo, 0.5, 0.12), 2) + ' vs sc ' + n(R(sc, 0.5, 0.12), 2));
+      var pSc = peakOf(sc), pB = peakOf(bbl), pP = peakOf(puff), pSl = peakOf(sl);
+      ok('bobble / popcorn and puff are welts well proud of a plain stitch; a slip stitch is nearly flat',
+        pB >= 1.7 * pSc && pP >= 1.4 * pSc && pSl < 0.5 * pSc,
+        'peaks: sc ' + n(pSc, 2) + ', bobble ' + n(pB, 2) + ', puff ' + n(pP, 2) + ', sl ' + n(pSl, 2));
+      ok('the two V\'s of an increase lean into their shared base',
+        R(inc, 0.62, 0.12) > R(inc, 0.38, 0.12) && R(inc2, 0.38, 0.12) > R(inc2, 0.62, 0.12),
+        'inc: right ' + n(R(inc, 0.62, 0.12), 2) + ' > left ' + n(R(inc, 0.38, 0.12), 2) +
+        '   inc+: left ' + n(R(inc2, 0.38, 0.12), 2) + ' > right ' + n(R(inc2, 0.62, 0.12), 2));
+
+      /* built bands */
+      function mk(types, h, colours) {
+        var st = [];
+        for (var q = 0; q < types.length; q++) {
+          st.push({ t: types[q], c: colours ? colours[q % colours.length] : null,
+            h: types[q] === 'ch' ? 0 : h, w: 1 });
+        }
+        return { count: st.length, done: st.length, stitches: st, color: '#f1e3c8', height: h, ghost: false };
+      }
+      var ringBand = { rTop: 3, rBot: 3.5, yTop: 0, yBot: -1.9, reach: 1.9, prof: null, radMax: 3.5 };
+      var lace = [];
+      for (i = 0; i < 6; i++) lace.push('dc', 'dc', 'dc', 'ch', 'ch');
+      var gl3 = RX.buildRound('rounds', mk(lace, 2.01), ringBand, 1, 2);
+      var degen = 0;
+      for (i = 0; i < gl3.tri.length; i += 3) {
+        if (gl3.tri[i] === gl3.tri[i + 1] && gl3.tri[i] === gl3.tri[i + 2]) degen++;
+      }
+      var sc3 = RX.buildRound('rounds', mk(lace, 1), ringBand, 1, 2);
+      var low3 = RX.buildRound('rounds', mk(lace, 2.01), ringBand, 1, 0);
+      ok('a chain space in a tall (granny / lace) round is an open hole; in an sc round it is a strand',
+        gl3.holes === 12 && degen > 0 && gl3.tri.length === gl3.n * gl3.tps &&
+        sc3.holes === 0 && low3.holes === 0,
+        'dc round, 12 ch of 30: ' + gl3.holes + ' holed slices, ' + degen + ' degenerate triangles, ' +
+        'index count ' + gl3.tri.length + ' = ' + gl3.n + ' × ' + gl3.tps + ' (draw ranges unchanged)' +
+        '  ·  same stitches at sc height: ' + sc3.holes + '  ·  lowest tier: ' + low3.holes);
+
+      var mixed = mk(['sc', 'dc', 'bbl', 'ch', 'dc', 'puff', 'sl', 'inc', 'inc+', 'dec'], 2.01);
+      mixed.stitches[1].post = 'front'; mixed.stitches[4].post = 'back';
+      var F = RX.FLOATS, T3 = RX.buildRound('rounds', mixed, ringBand, 3, 3);
+      var cols = T3.segs + 1, vps = cols * (T3.rows + 1), worstRing = 0, worstSeam = 0, j, k;
+      function pos(v) { var p = v * F; return [T3.verts[p] + T3.verts[p + 3], T3.verts[p + 1] + T3.verts[p + 4], T3.verts[p + 2] + T3.verts[p + 5]]; }
+      for (j = 0; j < T3.n; j++) {
+        for (k = 0; k < cols; k++) {
+          var top = pos(j * vps + k), bot = pos(j * vps + T3.rows * cols + k);
+          worstRing = Math.max(worstRing,
+            Math.abs(Math.sqrt(top[0] * top[0] + top[2] * top[2]) - (3 - DC.GROOVE)), Math.abs(top[1]),
+            Math.abs(Math.sqrt(bot[0] * bot[0] + bot[2] * bot[2]) - (3.5 - DC.GROOVE)), Math.abs(bot[1] + 1.9));
+        }
+        var nj = (j + 1) % T3.n;
+        for (var t = 0; t <= T3.rows; t++) {
+          var aP = pos(j * vps + t * cols + T3.segs), bP = pos(nj * vps + t * cols);
+          worstSeam = Math.max(worstSeam, Math.abs(aP[0] - bP[0]), Math.abs(aP[1] - bP[1]), Math.abs(aP[2] - bP[2]));
+        }
+      }
+      ok('a band of ten different stitch kinds still meets its rings exactly and its neighbours seamlessly',
+        worstRing < 1e-4 && worstSeam < 1e-4,
+        'tier ' + T3.tier + ' (' + T3.segs + '×' + T3.rows + '): worst ring error ' + worstRing.toExponential(1) +
+        ', worst slice-to-slice gap ' + worstSeam.toExponential(1) + ' (the old bump dipped each slice edge by its own jittered amount)');
+
+      var stripe = RX.buildRound('rounds', mk(rep('sc', 12), 1, ['#c0282d', '#1f4fa8']), ringBand, 1, 3);
+      var crisp = true;
+      var sv = (stripe.segs + 1) * (stripe.rows + 1);
+      for (j = 0; j < stripe.n; j++) {
+        for (k = 0; k < sv; k++) {
+          var cp = (j * sv + k) * F + 9;
+          var red = stripe.verts[cp] > stripe.verts[cp + 2];
+          if (red !== (j % 2 === 0)) crisp = false;
+        }
+      }
+      ok('colour work is per stitch: every vertex of a stitch carries that stitch\'s yarn (no bleed)',
+        crisp, stripe.n + ' alternating red/blue stitches, ' + sv + ' vertices each');
+
+      var rowBand = { Rc: 30, width: 10, x0: -5, yTop: 1, yBot: 0, reach: 1, anchor: 'center' };
+      var rw = RX.buildRound('rows', mk(rep('sc', 10), 1), rowBand, 0, 3);
+      var rd = RX.buildRound('rounds', mk(rep('sc', 10), 1), ringBand, 0, 3);
+      function uvAtY(g, yWant) {
+        var out = -1, nv = g.verts.length / F;
+        for (var v = 0; v < nv; v++) {
+          var p = v * F;
+          if (Math.abs(g.verts[p + 1] + g.verts[p + 4] - yWant) < 1e-6 && g.verts[p + 13] === 0) { out = g.verts[p + 14]; break; }
+        }
+        return out;
+      }
+      ok('the V points at the round/row it is worked into: rounds grow down, rows grow up',
+        uvAtY(rw, 0) === 0 && uvAtY(rw, 1) === 1 && uvAtY(rd, 0) === 0 && uvAtY(rd, -1.9) === 1,
+        'rows: s at the bottom edge ' + uvAtY(rw, 0) + ', top ' + uvAtY(rw, 1) +
+        '   rounds: s at the ring above ' + uvAtY(rd, 0) + ', own ring ' + uvAtY(rd, -1.9) +
+        ' (rows used to have the V upside down)');
+
+      var TI = DC.LOD_TIERS || [];
+      var t0 = RX.buildRound('rounds', mk(rep('sc', 10), 1), ringBand, 0, 0);
+      ok('four relief tiers: the old 3×3 bump at the bottom, 9×8 per sc stitch at the top',
+        TI.length === 4 && t0.verts.length / F / t0.n === 9 && T3.segs === 8 &&
+        rd.verts.length / F / rd.n === 72,
+        TI.map(function (x) { return x.name + ' ' + x.segs + '×' + x.rows.join('/') + ' ≥' + x.px + 'px'; }).join(', '));
+
+      function piece(rounds, per, h) {
+        var rs = [];
+        for (var q = 0; q < rounds; q++) rs.push({ n: per, height: h || 1 });
+        return rs;
+      }
+      var sphere = piece(15, 48), big = piece(60, 60), huge = piece(400, 160);
+      ok('LOD follows the stitch size on screen, with hysteresis',
+        RX.lodFor(2, 0, 'viewer', sphere, false) === 0 &&
+        RX.lodFor(5, 0, 'viewer', sphere, false) === 1 &&
+        RX.lodFor(25, 0, 'viewer', sphere, false) === 3 &&
+        RX.lodFor(15, 3, 'viewer', sphere, false) === 3 &&
+        RX.lodFor(17, 2, 'viewer', sphere, false) === 2,
+        'viewer, 15 × 48 sphere: 2 px → ' + RX.lodFor(2, 0, 'viewer', sphere, false) +
+        ', 5 px → ' + RX.lodFor(5, 0, 'viewer', sphere, false) + ', 25 px → ' +
+        RX.lodFor(25, 0, 'viewer', sphere, false) + '; at full, 15 px stays ' +
+        RX.lodFor(15, 3, 'viewer', sphere, false) + '; at high, 17 px stays ' +
+        RX.lodFor(17, 2, 'viewer', sphere, false) + ' (enters full at ' + n(16 * (1 + DC.LOD_HYST), 1) + ')');
+      ok('full V geometry is for the viewer; the button and the gallery stop one tier short',
+        DC.LOD_MAX && DC.LOD_MAX.viewer === 3 &&
+        RX.lodFor(40, 0, 'button', sphere, false) === 2 && RX.lodFor(40, 0, 'gallery', sphere, false) === 2 &&
+        RX.lodFor(40, 0, 'nonsense', sphere, false) === 2,
+        '15 × 48 sphere at 40 px: viewer ' + RX.lodFor(40, 0, 'viewer', sphere, false) + ', button ' +
+        RX.lodFor(40, 0, 'button', sphere, false) + ', gallery ' + RX.lodFor(40, 0, 'gallery', sphere, false) +
+        ', unknown purpose → the button\'s ' + RX.lodFor(40, 0, 'nonsense', sphere, false));
+      var bigT = RX.lodFor(30, 0, 'viewer', big, false);
+      var bigBtn = RX.lodFor(30, 0, 'button', big, false);
+      function vOf(rs, tier, thick) {
+        var v = 0, T = TI[tier];
+        for (var q = 0; q < rs.length; q++) v += rs[q].n * (T.segs + 1) * (T.rows[rs[q].height < 1.6 ? 0 : 1] + 1) * (thick ? 2 : 1);
+        return v;
+      }
+      ok('the vertex budget holds: a 60 × 60 piece drops a tier, 400 × 160 falls back to the bump',
+        bigT < 3 && vOf(big, bigT) <= DC.LOD_BUDGET.viewer &&
+        bigBtn <= bigT && vOf(big, bigBtn) <= DC.LOD_BUDGET.button &&
+        RX.lodFor(30, 0, 'viewer', huge, false) === 0,
+        '60 × 60 at 30 px: viewer tier ' + bigT + ' (' + vOf(big, bigT) + ' verts ≤ ' + DC.LOD_BUDGET.viewer +
+        '), button tier ' + bigBtn + ' (' + vOf(big, bigBtn) + ' ≤ ' + DC.LOD_BUDGET.button + ')  ·  400 × 160: tier ' +
+        RX.lodFor(30, 0, 'viewer', huge, false) + ' (' + vOf(huge, 0) + ' verts, was 960,000 at the old 15 per stitch)');
+
+      function wm(dev) {
+        var r1 = mk(rep('sc', 18), 1), r2 = mk(rep('sc', 24), 1);
+        r1.row = 1; r2.row = 2;
+        return { mode: 'rounds', rounds: [r1, r2], current: 1, defaultColor: '#f1e3c8', deviation: dev };
+      }
+      /* 06 #6 on the relief tiers: a 6-stitch tail must neither be a cog nor a
+         smooth blob. The relief ceiling is min(BUMP, max(RELIEF_FLOOR,
+         BUMP_R_RELIEF · r)). */
+      var tailBand = { rTop: 0.95, rBot: 0.95, yTop: 0, yBot: -0.95, reach: 0.95, prof: null, radMax: 0.95 };
+      var tb = RX.buildRound('rounds', mk(rep('sc', 6), 1), tailBand, 2, 2), tMax = 0;
+      for (i = 0; i < tb.verts.length / F; i++) {
+        var pp = i * F, tx = tb.verts[pp] + tb.verts[pp + 3], tz = tb.verts[pp + 2] + tb.verts[pp + 5];
+        // against the ring itself: the crease only dips at the band edges
+        tMax = Math.max(tMax, Math.sqrt(tx * tx + tz * tz) - 0.95);
+      }
+      ok('a 6-stitch round keeps visible stitches without turning into a cog',
+        tMax >= 0.09 && tMax <= DC.RELIEF_FLOOR * (1 + DC.JIT_AMP) + 1e-6 && tMax / 0.95 < 0.15,
+        'r 0.95: relief peaks ' + n(tMax, 3) + ' SW = ' + n(tMax / 0.95 * 100, 1) + '% of the radius (floor ' +
+        DC.RELIEF_FLOOR + ', ×' + (1 + DC.JIT_AMP) + ' jitter; the old bump gave 0.057, a smooth blob at viewer size)');
+
+      /* DiagramGeo 1.4.0 hands chains over with h = 0: nothing may divide by it */
+      var z0 = RX.descOf({ t: 'sc', c: null, h: 0, w: 1 }, 0, false);
+      var z1 = RX.descOf({ t: 'dc', c: null, h: 1e-9, w: 1 }, 1e-9, false);
+      var chRound = mk(['ch', 'ch', 'ch', 'ch', 'ch', 'ch'], 0);
+      chRound.height = 0;
+      var zb = RX.buildRound('rounds', chRound, ringBand, 0, 3), zFinite = true;
+      for (i = 0; i < zb.verts.length; i++) if (!isFinite(zb.verts[i])) { zFinite = false; break; }
+      var zr = 0;
+      for (a = 1; a < 20; a++) for (var b2 = 1; b2 < 20; b2++) {
+        var zv = R(z0, a / 20, b2 / 20) + R(z1, a / 20, b2 / 20);
+        if (!isFinite(zv)) zr = NaN; else zr = Math.max(zr, Math.abs(zv));
+      }
+      ok('zero-height records (chains since DiagramGeo 1.4.0) never divide by zero',
+        zFinite && isFinite(zr) && z1.h >= 0.3,
+        'an all-chain round of height 0 builds ' + zb.verts.length / F + ' finite vertices; a 0-tall sc / 1e-9-tall dc give finite relief (max ' +
+        n(zr, 2) + '), height floored at ' + z1.h);
+      var wWork = RX.wedgeFrom(wm({ expected: 18, actual: 24 }), 1, false);
+      var wDone = RX.wedgeFrom(wm({ expected: 18, actual: 24 }), 1, true);
+      var wRow = RX.wedgeFrom(wm({ expected: 6, actual: 0, row: 1 }), 1, false);
+      ok('the over-count wedge is drawn on the round being worked, never on a finished piece',
+        wWork === 18 && wDone === -1 && wRow === -1,
+        '24 worked of 18: wedge from slice ' + wWork + '; the same piece finished: ' + wDone +
+        '; a deviation naming row 1 while round 2 is drawn: ' + wRow +
+        ' (the gallery painted the panda Body\'s gathered close orange)');
+    }());
+    // /renderer ---------------------------------------------------------------
+
+    render();
+  }
+
+  /* ============================================= 2. reference fixtures */
+  /* The 40-part reference table in 01-geometry-truth.md §2, run against the
+     real PDFs through PdfText → Store.splitSections → Store.diagramModel →
+     DiagramGeo. Every check prints what it achieved, because most of these
+     depend on the parser/store half of the wave landing. */
+
+  var REF = [
+    // fixture file,                      part name,        mode,     class,      aspect low/high, extra
+    /* `ruffles`, `capBot` and `dome` are the 06 amigurumi review's three
+       defects, gated on the real fixtures: no ordinary shaping round may be
+       drawn as a frill, a piece that gathers shut must be capped, and a
+       magic-ring opening must be a convex dome rather than a cone (see
+       `capOf`). Achieved numbers are printed either way. */
+    ['crochet-panda.pdf',      /^body$/i,       'rounds', 'egg (stepped taper)', 1.18, 1.78, { ruffles: 0, dome: true }],
+    ['crochet-panda.pdf',      /^head$/i,       'rounds', 'sphere',              0.89, 1.33, { ruffles: 0, dome: true }],
+    ['crochet-panda.pdf',      /ear/i,          'rounds', 'shallow cup, sewn flat', 0.45, 0.90],
+    ['crochet-panda.pdf',      /eye/i,          'rounds', 'flat disc',           0.10, 0.56, { minRounds: 2 }],
+    // 01 §2 row 11 predicts 0.52 for the shell, but it gets there by assuming
+    // s = 0.35 — a firmly stuffed shell — which contradicts §1.3's own slack
+    // table (the shell ends at its widest round, so §1.3 gives it s = 0.00).
+    // Resolved the way the open-rim rule resolves it: the shell is a cup, so
+    // s = 0.20, and the FULL sequence 6→42 (+6×6), 42, 42 then walks out to
+    // H 6.08 / Ø 13.37 = 0.455 — which is what p.1's photo shows, a cap about
+    // four tenths as tall as it is wide, not a hemisphere. The parser hands us
+    // 12→42 (round 1's "6 sc in a magic ring" is lost), one rising round short,
+    // so the honest achievable number here is 0.355. Floor lowered 0.35 → 0.30
+    // to bracket 0.455 the same way ±35% brackets everything else in this
+    // table; it still rejects the flattened 0.151 this row was failing at.
+    ['crochet-turtle.pdf',     /shell/i,        'rounds', 'shallow dome',        0.30, 0.70, { ruffles: 0, dome: true }],
+    ['crochet-turtle.pdf',     /belly/i,        'rounds', 'flat disc',           0.10, 0.56],
+    ['crochet-turtle.pdf',     /head/i,         'rounds', 'egg / snout',         0.95, 1.43, { ruffles: 0, dome: true }],
+    // the hat's brim IS a frill — 48 → 71 in one round, four times the flat
+    // rate — so this row asserts the one ruffle the corpus should keep
+    ['crochet-snowman.pdf',    /hat/i,          'rounds', 'cup + flared brim',   0.25, 0.55, { ruffles: 1, minRuffles: 1 }],
+    ['bear.pdf',               /^head$/i,       'rounds', 'sphere',              0.82, 1.22, { ruffles: 0, capBot: true, dome: true }],
+    ['cato.pdf',               /^head$/i,       'rounds', 'sphere',              0.82, 1.24, { ruffles: 0, capBot: true, dome: true }],
+    // wave E: `11. Sc 2, then FO` (21, 21, 2) is no round — the store flags a
+    // closing round under a third of the one before — so the ear is an OPEN cup
+    ['cato.pdf',               /ear/i,          'rounds', 'cup / cone',          1.08, 1.62, { ruffles: 0, open: true }],
+    // wave E, 06 defect 8: the bear Body turns back in (40 → 24) with the text
+    // silent on stuffing, and the Arms taper with a 3-round wall — both stuffed
+    // segments (01 §2.1 #20 / #22: s 0.35 / 0.25), not an unstuffed 'open' / a
+    // 'shallow-bowl' (slack 0.05 / 0.10 by luck of a missing magic ring)
+    ['bear.pdf',               /^body$/i,       'rounds', 'barrel',              0.55, 1.05, { ruffles: 0, slack: 0.35 }],
+    ['bear.pdf',               /arms/i,         'rounds', 'tube, slight taper',  1.90, 3.30, { slack: 0.35 }],
+    ['crochet-fish.pdf',       /body/i,         'rounds', 'teardrop',            0.58, 0.88, { ruffles: 0, dome: true }],
+    // 06 defect 1's worst case: 13 of 33 rounds were frills and the piece read
+    // as two stacked tin cans at aspect 1.26 against 01 §2.7's 1.48
+    ['crochet-baphomet.pdf', /body\s*\/\s*head/i, 'rounds', 'two spheres + FLO waist', 1.18, 1.78, { ruffles: 0, capBot: true, dome: true }],
+    ['crochet-baphomet.pdf',   /arms/i,         'rounds', 'tube, folded',        1.46, 2.20, { ruffles: 0 }],
+    ['crochet-baphomet.pdf',   /tail/i,         'rounds', 'long whip tube',      6.60, 9.90],
+    ['crochet-baphomet.pdf',   /muzzle/i,       'rounds', 'STADIUM / oval tube', 0.35, 0.70, { kind: 'oval' }],
+    // the ears are a flat disc that the maker folds in half; the diagram shows
+    // the disc, by design (01 §4.1 "do not attempt the fold"), so the expected
+    // aspect here is the unfolded panel's, not the table's folded 0.48
+    ['crochet-baphomet.pdf',   /ear/i,          'rounds', 'flat disc (folded by hand)', 0.05, 0.35],
+    ['bee.pdf',                /body/i,         'rounds', 'striped egg',         1.40, 2.60],
+    /* `priorK` runs the SECOND check described in checkRef: the same real
+       section re-classified with `shape.corners` injected, which isolates the
+       geometry half of 07 D1 from the store half that supplies it. */
+    /* `dialect` (wave E): the dialect the part must resolve to once it is
+       seeded the way the importer seeds it (see `seededDialect`). The hood's
+       Motif section writes only tr / dc / ch and was measured at US heights. */
+    ['crochet-stylecraft-hex-socks.pdf', /hexagon|^$/i, 'rounds', 'hexagon, k = 6', 0, 0.06, { corners: 6, priorK: 6, priorFlat: true, dialect: 'uk' }],
+    ['crochet-redheart-persian-tiles.pdf', /square/i, 'rounds', 'square motif, k = 4', 0, 0.10, { corners: 4, priorK: 4, priorFlat: true, ruffles: 0, dialect: 'us' }],
+    ['crochet-stylecraft-hood.pdf', /motif/i, 'rounds', 'granny square in UK tr, k = 4', 0, 0.08, { corners: 4, priorK: 4, priorFlat: true, ruffles: 0, dialect: 'uk' }],
+    ['crochet-snowman.pdf',    /scarf/i,        'rows',   'long thin rectangle', 0.02, 0.09],
+    ['crochet-premier-sparkling-wrap.pdf', /wrap/i, 'rows', 'rectangle 74 × 16', 0.17, 0.27],
+    ['crochet-premier-simple-throw.pdf', /blanket/i, 'rows', 'rectangle 40 × 59', 1.18, 1.78]
+  ];
+
+  var textCache = {};
+  function fixtureText(file) {
+    if (textCache[file]) return textCache[file];
+    var key = 'zdgeo.v1:' + file, hit = null;
+    try { hit = sessionStorage.getItem(key); } catch (e) { /* ignore */ }
+    if (hit) { textCache[file] = Promise.resolve(hit); return textCache[file]; }
+    textCache[file] = fetch('../tmp-pdf/' + file, { cache: 'no-store' }).then(function (r) {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.blob();
+    }).then(function (b) { return window.PdfText.extract(b); })
+      .then(function (res) {
+        var t = String(res && res.text || '');
+        try { sessionStorage.setItem(key, t); } catch (e) { /* quota */ }
+        return t;
+      });
+    return textCache[file];
+  }
+
+  /* `Patterns.dialectHints(text).dialect` → 'uk' | 'us' | null — the same
+     question `Store.importPatternSections` (its `textDialect`) asks. */
+  function textDialectOf(text) {
+    var P = window.Patterns;
+    if (!P || typeof P.dialectHints !== 'function' || !/\S/.test(String(text || ''))) return null;
+    var d = null;
+    try { d = P.dialectHints(String(text)); } catch (e) { return null; }
+    var v = d && typeof d === 'object' ? String(d.dialect || '') : '';
+    return v === 'uk' || v === 'us' ? v : null;
+  }
+  /* The dialect the IMPORTER would have written onto this part (wave E): a
+     section that names its own dialect keeps 'auto' and decides for itself; one
+     that does not borrows the whole document's answer — `lendDialect` in
+     `Store.importPatternSections`. Without it a UK leaflet whose Motif section
+     writes only tr / dc / ch was measured at US heights here, in the test that
+     exists to police exactly that. */
+  function seededDialect(sectionText, docText) {
+    if (textDialectOf(sectionText)) return 'auto';
+    return textDialectOf(docText) || 'auto';
+  }
+
+  var partSeq = 0;
+  function finishedModel(section, mode, docText) {
+    partSeq++;
+    var part = {
+      id: 'ZDGEO_p' + partSeq, name: section.name || '(unnamed)',
+      patternText: section.text || '', row: 0, stitch: 0, rowStitches: [],
+      sizeIndex: 0, piecesDone: 0, repeat: null,
+      dialect: seededDialect(section.text || '', docText || '')
+    };
+    var proj = { id: 'ZDGEO_proj', countMode: mode, yarnColors: {} };
+    var src = window.Store.diagramModel(part, proj);
+    var rounds = [], i;
+    for (i = 0; i < src.rounds.length; i++) {
+      var r = src.rounds[i];
+      rounds.push({
+        count: r.count, done: r.count,
+        stitches: r.stitches && r.stitches.length ? r.stitches.slice() : [],
+        color: r.color, height: r.height, ghost: false,
+        inc: r.inc || null, dec: r.dec || null, row: r.row || i + 1,
+        // the store's "not fabric" flag — the reference path used to drop it,
+        // so a misread round the app bridges was drawn here (wave E)
+        outlier: r.outlier === true
+      });
+    }
+    while (rounds.length && rounds[rounds.length - 1].count <= 0) rounds.pop();
+    return {
+      mode: src.mode, rounds: rounds, current: Math.max(0, rounds.length - 1),
+      defaultColor: src.defaultColor, shape: src.shape || null,
+      window: src.window || null, deviation: src.deviation || null
+    };
+  }
+
+  function runFixtures() {
+    var btn = document.getElementById('runfix');
+    btn.disabled = true; btn.textContent = 'loading fixtures…';
+    sumEl.className = 'busy';
+    var files = {}, i;
+    for (i = 0; i < REF.length; i++) files[REF[i][0]] = 1;
+    var names = Object.keys(files);
+    var chain = Promise.resolve();
+    var texts = {};
+    names.forEach(function (f) {
+      chain = chain.then(function () {
+        statusEl.textContent = 'reading ' + f + ' …';
+        return fixtureText(f).then(function (t) { texts[f] = t; }, function (e) { texts[f] = e; });
+      });
+    });
+    return chain.then(function () {
+      statusEl.textContent = '';
+      group('Reference table (01 §2) — real fixtures via ../tmp-pdf');
+      for (var r = 0; r < REF.length; r++) checkRef(REF[r], texts);
+      checkPersianRounds(texts);
+      checkCatoTerraces(texts);
+      render();
+      btn.disabled = false; btn.textContent = 'Reload reference fixtures';
+    });
+  }
+
+  function sectionOf(texts, file, re) {
+    var text = texts[file];
+    if (!text || typeof text !== 'string') return null;
+    var secs = window.Store.splitSections(text) || [];
+    for (var i = 0; i < secs.length; i++) if (re.test(secs[i].name || '')) return { section: secs[i], text: text };
+    return null;
+  }
+
+  /* Red Heart Persian Tiles, First Square, round by round (wave E task 1,
+     HANDOFF "Persian Tiles round 4 does not fan"). The PDF: Rnd 1 16 dc in a
+     ch-4 ring; Rnd 2 24 sc; Rnd 3 `(3 dc, ch 3, 3 dc)` fans on single sc; Rnd 4
+     fills them — `dc in next 3 sc, ch 3, (sc, ch 2, sc) in ch-3 sp, ch 3`;
+     Rnd 5 sc + ch-3 loops; Rnd 6 `(3 dc, ch 5, 3 dc)` corners. p.1's photo is
+     a flat square tile, `Square = 5¼"`. */
+  function checkPersianRounds(texts) {
+    var name = 'redheart-persian-tiles · First Square — every round flat, round 4 steps out of round 3';
+    var hit = sectionOf(texts, 'crochet-redheart-persian-tiles.pdf', /first/i);
+    if (!hit) { ok(name, false, 'fixture or section unavailable'); return; }
+    var m = finishedModel(hit.section, 'rounds', hit.text);
+    var cls = G.classify(m), rs = cls.rounds;
+    if (rs.length !== 6) { ok(name, false, 'rounds ' + rs.length + ' (want 6)'); return; }
+    var steps = [], ratio = [], flat = true, i;
+    for (i = 0; i < 6; i++) {
+      var r0 = i ? rs[i - 1].radius : G.startRadius(cls.shape, rs[0].radius);
+      steps.push(rs[i].radius - r0);
+      ratio.push(steps[i] / (rs[i].h * (rs[i].kf || 1)));
+      if (!(rs[i].dy <= 0.06 * rs[i].h)) flat = false;
+    }
+    var P = m.rounds.map(function (r) { return G.roundMetrics(r).perimeter; });
+    var stepsOk = ratio.every(function (v, q) { return q === 0 || (v >= 0.6 && v <= G.POLY.flatTol); });
+    ok(name,
+      flat && stepsOk && cls.ruffles === 0 && rs[2].fan === true && rs[3].kind === 'polygon' &&
+      ratio[3] >= 0.6 && near(rs[3].radius, P[3] / (2 * Math.PI), 1e-9),
+      'rings ' + rs.map(function (e) { return n(e.radius, 2); }).join(' → ') +
+      ' · step / reach ' + ratio.map(function (v) { return n(v, 2); }).join(', ') +
+      ' · round 4 steps ' + n(steps[3], 2) + ' (was 0.48 and rose 1.86: a wall) · dy/h max ' +
+      n(Math.max.apply(null, rs.map(function (e) { return e.dy / e.h; })), 3) + ' · ruffles ' + cls.ruffles +
+      ' (rounds 2 and 5 were frills) · Σw ' + P.map(function (v) { return n(v, 2); }).join(', '));
+    ok('redheart-persian-tiles · First Square — rounds 3, 5, 6 stay right, and the finished size is Σw’s',
+      rs[2].kind === 'polygon' && rs[4].kind === 'polygon' && rs[5].kind === 'polygon' &&
+      rs[4].loop === true && !rs[4].ruffle && near(rs[5].radius, P[5] / (2 * Math.PI), 1e-9) &&
+      near(rs[4].radius, P[4] / (2 * Math.PI), 1e-9) && near(P[5] / 4, 21, 0.05) &&
+      cls.slack === 0 && cls.aspect < 0.03,
+      'round 3 fan ring ' + n(rs[2].radius, 2) + ' (Σw ring ' + n(rs[2].radiusCount, 2) + ') · round 5 is a ' +
+      n(rs[4].h / G.SH_SC, 2) + '-sc-tall loop round · round 6 ring ' + n(rs[5].radius, 2) + ' = 84/2π · ' +
+      'side ' + n(P[5] / 4, 2) + ' widths ≈ 5¼" at a worsted sc width of 0.25" · slack ' + cls.slack +
+      ' (form ' + cls.form + ') · aspect ' + n(cls.aspect, 4));
+  }
+
+  /* 06 defect 7 / 04 defect J on the real cato: the stuffed Head's
+     24,24,24,30,36,36,42,42,42 and the Horns' 5,5,5,10,10,10,15,15 terraces
+     are smoothed; nothing measured moves. */
+  function checkCatoTerraces(texts) {
+    [[/^head$/i, 'Head'], [/horn/i, 'Horns'], [/tail/i, 'Tail & Body']].forEach(function (p) {
+      var name = 'cato · ' + p[1] + ' — terraces smoothed, height / width / aspect unchanged';
+      var hit = sectionOf(texts, 'cato.pdf', p[0]);
+      if (!hit) { ok(name, false, 'fixture or section unavailable'); return; }
+      var m = finishedModel(hit.section, 'rounds', hit.text);
+      var on = G.classify(m), off = G.classify(m, { terrace: false });
+      /* judged at the terrace corners only (a ring the pass moved, and the ring
+         each side of it): the Tail & Body's tube-to-body shoulder at round 20
+         is a genuine step the pass leaves alone, and it would hide the rest */
+      var near3 = function (q) {
+        var rr = on.rounds;
+        return !!((rr[q] && rr[q].terrace) || (rr[q - 1] && rr[q - 1].terrace) || (rr[q + 1] && rr[q + 1].terrace));
+      };
+      var sOn = stairOf(on, 1, 0, near3), sOff = stairOf(off, 1, 0, near3);
+      ok(name,
+        on.terrace.rings > 0 && near(on.height, off.height, 1e-9) &&
+        near(on.maxRadius, off.maxRadius, 1e-12) && sOn.worst < sOff.worst,
+        'rings moved ' + on.terrace.rings + ' (a = ' + n(on.terrace.alpha, 3) + ', slack ' + on.slack +
+        ') · worst turn between rounds ' + n(sOff.worst, 1) + '° (round ' + (sOff.at + 1) + ') → ' +
+        n(sOn.worst, 1) + '° (round ' + (sOn.at + 1) + ') · H ' + n(on.height, 4) + ' = ' + n(off.height, 4) +
+        ' · aspect ' + n(on.aspect, 3));
+    });
+  }
+
+  function checkRef(row, texts) {
+    var file = row[0], re = row[1], mode = row[2], label = row[3];
+    var lo = row[4], hi = row[5], extra = row[6] || {};
+    var name = file.replace(/^crochet-|\.pdf$/g, '') + ' · ' + String(re).replace(/[/^$i]/g, '') + ' — ' + label;
+    var text = texts[file];
+    if (!text || typeof text !== 'string') {
+      ok(name, false, 'fixture unavailable: ' + (text && text.message ? text.message : 'no text'));
+      return;
+    }
+    var sections;
+    try { sections = window.Store.splitSections(text) || []; }
+    catch (e) { ok(name, false, 'splitSections threw: ' + e.message); return; }
+    var hit = null, avail = [];
+    for (var i = 0; i < sections.length; i++) {
+      avail.push(sections[i].name || '(unnamed)');
+      if (!hit && re.test(sections[i].name || '')) hit = sections[i];
+    }
+    if (!hit) {
+      ok(name, false, 'section not found — sections: ' + avail.slice(0, 12).join(', '));
+      return;
+    }
+    var m, cls;
+    try {
+      m = finishedModel(hit, mode, text);
+      cls = G.classify(m);
+    } catch (e) { ok(name, false, 'model/classify threw: ' + e.message); return; }
+    if (extra.dialect) {
+      ok(name + ' — measured in its own dialect', (m.shape && m.shape.dialect) === extra.dialect,
+        'resolved ' + (m.shape && m.shape.dialect) + ' want ' + extra.dialect + ' · section says ' +
+        (textDialectOf(hit.text) || 'nothing') + ', document says ' + (textDialectOf(text) || 'nothing') +
+        ' · Part.dialect seeded ' + seededDialect(hit.text || '', text));
+    }
+
+    var counts = [];
+    for (i = 0; i < Math.min(10, m.rounds.length); i++) counts.push(m.rounds[i].count);
+    var kinds = {};
+    for (i = 0; i < cls.rounds.length; i++) kinds[cls.rounds[i].kind] = (kinds[cls.rounds[i].kind] || 0) + 1;
+    var detail =
+      'aspect ' + n(cls.aspect, 3) + ' want ' + lo + '–' + hi +
+      ' · H ' + n(cls.height, 2) + ' Ø ' + n(2 * cls.maxRadius, 2) +
+      ' · rounds ' + m.rounds.length + ' [' + counts.join(',') + (m.rounds.length > 10 ? ',…' : '') + ']' +
+      ' · kinds ' + JSON.stringify(kinds) +
+      ' · corners ' + cls.corners + (cls.cornersSource ? '/' + cls.cornersSource : '') +
+      ' prior ' + (cls.priorK || 0) + ' outliers ' + (cls.outliers || 0) +
+      ' ruffles ' + cls.ruffles +
+      ' · dialect ' + ((m.shape && m.shape.dialect) || 'none') +
+      ' · slack ' + cls.slack + ' capTop ' + cls.closedTop + ' capBot ' + cls.closedBottom +
+      ' · equator ' + n(cls.equatorFrac, 2) +
+      ' · section "' + (hit.name || '(unnamed)') + '"';
+
+    var minRounds = extra.minRounds || 3;
+    var good = m.rounds.length >= minRounds && cls.aspect >= lo && cls.aspect <= hi;
+    if (extra.corners != null && cls.corners !== extra.corners) {
+      good = false; detail = 'corners ' + cls.corners + ' want ' + extra.corners + ' · ' + detail;
+    }
+    /* 06 defect 1: an ordinary shaping round is not a frill. `ruffles` is a
+       ceiling, `minRuffles` a floor for the one piece that really does frill. */
+    if (extra.ruffles != null && cls.ruffles > extra.ruffles) {
+      good = false; detail = 'ruffles ' + cls.ruffles + ' want ≤ ' + extra.ruffles + ' · ' + detail;
+    }
+    if (extra.minRuffles != null && cls.ruffles < extra.minRuffles) {
+      good = false; detail = 'ruffles ' + cls.ruffles + ' want ≥ ' + extra.minRuffles + ' · ' + detail;
+    }
+    if (extra.open && cls.closedBottom !== false) {
+      good = false; detail = 'closedBottom ' + cls.closedBottom + ' want an open rim · ' + detail;
+    }
+    if (extra.slack != null && cls.slack !== extra.slack) {
+      good = false; detail = 'slack ' + cls.slack + ' want ' + extra.slack + ' (form ' + cls.form + ') · ' + detail;
+    }
+    /* 06 honourable mention: a piece that gathers shut is capped. */
+    if (extra.capBot && cls.closedBottom !== true) {
+      good = false; detail = 'capBot ' + cls.closedBottom + ' — gathered to ' +
+        cls.shape.lastCount + ' and left open · ' + detail;
+    }
+    /* 06 defect 2: the magic-ring opening is a dome, not a cone. */
+    if (extra.dome) {
+      var cap = capOf(cls);
+      if (!cap.dome) { good = false; detail = 'NOT a dome · ' + detail; }
+      detail += ' · ' + capDetail(cap);
+    }
+    if (extra.kind) {
+      var found = false;
+      for (i = 0; i < cls.rounds.length; i++) if (cls.rounds[i].kind === extra.kind) found = true;
+      if (!found) { good = false; detail = 'no ' + extra.kind + ' round · ' + detail; }
+    }
+    if (m.rounds.length < minRounds) detail = 'fewer than ' + minRounds + ' rounds parsed · ' + detail;
+    ok(name, good, detail);
+
+    /* 07 D1, geometry half only. The row above is the end-to-end verdict and it
+       needs `shape.corners` from `js/store.js` (01 §1.4.7's text fallback: `k = 4`
+       on `(…, ch 2|3|5, …) in (corner|next ch-N sp)` with `rep from * 2|3 times`
+       or a part called "square", "tile" or "motif" with a `Square = …` gauge;
+       `k = 6` on "hexagon" or `6 x 3tr groups`). This row injects that prior into the SAME
+       real section and asks whether the polygon path then delivers: a k-gon
+       cross-section with straight sides, the k-gon flat rate in the walk, and no
+       ruffling. It is deliberately the geometry's own scorecard, so it passes
+       while the store half is still in flight. */
+    if (extra.priorK) {
+      var pm = {
+        mode: m.mode, rounds: m.rounds, current: m.current,
+        defaultColor: m.defaultColor, window: m.window, deviation: m.deviation,
+        shape: null
+      };
+      var base = m.shape || {};
+      pm.shape = {
+        start: base.start, chainLen: base.chainLen, ringCount: base.ringCount,
+        stuffed: base.stuffed, corners: extra.priorK, cornersSource: 'text'
+      };
+      var pc;
+      try { pc = G.classify(pm); } catch (e) { pc = null; }
+      var pname = name + ' — with shape.corners = ' + extra.priorK + ' injected';
+      if (!pc) { ok(pname, false, 'classify threw'); return; }
+      var polyN = 0, straight = true, j;
+      for (j = 0; j < pc.rounds.length; j++) {
+        if (pc.rounds[j].kind !== 'polygon') continue;
+        polyN++;
+        if (!(pc.rounds[j].prof && pc.rounds[j].prof.corners === extra.priorK)) straight = false;
+      }
+      var flatFrac = pc.maxRadius > 0 ? pc.height / pc.maxRadius : 99;
+      /* Flatness is gated where `priorFlat` says so. Wave E turned it on for the
+         two motifs this comment used to excuse: the hood is now measured at the
+         UK heights its leaflet names (a UK tr is a US dc — it was checked at US
+         tr, 33 % too tall, because the part carried no dialect), and Persian
+         Tiles' "counts that are not monotonic" (16,24,36,19,20,31 stitches) are
+         lace stitch counts over a Σw of 16,24,48,51,69,84 that the fan-and-fill
+         rule (js/diagram-geo.js (11)) now lays flat round by round. What this
+         row owns either way: k, a k-gon cross-section with straight sides, and
+         no frilling. */
+      var mono = true;
+      for (j = 1; j < pm.rounds.length; j++) {
+        if ((pm.rounds[j].count | 0) > 0 && (pm.rounds[j - 1].count | 0) > 0 &&
+            (pm.rounds[j].count | 0) < (pm.rounds[j - 1].count | 0)) mono = false;
+      }
+      ok(pname,
+        pc.corners === extra.priorK && polyN >= 1 && straight &&
+        (!extra.priorFlat || (flatFrac < 0.15 && pc.ruffles === 0)),
+        'corners ' + pc.corners + '/' + pc.cornersSource + ' · polygon rounds ' + polyN +
+        ' of ' + pc.rounds.length + ' (prior filled ' + pc.priorRounds + ')' +
+        ' · straight sides ' + straight + ' · ruffles ' + pc.ruffles + ' (was ' +
+        cls.ruffles + '), flattened ' + (pc.flattened || 0) +
+        ' · H ' + n(pc.height, 2) + ' = ' + n(flatFrac, 3) + '·radius' +
+        (extra.priorFlat ? ', want < 0.15' : ', flatness + ruffling NOT gated — counts ' +
+          (mono ? 'rise but under the k-gon flat rate' : 'are not monotonic') +
+          ', so they are the parser’s (07 D1 parser half / D4 store half)') +
+        ' · Ø ' + n(2 * pc.maxRadius, 2) + ' · aspect ' + n(pc.aspect, 3) + ' (was ' +
+        n(cls.aspect, 3) + ') · outliers ' + (pc.outliers || 0));
+    }
+  }
+
+  /* ------------------------------------------------------------- wiring */
+  document.getElementById('rerun').onclick = function () { runUnits(); };
+  document.getElementById('runfix').onclick = function () { runFixtures(); };
+  document.getElementById('showpass').onchange = render;
+
+  try { runUnits(); }
+  catch (e) {
+    sumEl.className = 'fail';
+    sumEl.textContent = 'unit tests threw: ' + e.message;
+    if (window.console) console.error(e);
+  }
+
+  window.DiagramGeoTests = {
+    runUnits: runUnits, runFixtures: runFixtures,
+    result: function () { return { passed: passed, failed: failed, skipped: skipped,
+      fails: rows.filter(function (r) { return r.state === 'f'; })
+        .map(function (r) { return r.name + ' :: ' + r.detail; }) }; }
+  };
 }());
 </script>
 </body>
