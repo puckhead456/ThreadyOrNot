@@ -804,6 +804,17 @@ dialog.sheet.sheet-viewer .sheet-body {
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
+/* "Pattern says 36 · instructions add up to 24" under the round readout. */
+.viewer-readout-note {
+  display: block;
+  max-width: 150px;
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.25;
+  white-space: normal;
+  text-align: right;
+}
 .viewer-stage {
   flex: 1 1 auto;
   min-height: 0;
@@ -876,6 +887,18 @@ dialog.sheet.sheet-viewer .sheet-body {
   font-weight: 600;
   color: var(--text-muted);
 }
+/* "Terms" in front of the Auto/UK/US chips, so they never read as a second
+   copy of the Auto/Top-down/Bottom-up row above them. */
+.viewer-bar-label {
+  flex: 0 0 auto;
+  font-size: 12px;
+  font-weight: 800;
+  color: var(--text-muted);
+}
+/* The Terms row keeps its (short) hint beside the chips: a third two-line
+   row would take ~75 px off the piece at 375×812. */
+.viewer-bar-row-inline { flex-wrap: nowrap; }
+.viewer-bar-row-inline .viewer-bar-hint { flex: 1 1 0; }
 /* "Showing a simple outline — 3D isn't available right now." */
 .viewer-note {
   position: absolute;
@@ -1125,6 +1148,14 @@ dialog.sheet {
   overflow: hidden;
 }
 dialog.sheet::backdrop { background: var(--overlay); }
+/* No showModal() (older iOS Safari): no top layer and no ::backdrop, so the
+   dialog — which already fills the viewport — paints the tint itself and sits
+   above the app's own fixed layers (banners 60-80), under the tour (200). A
+   tap on the tint is a tap on the dialog, which closes it (UX sweep D3). */
+dialog.sheet.sheet-fallback {
+  z-index: 150;
+  background: var(--overlay);
+}
 
 /* The corrupt-state recovery covers everything: the next write would destroy
    the evidence, so there is nothing else to do first (13 #3). */
@@ -2034,6 +2065,32 @@ textarea.mono {
 
 @media (min-height: 900px) {
   .stitch-btn { min-height: 44vh; }
+}
+
+/* UX sweep D4 / L10 (Wave E) — short phones. Below ~760 px of viewport the
+   counter overflowed and −1 / reset sat under the bottom bar with no scroll
+   cue (93 px over at 375×640; 76 px over even at 812 on a round with a setup
+   line and a three-line instruction). The order of things is unchanged; the
+   row card sheds whitespace, the instruction lines clamp tighter, and the big
+   button gives up its fixed floor first — it is still the largest target on
+   the screen, and it grows back as soon as there is room. */
+@media (max-height: 860px) {
+  .project-body .stitch-btn { min-height: max(20vh, 140px); }
+  .setup-line-text { -webkit-line-clamp: 1; }
+}
+@media (max-height: 760px) {
+  .project-body { gap: 8px; padding-top: 8px; }
+  .project-body .counter-card { padding: 4px var(--pad) 8px; }
+  .project-body .counter-card .big-number { font-size: min(var(--counter-size), 60px); }
+  .project-body .counter-card .round-btn { width: 50px; height: 50px; font-size: 26px; }
+  .project-body .counter-card .progress { margin-top: 2px; }
+  .project-body .counter-card .bar-label { margin-top: 2px; font-size: 12px; }
+  .project-body .tabs { padding-bottom: 2px; }
+  .pattern-line { padding: 6px 10px; }
+  .pattern-line-text { -webkit-line-clamp: 2; font-size: 14px; }
+  .setup-line { padding: 4px 10px; }
+  .project-body .stitch-section { gap: 4px; }
+  .project-body .stitch-btn { min-height: 120px; }
 }
 
 /* --------------------------------------------------------------------------

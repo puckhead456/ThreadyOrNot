@@ -3234,10 +3234,14 @@
   function applyPdf(projectId, edits, key, handle, progressLine, grid) {
     var source = (grid && grid.ok && grid.palette) ? grid.palette : edits.entries;
     var palette = source.map(function (e, i) {
+      /* A backstitch or French-knot row takes the strands the sheet gives
+         for that technique ('Backstitch in one strand'), not the
+         cross-stitch default. */
+      var own = e.kind === 'back' ? key.bsStrands : e.kind === 'knot' ? key.knotStrands : null;
       return {
         i: i, symbol: e.symbol || '', brand: e.brand || 'DMC', code: e.code,
         name: e.name || '', hex: e.hex || '808080',
-        strands: e.strands || edits.strands || 2, bsStrands: 1,
+        strands: e.strands || own || edits.strands || 2, bsStrands: key.bsStrands || 1,
         kind: e.kind || 'cross', blendWith: null,
         stitchCount: e.stitchCount || 0, skeins: e.skeins || 0, have: false
       };
@@ -3789,38 +3793,56 @@
         e.stopPropagation();
       }
 
-      function move(e) {
-        if (!drag) return;
-        var dx = (e.clientX - drag.px) / drag.sx;
-        var dy = (e.clientY - drag.py) / drag.sy;
-        var right = drag.x + drag.w, bottom = drag.y + drag.h;
-
-        if (drag.mode === 'move') {
-          crop.x = drag.x + dx;
-          crop.y = drag.y + dy;
-          crop.w = drag.w;
-          crop.h = drag.h;
+      /* Move the frame, or one corner of it, by (dx, dy) source pixels from
+         where it was at `base`. Shared by the pointer and the arrow keys. */
+      function shift(base, mode, dx, dy) {
+        var right = base.x + base.w, bottom = base.y + base.h;
+        if (mode === 'move') {
+          crop.x = base.x + dx;
+          crop.y = base.y + dy;
+          crop.w = base.w;
+          crop.h = base.h;
         } else {
-          var nx = drag.x, ny = drag.y, nr = right, nb = bottom;
-          if (drag.mode.charAt(1) === 'l') nx = Math.min(drag.x + dx, right - MIN_CROP);
-          else nr = Math.max(right + dx, drag.x + MIN_CROP);
-          if (drag.mode.charAt(0) === 't') ny = Math.min(drag.y + dy, bottom - MIN_CROP);
-          else nb = Math.max(bottom + dy, drag.y + MIN_CROP);
+          var nx = base.x, ny = base.y, nr = right, nb = bottom;
+          if (mode.charAt(1) === 'l') nx = Math.min(base.x + dx, right - MIN_CROP);
+          else nr = Math.max(right + dx, base.x + MIN_CROP);
+          if (mode.charAt(0) === 't') ny = Math.min(base.y + dy, bottom - MIN_CROP);
+          else nb = Math.max(bottom + dy, base.y + MIN_CROP);
           crop.x = nx; crop.y = ny; crop.w = nr - nx; crop.h = nb - ny;
-          if (aspectLock && drag.ratio > 0) {
+          if (aspectLock && base.ratio > 0) {
             /* keep the shape: the longer change wins, the anchored corner stays */
-            var byW = crop.w / drag.ratio;
-            var byH = crop.h * drag.ratio;
+            var byW = crop.w / base.ratio;
+            var byH = crop.h * base.ratio;
             if (Math.abs(byW - crop.h) < Math.abs(byH - crop.w)) crop.h = byW;
             else crop.w = byH;
-            if (drag.mode.charAt(1) === 'l') crop.x = nr - crop.w;
-            if (drag.mode.charAt(0) === 't') crop.y = nb - crop.h;
+            if (mode.charAt(1) === 'l') crop.x = nr - crop.w;
+            if (mode.charAt(0) === 't') crop.y = nb - crop.h;
           }
         }
         clampCrop();
         syncCropBox();
         schedule();
+      }
+
+      function move(e) {
+        if (!drag) return;
+        shift(drag, drag.mode, (e.clientX - drag.px) / drag.sx, (e.clientY - drag.py) / drag.sy);
         e.preventDefault();
+      }
+
+      /* Arrow keys nudge the focused corner (or the whole frame) by 1% of
+         the photo, 5% with Shift; the frame gets a visible focus ring. */
+      var KEY_DIRS = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
+      function nudge(e, mode) {
+        var d = KEY_DIRS[e.key];
+        if (!d || !crop || !srcW || !srcH) return;
+        if (mode === 'move' && e.target !== cropBox) return;
+        var step = e.shiftKey ? 0.05 : 0.01;
+        var base = { x: crop.x, y: crop.y, w: crop.w, h: crop.h,
+          ratio: crop.h > 0 ? crop.w / crop.h : 1 };
+        shift(base, mode, d[0] * Math.max(1, srcW * step), d[1] * Math.max(1, srcH * step));
+        e.preventDefault();
+        e.stopPropagation();
       }
 
       function end() { if (drag) { drag = null; schedule(); } }
@@ -3829,10 +3851,18 @@
         if (e.target !== cropBox) return;
         start(e, 'move');
       });
+      cropBox.tabIndex = 0;
+      cropBox.setAttribute('role', 'group');
+      cropBox.setAttribute('aria-label', 'Crop frame: arrow keys move it, Shift moves further');
+      on(cropBox, 'keydown', function (e) { nudge(e, 'move'); });
+      var CORNER_NAMES = { tl: 'top-left', tr: 'top-right', bl: 'bottom-left', br: 'bottom-right' };
       CORNER_IDS.forEach(function (id) {
         var handle = el('span', 'xs-crop-h xs-crop-' + id);
         handle.setAttribute('role', 'button');
-        handle.setAttribute('aria-label', 'Drag the ' + id + ' corner of the crop');
+        handle.tabIndex = 0;
+        handle.setAttribute('aria-label', 'The ' + CORNER_NAMES[id] +
+          ' corner of the crop: drag it, or use the arrow keys');
+        on(handle, 'keydown', function (e) { nudge(e, id); });
         on(handle, 'pointerdown', function (e) { start(e, id); });
         on(handle, 'pointermove', move);
         on(handle, 'pointerup', end);
@@ -4371,7 +4401,13 @@
     newProjectFields: newProjectFields,
     summary: summary,
     onTheme: onTheme,
-    onInit: onInit
+    onInit: onInit,
+    // HANDOFF item 13: the quota banner's "Free up space" button appears when
+    // a craft publishes this. Image-only mode keeps pages, key and tallies.
+    freeUpSpace: function (projectId) { switchToCountsMode(projectId); },
+    // What the New project sheet's drop zone accepts for this craft before
+    // handing the file to openImportSheet (the same list its own zone takes).
+    importAccept: ['.pdf', '.oxs', '.xml']
   });
 
 })();

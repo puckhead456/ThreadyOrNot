@@ -76,10 +76,24 @@
    - the surface is tone-mapped (a Reinhard variant, white point 0.8) before a
      real sRGB encode, so a cream keeps its hue instead of clipping to white
      and a near-black keeps its detail (02 #3).
-   - rounds are separated by a procedural crease and each stitch carries a V
-     with a bar across its top, both in the FRAGMENT shader off a band-local uv
-     (02 #3/#22). They fade out below ~2 device px per stitch, so the button
-     never speckles. Nothing was added to the geometry.
+   - STITCH RELIEF IS GEOMETRY again (wave E, HANDOFF "stitch texture is
+     bumps, not V's", 07 D9). Each stitch is a height field over its own
+     (u, s) cell — u across the stitch, s from its BASE (the round it is
+     worked into) to its TOP loops — built from what the record says: the two
+     lobes of the V, a post below it for hdc/dc/tr with one yarn-over wrap per
+     extra turn, the braid of top loops, a raised column for a front-post
+     stitch and a sunk one for a back-post, a ridge left by the unworked loop
+     of a BLO round, a welt for a puff / bobble / popcorn, and an OPEN HOLE
+     under the chain of a chain space in a tall round. Every term is zero on
+     all four edges of the cell, so stitches of any kind, count and phase
+     still meet watertight. Four levels of detail (`LOD_TIERS`), picked from
+     the projected stitch size and a per-purpose vertex budget, with
+     hysteresis: 8x7+ vertices per stitch in the viewer, down to the old 2x2
+     bump when a stitch is a few pixels. The fragment-shader V survives only
+     on the lowest tier, where the geometry cannot carry one.
+   - rounds are separated by a crease and a colour-change round cuts it
+     deeper, in the FRAGMENT shader off the band-local uv (02 #3), fading out
+     below ~2 device px per stitch so the button never speckles.
    - the working round wears a highlight ring in `palette.glow` (05 #3), and
      stitches past the pattern's own count for that round render in
      `palette.alert` rather than confidently closing the ring (05 #6).
@@ -106,6 +120,8 @@
      BUMP_R of the round it belongs to; the two meet at r = 3.33 (≈21 stitches),
      above which nothing changes and large rounds keep every bit of texture. */
   var BUMP_R = 0.06;
+  var BUMP_R_RELIEF = 0.10;   // the same ceiling for the relief tiers (see bumpAmpOf)
+  var RELIEF_FLOOR = 0.12;    // ...which never goes below this (SW units)
   var GROOVE = 0.03;       // inter-round crease, inward only (02 #2)
   var DIP = 0.17;          // vertical scallop ("v" shape) as a fraction of row height
   /* The scallop is a fraction of the STITCH height, which on a round the
@@ -135,6 +151,33 @@
   var THICK = 0.55;                // fabric thickness, fraction of SW
   var BACK_BUMP = 0.45;            // how much of the face texture the back keeps
   var FLOATS = 15;         // anchor3 + offset3 + normal3 + colour3 + slice1 + uv2
+
+  /* ---- stitch relief (wave E) ----
+     Levels of detail. `rows` is indexed by the band's height class: 0 for an
+     sc-tall round (h < 1.6), 1 for dc (< 2.4), 2 for anything taller, so a
+     treble has room for its post and its two wraps. `px` is the projected
+     stitch width (device px) at which the tier is entered; `LOD_HYST` keeps a
+     slow zoom or the 200 ms fit ease from rebuilding back and forth. */
+  var LOD_TIERS = [
+    { name: 'low', segs: 2, rows: [2, 2, 2], px: 0 },
+    { name: 'mid', segs: 4, rows: [3, 4, 5], px: 3.5 },
+    { name: 'high', segs: 6, rows: [5, 7, 8], px: 9 },
+    { name: 'full', segs: 8, rows: [7, 10, 12], px: 16 }
+  ];
+  var LOD_HYST = 0.15;
+  /* Vertex budget per purpose. The button is on screen for hours and spins at
+     60 fps, the gallery has a dozen canvases, the viewer is one piece looked
+     at on purpose. A piece that would blow the budget drops a tier. */
+  var LOD_BUDGET = { viewer: 160000, button: 70000, gallery: 60000 };
+  /* ...and the highest tier each purpose may use at all: the full 8-column V
+     is for the viewer, where a stitch is 20-40 device px; the button and the
+     gallery cards keep the 6-column one (the V, the post and the bar still
+     read, at about 60% of the triangles). */
+  var LOD_MAX = { viewer: 3, button: 2, gallery: 2 };
+  var AO_CAV = 0.42;       // darkening where the relief is low (crevices, gaps)
+  var HOLE_TOP = 0.77;     // a chain space is open from its base up to here
+  var HOLE_MIN_H = 1.3;    // ... but only in a round at least this tall (sc units)
+  var RELIEF_PEAK = { st: 1.0, ch: 0.85, sl: 0.4, bbl: 1.9, puff: 1.65, fp: 1.8 };
 
   var AO_EDGE = 0.17;      // darkening at slice edges
   var AO_BAND = 0.07;      // darkening at band edges
@@ -364,6 +407,13 @@
        crease at its top edge is cut deeper so the change reads at button
        size instead of washing out (02 #7). */
     'uniform float uSeam;',
+    /* The painted V is the fallback for the lowest LOD tier only: from 'mid'
+       up the V, the post and the bar are real geometry and painting a second
+       V over them made two V's that disagreed. */
+    'uniform float uTexV;',
+    /* Ply: a faint twist of fibre running along the legs of the V, only when
+       a stitch is big enough on screen (>= ~14 device px) to carry it. */
+    'uniform float uPly;',
     'void main() {',
     // contact shadow: vColor.r carries the falloff weight, ink is plain black
     '  if (uShadow > 0.5) {',
@@ -395,24 +445,30 @@
     '    vec3 H = normalize(K + V);',
     '    float nh = max(dot(N, H), 0.0);',
     // Wool scatters, so the sheen is broad and carries the yarn colour; the
-    // tight lobe is only a hint, otherwise the piece turns to plastic.
-    '    float sheen = pow(nh, 7.0) * 0.13 + pow(nh, 44.0) * 0.022;',
-    '    vec3 specTint = mix(vec3(1.0), base * 1.6, 0.5);',
+    // tight lobe is only a hint, otherwise the piece turns to plastic. With
+    // real relief every lobe of every V now catches the key on its own, so
+    // both lobes came down again (the fixture photos are matte yarn: a soft
+    // glow on the tops of the loops, never a white glint).
+    '    float sheen = pow(nh, 6.0) * 0.10 + pow(nh, 36.0) * 0.008;',
+    '    vec3 specTint = mix(vec3(1.0), base * 1.6, 0.65);',
     /* Fabric texture, in the fragment shader so it costs no geometry and
        filters itself out when a stitch is smaller than a couple of pixels.
-       vUV.y = 0 at the top edge of the round, 1 at the bottom; vUV.x runs
-       across one stitch. What real crochet has here is a CREASE between
-       rounds and, inside each round, a V with a bar across its top. */
+       vUV.y = s: 0 at the stitch's BASE (the round it is worked into), 1 at
+       its top loops, in rounds and rows mode alike; vUV.x runs across one
+       stitch. The crease at both band edges stays at every tier; the painted
+       V only where the geometry has none (uTexV). */
     '    float u = vUV.x, vv = vUV.y;',
     '    float crease = smoothstep(0.30, 0.0, vv) + smoothstep(0.70, 1.0, vv);',
     '    crease += smoothstep(0.42, 0.0, vv) * uSeam * ' + glsl(TEX_SEAM) + ';',
     '    float legs = abs(abs(u - 0.5) * 2.0 - vv);',
     '    float bar = smoothstep(0.17, 0.0, abs(vv - 0.86));',
-    '    float vtex = smoothstep(0.26, 0.0, legs) * 0.62 + bar * 0.38;',
-    '    float ridge = smoothstep(0.30, 0.52, vv) * (1.0 - smoothstep(0.52, 0.74, vv));',
-    '    float shade = 1.0 - uTex * (' + glsl(TEX_GROOVE) + ' * min(crease, 1.4) +' +
+    '    float vtex = (smoothstep(0.26, 0.0, legs) * 0.62 + bar * 0.38) * uTexV;',
+    '    float ridge = smoothstep(0.30, 0.52, vv) * (1.0 - smoothstep(0.52, 0.74, vv)) * uTexV;',
+    '    float ply = sin(6.2831853 * (abs(u - 0.5) * 7.0 - vv * 3.0));',
+    '    float shade = 1.0 - uTex * (' + glsl(TEX_GROOVE) + ' * (0.45 + 0.55 * uTexV) * min(crease, 1.4) +' +
     ' ' + glsl(TEX_V) + ' * vtex);',
     '    shade += uTex * ' + glsl(TEX_LIFT) + ' * ridge;',
+    '    shade *= 1.0 + uPly * 0.045 * ply;',
     '    c = base * vec3(1.06, 0.99, 0.88) * (0.22 + 0.86 * wrap) * shade;',   // warm key
     '    c += base * vec3(0.44, 0.54, 0.76) * 0.30 * fill * shade;',           // cool bounce
     '    c += specTint * sheen * wrap * shade;',
@@ -482,6 +538,241 @@
     hdc: 1.0, dc: 1.0, tr: 1.0, bbl: 1.2, puff: 1.2
   };
 
+  /* ------------------------------------------------------ stitch relief */
+
+  /* What one stitch record looks like as relief. Everything the Model v2
+     record carries is used: `t` (the family), `h` (its own height, so a dc
+     has a post under its V and a treble two wraps on it), inc / inc+ (the two
+     V's of an increase lean into their shared base). Post and loop flags are
+     read forward-compatibly — `post: 'front'|'back'` (or a `t` spelled
+     fpdc/bpdc…) and `lp: 'blo'|'flo'` (or `loop: 'back'|'front'`; the parser's
+     own boolean `loop` on a slack chain is not a loop flag and is ignored) —
+     because today `stitchTok` collapses them before the store sees them; see
+     "For the owner of js/patterns.js / js/store.js" in docs/wave-e/3d-renderer.md. */
+  var K_ST = 0, K_CH = 1, K_SL = 2, K_BBL = 3, K_PUFF = 4;
+  function descOf(st, roundH, holeOK) {
+    var t = String((st && st.t) || 'x').toLowerCase();
+    var D = { k: K_ST, vf: 1, wraps: 0, post: 0, lp: 0, inc: 0, hole: false, h: 1, peak: RELIEF_PEAK.st };
+    var post = st && typeof st.post === 'string' ? st.post.toLowerCase() : '';
+    var pm = /^(fp|bp)(.*)$/.exec(t);
+    if (pm) { post = pm[1]; t = pm[2] || 'dc'; }
+    if (post === 'front' || post === 'fp') D.post = 1;
+    else if (post === 'back' || post === 'bp') D.post = -1;
+    var lp = st && typeof st.lp === 'string' ? st.lp.toLowerCase()
+      : (st && typeof st.loop === 'string' ? st.loop.toLowerCase() : '');
+    if (lp === 'blo' || lp === 'back') D.lp = 1;
+    else if (lp === 'flo' || lp === 'front') D.lp = -1;
+    if (t === 'ch') {
+      D.k = K_CH; D.hole = !!holeOK; D.peak = RELIEF_PEAK.ch;
+    } else if (t === 'sl') {
+      D.k = K_SL; D.peak = RELIEF_PEAK.sl;
+    } else if (t === 'bbl' || t === 'bobble' || t === 'popcorn' || t === 'cluster') {
+      D.k = K_BBL; D.peak = RELIEF_PEAK.bbl;
+    } else if (t === 'puff') {
+      D.k = K_PUFF; D.peak = RELIEF_PEAK.puff;
+    } else {
+      var h = st && typeof st.h === 'number' && isFinite(st.h) && st.h > 0 ? st.h
+        : (roundH > 0 ? roundH : 1);
+      /* hdc/dc/tr/dtr: the V is one sc tall and sits on top of a post */
+      // never below a slip stitch: nothing downstream may divide by a 0-tall
+      // record (chains reach the model with h = 0 since DiagramGeo 1.4.0)
+      D.h = Math.max(0.3, Math.round(h * 20) / 20);
+      D.vf = D.h > 1.15 ? clamp(1 / D.h, 0.3, 1) : 1;
+      D.wraps = D.h < 1.7 ? 0 : D.h < 2.4 ? 1 : D.h < 3.1 ? 2 : 3;
+      if (t === 'inc') D.inc = 1; else if (t === 'inc+') D.inc = -1;
+      if (D.post > 0) D.peak = RELIEF_PEAK.fp;
+    }
+    D.key = D.k + ':' + D.vf + ':' + D.wraps + ':' + D.post + ':' + D.lp + ':' + D.inc + ':' + (D.hole ? 1 : 0);
+    return D;
+  }
+
+  /* The round cross-section of a strand of yarn, d = distance from its centre
+     line in units of its half-width. Not a semicircle — that has an infinite
+     slope at its edge and the normals go black — but close to one. */
+  function yarnP(d) {
+    d = d < 0 ? -d : d;
+    return d >= 1 ? 0 : Math.pow(1 - d * d, 0.45);
+  }
+
+  /* Relief of one stitch at (u, s), in units of the band's bump ceiling.
+     u: 0..1 across the stitch; s: 0 at its BASE (the round/row it is worked
+     into), 1 at its top loops. Zero on all four edges, always. */
+  function relief(u, s, D) {
+    if (!(u > 0 && u < 1 && s > 0 && s < 1)) return 0;
+    var win = smoothstep(0, 0.1, u) * smoothstep(0, 0.1, 1 - u) *
+      smoothstep(0, 0.05, s) * smoothstep(0, 0.05, 1 - s);
+    var d = 0, cu = Math.abs(u - 0.5);
+    switch (D.k) {
+      case K_CH:
+        // a chain: a strand of little beads. Over a hole it hangs near the top
+        // of the space; otherwise (an sc round's ch 1) it lies in the middle.
+        var bead = 0.82 + 0.18 * Math.cos(TAU * 2 * (u - 0.25));
+        d = D.hole ? 0.85 * yarnP((s - 0.87) / 0.1) * bead
+          : 0.5 * yarnP((s - 0.5) / 0.24) * bead;
+        break;
+      case K_SL:
+        d = 0.4 * yarnP((s - 0.6) / 0.28) * yarnP(cu / 0.46);
+        break;
+      case K_BBL: case K_PUFF:
+        var ex = (u - 0.5) / 0.47, ey = (s - 0.52) / 0.47;
+        var dome = yarnP(Math.sqrt(ex * ex + ey * ey));
+        d = D.k === K_BBL ? RELIEF_PEAK.bbl * Math.pow(dome, 0.8) * (0.93 + 0.07 * Math.cos(TAU * 2 * cu))
+          : RELIEF_PEAK.puff * dome * (0.86 + 0.14 * Math.cos(TAU * 3 * cu));
+        break;
+      default:
+        var sV = 1 - D.vf;
+        // the V: two plump legs, meeting at its point (the base of the V) and
+        // opening toward the top loops
+        if (s > sV) {
+          var q = (s - sV) / D.vf;
+          var shift = D.inc * 0.16 * (1 - q);
+          /* Each leg is a slanted oval, about 45 degrees off vertical: an sc is
+             about as wide as it is tall, and a V with near-parallel legs read
+             as a column of teeth rather than a V (checked on screen). */
+          var env = smoothstep(0, 0.14, q) * (1 - 0.35 * smoothstep(0.75, 1, q));
+          var lobe = 0.75 + 0.25 * Math.sin(Math.PI * q);
+          var off = 0.04 + 0.24 * q, hw = 0.15 + 0.05 * q;
+          var c0 = 0.5 + shift;
+          d = Math.max(yarnP((u - (c0 - off)) / hw), yarnP((u - (c0 + off)) / hw)) * env * lobe;
+          // the body of the stitch shows between the legs: a shallow valley,
+          // not a cut through the fabric
+          d = Math.max(d, 0.32 * yarnP(cu / 0.42) * env);
+        }
+        // the braid of top loops: the horizontal bar between rounds
+        d = Math.max(d, 0.45 * yarnP((s - 0.92) / 0.07) * (0.8 + 0.2 * Math.cos(TAU * (u - 0.5))));
+        // the post of a tall stitch, and a yarn-over wrap per extra turn
+        if (sV > 0 && s < sV + 0.14) {
+          var r = s / sV;
+          var fade = 1 - smoothstep(sV - 0.05, sV + 0.12, s);
+          var postD = 0.78 * yarnP(cu / 0.21) * smoothstep(0, 0.18, r) * fade;
+          var th = 0.16 / D.h, slope = 0.34 / D.h;
+          for (var w = 1; w <= D.wraps; w++) {
+            var sw = sV * w / (D.wraps + 1);
+            var wd = 0.95 * yarnP((s - sw - (u - 0.5) * slope) / th) * yarnP(cu / 0.3);
+            if (wd > postD) postD = wd;
+          }
+          if (postD > d) d = postD;
+        }
+        // BLO: the front loop of the round below is left standing at the
+        // base as a ridge. FLO: the back loop pulls the base in.
+        if (D.lp > 0) d = Math.max(d, 0.9 * yarnP((s - 0.09) / 0.075));
+        else if (D.lp < 0) d -= 0.4 * yarnP((s - 0.12) / 0.12);
+        // front post: the whole column stands proud; back post: sunk. At the
+        // full ceiling (0.20 SW) that is about +0.3 / -0.2 SW, 01 §4.3's
+        // "+/-0.30 SW in z" basketweave checkerboard.
+        if (D.post > 0) d = d * 1.2 + 0.6 * yarnP(cu / 0.4) * Math.sin(Math.PI * s);
+        else if (D.post < 0) d = d * 0.6 - 0.9 * yarnP(cu / 0.4) * Math.sin(Math.PI * s);
+    }
+    return d * win;
+  }
+
+  /* The lowest tier keeps the old single bump — a raised centre, zero at the
+     slice edges (the old one dipped the edges by a per-slice amount, which
+     opened hairline cracks between neighbours with different jitter). */
+  function reliefLow(u, s) {
+    if (!(u > 0 && u < 1 && s > 0 && s < 1)) return 0;
+    return 1.6 * Math.sin(Math.PI * s) * (1 - Math.cos(TAU * u)) / 2;
+  }
+
+  /* One stamp per (descriptor, tier, rows, direction): the relief sampled on
+     the vertex grid with slopes taken at the GRID spacing, so the shading
+     belongs to the mesh that is actually drawn, plus per-vertex cavity and
+     per-quad hole flags. Shared by every stitch with the same descriptor. */
+  var STAMPS = {};
+  var STAMP_N = 0;
+  function stampOf(D, tier, rows, sdir) {
+    var segs = LOD_TIERS[tier].segs;
+    var key = (tier === 0 ? 'L' : D.key) + '|' + tier + '|' + rows + '|' + sdir;
+    var hit = STAMPS[key];
+    if (hit) return hit;
+    if (STAMP_N > 400) { STAMPS = {}; STAMP_N = 0; }
+    var cols = segs + 1, vrows = rows + 1;
+    var nv = cols * vrows;
+    var d = new Float32Array(nv), du = new Float32Array(nv), dt = new Float32Array(nv);
+    var sv = new Float32Array(nv);
+    var hu = 1 / segs, ht = 1 / rows;
+    function f(u, tt) {
+      var s = sdir > 0 ? tt : 1 - tt;
+      return tier === 0 ? reliefLow(u, s) : relief(u, s, D);
+    }
+    for (var t = 0; t < vrows; t++) {
+      for (var k = 0; k < cols; k++) {
+        var u = k * hu, tt = t * ht, i = t * cols + k;
+        d[i] = f(u, tt);
+        du[i] = (f(u + hu, tt) - f(u - hu, tt)) / (2 * hu);
+        dt[i] = (f(u, tt + ht) - f(u, tt - ht)) / (2 * ht);
+        sv[i] = sdir > 0 ? tt : 1 - tt;
+      }
+    }
+    var holes = null, nh = 0;
+    if (tier > 0 && D.hole) {
+      holes = new Uint8Array(segs * rows);
+      for (t = 0; t < rows; t++) {
+        var s0 = sdir > 0 ? t * ht : 1 - (t + 1) * ht;
+        var s1 = s0 + ht;
+        if (s1 <= HOLE_TOP + 1e-6 && s0 >= -1e-6) {
+          for (k = 0; k < segs; k++) { holes[t * segs + k] = 1; nh++; }
+        }
+      }
+    }
+    hit = { d: d, du: du, dt: dt, s: sv, holes: nh ? holes : null, nholes: nh };
+    STAMPS[key] = hit; STAMP_N++;
+    return hit;
+  }
+
+  /* Rows class of a band: sc-tall, dc-tall, taller. */
+  function hClass(h) { return h < 1.6 ? 0 : h < 2.4 ? 1 : 2; }
+
+  /* Vertices one round costs at a tier. */
+  function roundVerts(round, tier, thick) {
+    var T = LOD_TIERS[tier];
+    return round.n * (T.segs + 1) * (T.rows[hClass(round.height)] + 1) * (thick ? 2 : 1);
+  }
+
+  /* The slice the over-count wedge starts at, or -1 for none (05 #6).
+     The wedge belongs to the round being WORKED. A finished piece has none
+     (like the marker, 06 #5), and a deviation that names another row than the
+     one `current` draws is about a different round: the gallery's finished
+     panda Body carried the part's round-1 deviation (expected 6) onto its
+     18-stitch last round and painted a 2/3 alert wedge into the gathered
+     close. `m` is a normalized model. */
+  function wedgeFrom(m, cur, done) {
+    var dev = m && m.deviation;
+    var r = m && m.rounds ? m.rounds[cur] : null;
+    if (done || !r || !dev || typeof dev.expected !== 'number' || !(dev.expected > 0)) return -1;
+    var raw = m.geoRaw ? m.geoRaw[cur] : null;
+    if (typeof dev.row === 'number' && raw && typeof raw.row === 'number' && dev.row !== raw.row) return -1;
+    if (!(r.count > dev.expected) || !(r.n > 0)) return -1;
+    return clamp(Math.round(dev.expected / r.count * r.n), 0, r.n);
+  }
+
+  /* Which relief tier a piece gets: the highest whose entry size the stitch
+     has reached (with hysteresis around the tier it is already at), then
+     stepped down until the whole piece fits the purpose's vertex budget.
+     Pure, so the test page can check it without a GL context. */
+  function lodFor(px, cur, purpose, rounds, thick, bands) {
+    cur = cur | 0;
+    var tier = 0, i;
+    for (i = LOD_TIERS.length - 1; i > 0; i--) {
+      var th = LOD_TIERS[i].px * (i > cur ? 1 + LOD_HYST : 1 - LOD_HYST);
+      if (px >= th) { tier = i; break; }
+    }
+    var cap = LOD_MAX[purpose] != null ? LOD_MAX[purpose] : LOD_MAX.button;
+    if (tier > cap) tier = cap;
+    var budget = LOD_BUDGET[purpose] || LOD_BUDGET.button;
+    while (tier > 0 && piecesVerts(rounds, tier, thick, bands) > budget) tier--;
+    return tier;
+  }
+  function piecesVerts(rounds, tier, thick, bands) {
+    var v = 0;
+    for (var i = 0; i < (rounds ? rounds.length : 0); i++) {
+      var r = rounds[i];
+      if (!r || !(r.n > 0) || (bands && !bands[i])) continue;
+      v += roundVerts(r, tier, thick);
+    }
+    return v;
+  }
+
   /* Build the render-side description of one round: slices (after the 160 cap),
      per-slice amplitude / width weight / colour, and the done slice count. */
   function prepRound(round, defColor, prev, index) {
@@ -491,7 +782,14 @@
     var base = round.color || defColor || DEFAULT_YARN;
     var height = round.height > 0 ? round.height : 1;
     var ghost = !!round.ghost;
-    var n = Math.min(count, MAX_SLICES);
+    /* One slice per ring POSITION, not per counted stitch (wave E). A lace or
+       granny round carries more records than its count — every chain of a
+       ch-3 space is a position (Persian Tiles round 5: 20 counted stitches,
+       80 positions) — and slicing it by the count sampled one record in four,
+       so a round of `sc, ch 3` drew as 20 smeared quarter-stitches with the
+       spaces lost. `done` still maps onto slices by proportion. */
+    var nRec = stitches && stitches.length > count ? stitches.length : count;
+    var n = count > 0 ? Math.min(nRec, MAX_SLICES) : 0;
 
     /* Fast path for the tap loop: the caller normally hands back the very same
        stitches array and only moves `done`, so nothing but the draw range
@@ -520,6 +818,23 @@
     h = hashNum(h, ghost ? 1 : 0);
     h = hashNum(h, stitches ? stitches.length : 0);
 
+    /* Relief descriptors (wave E). A chain space only opens into a hole in a
+       round tall enough to have one — a granny / lace / mesh round of hdc and
+       up — and only when the round also has real stitches to hang it
+       between; a foundation chain or an `sc, ch 1` amigurumi turn is a strand,
+       not a hole. */
+    var holeOK = false;
+    if (height >= HOLE_MIN_H && stitches && stitches.length) {
+      for (var hi = 0; hi < stitches.length; hi++) {
+        var ht = stitches[hi] && stitches[hi].t;
+        if (ht && ht !== 'ch' && ht !== 'sl') { holeOK = true; break; }
+      }
+    }
+    var keys = new Array(n);
+    var descs = {};
+    var jit = new Float32Array(n);
+    var peak = 0;
+
     for (var i = 0; i < n; i++) {
       var si = count > 0 ? Math.min(recs - 1, Math.floor(i * step)) : 0;
       var st = null;
@@ -528,8 +843,15 @@
       }
       var t = (st && st.t) || 'sc';
       var c = (st && st.c) || base;
-      amp[i] = (STITCH_AMP[t] != null ? STITCH_AMP[t] : 1.0) *
-        (1 + noise11(seed, i * 3) * JIT_AMP);
+      jit[i] = 1 + noise11(seed, i * 3) * JIT_AMP;
+      amp[i] = (STITCH_AMP[t] != null ? STITCH_AMP[t] : 1.0) * jit[i];
+      var D = descOf(st, height, holeOK);
+      keys[i] = D.key;
+      if (!descs[D.key]) descs[D.key] = D;
+      if (D.peak > peak) peak = D.peak;
+      if (st && (st.post || st.lp || st.loop)) {
+        h = hashStr(h, String(st.post || '') + String(st.lp || '') + String(st.loop || ''));
+      }
       /* Model v2 carries the stitch's real width; fall back to the type table
          (which also widens an `inc` slice a little for emphasis). */
       wt[i] = (st && typeof st.w === 'number' && isFinite(st.w) && st.w > 0)
@@ -548,6 +870,7 @@
       count: count, done: done, n: n,
       doneSlices: count > 0 ? Math.round(done / count * n) : 0,
       amp: amp, wt: wt, col: col,
+      jit: jit, keys: keys, descs: descs, reliefPeak: peak || 1,
       height: height, ghost: ghost,
       ref: stitches, base: base,
       hash: (h ^ seed) >>> 0
@@ -756,69 +1079,114 @@
     }
   }());
 
+  /* Row / column profiles for one grid size (the scallop and the crease),
+     computed once per (segs, rows). Same formulas as the old 5 x 3 stamps. */
+  var PROFILES = {};
+  function profilesOf(segs, rows) {
+    var key = segs + 'x' + rows;
+    var hit = PROFILES[key];
+    if (hit) return hit;
+    var cols = segs + 1, vrows = rows + 1, k, t;
+    var P = {
+      dipU: new Float64Array(cols), ddipU: new Float64Array(cols), edge: new Float64Array(cols),
+      blg: new Float64Array(vrows), dblg: new Float64Array(vrows),
+      dipT: new Float64Array(vrows), ddipT: new Float64Array(vrows)
+    };
+    for (k = 0; k < cols; k++) {
+      var u = k / segs, cu = -Math.cos(TAU * u);
+      P.dipU[k] = -DIP * (1 + cu) / 2;
+      P.ddipU[k] = -DIP * TAU * Math.sin(TAU * u) / 2;
+      P.edge[k] = (1 - cu) / 2;
+    }
+    for (t = 0; t < vrows; t++) {
+      var tt = t / rows;
+      P.blg[t] = -GROOVE * SW * (1 - Math.sin(Math.PI * tt));
+      P.dblg[t] = GROOVE * SW * Math.PI * Math.cos(Math.PI * tt);
+      P.dipT[t] = Math.sin(Math.PI * tt);
+      P.ddipT[t] = Math.PI * Math.cos(Math.PI * tt);
+    }
+    PROFILES[key] = P;
+    return P;
+  }
+
   /* Builds one band (one round / one row) into typed arrays.
-     opts: n, a0[], aw[], amp[], col[], rBase[3], drdt, yBase[3], dydt, zOff,
-           dipScale, anchorCol, thick, prof
+     opts: n, a0[], aw[], amp[], jit[], keys[], descs{}, col[], rBase[3], drdt,
+           yBase[3], dydt, zOff, dipScale, anchorCol, thick, prof, bumpAmp,
+           tier, hc, sdir
+     `tier` picks the grid from LOD_TIERS and `hc` its row count (the band's
+     height class). `sdir` says which way the stitch runs: +1 when row t = 0
+     of the band is the stitch's BASE (rounds: the band starts at the ring
+     above it), -1 when it is the stitch's TOP (rows are worked upward).
      `prof(theta, t)` is an optional radius MULTIPLIER from DiagramGeo — the
      cross-section of a polygon motif, an oval/stadium or a ripple. Absent (the
      usual case) the ring is a circle and this costs nothing.
-     `thick` > 0 extrudes the bump surface inward by that much and closes the
-     four sides, so flat fabric has a real edge and never vanishes when it
-     turns side-on. Rounds mode is a closed solid already and passes 0.
-     `bumpAmp` is this band's per-stitch bump ceiling in world units; absent it
-     falls back to the old absolute BUMP * SW. */
+     `thick` > 0 extrudes the surface inward by that much and closes the four
+     sides, so flat fabric has a real edge and never vanishes when it turns
+     side-on. Rounds mode is a closed solid already and passes 0.
+     `bumpAmp` is this band's relief ceiling in world units (06 #6).
+     The relief is displaced along the smooth surface's own normal, and the
+     shading normal is the true normal of the displaced grid (the stamp's
+     slopes are taken at the grid spacing), so what is lit is what is drawn.
+     A chain space in a tall round leaves its lower quads DEGENERATE rather
+     than absent: every slice keeps the same index count, so the draw ranges
+     (`done` slices, the over-count wedge, the stitch animation) are unchanged. */
   function buildBand(o) {
     var n = o.n;
+    var tier = o.tier > 0 ? Math.min(o.tier, LOD_TIERS.length - 1) : 0;
+    var TT = LOD_TIERS[tier];
+    var SEG = TT.segs, RW = TT.rows[o.hc > 0 ? Math.min(o.hc, 2) : 0];
+    var cols = SEG + 1, vrows = RW + 1, vpsF = cols * vrows;
+    var sdir = o.sdir < 0 ? -1 : 1;
     var thick = o.thick || 0;
-    var vps = thick ? VPS * 2 : VPS;
-    var tidx = thick ? TIDX_THICK : TIDX;
+    var vps = thick ? vpsF * 2 : vpsF;
+    var tpsF = SEG * RW * 2;
+    var tps = thick ? tpsF * 2 + RW * 2 * 2 + SEG * 2 * 2 : tpsF;
+    var tidx = tps * 3;
+    var lps = (SEG * 2 + RW) * 2;
+    var gps = SEG * 2;
     var verts = new Float32Array(n * vps * FLOATS);
     var tri = new Uint16Array(n * tidx);
-    var lin = new Uint16Array(n * LIDX);
-    var ring = new Uint16Array(n * GIDX);
+    var lin = new Uint16Array(n * lps);
+    var ring = new Uint16Array(n * gps);
     var a0 = o.a0, aw = o.aw, amp = o.amp, col = o.col;
-    var rB = o.rBase, yB = o.yBase, drdt = o.drdt, dydt = o.dydt;
+    var jit = o.jit || null, keys = o.keys || null, descs = o.descs || null;
+    var rB0 = o.rBase[0], yB0 = o.yBase[0], drdt = o.drdt, dydt = o.dydt;
     var zOff = o.zOff, dipScale = o.dipScale;
-    var anchorCol = o.anchorCol;
+    var anchorCol = o.anchorCol || 0;
     var prof = o.prof || null;
     var PROF_EPS = 1e-3;
-    var cosA = new Float64Array(COLS), sinA = new Float64Array(COLS);
-    var px = new Float64Array(VPS), py = new Float64Array(VPS), pz = new Float64Array(VPS);
-    var nx = new Float64Array(VPS), ny = new Float64Array(VPS), nz = new Float64Array(VPS);
-    var bx = thick ? new Float64Array(VPS) : null;
-    var bz = thick ? new Float64Array(VPS) : null;
-    var j, k, t, vi, p, idx;
-
-    var angA = new Float64Array(COLS);
+    var P = profilesOf(SEG, RW);
+    var cosA = new Float64Array(cols), sinA = new Float64Array(cols), angA = new Float64Array(cols);
+    var px = new Float64Array(vpsF), py = new Float64Array(vpsF), pz = new Float64Array(vpsF);
+    var nx = new Float64Array(vpsF), ny = new Float64Array(vpsF), nz = new Float64Array(vpsF);
+    var bx = thick ? new Float64Array(vpsF) : null;
+    var by = thick ? new Float64Array(vpsF) : null;
+    var bz = thick ? new Float64Array(vpsF) : null;
     var blend = !!(prof && prof.blend);
-    /* Per-stitch bump amplitude (06 #6). `bumpAmp` is the band's own ceiling —
-       min(BUMP*SW, BUMP_R * its ring radius) — and the per-stitch weight in
-       `amp[]` still scales it, so a bobble is still bigger than a slip stitch
-       and a tiny round is still a circle. It is 0 at BOTH band edges (FT), so
-       consecutive bands meet exactly at rBase + BLG whatever their stitch
-       counts, phases and amplitudes: no lip and no crack. */
     var bumpAmp = o.bumpAmp != null ? o.bumpAmp : BUMP * SW;
+    var plain = descOf(null, 1, false);
+    var holeSlices = 0;
+    var j, k, t, vi, p, idx, z;
+
     for (j = 0; j < n; j++) {
-      var A = amp[j] * bumpAmp;
+      var D = (keys && descs && descs[keys[j]]) || plain;
+      var S = stampOf(D, tier, RW, sdir);
+      var A = bumpAmp * (tier === 0 ? amp[j] : (jit ? jit[j] : 1));
       var aStart = a0[j], aWidth = aw[j];
-      for (k = 0; k < COLS; k++) {
-        var ang0 = aStart + aWidth * (k / SEGS);
+      for (k = 0; k < cols; k++) {
+        var ang0 = aStart + aWidth * (k / SEG);
         angA[k] = ang0;
         cosA[k] = Math.cos(ang0); sinA[k] = Math.sin(ang0);
       }
-      for (t = 0; t < VROWS; t++) {
-        var ft = FT[t], dft = DFT[t];
-        var ttv = t / ROWS;
-        var rowR = rB[t] + BLG[t];
-        var rowY = yB[t];
-        var dr_dt_row = drdt + DBLG[t];
-        var dipT = DIPT[t], ddipT = DDIPT[t];
-        for (k = 0; k < COLS; k++) {
-          vi = t * COLS + k;
+      for (t = 0; t < vrows; t++) {
+        var ttv = t / RW;
+        var rowBase = rB0 + drdt * ttv;
+        var rowY = yB0 + dydt * ttv;
+        var blg = P.blg[t], dblg = P.dblg[t];
+        var dipT = P.dipT[t], ddipT = P.ddipT[t];
+        for (k = 0; k < cols; k++) {
+          vi = t * cols + k;
           var ca = cosA[k], sa = sinA[k];
-          /* non-circular cross-section: scale the base radius, and carry the
-             profile's slope into both tangents or the normals go wrong at a
-             polygon corner */
           var pm = 1, dpm_dth = 0, dpm_dt = 0;
           if (prof) {
             var ang = angA[k];
@@ -829,57 +1197,73 @@
               dpm_dt = t1 > t0 ? (prof(ang, t1) - prof(ang, t0)) / (t1 - t0) : 0;
             }
           }
-          var rowRp = prof ? rB[t] * pm + BLG[t] : rowR;
-          var r = rowRp + A * CU[k] * ft;
-          var y = rowY + dipScale * DIPU[k] * dipT;
-          px[vi] = r * ca;
-          py[vi] = y;
-          pz[vi] = r * sa + zOff;
-          // tangents
-          var dr_du = A * DCU[k] * ft + (prof ? rB[t] * dpm_dth * aWidth : 0);
-          var dy_du = dipScale * DDIPU[k] * dipT;
+          var r = prof ? rowBase * pm + blg : rowBase + blg;
+          var y = rowY + dipScale * P.dipU[k] * dipT;
+          var Bx = r * ca, By = y, Bz = r * sa + zOff;
+          // tangents of the smooth surface
+          var dr_du = prof ? rowBase * dpm_dth * aWidth : 0;
           var tux = dr_du * ca - r * aWidth * sa;
-          var tuy = dy_du;
+          var tuy = dipScale * P.ddipU[k] * dipT;
           var tuz = dr_du * sa + r * aWidth * ca;
-          var dr_dt = (prof ? drdt * pm + rB[t] * dpm_dt + DBLG[t] : dr_dt_row) + A * CU[k] * dft;
+          var dr_dt = (prof ? drdt * pm + rowBase * dpm_dt : drdt) + dblg;
           var tvx = dr_dt * ca;
-          var tvy = dydt + dipScale * DIPU[k] * ddipT;
+          var tvy = dydt + dipScale * P.dipU[k] * ddipT;
           var tvz = dr_dt * sa;
           var Nx = tuy * tvz - tuz * tvy;
           var Ny = tuz * tvx - tux * tvz;
           var Nz = tux * tvy - tuy * tvx;
           var len = Math.sqrt(Nx * Nx + Ny * Ny + Nz * Nz) || 1;
-          Nx /= len; Ny /= len; Nz /= len;
-          if (Nx * ca + Nz * sa < 0) { Nx = -Nx; Ny = -Ny; Nz = -Nz; }
-          nx[vi] = Nx; ny[vi] = Ny; nz[vi] = Nz;
+          var sg = (Nx * ca + Nz * sa < 0) ? -1 : 1;
+          Nx = Nx * sg / len; Ny = Ny * sg / len; Nz = Nz * sg / len;
+          // relief along that normal
+          var dv = S.d[vi] * A;
+          px[vi] = Bx + Nx * dv; py[vi] = By + Ny * dv; pz[vi] = Bz + Nz * dv;
+          var ddu = S.du[vi] * A, ddt = S.dt[vi] * A;
+          var pux = tux + Nx * ddu, puy = tuy + Ny * ddu, puz = tuz + Nz * ddu;
+          var pvx = tvx + Nx * ddt, pvy = tvy + Ny * ddt, pvz = tvz + Nz * ddt;
+          var Mx = puy * pvz - puz * pvy;
+          var My = puz * pvx - pux * pvz;
+          var Mz = pux * pvy - puy * pvx;
+          var ml = Math.sqrt(Mx * Mx + My * My + Mz * Mz) || 1;
+          Mx = Mx * sg / ml; My = My * sg / ml; Mz = Mz * sg / ml;
+          if (Mx * Nx + My * Ny + Mz * Nz < 0.05) { Mx = Nx; My = Ny; Mz = Nz; }
+          nx[vi] = Mx; ny[vi] = My; nz[vi] = Mz;
           if (thick) {
-            var rb = rowRp - thick + A * CU[k] * ft * BACK_BUMP;
-            bx[vi] = rb * ca;
-            bz[vi] = rb * sa + zOff;
+            // the wrong side: the same surface pushed back, flatter
+            var db = -thick + dv * BACK_BUMP;
+            bx[vi] = Bx + Nx * db; by[vi] = By + Ny * db; bz[vi] = Bz + Nz * db;
           }
         }
       }
 
       // anchor: mid-height of the leading edge, so the stitch unfurls from its
       // neighbour rather than from thin air.
-      var ai = 1 * COLS + anchorCol;
+      var ai = (RW >> 1) * cols + anchorCol;
       var ax = px[ai], ay = py[ai], az = pz[ai];
       var cr = col[j * 3], cg = col[j * 3 + 1], cb = col[j * 3 + 2];
       var lum = 0.2126 * cr + 0.7152 * cg + 0.0722 * cb;
       var base = j * vps;
+      var pk = D.peak > 0 ? D.peak : 1;
 
-      for (t = 0; t < VROWS; t++) {
-        var edgeT = (t === 0 || t === VROWS - 1) ? 1 : 0;
-        var uvV = t / ROWS;
-        for (k = 0; k < COLS; k++) {
-          vi = t * COLS + k;
-          var uvU = k / SEGS;
-          var ao = EDGE[k] * AO_EDGE + edgeT * AO_BAND;
-          var mixv = ao * (AO_DESAT / (AO_EDGE + AO_BAND));
+      for (t = 0; t < vrows; t++) {
+        var edgeT = (t === 0 || t === vrows - 1) ? 1 : 0;
+        for (k = 0; k < cols; k++) {
+          vi = t * cols + k;
+          var ao;
+          if (tier === 0) {
+            ao = P.edge[k] * AO_EDGE + edgeT * AO_BAND;
+          } else {
+            // crevice AO from the relief itself: the low ground between the
+            // legs, beside a post and under a welt is where light does not reach
+            var cav = clamp(1 - S.d[vi] / (0.95 * pk), 0, 1.3);
+            ao = cav * AO_CAV + edgeT * AO_BAND * 0.6;
+          }
+          var mixv = Math.min(1, ao * (AO_DESAT / (AO_EDGE + AO_BAND)));
           var dark = 1 - ao;
           var fr = lerp(cr, lum * 0.62, mixv) * dark;
           var fg = lerp(cg, lum * 0.62, mixv) * dark;
           var fb = lerp(cb, lum * 0.62, mixv) * dark;
+          var uvU = k / SEG, uvV = S.s[vi];
           p = (base + vi) * FLOATS;
           verts[p] = ax; verts[p + 1] = ay; verts[p + 2] = az;
           verts[p + 3] = px[vi] - ax; verts[p + 4] = py[vi] - ay; verts[p + 5] = pz[vi] - az;
@@ -888,10 +1272,9 @@
           verts[p + 12] = j;
           verts[p + 13] = uvU; verts[p + 14] = uvV;
           if (thick) {
-            // the wrong side of the fabric: darker and flatter
-            p = (base + VPS + vi) * FLOATS;
+            p = (base + vpsF + vi) * FLOATS;
             verts[p] = ax; verts[p + 1] = ay; verts[p + 2] = az;
-            verts[p + 3] = bx[vi] - ax; verts[p + 4] = py[vi] - ay; verts[p + 5] = bz[vi] - az;
+            verts[p + 3] = bx[vi] - ax; verts[p + 4] = by[vi] - ay; verts[p + 5] = bz[vi] - az;
             verts[p + 6] = -nx[vi]; verts[p + 7] = -ny[vi]; verts[p + 8] = -nz[vi];
             verts[p + 9] = lerp(fr, lum * 0.45, 0.38) * 0.52;
             verts[p + 10] = lerp(fg, lum * 0.45, 0.38) * 0.52;
@@ -904,64 +1287,83 @@
         }
       }
 
+      var holes = S.holes;
+      if (holes) holeSlices++;
       idx = j * tidx;
-      for (t = 0; t < ROWS; t++) {
-        for (k = 0; k < SEGS; k++) {
-          var v00 = base + t * COLS + k;
-          var v10 = v00 + 1;
-          var v01 = v00 + COLS;
-          var v11 = v01 + 1;
+      for (t = 0; t < RW; t++) {
+        for (k = 0; k < SEG; k++) {
+          var v00 = base + t * cols + k;
+          if (holes && holes[t * SEG + k]) {
+            for (z = 0; z < 6; z++) tri[idx++] = v00;
+            continue;
+          }
+          var v10 = v00 + 1, v01 = v00 + cols, v11 = v01 + 1;
           tri[idx++] = v00; tri[idx++] = v01; tri[idx++] = v10;
           tri[idx++] = v10; tri[idx++] = v01; tri[idx++] = v11;
         }
       }
       if (thick) {
-        var B = base + VPS;
-        for (t = 0; t < ROWS; t++) {           // back face
-          for (k = 0; k < SEGS; k++) {
-            var w00 = B + t * COLS + k;
-            var w10 = w00 + 1;
-            var w01 = w00 + COLS;
-            var w11 = w01 + 1;
+        var B = base + vpsF;
+        for (t = 0; t < RW; t++) {           // back face
+          for (k = 0; k < SEG; k++) {
+            var w00 = B + t * cols + k;
+            if (holes && holes[t * SEG + k]) {
+              for (z = 0; z < 6; z++) tri[idx++] = w00;
+              continue;
+            }
+            var w10 = w00 + 1, w01 = w00 + cols, w11 = w01 + 1;
             tri[idx++] = w00; tri[idx++] = w10; tri[idx++] = w01;
             tri[idx++] = w10; tri[idx++] = w11; tri[idx++] = w01;
           }
         }
         for (var e = 0; e < 2; e++) {          // the two side walls (u edges)
-          var ke = e === 0 ? 0 : SEGS;
-          for (t = 0; t < ROWS; t++) {
-            var f0 = base + t * COLS + ke, f1 = f0 + COLS;
-            var b0 = B + t * COLS + ke, b1 = b0 + COLS;
+          var ke = e === 0 ? 0 : SEG;
+          var kq = e === 0 ? 0 : SEG - 1;
+          for (t = 0; t < RW; t++) {
+            var f0 = base + t * cols + ke, f1 = f0 + cols;
+            if (holes && holes[t * SEG + kq]) {
+              for (z = 0; z < 6; z++) tri[idx++] = f0;
+              continue;
+            }
+            var b0 = B + t * cols + ke, b1 = b0 + cols;
             tri[idx++] = f0; tri[idx++] = b0; tri[idx++] = f1;
             tri[idx++] = f1; tri[idx++] = b0; tri[idx++] = b1;
           }
         }
         for (e = 0; e < 2; e++) {              // the two end walls (t edges)
-          var te = e === 0 ? 0 : ROWS;
-          for (k = 0; k < SEGS; k++) {
-            var g0 = base + te * COLS + k, g1 = g0 + 1;
-            var h0 = B + te * COLS + k, h1 = h0 + 1;
+          var te = e === 0 ? 0 : RW;
+          var tq = e === 0 ? 0 : RW - 1;
+          for (k = 0; k < SEG; k++) {
+            var g0 = base + te * cols + k, g1 = g0 + 1;
+            if (holes && holes[tq * SEG + k]) {
+              for (z = 0; z < 6; z++) tri[idx++] = g0;
+              continue;
+            }
+            var h0 = B + te * cols + k, h1 = h0 + 1;
             tri[idx++] = g0; tri[idx++] = g1; tri[idx++] = h0;
             tri[idx++] = g1; tri[idx++] = h1; tri[idx++] = h0;
           }
         }
       }
-      idx = j * LIDX;
-      for (k = 0; k < SEGS; k++) {
+      idx = j * lps;
+      for (k = 0; k < SEG; k++) {
         lin[idx++] = base + k; lin[idx++] = base + k + 1;
-        lin[idx++] = base + ROWS * COLS + k; lin[idx++] = base + ROWS * COLS + k + 1;
+        lin[idx++] = base + RW * cols + k; lin[idx++] = base + RW * cols + k + 1;
       }
-      for (t = 0; t < ROWS; t++) {
-        lin[idx++] = base + t * COLS; lin[idx++] = base + (t + 1) * COLS;
+      for (t = 0; t < RW; t++) {
+        lin[idx++] = base + t * cols; lin[idx++] = base + (t + 1) * cols;
       }
       // ghost pass: only the bottom edge of the band, so a stack of future
       // rounds reads as a stack of rings instead of a wire cage
-      idx = j * GIDX;
-      for (k = 0; k < SEGS; k++) {
-        ring[idx++] = base + ROWS * COLS + k; ring[idx++] = base + ROWS * COLS + k + 1;
+      idx = j * gps;
+      for (k = 0; k < SEG; k++) {
+        ring[idx++] = base + RW * cols + k; ring[idx++] = base + RW * cols + k + 1;
       }
     }
-    return { verts: verts, tri: tri, lin: lin, ring: ring, n: n, tps: tidx, lps: LIDX, gps: GIDX };
+    return {
+      verts: verts, tri: tri, lin: lin, ring: ring, n: n, tps: tidx, lps: lps, gps: gps,
+      tier: tier, segs: SEG, rows: RW, holes: holeSlices
+    };
   }
 
   /* Small domed cap: the magic ring at the top of a round-worked piece
@@ -1036,14 +1438,23 @@
      6-stitch round gets 0.06 * 0.95 = 0.057 where it used to get 0.20, and a
      48-stitch round keeps the full 0.20. Rows-mode bands carry the cylinder
      radius, which is far past the crossover, so a sheet is untouched. */
-  function bumpAmpOf(band) {
+  function bumpAmpOf(band, tier) {
     if (!band) return BUMP * SW;
     var r = band.rBot > 0 ? band.rBot : Math.max(band.rTop, 0);
+    /* The relief tiers put TWO lobes on every stitch, so the silhouette wave
+       on a small ring is twice as fine as the old single bump and reads as
+       texture, not as a cog, at a higher ceiling. At 0.06 a 6-stitch tail
+       (r 0.95) got 0.057 SW of relief and rendered as a smooth blob. */
+    if (tier > 0) {
+      /* ...and a floor: yarn is as thick on a 6-stitch tail as on a
+         48-stitch body. 0.12 SW on r 0.95 is a 12-lobe, 13 % wave. */
+      return Math.min(BUMP * SW, Math.max(RELIEF_FLOOR * SW, BUMP_R_RELIEF * Math.max(R_MIN, r)));
+    }
     return Math.min(BUMP * SW, BUMP_R * Math.max(R_MIN, r));
   }
 
   /* Turns one prepared round + its layout band into geometry. */
-  function buildRoundBand(mode, round, band, index) {
+  function buildRoundBand(mode, round, band, index, tier) {
     var n = round.n;
     if (n <= 0) return null;
     var a0 = new Float64Array(n), aw = new Float64Array(n);
@@ -1072,6 +1483,8 @@
       var dipReach = Math.min(band.reach, DIP_SPAN * dyAbs / DIP);
       return buildBand({
         n: n, a0: a0, aw: aw, amp: round.amp, col: round.col,
+        jit: round.jit, keys: round.keys, descs: round.descs,
+        tier: tier, hc: hClass(round.height), sdir: 1,
         rBase: [band.rTop, (band.rTop + band.rBot) / 2, band.rBot],
         drdt: band.rBot - band.rTop,
         yBase: [band.yTop, (band.yTop + band.yBot) / 2, band.yBot],
@@ -1080,7 +1493,7 @@
         dipScale: dipReach * (band.yBot < band.yTop ? 1 : -1),
         anchorCol: 0,
         prof: band.prof || null,
-        bumpAmp: bumpAmpOf(band)
+        bumpAmp: bumpAmpOf(band, tier)
       });
     }
     /* rows: a cylinder segment about a vertical axis behind the sheet, so
@@ -1108,6 +1521,9 @@
     }
     return buildBand({
       n: n, a0: a0, aw: aw, amp: round.amp, col: round.col,
+      jit: round.jit, keys: round.keys, descs: round.descs,
+      // a row is worked UPWARD: its base is the band's bottom edge (yBot)
+      tier: tier, hc: hClass(round.height), sdir: -1,
       rBase: [Rc, Rc, Rc], drdt: 0,
       yBase: [band.yTop, (band.yTop + band.yBot) / 2, band.yBot],
       dydt: band.yBot - band.yTop,
@@ -1230,7 +1646,9 @@
         tint: gl.getUniformLocation(p, 'uTint'),
         tintMix: gl.getUniformLocation(p, 'uTintMix'),
         tex: gl.getUniformLocation(p, 'uTex'),
-        seam: gl.getUniformLocation(p, 'uSeam')
+        seam: gl.getUniformLocation(p, 'uSeam'),
+        texV: gl.getUniformLocation(p, 'uTexV'),
+        ply: gl.getUniformLocation(p, 'uPly')
       }
     };
   }
@@ -1292,6 +1710,9 @@
       status: 'init',
       onStatus: typeof opts.onStatus === 'function' ? opts.onStatus : null,
       tex: 1,               // stitch-texture strength for this frame (LOD)
+      lod: 0,               // relief tier the chunks were built at (LOD_TIERS)
+      lodPx: 0,             // the stitch size that tier was picked for
+      lodSwitches: 0,       // how many times a frame rebuilt for a new tier
       // camera
       yaw: -0.35, pitch: PITCH,
       spinVel: 0,
@@ -1421,12 +1842,14 @@
       c.linCount = geo.linCount != null ? geo.linCount : geo.n * c.lps;
       c.ringCount = geo.ringCount != null ? geo.ringCount : geo.n * c.gps;
       c.verts = geo.verts.length / FLOATS;
+      c.holes = geo.holes || 0;
+      c.tier = geo.tier || 0;
       return c;
     }
 
     /* ---------------------------------------------------------- geometry */
 
-    function rebuild(model) {
+    function rebuild(model, forceTier) {
       var t0 = now();
       var mode = model.mode;
       var rounds = model.rounds;
@@ -1439,7 +1862,7 @@
       var bLo = Infinity, bHi = -Infinity;
       for (var bi = 0; bi < bands.length; bi++) {
         if (!bands[bi] || !rounds[bi] || rounds[bi].count <= 0) continue;
-        var ba = mode === 'rounds' ? bumpAmpOf(bands[bi]) : BUMP * SW;
+        var ba = mode === 'rounds' ? bumpAmpOf(bands[bi], state.lod) : BUMP * SW;
         if (ba < bLo) bLo = ba;
         if (ba > bHi) bHi = ba;
       }
@@ -1449,6 +1872,28 @@
       var gl = state.gl;
       var i;
       if (!gl) { state.stats.buildMs = now() - t0; return; }
+
+      /* The relief tier. A frame that finds the stitch size has moved into
+         another tier passes it in; otherwise it is picked here from the fit
+         this model is about to get, so the first frame is already right. */
+      var tier = forceTier;
+      if (tier == null) {
+        var fitNow = computeFit();
+        state.lodPx = stitchPxAt(fitNow.scale);
+        tier = lodFor(state.lodPx, state.lod, state.fitPurpose, rounds, mode === 'rows', bands);
+      }
+      if (tier !== state.lod) state.hashes = [];
+      state.lod = tier;
+      // the bump range getStats reports, at the tier actually built
+      bLo = Infinity; bHi = -Infinity;
+      for (bi = 0; bi < bands.length; bi++) {
+        if (!bands[bi] || !rounds[bi] || rounds[bi].count <= 0) continue;
+        ba = mode === 'rounds' ? bumpAmpOf(bands[bi], tier) : BUMP * SW;
+        if (ba < bLo) bLo = ba;
+        if (ba > bHi) bHi = ba;
+      }
+      state.bumpLo = bLo === Infinity ? 0 : bLo;
+      state.bumpHi = bHi === -Infinity ? 0 : bHi;
 
       // drop chunks beyond the current round count
       for (i = rounds.length; i < state.chunks.length; i++) freeChunk(state.chunks[i]);
@@ -1468,6 +1913,7 @@
         // the cross-section class, so a ring that becomes a polygon rebuilds
         h = hashNum(h, b.sig || 0);
         h = hashNum(h, (b.x0 || 0) * 97);
+        h = hashNum(h, tier + 11);
         if (state.hashes[i] === h && state.chunks[i]) continue;
         /* NOT `geo`: `var` is function-scoped, so the old name overwrote the
            layout `geo` above with this band's mesh — and a last round that
@@ -1475,7 +1921,7 @@
            the end of a finished piece) left it null, so `geo.closedTop` below
            threw and setModel died before it ever applied the fit. The viewer
            then drew every finished amigurumi at scale 1, spilling off frame. */
-        var bandGeo = buildRoundBand(mode, r, b, i);
+        var bandGeo = buildRoundBand(mode, r, b, i, tier);
         if (!bandGeo) { freeChunk(state.chunks[i]); state.chunks[i] = null; state.hashes[i] = h; continue; }
         state.chunks[i] = uploadChunk(bandGeo, state.chunks[i]);
         state.hashes[i] = h;
@@ -1566,7 +2012,13 @@
       stat.buildMs = now() - t0;
       stat.rebuilt = built;
       var vtot = 0;
-      for (i = 0; i < state.chunks.length; i++) if (state.chunks[i]) vtot += state.chunks[i].verts;
+      var holes = 0;
+      for (i = 0; i < state.chunks.length; i++) {
+        if (!state.chunks[i]) continue;
+        vtot += state.chunks[i].verts;
+        holes += state.chunks[i].holes || 0;
+      }
+      stat.holes = holes;
       stat.verts = vtot;
     }
 
@@ -1584,7 +2036,9 @@
       } else {
         // the same per-band bump the builder used, so the fit neither clips the
         // fabric nor reserves 0.20 of margin a tiny round no longer needs
-        out.rad = (b.radMax > 0 ? b.radMax : Math.max(b.rTop, b.rBot)) + bumpAmpOf(b);
+        // (a bobble / puff / front-post round stands further out than a V)
+        out.rad = (b.radMax > 0 ? b.radMax : Math.max(b.rTop, b.rBot)) +
+          bumpAmpOf(b, 1) * Math.max(1, r.reliefPeak || 1);
       }
       out.ymin = Math.min(b.yTop, b.yBot);
       out.ymax = Math.max(b.yTop, b.yBot);
@@ -1747,6 +2201,13 @@
       return { scale: scale, cx: 0, cy: cy, cz: 0 };
     }
 
+    /* Device px one stitch (SW) spans at a given fit scale and the current
+       zoom. 0 until the canvas has a size. */
+    function stitchPxAt(scale) {
+      if (!(state.h > 0) || !(scale > 0)) return 0;
+      return SW * scale * state.zoom * state.h / (2 * CAM_DIST * Math.tan(FOV / 2));
+    }
+
     function applyFit(target, immediate) {
       var f = state.fit;
       if (immediate || (Math.abs(target.scale - f.scale) < 1e-4 && Math.abs(target.cy - f.cy) < 1e-3)) {
@@ -1849,7 +2310,22 @@
       var stitchPx = SW * state.fit.scale * state.zoom * pxPerUnit;
       state.tex = smoothstep(TEX_PX_OFF, TEX_PX_ON, stitchPx);
       state.stitchPx = stitchPx;
+      /* Relief LOD: the tier follows the TARGET fit (not the 200 ms ease) and
+         the zoom, with hysteresis, so it is rebuilt when a pinch or a resize
+         really crosses a tier and never back and forth. */
+      if (state.model.rounds.length) {
+        var lodPx = stitchPxAt(state.fitTo.scale);
+        var want = lodFor(lodPx, state.lod, state.fitPurpose, state.model.rounds,
+          state.model.mode === 'rows', state.bands);
+        if (want !== state.lod) {
+          state.lodPx = lodPx;
+          state.lodSwitches++;
+          rebuild(state.model, want);
+        }
+      }
       gl.uniform1f(u.tex, state.tex);
+      gl.uniform1f(u.texV, state.lod === 0 ? 1 : 0);
+      gl.uniform1f(u.ply, state.lod >= 2 ? smoothstep(12, 26, stitchPx) : 0);
       gl.uniform1f(u.seam, 0);
       gl.uniform1f(u.tintMix, 0);
       gl.uniform3f(u.tint, state.alertLin[0], state.alertLin[1], state.alertLin[2]);
@@ -1874,14 +2350,8 @@
          `finished`), and the model derives it otherwise. */
       var done = !!state.fitFinished || !!state.model.finished;
       state.markerOn = !done;
-      var dev = state.model.deviation;
-      var expSlices = -1;
-      if (dev && typeof dev.expected === 'number' && dev.expected > 0 && rounds[cur]) {
-        var rcur = rounds[cur];
-        if (rcur.count > dev.expected && rcur.n > 0) {
-          expSlices = clamp(Math.round(dev.expected / rcur.count * rcur.n), 0, rcur.n);
-        }
-      }
+      var expSlices = wedgeFrom(state.model, cur, done);
+      state.wedgeFrom = expSlices;
 
       // animation uniforms
       var animBand = -1, animSlice = -1, animScale = 1;
@@ -2671,6 +3141,17 @@
           canvasPx: state.w + 'x' + state.h,
           stitchPx: r3(state.stitchPx || 0),
           tex: r3(state.tex),
+          /* the stitch relief the chunks were built with (wave E): the tier,
+             its grid, the stitch size it was picked for, how many chain-space
+             slices were opened into holes, and how often a frame had to
+             rebuild because the stitch size crossed a tier */
+          lod: {
+            tier: state.lod, name: LOD_TIERS[state.lod].name,
+            segs: LOD_TIERS[state.lod].segs, rows: LOD_TIERS[state.lod].rows.slice(),
+            px: r3(state.lodPx || 0), switches: state.lodSwitches,
+            budget: LOD_BUDGET[state.fitPurpose] || LOD_BUDGET.button
+          },
+          holes: s.holes || 0,
           contexts: LIVE.length,
           /* the composed alpha future rounds and the pending grid actually
              render at — the number 02 #1 was about */
@@ -2688,9 +3169,14 @@
              absolute ceiling, the relative one, and the range over the bands */
           bump: {
             abs: r3(BUMP * SW), rel: BUMP_R,
+            // the relief tiers (wave E): a higher relative ceiling and a floor
+            relRelief: BUMP_R_RELIEF, floor: RELIEF_FLOOR,
             min: r3(state.bumpLo || 0), max: r3(state.bumpHi || 0)
           },
-          alert: { mix: ALERT_MIX, glow: ALERT_GLOW },
+          /* `wedgeFrom`: the slice the over-count wedge started at on the last
+             frame, -1 when none was drawn (always -1 on a finished piece) */
+          alert: { mix: ALERT_MIX, glow: ALERT_GLOW,
+            wedgeFrom: state.wedgeFrom == null ? -1 : state.wedgeFrom },
           insets: {
             top: state.insets.top, right: state.insets.right,
             bottom: state.insets.bottom, left: state.insets.left
@@ -2739,7 +3225,7 @@
 
   global.Diagram = {
     mount: mount,
-    version: '1.3.0',
+    version: '1.4.0',
     // exposed for tests / tuning
     _consts: {
       SW: SW, SH_SC: (global.DiagramGeo ? global.DiagramGeo.SH_SC : FB_SH_SC),
@@ -2747,7 +3233,8 @@
       /* 06 #6: the bump is min(BUMP*SW, BUMP_R*R), and the scallop may use at
          most DIP_SPAN of the band's own height, so neither can reach past the
          ring two bands share. */
-      BUMP_R: BUMP_R, DIP: DIP, DIP_SPAN: DIP_SPAN,
+      BUMP_R: BUMP_R, BUMP_R_RELIEF: BUMP_R_RELIEF, RELIEF_FLOOR: RELIEF_FLOOR,
+      DIP: DIP, DIP_SPAN: DIP_SPAN,
       /* bump at the two ends of the useful range, as a fraction of the ring:
          a 6-stitch ring (r 0.95) and a 48-stitch one (r 7.64) */
       BUMP_AT_6: Math.round(Math.min(BUMP * SW, BUMP_R * 6 / TAU) / (6 / TAU) * 1e4) / 1e4,
@@ -2765,7 +3252,29 @@
       FLOATS: FLOATS,
       SHADOW_ALPHA: SHADOW_ALPHA, JIT_LIGHT: JIT_LIGHT, JIT_AMP: JIT_AMP,
       PITCH_RETURN: PITCH_RETURN, ROT_PAUSE: ROT_PAUSE,
+      LOD_TIERS: LOD_TIERS, LOD_BUDGET: LOD_BUDGET, LOD_HYST: LOD_HYST, LOD_MAX: LOD_MAX,
+      AO_CAV: AO_CAV, HOLE_TOP: HOLE_TOP, HOLE_MIN_H: HOLE_MIN_H,
+      RELIEF_PEAK: RELIEF_PEAK,
       geo: global.DiagramGeo ? global.DiagramGeo.version : null
+    },
+    /* Pure pieces of the relief builder, for test/diagram.test.html's
+       renderer block: no GL context needed. `buildRound(mode, round, band,
+       index, tier)` prepares a Model round and builds its band exactly as
+       the renderer would, returning the typed arrays. */
+    _relief: {
+      descOf: descOf,
+      relief: relief,
+      lodFor: lodFor,
+      /* wedgeFrom(model, current, finished) on a RAW model: normalises it */
+      wedgeFrom: function (model, cur, done) { return wedgeFrom(normalizeModel(model, null), cur | 0, !!done); },
+      stamp: function (D, tier, rows, sdir) { return stampOf(D, tier, rows, sdir); },
+      buildRound: function (mode, round, band, index, tier) {
+        var pr = prepRound(round, DEFAULT_YARN, null, index | 0);
+        var g = buildRoundBand(mode === 'rows' ? 'rows' : 'rounds', pr, band, index | 0, tier | 0);
+        if (g) g.prep = pr;
+        return g;
+      },
+      FLOATS: FLOATS
     }
   };
 

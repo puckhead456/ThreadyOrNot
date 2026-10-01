@@ -322,8 +322,21 @@ assertEqual(fallback[0].marker, 'none', 'fallback steps are marked "none"');
 var longStep = ['1. Press the seam allowance carefully.'];
 for (var lw = 0; lw < 60; lw++) longStep.push('Keep pressing the seam allowance carefully all the way along.');
 var longParsed = S.parseSteps(longStep.join('\n'));
-assertEqual(longParsed.length, 1, 'a very long step is still one step');
-assertTrue(longParsed[0].text.length <= 810, 'step text is capped near 800 characters');
+// Wave E (sewing-audit): a long step carries on over up to three cards at a
+// sentence break instead of losing its end; only a runaway is shortened.
+assertEqual(longParsed.length, 3, 'a very long step carries on over three cards, no more');
+assertTrue(longParsed.every(function (s) { return s.text.length <= 810; }), 'each card is capped near 800 characters');
+assertTrue(longParsed.every(function (s) { return s.n === 1; }), 'every card keeps the printed step number');
+assertTrue(/^\(continued\) /.test(longParsed[1].text), 'the second card says it continues');
+assertTrue(/\.$/.test(longParsed[0].text), 'the first card ends at a sentence break');
+assertTrue(hasWarning(longParsed.warnings, 'second card'), 'the split is warned about');
+assertTrue(hasWarning(longParsed.warnings, 'shortened'), 'and a runaway past three cards is still shortened');
+var twoCard = ['1. Press the seam allowance carefully.'];
+for (var lw2 = 0; lw2 < 16; lw2++) twoCard.push('Keep pressing the seam allowance carefully all the way along.');
+twoCard.push('Hand sew or blind stitch the hem.');
+var twoParsed = S.parseSteps(twoCard.join('\n'));
+assertEqual(twoParsed.length, 2, 'a 1,000-character step becomes two cards');
+assertTrue(/Hand sew or blind stitch the hem\.$/.test(twoParsed[1].text), 'and its last sentence is not lost');
 
 var many = [];
 for (var mi = 1; mi <= 260; mi++) many.push(mi + '. Do a thing.');
@@ -1753,6 +1766,10 @@ assertEqual(S.normalizeText('11\n64 ⁄22" x 64 ⁄22"'), '64 /2" x 64 /2"',
   'and one numerator for two fractions is dropped rather than half-applied');
 assertEqual(S.normalizeText('Sew 3 seams\nThen press'), 'Sew 3 seams\nThen press',
   'ordinary lines are untouched');
+// Wave E (sewing-audit): Pattern Runway prints 'Bust 84cm/33"'; the doubled
+// digit after an ASCII slash is a real inch value, not faux-bold art.
+assertEqual(S.normalizeText('Bust 84cm/33" 86.5 cm/34"'), 'Bust 84cm/33" 86.5 cm/34"',
+  'a dual-unit value keeps a doubled digit after an ASCII slash');
 
 // =======================================================================
 group('Wave 1: step markers');
@@ -2168,6 +2185,202 @@ assertEqual(S.parseNotions(S.toLines('Lightweight Fusing'), { inBlock: false }).
   assertTrue(res.steps.length > 0, 'the big booklet produced steps');
   window.__sewingPerfMs = ms;
   window.__sewingPerfChars = big.length;
+})();
+
+// =======================================================================
+group('Wave E (sewing-audit): steps');
+// =======================================================================
+(function () {
+  // A wrapped cross-reference is not a new step 1 (Peppermint Samford p15).
+  var r = S.parseSteps('SEWING INSTRUCTIONS\n2. Insert Drawstring\nUsing a bodkin, feed the drawstring made in\nStep 1 through buttonhole openings. Tie a bow.\n3. Hem\nPress up the bottom edges twice.');
+  assertEqual(r.length, 2, 'audit: "Step 1 through…" continues the running step');
+  assertTrue(/made in Step 1 through/.test(r[0].text), 'audit: and the reference stays in its sentence');
+  assertEqual(r[1] && r[1].n, 3, 'audit: the real step after it is kept');
+
+  // A demoted '4. Waistband:' still numbers the titled paragraphs under it.
+  var r2 = S.parseSteps('SEWING INSTRUCTIONS\n3. Shoulders: Stitch the shoulder seams together.\n4. Waistband:\nSHELL: Apply fusing to the waistband pieces.\nLINING: Stitch the left side seam of the lining.\n5. Hem: Press up the hem and stitch.');
+  assertTrue(r2.filter(function (s) { return s.marker === 'title'; }).every(function (s) { return s.n === 4; }),
+    'audit: SHELL / LINING under a demoted "4. Waistband:" are step 4');
+
+  // A figure caption between two paragraphs of one step keeps the second one.
+  var r3 = S.parseSteps('SEWING INSTRUCTIONS\n1. Waistband: With right sides together stitch the side seam.\nLining\nPress seams open and stitch the lining to the bodice.\n2. Hem: Press up the hem.');
+  assertEqual(r3.length, 2, 'audit: a caption set like a heading does not end the step');
+  assertTrue(/Press seams open/.test(r3[0].text), 'audit: the prose under the caption joins the running step');
+
+  // The back cover ends the last step.
+  var r4 = S.parseSteps('SEWING INSTRUCTIONS\n6. Hem: Hand sew or blind stitch the hem.\n=== PAGE 9 ===\nwww.example.com | e: someone@example.com\nFall in love with handmade');
+  assertTrue(!/www|Fall in love/.test(r4[0].text), 'audit: a web address after the page break ends the step');
+
+  // Short bullets are steps once the line above has ended (AGF Joyous).
+  var r5 = S.parseSteps('CONSTRUCTION\n- Pair the three pieces together in the order A-I-B.\n- set aside\n- repeat the previous process for the other combinations:\n=== PAGE 6 ===\n- Join rows 1-8.');
+  assertEqual(r5.length, 4, 'audit: "set aside" and "Join rows 1-8." are bullets of their own');
+
+  // Diagram labels and stray repeats never become sections.
+  var r6 = S.parseSteps('QUILT ASSEMBLY\n- Place the backing on a large surface wrong side up.\nBINDING\n- Cut enough strips to make a final strip 184" long.\nQUILT ASSEMBLY\n- Stop stitching before you reach the last few inches.\nDIAGRAM 1\n- Trim the seam and press it open.');
+  assertTrue(r6.slice(1).every(function (s) { return s.section === 'Binding'; }),
+    'audit: a repeated section heading and "DIAGRAM 1" leave the section alone');
+  var r7 = S.parseSteps('Block Construction\n1. Arrange the blocks in rows.\nK K K K\n2. Sew the rows together.');
+  assertEqual(r7[1].section, 'Block Construction', 'audit: a row of diagram letters is not a section');
+
+  // A section running head names the garment (Peppermint bathers).
+  var r8 = S.parseSteps('STEP 1: STRAPS Stitch the straps.\nSTEP 2: LINING Stitch the lining.\nsewing instructions - bikini briefs\nSTEP 1: WAISTBAND Stitch the waistband.\nSTEP 2: LEGS Stitch the legs.');
+  assertEqual(r8[2].section, 'Bikini Briefs', 'audit: "sewing instructions - bikini briefs" names the section');
+  assertTrue(r8.every(function (s) { return !/^Section \d/.test(s.section); }), 'audit: so the restart is not "Section 2"');
+
+  // Kerning splits in a display heading are joined.
+  var r9 = S.parseSteps('MAKE AND AT TACH WAISTBAND\n7. Attach Interfacing Place the interfacing.\nINSERT AND SECURE EL ASTIC\n11. Insert Elastic Cut the elastic.');
+  assertEqual(r9[0].section, 'Make And Attach Waistband', 'audit: "AT TACH" reads as Attach');
+  assertEqual(r9[1].section, 'Insert And Secure Elastic', 'audit: "EL ASTIC" reads as Elastic');
+
+  // A magazine dek in capitals is neither a step nor a section (Peppermint apron).
+  var ap = S.parse("WHAT YOU'LL NEED\nScissors\nTape measure\nLET'S GET MAKING!\nClassic pocket\nTHE CLASSIC POCKET COMES IN TWO SIZES - PERFECT FOR KEEPING\nYOUR PHONE AND OTHER ESSENTIALS ON YOU AS YOU GO.\nFinish the edges on the sides and bottom of your pocket and press them well.\nSlant pocket\nTHE SLANT POCKET MAKES FOR AN EASY-TO-ACCESS SIDE POCKET ON\nYOUR APRON - HELPFUL IF SOMEONE WANTS A PIC OF YOU LOOKING\nTOO CUTE!\nDouble-fold the hem along the slanted edge and topstitch it in place.");
+  assertEqual(ap.steps.length, 2, 'audit: the capitals dek lines are not steps');
+  assertEqual(ap.steps[1].section, 'Slant pocket', 'audit: the pocket name above the dek is the section, not "Too Cute"');
+  assertEqual(ap.notions.length, 2, 'audit: "Scissors" / "Tape measure" one per line stay in the list');
+})();
+
+// =======================================================================
+group('Wave E (sewing-audit): cutting, fabric, notions, names');
+// =======================================================================
+(function () {
+  // Fabric group labels (AGF): the row under BACKING FABRIC is the backing.
+  var q = S.parse('FABRIC REQUIREMENTS\nFabric A ABC-1 3/4 yd.\nFabric B ABC-2 3/8 yd.\nBINDING FABRIC\nFabric A ABC-1 (Included)\nBACKING FABRIC\nABC-9 5 1/2 yds (Suggested)\nCUTTING DIRECTIONS\n- Seven (7) 10 1/2" x 4 1/2" rectangles from fabric A.\nWOF means width of fabric.');
+  assertTrue(q.fabric.some(function (f) { return /^Binding — /.test(f.name) && f.amounts[0] === 'included'; }),
+    'audit: the binding row is named and marked included');
+  assertTrue(q.fabric.some(function (f) { return /^Backing — ABC-9/.test(f.name); }), 'audit: the backing row is named');
+
+  // A fabric table printed column by column is zipped back (FreeSpirit).
+  var z = S.parse('Fabric Requirements\nDESIGN COLOR\n(A) Blue Panel\n(B) Somewhere Bird\n(C) Little Plum\nITEM ID\nPW001.PANEL\nPW002.BIRD\nPW003.PLUM\nYARDAGE\n2/3 yard (0.61m)\n1 5/8 yards (1.49m)\n1/2 yard (0.46m)\nBacking (Purchased Separately)\n44" (1.12m) wide\nClimbers Lime\n4 1/8 yards (3.77m)\n\n1. Sew the blocks together into rows.');
+  assertEqual(z.fabric.length, 4, 'audit: three lettered fabrics and the backing');
+  assertTrue(/^Fabric B — Somewhere Bird \(PW002\.BIRD\)$/.test(z.fabric[1].name) && z.fabric[1].amounts[0] === '1 5/8 yards (1.49m)',
+    'audit: each name meets its own id and yardage');
+
+  // Diagram captions repeating a '(N)' row are skipped; a mixed-number lead is not a count.
+  var c = S.parseCutting('Fabric B, fussy cut:\n(4) 6 3/4" tall x 7 5/8" wide B¹ rectangles\n(4) 6 3/4" tall x 7 5/8" wide B² rectangles\n(4) 6 1/2" B³ squares\nFabric B - 6 3/4" tall x 7 5/8" wide B rectangle: Cut 4\n6 1/2" x 6 1/2" B square: Cut 4 on point');
+  assertEqual(c.length, 3, 'audit: the cutting-diagram captions add no rows');
+  assertTrue(c.every(function (r) { return r.qty === 4; }), 'audit: and no "6 3/4" became six pieces');
+  assertTrue(S.cutRow('6 3/4" tall x 7 5/8" wide B rectangle: Cut 4', null).qty === 4, 'audit: "6 3/4 …: Cut 4" is four');
+  var tpl = S.cutRow('(4) each D¹ and D², oriented as shown in the cutting diagram', 'Fabric D');
+  assertTrue(!!tpl && tpl.qty === 4 && /D¹ and D²/.test(tpl.piece), 'audit: template pieces with a placement clause are rows');
+
+  // The same piece under two groups is two rows (Peppermint bathers).
+  var b = S.parseCutting('Bikini Top\nOuter section/fabric: Cut x 1 front on the fold. Cut x 1 back on the fold.\nBikini Briefs\nOuter section/fabric: Cut x 1 front on the fold. Cut x 1 back on the fold.');
+  assertEqual(b.length, 4, 'audit: top front and briefs front are both kept');
+  assertTrue(b.some(function (r) { return r.note === 'Bikini Briefs'; }), 'audit: and labelled by their group');
+  assertEqual(S.parseCutting('Cut x 1 length of 6mm elastic to the chart below.').length, 0, 'audit: an elastic length is not a piece');
+
+  // Layered pattern sheets: size labels glued to the piece name (Tiana's).
+  var sh = S.parse('=== PAGE 1 ===\nPage 1A\n=== PAGE 2 ===\nKIDS JOGGER PANTS\nwith seam allowance\nFRONTSIZE 12MSIZE 18MSIZE 24M\nSIZE 3TSIZE 5TSIZE 4T\ncut 2 SIZE 6\n=== PAGE 3 ===\nSIZE 12MSIZE 18M\ncut 2BACKSIZE 6SIZE 3T\n=== PAGE 4 ===\nWAISTBAND\ncut 1 on fold\n=== PAGE 5 ===\nPANT CUFF\ncut 2 on fold');
+  var names = sh.cuttingList.map(function (r) { return r.piece; }).join('|');
+  assertTrue(/FRONT/.test(names) && /BACK/.test(names), 'audit: FRONT and BACK come back from under the size labels');
+  assertTrue(!/SIZE/.test(names), 'audit: no piece is named after a size layer');
+
+  // Notions: quantities printed as bullets under the item (Peppermint bathers).
+  var n = S.parseNotions('NOTIONS Narrow elastic width - 6mm or 1/4 wide\n- 5m or 5 1/2 yards for sizes XS to 5X\n- 6m or 6 1/2 yards for sizes 6X to 9X\n- 1 pair of sliders - 12mm wide\n- One pair of rings - 12mm wide\n- 1 pair of foam bra cups to match your size');
+  assertTrue(/^Narrow elastic width - 6mm or 1\/4 wide: 5m for XS to 5X; 6m for 6X to 9X$/.test(n[0].text),
+    'audit: the elastic and its per-size lengths are one item');
+  assertTrue(n.some(function (x) { return /bra cups/.test(x.text) && x.kind === 'notion'; }), 'audit: bra cups are not interfacing');
+  assertTrue(n.some(function (x) { return /rings/.test(x.text) && x.kind === 'hardware'; }), 'audit: a pair of rings is hardware');
+  var sf = S.parseNotions(['Shapeflex/SF101 (2) 10" x 12" rectangles'], { inBlock: false });
+  assertEqual(sf.length, 1, 'audit: "Shapeflex/SF101" is a notion (the second name is the same product)');
+
+  // A fabric line in a materials list becomes a fabric row (Swoon, Peppermint apron).
+  var m = S.parse('Materials Needed:\n- 1/2 yard 44" wide quilting weight exterior fabric\n- 1 magnetic snap\n1) PREPPING\nPrint the pattern and cut it out.');
+  assertTrue(m.fabric.length === 1 && m.fabric[0].width === '44"' && m.fabric[0].amounts[0] === '1/2 yard',
+    'audit: the yardage line is a fabric row with its bolt width');
+  assertTrue(!m.notions.some(function (x) { return /fabric/.test(x.text); }), 'audit: and not a notion');
+
+  // One fabric in two units on two lines (Peppermint bathers).
+  var two = S.parseFabric('Outer swim Metres 0.9m 1m\nfabric Yards 1 yard 11/8 yard', null);
+  assertEqual(two.length, 1, 'audit: metres and yards lines are one fabric');
+  assertEqual(two[0].name, 'Outer swim fabric', 'audit: with its name put back together');
+  assertEqual(two[0].amounts[1], '1 m / 1 1/8 yard', 'audit: and "11/8 yard" read as 1 1/8');
+
+  // Width-only rows with no amounts are dropped, with a warning.
+  var wo = S.parse('FABRIC REQUIREMENTS\n140CM 1.5\nSIZES A-H\n113CM 1.6\nSEWING INSTRUCTIONS\n1. Sew the side seams together.');
+  assertTrue(wo.fabric.every(function (f) { return f.amounts.length > 0; }), 'audit: no fabric row is a width without an amount');
+  assertTrue(hasWarning(wo.warnings, 'could not be read'), 'audit: the unreadable table is reported');
+
+  // Pattern names.
+  assertEqual(S.parse('swoon\nmabel\n=== PAGE 2 ===\nInstructions & Pattern Mabel Vintage Handbag\nMaterials Needed:\n- 1 magnetic snap').meta.patternName,
+    'Mabel Vintage Handbag', 'audit: "Instructions & Pattern <name>" wins over the brand mark');
+  assertEqual(S.parse('Standard Piecing Bag\nREQUIREMENTS TRIPLE T TOTE\nFabric A 1 Fat Quarter\nTriple T Tote\n').meta.patternName,
+    'Triple T Tote', 'audit: the name printed twice beats a one-off strapline');
+  assertEqual(S.parse('f r e e p a t t e r n\nQUILT DESIGNED BY SOMEONE\n').meta.patternName, '',
+    'audit: a letter-spaced "free pattern" or a credit is never the name');
+
+  // Quilt counters.
+  var u = S.parseUnits('Make a total of 4 Unit 7a. In the same manner, make 4Unit 7b. Make a total of 4 Inner Borders (5 1/4" x 51 1/2" unfinished).');
+  var un = u.map(function (x) { return x.name; }).join('|');
+  assertTrue(/Unit 7b/.test(un), 'audit: "make 4Unit 7b" with no space is a counter');
+  assertTrue(/Inner Borders/.test(un), 'audit: pieced inner borders are a counter');
+
+  // Stacked-fraction numerators now come out as plain single digits.
+  assertEqual(S.normalizeText('1\nPWCG005.CLEAR /3 yard (0.30m)'), 'PWCG005.CLEAR 1/3 yard (0.30m)',
+    'audit: a single-digit numerator row fills a bare "/3" slot');
+  assertEqual(S.normalizeText('3 5\n(4) each 6/4" tall x 7/8" wide'), '(4) each 6 3/4" tall x 7 5/8" wide',
+    'audit: "6/4"" cannot be a measurement, so both fractions get their numerators');
+  assertEqual(S.normalizeText('1 B B B\n(4) 5/4" squares'), 'B B B\n(4) 5 1/4" squares',
+    'audit: a caption riding on the numerator row survives as its own line');
+  assertEqual(S.normalizeText('1\n1/4 yards (1.14m)'), '1 1/4 yards (1.14m)', 'audit: a lifted whole number rejoins its yardage');
+  assertEqual(S.normalizeText('Pellon® Peltex® 70'), 'Pellon Peltex 70', 'audit: registered marks are not part of a code');
+
+  // A per-size elastic chart is not the body chart (Peppermint bathers).
+  var ec = S.parseSizes('Bikini Top Edge Elastic\nCut x 1 length of 6mm elastic to your size below:\nXS S M L\nCM 38 42 46 50\nINCHES 15 16 18 19');
+  assertTrue(!!ec && ec.chart.length === 0, 'audit: elastic lengths are not body measurements');
+  assertTrue(!!ec && ec.finished.length === 2 && ec.finished[0].label === 'Bikini Top Edge Elastic · cm',
+    'audit: they are kept, named after their chart');
+
+  // Home-card summary counts the construction, not the optional extras.
+  var data = S.toCraftData({ steps: [{ n: 1, text: 'Sew.' }, { n: 2, text: 'Hem.' }],
+    variations: [{ n: 2, text: 'Try a longer skirt.', optional: true }], cuttingList: [], notions: [], fabric: [], units: [] });
+  assertTrue(/step 1 of 2/.test(S.summary({ craftData: data })), 'audit: the summary says "step 1 of 2", not "of 3"');
+
+  // The pattern's own numbering (coordinator decision, Wave E).
+  var cards = [
+    { n: 1, text: 'a' }, { n: 2, text: 'b' }, { n: 3, text: 'c' },
+    { n: 4, text: 'Skirt back: d' }, { n: 4, text: 'Centre Back Seam: e' }, { n: 4, text: 'Invisible Zip: f' },
+    { n: 5, text: 'g' }, { n: 6, text: 'h' }, { n: 6, text: '(continued) i' },
+    { n: 6, text: 'Try a longer hem.', optional: true }
+  ];
+  var ps = S.printedSteps(cards);
+  assertEqual(ps.total, 6, 'audit: ten cards, six printed steps, the optional extra not counted');
+  assertEqual(ps.of[4].n + '/' + ps.of[4].runTotal + ' card ' + ps.of[4].card + '/' + ps.of[4].cards, '4/6 card 2/3',
+    'audit: a titled sub-paragraph is card 2 of 3 of printed step 4 of 6');
+  assertEqual(ps.of[8].n + ' card ' + ps.of[8].card + '/' + ps.of[8].cards, '6 card 2/2', 'audit: a (continued) card belongs to its step');
+  assertTrue(!ps.of[9], 'audit: an optional extra has no printed position');
+  cards[3].done = cards[4].done = true;
+  assertEqual(S.printedDone(cards), 0, 'audit: a printed step is not done while one of its cards is open');
+  cards[5].done = true;
+  assertEqual(S.printedDone(cards), 1, 'audit: and is done once every card is');
+  var restart = S.printedSteps([{ n: 1 }, { n: 2 }, { n: 3 }, { n: 1 }, { n: 2 }].map(function (s) { s.text = 'x'; return s; }));
+  assertEqual(restart.of[3].n + ' of ' + restart.of[3].runTotal, '1 of 2', 'audit: a restart (bikini briefs) counts its own run');
+  assertEqual(restart.of[0].runTotal, 3, 'audit: and the first run keeps its own count');
+  var gap = S.printedSteps([{ n: 1 }, { n: 2 }, { n: 4 }].map(function (s) { s.text = 'x'; return s; }));
+  assertEqual(gap.of[2].runTotal, 4, 'audit: a missed step never makes the last read "4 of 3"');
+  var home = S.toCraftData({ steps: cards.slice(0, 9), variations: [cards[9]], cuttingList: [], notions: [], fabric: [], units: [] });
+  home.currentStep = 4;
+  assertTrue(/step 4 of 6/.test(S.summary({ craftData: home })), 'audit: the home card says "step 4 of 6" on card 5 of 10');
+  home.steps.forEach(function (s) { if (!s.optional) s.done = true; });
+  home.currentStep = 9;
+  assertTrue(/all 6 steps done/.test(S.summary({ craftData: home })), 'audit: on the optional extras after finishing it says "all 6 steps done"');
+
+  // An import with no cutting list does not keep the template's placeholders
+  // (the Peppermint apron's home card read "0 of 5 cut").
+  var garment = S.templates().filter(function (t) { return t.id === 'sew-garment'; })[0];
+  var seeded = S.normalize(garment.craftData, null);
+  assertEqual(seeded.cutting.length, 5, 'audit: the Garment template seeds five placeholder pieces');
+  var apronLike = S.parse('LET\'S GET COOKING!\nTrace your apron pattern and cut out your fabric on the fold using the pattern piece.\nSew one back strap to the front strap on the opposite side, right sides together.');
+  var imported = S.toCraftData(apronLike, seeded);
+  assertEqual(imported.cutting.length, 0, 'audit: an import that found no cutting list clears the placeholder pieces');
+  assertTrue(!/ cut/.test(S.summary({ craftData: imported })), 'audit: so the home card shows no "0 of 5 cut"');
+  assertEqual(S.toCraftData(apronLike, seeded, { groups: { cutting: false, steps: true, notions: true } }).cutting.length, 0,
+    'audit: also when the import sheet left the empty "Cutting list" group unticked');
+  assertEqual(S.toCraftData(apronLike, seeded, { groups: { cutting: false, steps: false, notions: false, meta: false,
+    sizes: false, fabric: false, seamAllowance: false, units: false } }).cutting.length, 5,
+    'audit: "Just keep the text" changes nothing else');
+  seeded.cutting[0].cutCount = 1;
+  assertEqual(S.toCraftData(apronLike, seeded).cutting.length, 1, 'audit: a placeholder the user already ticked stays');
 })();
 
 // =======================================================================

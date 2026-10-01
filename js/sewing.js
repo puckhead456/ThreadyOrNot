@@ -65,9 +65,26 @@
   }
 
   /** 'CONSTRUCTION' -> 'Construction', 'VIEW A' -> 'View A'. Mixed case is left alone. */
+  // Words PdfText splits at a kerning pair in Peppermint's display face
+  // ('MAKE AND AT TACH WAISTBAND', 'INSERT AND SECURE EL ASTIC', 'CUT TING
+  // L AYOUTS'); xpdf reads the same headings whole (sewing-audit).
+  var KERN_WORDS = { attach: 1, attaching: 1, elastic: 1, cutting: 1, layout: 1, layouts: 1,
+    pattern: 1, patterns: 1, stitching: 1, straps: 1, getting: 1, setting: 1, button: 1, buttons: 1 };
+
+  function unkern(s) {
+    var w = s.split(/\s+/), out = [];
+    for (var i = 0; i < w.length; i++) {
+      if (i + 1 < w.length && KERN_WORDS[(w[i] + w[i + 1]).toLowerCase()] &&
+          !KERN_WORDS[w[i + 1].toLowerCase()]) { out.push(w[i] + w[i + 1]); i++; continue; }
+      out.push(w[i]);
+    }
+    return out.join(' ');
+  }
+
   function prettyHeading(s) {
     s = str(s, '').trim();
     if (!s) return '';
+    if (!/[a-z]/.test(s)) s = unkern(s);
     if (!/[a-z]/.test(s) && s.length > 3) {
       return s.split(/\s+/).map(function (w) {
         if (w.length === 1) return w.toUpperCase();
@@ -135,6 +152,7 @@
   var LEADER_MARK = '\u0001';
 
   var STACK_SLOT_RE = /(^|\s)\/(\d{1,2})(?!\d)/g;
+  var IMPROPER_SLOT_RE = /\b(\d{1,2})\/(\d{1,2})(?=\s*(?:"|''|in\b|yards?\b|yds?\b))/g;
 
   /**
    * Re-unite a stacked fraction with the numerator row printed above it.
@@ -151,11 +169,21 @@
     for (var i = 0; i < lines.length; i++) {
       var t = lines[i].replace(/^\s+|\s+$/g, '');
       var toks = t ? t.split(/\s+/) : [];
-      var nums = [], allDoubled = toks.length > 0;
+      var nums = [], allDoubled = toks.length > 0, restText = '';
       for (var k = 0; k < toks.length; k++) {
         var dm = DOUBLED_DIGIT.exec(toks[k]);
-        if (!dm) { allDoubled = false; break; }
+        if (!dm) {
+          // '11 11 Fabric D - D and D: Cut 4 each' / '11 B B B': the
+          // numerator row with a diagram caption glued on after it
+          // (FreeSpirit Harmony). The caption survives as its own line.
+          if (nums.length && /^[A-Za-z]/.test(toks[k])) { restText = toks.slice(k).join(' '); break; }
+          allDoubled = false; break;
+        }
         nums.push(dm[1]);
+      }
+      if (restText && i + 1 < lines.length) {
+        var slots0 = lines[i + 1].match(STACK_SLOT_RE);
+        if (!slots0 || slots0.length !== nums.length) { out.push(lines[i]); continue; }
       }
       if (allDoubled && i + 1 < lines.length) {
         var slots = lines[i + 1].match(STACK_SLOT_RE);
@@ -166,6 +194,50 @@
               return lead + nums[at++] + '/' + den;
             });
           }
+          if (restText) out.push(restText);
+          continue;
+        }
+      }
+      // Once the extractor drops faux-bold duplicates the numerator row is a
+      // plain '1' ('1' / 'PWCG005.CLEAR /3 yard'): single digits are only
+      // spliced when the slots match exactly, and never guessed otherwise.
+      // ('1 1 Fabric D - D and D: Cut 4 each' — a diagram caption can ride on
+      // the numerator row; it is kept as a line of its own.)
+      var sdm = /^(\d(?:\s+\d)*)(?:\s+([A-Za-z].*))?$/.exec(t);
+      if (sdm && i + 1 < lines.length) {
+        var sd = sdm[1].split(/\s+/), cap = sdm[2] || '';
+        var slots1 = lines[i + 1].match(STACK_SLOT_RE);
+        if (slots1 && slots1.length === sd.length) {
+          var at1 = 0;
+          lines[i + 1] = lines[i + 1].replace(STACK_SLOT_RE, function (whole, lead, den) {
+            return lead + sd[at1++] + '/' + den;
+          });
+          if (cap) out.push(cap);
+          continue;
+        }
+        // '3 5' / '(4) each 6/4" tall x 7/8" wide': the slash glued to the
+        // whole number. An improper fraction is never printed as a
+        // measurement, so '6/4"' is '6 ?/4"' waiting for its numerator.
+        // ('7/8"' beside it is then '7 5/8"': the numerator row counts every
+        // fraction on the line, and at least one has to be impossible.)
+        var imp = 0, allFr = 0;
+        lines[i + 1].replace(IMPROPER_SLOT_RE, function (whole, w, den) {
+          allFr++;
+          if (parseInt(w, 10) >= parseInt(den, 10)) imp++;
+          return whole;
+        });
+        if (imp && allFr === sd.length) {
+          var at2 = 0;
+          lines[i + 1] = lines[i + 1].replace(IMPROPER_SLOT_RE, function (whole, w, den) {
+            return w + ' ' + sd[at2++] + '/' + den;
+          });
+          if (cap) out.push(cap);
+          continue;
+        }
+        // '1' / '1/4 yards (1.14m)': the whole number of a mixed yardage
+        // lifted onto its own row.
+        if (!cap && sd.length === 1 && /^\d\/\d{1,2}\s*(?:yards?|yds?)\b/i.test(lines[i + 1].replace(/^\s+/, ''))) {
+          lines[i + 1] = sd[0] + ' ' + lines[i + 1].replace(/^\s+/, '');
           continue;
         }
       }
@@ -184,6 +256,8 @@
     s = s.replace(/\r\n?/g, '\n');
     s = s.replace(/[     ]/g, ' ');
     s = s.replace(/[​‌‍﻿]/g, '');
+    // 'Pellon® Peltex® 70': the marks are not part of the product code.
+    s = s.replace(/[®™]/g, '');
     // quotes and prime marks
     s = s.replace(/[“”„‟″]/g, '"');
     s = s.replace(/[‘’‚‛′]/g, "'");
@@ -194,14 +268,23 @@
     s = s.replace(FRAC_CLASS, function (f) { return FRACTIONS[f] || f; });
     // stacked fractions: the fraction slash becomes '/', and a denominator that
     // was drawn twice ('⁄22' -> '/2') is collapsed before anything counts digits.
+    // Only the fraction slash U+2044 comes from that art; an ASCII slash
+    // between two units is a dual-unit value ('84cm/33"'), never a
+    // denominator, and must keep its digits.
+    s = s.replace(/⁄(\d)\1(?!\d)/g, '⁄$1');
     s = s.replace(/⁄/g, '/');
-    s = s.replace(/\/(\d)\1(?!\d)/g, '/$1');
     s = repairStackedFractions(s);
     // dot leaders / long dash runs -> a protected separator
     s = s.replace(LEADER_RE, LEADER_MARK);
     s = s.replace(/…+/g, LEADER_MARK);
     // remaining typographic dashes -> ascii hyphen
     s = s.replace(UNI_DASH, '-');
+    // '11/8 yard' is how Peppermint's text layer spells 1⅛ yard: an improper
+    // fraction is never printed as a yardage, so the leading digit is the
+    // whole number (sewing-audit).
+    s = s.replace(/\b(\d)(\d{1,2})\/(2|3|4|8|16)(?=\s*(?:yards?|yds?)\b)/gi, function (m, w, n, d) {
+      return parseInt(w + n, 10) > parseInt(d, 10) && parseInt(n, 10) < parseInt(d, 10) ? w + ' ' + n + '/' + d : m;
+    });
     // hyphenated mixed numbers: 2-1/2 -> 2 1/2
     s = s.replace(/(\d)\s*-\s*(\d+\s*\/\s*\d+)/g, '$1 $2');
     // a fraction split by a stray space: '5 /8 "' -> '5/8 "' (Pattern Runway booklets)
@@ -386,7 +469,7 @@
     // 'Fabric D, cut' / 'Fabric B, fussy cut' heads a per-fabric cutting block
     // in every quilt booklet read so far; 'Preparation Cutting' heads the
     // template prep, which must not leak into the construction steps.
-    ['cut', /^(?:cutting(?:\s+(?:instructions?|list|guide|directions?|out|notes?))?|cut(?:ting)?\s+your\s+fabric|cut\s+list|cutting\s+and\s+marking|preparation\s+cutting|pattern\s+pieces|pieces\s+to\s+cut|(?:from\s+)?(?:fabric|the)?\s*[a-z0-9][a-z0-9 ]{0,24}\s*,\s*(?:fussy\s+)?cut|from\s+(?:fabric\s+)?[a-z0-9][a-z0-9 ]{0,24})$/i],
+    ['cut', /^(?:cutting(?:\s+(?:instructions?|list|guide|directions?|out|notes?))?|cut(?:ting)?\s+your\s+fabric|cut\s+list|cutting\s+and\s+marking|preparation\s+cutting|pattern\s+pieces|pieces\s+to\s+cut|(?:from\s+)?(?:fabric|the)?\s*[a-z0-9][a-z0-9 *]{0,24}\s*,\s*(?:fussy\s+)?cut|from\s+(?:fabric\s+)?[a-z0-9][a-z0-9 ]{0,24})$/i],
     // 'MATERIALS REQUIRED' and 'Optional Tools' head the notions list as often
     // as 'NOTIONS' does; without them the list sits inside whatever block came
     // before it and never reaches the shopping list.
@@ -457,6 +540,12 @@
           // apart is whether more table rows follow.
           if (!blockDataAhead(lines, i + 1, cur)) cur = 'none';
         }
+        // 'Scissors' / 'Tape measure' printed one per line under WHAT YOU'LL
+        // NEED look like headings, and each one used to end the list (apron).
+        else if (cur === 'notions' && !/:\s*$/.test(t) && core.split(/\s+/).length <= 5 &&
+                 (NOTION_VOCAB.test(core) || TOOL_ITEM_RE.test(core))) {
+          kinds[i] = 'notions'; heads[i] = head; continue;
+        }
         // An unrecognised heading ('Sleeve Length:', 'To Lengthen a Bodice:')
         // does not break out of a steps or skip block — it just names a section.
         else if (cur !== 'none' && cur !== 'steps' && cur !== 'skip') { cur = 'none'; }
@@ -478,6 +567,29 @@
       }
       // A 'skip' block (glossary, pattern symbols, how-to-measure) ends only at
       // the next recognised heading: its numbered lists must never leak out.
+      // '- Take sixty seven (67) … rectangles from fabric L' / 'Sew all right
+      // sides together…' after a cutting table: construction has begun even
+      // though its heading never reached the text (AGF Catwalk).
+      if (cur === 'cut' && (/^[-•*]\s+(?:take|join|pair|arrange|bring)\b/i.test(t) || /^sew all\b/i.test(t))) {
+        cur = 'steps'; count = 0; sawSteps = true;
+      }
+      // 'NOTIONS Narrow elastic width – 6mm…': Peppermint sets the label in a
+      // left column, so it arrives glued to the first item (bathers p3).
+      if (cur !== 'notions' && /^(?:NOTIONS|HABERDASHERY)\s+[A-Za-z]/.test(t)) { cur = 'notions'; count = 0; }
+      // A bulleted cut row ('- One (1) 2 1/4" x 2 1/2" rectangle from fabric
+      // A.') inside the yardage block means the cutting table has begun, even
+      // when its heading never reached the text (sewing-audit, AGF Catwalk).
+      if (cur === 'fabric' && /^[-•*]\s|\bfrom\s+(?:the\s+)?fabric\s+[a-z]{1,2}\b/i.test(t) &&
+          !widthsIn(t).length && !plainFabricRow(t) && cutRow(t, null)) {
+        cur = 'cut'; count = 0;
+      }
+      // '- 2" (5cm) Elastic (Use provided elastic chart for' under a combined
+      // MATERIALS REQUIRED / FABRIC REQUIREMENTS page is the notions list
+      // starting (Peppermint Samford), not another yardage row.
+      else if (cur === 'fabric' && BULLET_RE.test(t) && !widthsIn(t).length && !plainFabricRow(t) &&
+               NOTION_VOCAB.test(t)) {
+        cur = 'notions'; count = 0;
+      }
       if (cur !== 'none' && cur !== 'steps' && cur !== 'skip') {
         count++;
         // A quilt's cutting table runs to sixty-five rows over two pages, so the
@@ -557,7 +669,11 @@
       var rest2 = m[2].replace(/^\s+/, '');
       if (rest2 && !REST_OK_RE.test(rest2)) return null;
       if (UNIT_START_RE.test(rest2)) return null;
-      return { n: parseInt(m[1], 10), rest: rest2, marker: 'Step' };
+      // 'Step 1 through buttonhole openings' — no punctuation after the number
+      // and a lowercase word: a cross-reference that wrapped onto the start of
+      // a line. parseSteps decides with the line above (sewing-audit).
+      var bare = !/^step\s*[#]?\s*\d{1,3}\s*[.:)\-]/i.test(s) && /^[a-z]/.test(rest2);
+      return { n: parseInt(m[1], 10), rest: rest2, marker: 'Step', bare: bare };
     }
     return null;
   }
@@ -631,7 +747,69 @@
     return false;
   }
 
+  /**
+   * Could this heading-shaped line be a figure caption rather than a section?
+   * Short (three words at most), or sitting in the middle of a sentence that
+   * the line above did not finish.
+   */
+  function captionLike(t, prev) {
+    var s = str(t, '').replace(/^\s+|\s+$/g, '');
+    if (!s || s.length > 40) return false;
+    // 'Pattern Variations:' is a section with an intro paragraph, not a caption.
+    if (VARIATION_RE.test(s)) return false;
+    // 'Adjustable Straps Option Continued:' / 'Centre Front Stitch Line' sit
+    // in the middle of a STEP n and head a paragraph of it (Peppermint bathers).
+    if (s.split(/\s+/).length <= 5) return true;
+    return !!prev && !/[.!?:]["')]?$/.test(prev);
+  }
+
+  /**
+   * Does unmarked prose of the steps block come next (after at most two more
+   * caption lines)? That is what separates a caption inside a step from a
+   * section heading, which is followed by the next marked or titled step.
+   */
+  function proseFollows(lines, from, kinds) {
+    var heads = 0;
+    for (var i = from; i < lines.length && i < from + 8; i++) {
+      // A caption at the foot of a page captions that page; what the next
+      // page opens with is not "the rest of the step" by that route.
+      if (lines[i].pageMark) return false;
+      var t = lines[i].text;
+      if (!t) continue;
+      if (kinds[i] === 'head') {
+        if (stepMarker(t) || ++heads > 2) return false;
+        continue;
+      }
+      // 'none' too: booklets that number their sections ('1) PREPPING') have
+      // no recognised steps heading, and a step is known to be running here.
+      if (kinds[i] !== 'steps' && kinds[i] !== 'none') return false;
+      // Prose, not the next diagram label ('B2a' under 'Quilt Layout').
+      if (t.length < 15 || !/[a-z]{2,}\s+[a-z]{2,}/i.test(t)) return false;
+      // 'Step A: Thread the strap…' is a sub-step of the running step.
+      return !stepMarker(t) && (!titleStep(t) || /^step\s+[a-z]\s*:/i.test(t)) && !BULLET_RE.test(t);
+    }
+    return false;
+  }
+
   var STEP_TEXT_CAP = 800;
+  var STEP_PARTS_MAX = 3;
+  var DIAGRAM_HEAD_RE = /^(?:diagram|fig(?:ure)?\.?)\s*[a-z]?\s*\d{0,3}\s*[a-z]?\s*:?$/i;
+  var LETTERS_HEAD_RE = /^[A-Z]{1,2}\d?(?:\s+[A-Z]{1,2}\d?){0,7}$/;
+  // A line that is only contact details or a copyright notice.
+  // 'E S T . 2 0 1 1' — a tracked-out logo line of single characters.
+  var BOILERPLATE_RE = /^(?:www\.|https?:\/\/|\S+@\S+\.\w+|©|copyright\b|all rights reserved)|\|\s*e:\s*\S+@|^(?:\S{1,2} ){4,}\S{1,2}$/i;
+  // The publisher's disclaimer, matched with the spaces squeezed out because
+  // FreeSpirit's kerning splits it ('All possible c a re has b e e n taken').
+  var DISCLAIMER_RE = /^(?:allpossiblecare|whileallpossiblecare|pleasereadtheinstructions|readtheinstructionscarefully|note:whileallpossiblecare)/i;
+
+  /** Where to break an over-long step: the last sentence end inside the cap. */
+  function sentenceBreak(s, cap) {
+    var re = /[.!?]["')]?\s/g, m, best = -1;
+    while ((m = re.exec(s)) && m.index < cap) best = m.index + m[0].length - 1;
+    if (best >= cap * 0.4) return best;
+    var sp = s.lastIndexOf(' ', cap);
+    return sp > 0 ? sp : cap;
+  }
 
   /**
    * parseSteps(lines, opts) -> StepRow[]  (with a non-enumerable `.warnings`)
@@ -646,10 +824,21 @@
     var variations = [];
     var warns = [];
     var lastN = 0, section = '', cur = null;
-    var candidates = 0, jumped = 0, sectionSeq = 1, capped = false, truncated = 0;
+    var candidates = 0, jumped = 0, sectionSeq = 1, capped = false, truncated = 0, splitSteps = 0;
     var firstIndex = -1;
     var justCrossedPage = false, lastStep = null, pending = null;
     var optional = false, noteRun = false, prevNonEmpty = '';
+    var sectionsSeen = {};
+    // A heading printed on three or more pages is a running head.
+    var runningHeads = {}, headPages = {};
+    for (var rh = 0; rh < lines.length; rh++) {
+      if (kinds[rh] !== 'head' || typeof lines[rh].page !== 'number') continue;
+      var rk = key(headingText(heads[rh] || lines[rh].text));
+      if (!rk) continue;
+      headPages[rk] = headPages[rk] || {};
+      headPages[rk][lines[rh].page] = 1;
+      if (Object.keys(headPages[rk]).length >= 3) runningHeads[rk] = 1;
+    }
 
     /**
      * Add a step, or park it in `variations` when its section is a
@@ -712,9 +901,41 @@
           justCrossedPage = false; lastStep = null; pending = null; noteRun = false;
           continue;
         }
+        // '4. Waistband:' demoted to a section still owns the number: the
+        // 'SHELL: …' / 'LINING: …' paragraphs under it are step 4, not a
+        // second and third step 3 (Pattern Runway sundress, sewing-audit).
+        if (demote && hm.n <= lastN + 12) lastN = hm.n;
+        // A figure caption set like a heading in the middle of a running step
+        // ('Lining' under the waistband drawing, sundress p7): when plain prose
+        // carries on underneath it, that prose is the rest of the step. Before
+        // this the prose was dropped with nowhere to go.
+        // Not a section at all, and not the end of the running step: a
+        // running head printed on every page ('Harmony Quilt'), a diagram label
+        // ('DIAGRAM 1', 'Fig. 3', 'K K K K', 'B BB BB'), or a stray repeat of
+        // a section already left behind ('QUILT ASSEMBLY' printed again at the
+        // foot of AGF's binding page). (sewing-audit)
+        var hText = headingText(heads[i] || t);
+        var hKey = key(hText);
+        if (!hm && runningHeads[hKey]) continue;
+        var labelHead = !hm && (DIAGRAM_HEAD_RE.test(hText) || LETTERS_HEAD_RE.test(hText) ||
+          (sectionsSeen[hKey] && hKey !== key(section)));
+        var running = cur || pending || (justCrossedPage ? lastStep : null);
+        if (!hm && running && !headingKind(heads[i] || '') &&
+            captionLike(t, prevNonEmpty) && proseFollows(lines, i + 1, kinds)) {
+          cur = running; lastStep = null; justCrossedPage = false; pending = null;
+          continue;
+        }
         // 'Key:' / 'Note:' name a legend, not a section of the garment.
-        if (!TITLE_STEP_BAD.test(headingText(heads[i] || ''))) {
-          section = prettyHeading(heads[i]);
+        if (!labelHead && !TITLE_STEP_BAD.test(headingText(heads[i] || ''))) {
+          // 'Materials Needed:' over '1) PREPPING' is the block just left
+          // behind, not the section the steps sit in (Swoon Mabel); nor is a
+          // group label inside the cutting table ('Bikini Top', 'BACKING
+          // FABRIC').
+          var hk = headingKind(heads[i] || '');
+          var hOwner = owners ? owners[i] : null;
+          section = ((hk && hk !== 'steps') || (hOwner && hOwner !== 'steps' && hOwner !== 'none'))
+            ? '' : prettyHeading(heads[i]);
+          if (section) sectionsSeen[key(section)] = 1;
           optional = VARIATION_RE.test(section);
         }
         // 'Notes:' reads as a heading, and the bulleted asides under it are not
@@ -734,6 +955,11 @@
         continue;
       }
       var mk = inOtherBlock ? null : stepMarker(t);
+      // '…feed the drawstring made in' / 'Step 1 through buttonhole openings.'
+      // (Peppermint Samford, p15): the running sentence wrapped onto a line
+      // that begins with a step reference. It is text, not step 1 of a new
+      // section — and taking it as one also hid the real step 15 after it.
+      if (mk && mk.bare && (cur || pending) && prevNonEmpty && !/[.!?:]["')]?$/.test(prevNonEmpty)) mk = null;
       if (!mk && !inOtherBlock) mk = debrisMarker(t, lastN);
       if (!mk && inStepsBlock) {
         var ts = titleStep(t);
@@ -757,8 +983,17 @@
         // sentence. Art Gallery Fabrics genuinely sets its bullets lowercase,
         // so the previous line is what decides.
         var bulletBody = t.replace(BULLET_RE, '').replace(/^\s+/, '');
-        var bulletOk = /^[A-Z0-9(]/.test(bulletBody) || !prevNonEmpty || /[.!?:]["')]?$/.test(prevNonEmpty);
-        if (!noteRun && BULLET_RE.test(t) && bulletBody.length >= 20 && bulletOk) {
+        // A one-line bullet above ('- set aside', no full stop) finished its
+        // own thought, so the bullet under it is a new one too (AGF Joyous).
+        var prevBullet = BULLET_RE.test(prevNonEmpty) && prevNonEmpty.length <= 30;
+        var bulletOk = /^[A-Z0-9(]/.test(bulletBody) || !prevNonEmpty || prevBullet ||
+          /[.!?:]["')]?$/.test(prevNonEmpty);
+        // Short bullets are real operations too ('Set aside', 'Join rows 1-8.'),
+        // once the line above is known to have ended (sewing-audit).
+        var bulletLong = bulletBody.length >= 20 ||
+          (bulletBody.length >= 8 && /^[A-Za-z]/.test(bulletBody) &&
+           (!prevNonEmpty || prevBullet || /[.!?:]["')]?$/.test(prevNonEmpty)));
+        if (!noteRun && BULLET_RE.test(t) && bulletLong && bulletOk) {
           lastN = lastN + 1;
           cur = pushStep({
             n: lastN,
@@ -789,6 +1024,21 @@
         justCrossedPage = false; lastStep = null; pending = null; noteRun = false;
         continue;
       }
+      // 'sewing instructions - bikini briefs': Peppermint's section running
+      // head names the garment the steps below belong to (bathers p19-21).
+      var shm = /^sewing instructions\s*-\s*([a-z][a-z ]{2,30})$/i.exec(t);
+      if (shm) {
+        var shName = titleCase(shm[1].toLowerCase());
+        if (key(shName) !== key(section)) { section = shName; sectionsSeen[key(section)] = 1; }
+        continue;
+      }
+      // The back cover's web address / copyright box ends whatever step ran
+      // before it (Pattern Runway p9: 'www.patternrunway.com | e: …' was
+      // carried into step 6 over the page break).
+      if (BOILERPLATE_RE.test(t) || DISCLAIMER_RE.test(t.replace(/\s+/g, ''))) {
+        cur = null; lastStep = null; justCrossedPage = false; pending = null;
+        continue;
+      }
       // A step that ran over a page break carries on: the PDF put a page marker
       // in the middle of the paragraph, not a new instruction.
       if (!cur && justCrossedPage && lastStep && !inOtherBlock) {
@@ -802,9 +1052,26 @@
         // cap, so the ellipsis is what marks a step as full — not its length.
         var full = cur.text.charAt(cur.text.length - 1) === '…';
         if (!full && cur.text.length < STEP_TEXT_CAP) {
-          cur.text = cur.text ? (cur.text + ' ' + t) : t;
-          if (cur.text.length > STEP_TEXT_CAP) {
-            cur.text = cur.text.slice(0, STEP_TEXT_CAP).replace(/\s+\S*$/, '') + '…';
+          var joined = cur.text ? (cur.text + ' ' + t) : t;
+          if (joined.length <= STEP_TEXT_CAP) {
+            cur.text = joined;
+          } else if ((cur.part || 1) < STEP_PARTS_MAX) {
+            // A real printed step can run to 1,500 characters (Pattern Runway
+            // step 6, Swoon's FINAL ASSEMBLY). Cutting it at the cap lost the
+            // end of the instruction, so it carries on in a second card at a
+            // sentence break instead (sewing-audit). Only a runaway past three
+            // cards is still shortened.
+            var at = sentenceBreak(joined, STEP_TEXT_CAP);
+            cur.text = joined.slice(0, at).replace(/\s+$/, '');
+            var more = pushStep({
+              n: cur.n, section: cur.section,
+              text: '(continued) ' + joined.slice(at).replace(/^\s+/, ''),
+              page: typeof ln.page === 'number' ? ln.page : cur.page,
+              marker: cur.marker, part: (cur.part || 1) + 1
+            }, i);
+            if (more) { if (more.part === 2) splitSteps++; cur = more; }
+          } else {
+            cur.text = joined.slice(0, STEP_TEXT_CAP).replace(/\s+\S*$/, '') + '…';
             truncated++;
           }
         }
@@ -812,6 +1079,10 @@
     }
 
     if (capped) warns.push('More than 200 steps were found — only the first 200 were kept.');
+    if (splitSteps) {
+      warns.push(splitSteps + (splitSteps === 1 ? ' long step carries' : ' long steps carry') +
+        ' on over a second card.');
+    }
     if (truncated) warns.push(truncated + (truncated === 1 ? ' step was' : ' steps were') + ' very long and got shortened.');
     if (candidates > 0 && jumped / candidates > 0.4) {
       warns.push('This PDF\'s columns may be interleaved' +
@@ -858,8 +1129,10 @@
   // ticked and the reference matter starts unticked, and the user fixes the rest
   // in the picker.
 
-  var IMPERATIVE_OPENER_RE = /^(?:sew|pin|press|stitch|fold|cut|trim|attach|turn|topstitch|baste|gather|hem|insert|finish|clip|understitch|edgestitch)\b/i;
-  var IMPERATIVE_ANY_RE = /\b(?:sew|sewn|sewing|pin|pinned|press|pressed|pressing|stitch|stitched|stitching|fold|folded|cut|trim|attach|turn|topstitch|baste|basting|gather|gathered|hem|hemming|insert|finish|clip|understitch|edgestitch|overlock|serge|staystitch|slipstitch|tack|notch)\b/i;
+  var IMPERATIVE_OPENER_RE = /^(?:sew|pin|fuse|prep|prepare|place|lay|press|stitch|fold|cut|trim|attach|turn|topstitch|baste|gather|hem|insert|finish|clip|understitch|edgestitch)\b/i;
+  // (sewing-audit) 'Prep your rectangles by fusing fabric A to the fusible
+  // fleece' is Riley Blake's first step and scored zero without these.
+  var IMPERATIVE_ANY_RE = /\b(?:sew|sewn|sewing|fuse|fused|fusing|pin|pinned|press|pressed|pressing|stitch|stitched|stitching|fold|folded|cut|trim|attach|turn|topstitch|baste|basting|gather|gathered|hem|hemming|insert|finish|clip|understitch|edgestitch|overlock|serge|staystitch|slipstitch|tack|notch)\b/i;
   var SEW_VOCAB_RE = /\b(?:right sides? together|wrong sides? together|rst|seam allowances?|raw edges?|seams?|hemline|notch(?:es)?|interfacing|facings?|selvages?|selvedges?|darts?|zips?|zippers?|neckline|armholes?|waistband|lining|bodice|cuffs?|collar|pocket)\b/i;
   var PROSE_ABOUT_RE = /\b(?:we recommend|please note|you may wish|this pattern|our patterns|all rights reserved|copyright|print at home|test square|thank you|share your|before you start|tag us|hashtag)\b/i;
   var EXCLUDED_KIND = { cut: 1, notions: 1, fabric: 1, size: 1, skip: 1 };
@@ -899,7 +1172,7 @@
     var info = blocks || classify(lines);
     var kinds = info.kinds, heads = info.heads;
     var out = [];
-    var buf = '', section = '', page = null, excluded = false, inSteps = false;
+    var buf = '', section = '', page = null, excluded = false, inSteps = false, prevDek = false;
     // When the booklet names its construction section, nothing outside it starts
     // ticked: the cover blurb and the "before you start" page are not steps.
     var hasSteps = info.hasSteps || hasStepsBlock(kinds);
@@ -907,7 +1180,7 @@
     function nextContent(from) {
       for (var j = from; j < lines.length; j++) {
         if (lines[j].pageMark) return lines[j];
-        if (lines[j].text) return lines[j];
+        if (lines[j].text && !(/^[\d\s.\/"'x×-]+$/.test(lines[j].text) && /\d/.test(lines[j].text))) return lines[j];
       }
       return null;
     }
@@ -941,6 +1214,21 @@
         flush();
         continue;
       }
+      // A magazine dek set in capitals under each pocket's name ('THE CLASSIC
+      // POCKET COMES IN TWO SIZES – …' / 'TOO CUTE!') is a description, not
+      // an operation, and its tail is not a section. The short name above it
+      // ('Classic pocket') IS the section (Peppermint apron, sewing-audit).
+      var isDekLine = !/[a-z]/.test(t) && /[A-Z]{2,}/.test(t) &&
+        ((t.length >= 40 && t.split(/\s+/).length >= 6) || (prevDek && !/^[A-Z0-9 ]+:$/.test(t)));
+      if (isDekLine && !stepMarker(t)) { flush(); prevDek = true; continue; }
+      prevDek = false;
+      var nxDek = nextContent(i + 1);
+      if ((!buf || /[.!?]["')]?$/.test(buf)) && t.length <= 30 && /[a-z]/.test(t) && !/[.!?:]$/.test(t) && nxDek && nxDek.text &&
+          !/[a-z]/.test(nxDek.text) && nxDek.text.length >= 40 && nxDek.text.split(/\s+/).length >= 6) {
+        flush();
+        section = prettyHeading(t);
+        continue;
+      }
       if (k === 'head') {
         // Every heading names a section here, including 'Glossary' and 'Notions':
         // the picker shows those paragraphs (unticked) so the user can rescue one.
@@ -948,6 +1236,9 @@
         section = prettyHeading(heads[i]);
         continue;
       }
+      // A diagram's dimension labels ('.5" .5"', Riley Blake p2-p3) are not
+      // prose; kept in, they glued two paragraphs together at the page break.
+      if (/^[\d\s.\/"'x×-]+$/.test(t) && /\d/.test(t)) continue;
       if (!buf) {
         page = typeof ln.page === 'number' ? ln.page : null;
         excluded = !!EXCLUDED_KIND[k];
@@ -1112,10 +1403,17 @@
     var line = str(rawLine, '').replace(/^\s+|\s+$/g, '');
     if (!line || line.length > 120) return null;
     var s = line.replace(BULLET_RE, '').replace(MARKER_STRIP_RE, '').replace(/\s*[.;]\s*$/, '');
+    // '(4) each D¹ and D², oriented as shown in the cutting diagram': the
+    // placement clause is advice, and it used to make the whole row read as a
+    // figure caption (FreeSpirit Harmony, sewing-audit).
+    s = s.replace(/,\s*(?:oriented|noting|centered|centred)\b.*$/i, '');
     if (!s) return null;
 
     var qty = null, piece = '', rest = '', fromHere = null, quilty = false;
     var m;
+    // '6 3/4" tall x 7 5/8" wide B rectangle: Cut 4' starts with a mixed
+    // number, not with a count of six.
+    var mixedLead = MIXED_LEAD_RE.test(s);
 
     if ((m = C_SUBCUT.exec(s))) {
       qty = parseInt(m[1], 10);
@@ -1127,14 +1425,14 @@
       piece = cleanPiece(m[2]) + ' x WOF strip';
       rest = m[2] + ' ' + m[3];
       quilty = true;
-    } else if ((m = C_WOF_DIMS.exec(s))) {
+    } else if (!mixedLead && (m = C_WOF_DIMS.exec(s))) {
       // '(4) 3 1/2" x WOF; subcut' — one spelling of the WOF strip row; the
       // piece name is normalised so both spellings group together (05 #14).
       qty = parseInt(m[1], 10);
       piece = cleanPiece(m[2]) + ' x WOF strip';
       rest = (m[2] || '') + ' ' + (m[3] || '');
       quilty = true;
-    } else if ((m = C_COUNT_DIMS.exec(s))) {
+    } else if (!mixedLead && (m = C_COUNT_DIMS.exec(s))) {
       qty = parseInt(m[1], 10);
       piece = singular(cleanPiece(m[2] + ' ' + m[3]));
       rest = m[4] || '';
@@ -1185,6 +1483,9 @@
     var scan = s + ' ' + (from || '');
     var note = parensNote(s);
     var material = materialOf(rest) || materialOf(s) || materialOf(from) || 'main';
+    // Under 'Fabric H, cut:' the row comes off fabric H, whatever the row
+    // says it is for ('… x WOF for outer border', '… for binding').
+    if (/^fabric\s+[a-z]{1,2}\b/i.test(str(from, '')) && material !== 'lining' && material !== 'interfacing') material = 'other';
     if (material === 'other') {
       var lab = /\bfabric\s+[a-z]\b/i.exec(rest) || /\bfabric\s+[a-z]\b/i.exec(s) || /\bfabric\s+[a-z]\b/i.exec(str(from, '')) ||
         /\b(?:background|backing)\b/i.exec(rest) || /\b(?:background|backing)\b/i.exec(s) || /\b(?:background|backing)\b/i.exec(str(from, ''));
@@ -1203,6 +1504,9 @@
     // A figure caption is not a piece: 'Fabric B cutting diagram',
     // '... oriented as shown in the cutting diagram'.
     if (CUT_CAPTION_RE.test(piece)) return null;
+    // 'Cut x 1 length of 12mm elastic to the size chart' sits in a step and
+    // is a notion cut to length, not a pattern piece (Peppermint bathers).
+    if (/\belastic\b|^length\b|\bchart\b/i.test(piece)) return null;
 
     return {
       piece: piece,
@@ -1220,6 +1524,11 @@
   // 'Cut x 1 front on the fold. Cut x 1 back on the fold.' and 'Cut (2) … from
   // fabric A. Then cut (2) … from fabric B.' — two or three cut rows printed as
   // one sentence-per-piece line.
+  var MIXED_LEAD_RE = /^(?:[a-z][a-z\- ]{2,23}\s+)?\d{1,3}\s+\d{1,2}\/\d{1,2}\s*(?:"|''|in\b|inch|cm\b)/i;
+  // A cutting-diagram caption: '… B rectangle: Cut 4', 'Fabric D - D and D:
+  // Cut 4 each'. In a table whose rows lead with '(4)' they repeat a row.
+  var DIAGRAM_CUT_RE = /^[^:]{3,80}:\s*cut\s+\d{1,3}\b/i;
+  var PAREN_LEAD_RE = /^\(\s*\d{1,4}\s*\)\s/;
   var CUT_SENT_SPLIT = /\.\s+(?=(?:then\s+)?cut\b)/i;
   var CUT_PREFIX_RE = /^(.{2,40}?):\s*(cut\b.*)$/i;
   var CUT_SOURCE_RE = /^(.{2,32}?)\s*,\s*(?:fussy\s+)?cut\s*:?\s*$/i;
@@ -1232,6 +1541,18 @@
     'batting|wadding|fleece|stabili[sz]er|interlining|main|self|contrast|felt)s?\\b[a-z0-9®\'\\- ]*)$', 'i');
 
   /** A standalone piece label near a cutting row, or ''. */
+  // Brand stamps and material words scattered across a pattern sheet.
+  var SHEET_JUNK_RE = /^(?:pellon|peltex|shape-?\s?flex|fold|interfacing|stabili[sz]er|lining|exterior)$/i;
+  var SIZE_RUN_RE = /SIZE\s?(?:\d{1,2}\s?[MTY]?|[2-9]?X{0,3}[SML])(?=SIZE|\s|$)/g;
+  var SIZE_RUN_TEST = /^(?:\s*SIZE\s?(?:\d{1,2}\s?[MTY]?|[2-9]?X{0,3}[SML]))+\s*$/;
+
+  /** A sheet label without its overprinted size-layer labels. */
+  function sheetClean(t) {
+    return str(t, '').replace(SIZE_RUN_RE, ' ')
+      .replace(/\b(cut\s*\d{1,3})(?=[A-Za-z])/i, '$1 ')
+      .replace(/\s{2,}/g, ' ').replace(/^\s+|\s+$/g, '');
+  }
+
   function labelCandidate(t) {
     var s = str(t, '').replace(/^\s+|\s+$/g, '').replace(/[.,;:]+$/, '');
     if (s.length < 3 || s.length > 40) return '';
@@ -1251,9 +1572,12 @@
     var warns = [];
     var seen = {};
     var from = null, label = '', wofPending = false;
+    var parenRows = 0;
+    for (var pr0 = 0; pr0 < lines.length; pr0++) if (PAREN_LEAD_RE.test(lines[pr0].text || '')) parenRows++;
     for (var i = 0; i < lines.length; i++) {
       var t = lines[i].text;
       if (!t) continue;
+      if (parenRows >= 3 && DIAGRAM_CUT_RE.test(t) && !PAREN_LEAD_RE.test(t)) continue;
       // 'Fabric D, cut:' / 'Fabric B, fussy cut:' names the fabric every row
       // beneath it comes off — which is how a quilter works (05 #8).
       var src = CUT_LABEL_RE.test(t) ? CUT_SOURCE_RE.exec(t) : null;
@@ -1290,6 +1614,7 @@
         if (!row) continue;
         madeRow = true;
         if (MATERIAL_ONLY_PIECE.test(row.piece) && (prefixLabel || label)) row.piece = prefixLabel || label;
+        if (/\belastic\b|\bchart\b/i.test(row.piece)) continue;
         var isWof = /x WOF strip$/.test(row.piece);
         if (wofPending && !isWof) {
           row.subcut = true;
@@ -1299,9 +1624,23 @@
         wofPending = isWof ? SUBCUT_TAIL_RE.test(seg) : wofPending;
         // The fabric a piece comes off is part of its identity: without it the
         // Catwalk quilt's eighteen '2 1/2" square' rows collapse into one.
-        var k = key(row.piece) + '|' + row.qty + '|' + row.material + '|' + key(row.note);
-        if (seen[k]) continue;
-        seen[k] = 1;
+        // (key() drops superscripts, and 'K¹ rectangle' / 'K² rectangle' are
+        // two different pieces.)
+        var k = key(row.piece) + '|' + (row.piece.match(/[¹²³⁴-⁹]/g) || []).join('') + '|' +
+          row.qty + '|' + row.material + '|' + key(row.note);
+        if (seen[k]) {
+          // The same 'Cut x 1 front on the fold' under a different group
+          // ('Bikini Top' / 'Bikini Briefs') is a different piece: both get
+          // the group they sit in, and neither is lost (sewing-audit).
+          var first = seen[k];
+          if (!label || first.label === label || key(label) === key(row.piece) ||
+              /\d|\bpage\b|\bcutting\b|\bdiagram\b/i.test(label)) continue;
+          if (!first.row.note) first.row.note = first.label || '';
+          row.note = row.note ? (row.note + ', ' + label) : label;
+          k = k + '|' + key(label);
+          if (seen[k]) continue;
+        }
+        seen[k] = { label: label, row: row };
         out.push(row);
         if (out.length >= 400) break;
       }
@@ -1335,6 +1674,8 @@
     'basting spray', 'safety pins?', 'walking foot', 'zipper foot', 'needles?',
     'rotary blades?', 'stabili[sz]ers?', 'shape ?flex', 'sf-?101', 'soft and stable'
   ].join('|') + ')\\b', 'i');
+
+  var TOOL_ITEM_RE = /\b(?:scissors|shears|tape measure|sewing machine|iron|pins|chalk|marking pen|ruler|snips|bodkin|seam ripper|rotary cutter|cutting mat)\b/i;
 
   var HARDWARE_RE = /\b(?:d-?rings?|o-?rings?|rectangle rings?|swivel hooks?|swivel clasps?|triglides?|sliders?|rivets?|grommets?|eyelets?|magnetic snaps?|snaps?|press studs?|hook and eye|bra hooks?|toggles?|cord stops?|buckles?|purse feet|bag feet)\b/i;
   var INTERFACING_RE = /\b(?:interfacing|interlining|fusing|fusible[a-z ]*|sf-?101|shape ?flex|soft and stable|stabili[sz]ers?|foam)\b/i;
@@ -1429,6 +1770,8 @@
       for (var a = 0; a < tail.length; a++) {
         var w = tail[a];
         if (!w || /^\d+$/.test(w) || LOOSE_TAIL_OK[w] || LOOSE_LEAD[w]) continue;
+        // 'Shapeflex/SF101': a second name for the same product (Riley Blake).
+        if (NOTION_VOCAB.test(w)) continue;
         // '12mm', '1yd': a measurement glued to its unit is part of the item.
         if (/^\d+(?:\.\d+)?(?:mm|cm|m|in|inch|inches|yd|yds|yard|yards)$/.test(w)) continue;
         return false;
@@ -1450,9 +1793,47 @@
   }
 
   function notionKind(text) {
+    // 'foam bra cups' are cups, not foam interfacing; 'a pair of rings' for
+    // swim straps is hardware (Peppermint bathers, sewing-audit).
+    if (/\b(?:bra|foam)\s+cups?\b/i.test(text)) return 'notion';
+    if (/\bpairs?\s+of\s+rings?\b/i.test(text)) return 'hardware';
     if (INTERFACING_RE.test(text)) return 'interfacing';
     if (HARDWARE_RE.test(text)) return 'hardware';
     return 'notion';
+  }
+
+  var AMOUNT_BULLET_RE = /^[-•*]\s*\d+(?:[.,]\d+)?\s*(?:m|cm|mm|yards?|yds?)\b/i;
+
+  /**
+   * 'Narrow elastic width – 6mm or ¼ wide' over '- 5m or 5 ½ yards for sizes
+   * XS to 5X' / '- 6m or 6 ½ yards for sizes 6X to 9X' (Peppermint bathers):
+   * the bullets are the quantities OF the line above, not items of their own.
+   * They become one item. A left-column label glued onto the first line
+   * ('NOTIONS Narrow elastic…') is taken off (sewing-audit).
+   */
+  function mergeAmountBullets(lines) {
+    var out = [];
+    for (var i = 0; i < lines.length; i++) {
+      var ln = lines[i];
+      var t = (ln.text || '').replace(/^(?:NOTIONS|HABERDASHERY|SUPPLIES)\s+(?=\S)/, '');
+      if (t !== ln.text) ln = { text: t, page: ln.page, pageMark: ln.pageMark };
+      if (t && !ln.pageMark && !BULLET_RE.test(t) && t.length <= 60 && i + 1 < lines.length &&
+          lines[i + 1].text && AMOUNT_BULLET_RE.test(lines[i + 1].text)) {
+        var parts = [];
+        while (i + 1 < lines.length && lines[i + 1].text && AMOUNT_BULLET_RE.test(lines[i + 1].text)) {
+          // '5m or 5 1/2 yards for sizes XS to 5X' -> '5m for XS to 5X', so
+          // the item stays one readable line.
+          parts.push(lines[i + 1].text.replace(BULLET_RE, '')
+            .replace(/\s+or\s+[\d\s\/.]+(?:yards?|yds?|inch(?:es)?|")/i, '')
+            .replace(/\bfor\s+sizes\b/i, 'for').replace(/^\s+|\s+$/g, ''));
+          i++;
+        }
+        out.push({ text: '- ' + t + ': ' + parts.join('; '), page: ln.page });
+        continue;
+      }
+      out.push(ln);
+    }
+    return out;
   }
 
   /**
@@ -1463,7 +1844,7 @@
   function parseNotions(input, opts) {
     opts = opts || {};
     var inBlock = opts.inBlock !== false;
-    var lines = toLines(input);
+    var lines = mergeAmountBullets(toLines(input));
     var out = [];
     var warns = [];
     var seen = {};
@@ -1481,7 +1862,8 @@
       if (!t || ln.pageMark) continue;
       // A wrapped item: '2" (5cm) Elastic (Use provided elastic chart for' /
       // 'length)'. An unclosed bracket is the giveaway.
-      if (inBlock && out.length && /^[a-z(]/.test(t) && t.length <= 60) {
+      // ('– see page 108)' wraps the Peppermint apron's pattern line.)
+      if (inBlock && out.length && /^(?:-\s+)?[a-z(]/.test(t) && t.length <= 60) {
         var prevText = out[out.length - 1].text;
         var opens = prevText.split('(').length - 1, closes = prevText.split(')').length - 1;
         if (opens > closes) {
@@ -1886,6 +2268,29 @@
       var rows = measureRows(lines, i + 1, hdr, 12);
       if (!rows.length) { if (!labels) warns.push('A size row was found but no measurements lined up with it.'); continue; }
       var isFinished = /finish/i.test(lastHead) || /finish/i.test(t);
+      // A per-size ELASTIC chart ('Cut x 1 length of 6mm elastic to your size
+      // below:' over 'XS S M … / CM 38 42 … / INCHES 15 16½ …', Peppermint
+      // bathers) is not the body chart: its bare 'CM' / 'INCHES' rows are
+      // named after the chart and kept with the other per-size rows, never as
+      // body measurements (sewing-audit).
+      var ctx = '';
+      for (var cb = i - 1, seenCtx = 0; cb >= 0 && seenCtx < 2; cb--) {
+        if (lines[cb].pageMark) break;
+        if (lines[cb].text) { ctx += ' ' + lines[cb].text; seenCtx++; }
+      }
+      var elasticChart = /elastic/i.test(ctx) || /elastic/i.test(lastHead);
+      if (elasticChart) {
+        // Named by the heading right above it, or by the elastic's width when
+        // the chart sits inside a step ('STEP 8: … LOWER EDGE …' / '12mm').
+        var mmW = /(\d{1,2})\s*mm\b/i.exec(ctx);
+        var chartName = (/elastic/i.test(lastHead) && ctx.indexOf(lastHead) >= 0)
+          ? prettyHeading(lastHead) : 'Elastic' + (mmW ? ' ' + mmW[1] + 'mm' : '');
+        rows = rows.map(function (r) {
+          return /^(?:cm|mm|inch(?:es)?|in)$/i.test(r.label)
+            ? { label: chartName + ' · ' + r.label.toLowerCase(), values: r.values } : r;
+        });
+        isFinished = true;
+      }
       if (!labels) { labels = hdr; unit = thisUnit; }
       if (hdr.length !== labels.length) continue;
       if (isFinished) {
@@ -2127,12 +2532,74 @@
     return { name: name, amounts: amtTexts, note: note };
   }
 
+  var ZIP_NAME_RE = /^\(([A-Z])\)\s+([A-Za-z].{2,58})$/;
+  var ZIP_ID_RE = /^[A-Z0-9]{2,}[.\-][A-Z0-9.\-]*\**$/;
+  // An amount on its own, or after its item id ('PWCG002.BLUEBIRD 1 5/8 yards (1.49m)').
+  var ZIP_ROW_RE = /^(?:([A-Z0-9]{2,}[.\-][A-Z0-9.\-]*?)\**\s+)?((?:\d{1,2}(?:\s+\d\/\d{1,2})?|\d\/\d{1,2})\s*(?:yards?|yds?\.?|m)\b\s*(?:\(\s*\d+(?:\.\d+)?\s*m\s*\))?)$/i;
+
+  /**
+   * A requirements table whose columns came out one after another: the
+   * lettered names ('(A) Blue Magic Panel' …), then the item ids, then the
+   * yardage column ('2/3 yard (0.61m)' …). FreeSpirit prints its table this
+   * way and the rows were all lost (sewing-audit). Zipped back together in
+   * order, and only when there are at least as many amounts as names; the
+   * extra amounts at the end are the backing, paired with its printed widths.
+   */
+  function zipFabricColumns(lines, kinds, heads) {
+    var start = -1;
+    for (var i = 0; i < lines.length; i++) {
+      if (kinds[i] === 'head' && headingKind(heads[i] || '') === 'fabric') { start = i; break; }
+    }
+    if (start < 0) return [];
+    var page = lines[start].page;
+    var names = [], ids = [], amounts = [], widths = [], colors = [], colorWant = 0;
+    for (var j = start + 1; j < lines.length; j++) {
+      if (lines[j].pageMark) { if (names.length) break; continue; }
+      if (typeof page === 'number' && lines[j].page !== page) break;
+      var t = lines[j].text;
+      if (!t) continue;
+      // The COLOR column printed as its own run of names.length lines.
+      if (colorWant > 0) {
+        if (/\d/.test(t) || t.length > 30) colorWant = 0;
+        else { colors.push(t); colorWant--; continue; }
+      }
+      if (/^colou?r$/i.test(t) && names.length) { colorWant = names.length; continue; }
+      var nm = ZIP_NAME_RE.exec(t);
+      if (nm && !amountsIn(t).length) { names.push({ letter: nm[1], name: nm[2] }); continue; }
+      if (ZIP_ID_RE.test(t)) { ids.push(t.replace(/\*+$/, '')); continue; }
+      var rm = ZIP_ROW_RE.exec(t);
+      if (rm) { if (rm[1]) ids.push(rm[1]); amounts.push(rm[2]); continue; }
+      var wm = /^(\d{2,3})"\s*(?:\(\s*\d+(?:\.\d+)?\s*m\s*\))?\s*wide$/i.exec(t);
+      if (wm) widths.push({ width: wm[1] + '"', name: (lines[j + 1] && lines[j + 1].text) || '' });
+    }
+    if (names.length < 3 || amounts.length < names.length) return [];
+    var out = [];
+    for (var k = 0; k < names.length; k++) {
+      var nmTxt = 'Fabric ' + names[k].letter + ' — ' + names[k].name +
+        (colors.length === names.length ? ' ' + colors[k] : '') +
+        (ids.length >= names.length ? ' (' + ids[k] + ')' : '');
+      out.push({ name: nmTxt, width: '', amounts: [amounts[k]], grouped: false,
+        rawAmounts: [amounts[k]], note: '', line: names[k].name + ' ' + amounts[k] });
+    }
+    var extra = amounts.slice(names.length);
+    if (extra.length && extra.length === widths.length) {
+      for (var b = 0; b < extra.length; b++) {
+        var bn = widths[b].name && !amountsIn(widths[b].name).length && widths[b].name.length <= 40
+          ? 'Backing — ' + widths[b].name : 'Backing';
+        out.push({ name: bn + (extra.length > 1 ? ' (option ' + (b + 1) + ')' : ''), width: widths[b].width,
+          amounts: [extra[b]], grouped: false, rawAmounts: [extra[b]], note: '', line: bn + ' ' + extra[b] });
+      }
+    }
+    return out;
+  }
+
   /** parseFabric(lines, labels) -> FabricRow[] */
   function parseFabric(input, labels) {
     var lines = toLines(input);
     var out = [];
     var lastName = '';
     var groups = null;
+    var groupNext = '';
     for (var i = 0; i < lines.length; i++) {
       var ln = lines[i];
       var t = ln.text;
@@ -2151,6 +2618,11 @@
         // parses as a requirement is a row, not a heading.
         if (isHeading(t) && !plainFabricRow(t)) {
           lastName = prettyHeading(headingText(t));
+          // 'BINDING FABRIC' / 'BACKING FABRIC' over one row each (AGF): the
+          // row under it is 'Fus-P-1205 5 1/2 yds', which on its own reads as
+          // a twelfth fabric instead of the backing (sewing-audit).
+          var gm = /^(binding|backing|batting)\b/i.exec(headingText(t));
+          groupNext = gm ? titleCase(gm[1].toLowerCase()) : '';
           continue;
         }
         // Quilt yardage never names a bolt width — WOF is assumed — so a row is
@@ -2159,12 +2631,18 @@
         var plain = plainFabricRow(t);
         if (plain) {
           var mappedPlain = expandAmounts(plain.amounts, labels, groups, ALL_SIZES_RE.test(t));
+          var pName = plain.name || lastName || 'Fabric';
+          if (groupNext && pName.toLowerCase().indexOf(groupNext.toLowerCase()) < 0) pName = groupNext + ' — ' + pName;
+          groupNext = '';
+          // '(Included)': the binding comes out of a fabric already listed.
+          var pAmts = plain.amounts.length ? plain.amounts.slice()
+            : (/^included$/i.test(plain.note) ? ['included'] : []);
           out.push({
-            name: plain.name || lastName || 'Fabric',
+            name: pName,
             width: '',
-            amounts: mappedPlain.amounts.length ? mappedPlain.amounts : plain.amounts.slice(),
+            amounts: mappedPlain.amounts.length ? mappedPlain.amounts : pAmts,
             grouped: mappedPlain.grouped,
-            rawAmounts: plain.amounts.slice(),
+            rawAmounts: pAmts,
             note: plain.note,
             line: t
           });
@@ -2216,7 +2694,36 @@
       if (consumedNext) i++;
       if (out.length >= 40) break;
     }
-    return out;
+    // A bolt width with no amount anywhere near it ('140CM' / 'SIZES A-H' in
+    // a grid whose numbers came out elsewhere, Peppermint Samford) tells the
+    // shopper nothing; an honest "not found" beats four empty rows.
+    out = out.filter(function (r) { return !(r.width && !r.amounts.length && !r.rawAmounts.length); });
+    // 'Outer swim  Metres 0.9m 1m …' over '   fabric  Yards 1 yard 1 1/8 yard …'
+    // (Peppermint bathers): ONE fabric printed in two units on two lines, with
+    // its name split across them. Put back together as 'Outer swim fabric'
+    // with '0.9 m / 1 yard' per size (sewing-audit).
+    var merged = [];
+    for (var mi = 0; mi < out.length; mi++) {
+      var A = out[mi], B = out[mi + 1];
+      if (B && !A.width && !B.width && /\s(?:metres|meters)$/i.test(A.name) && /(?:^|\s)(?:yards|yds)$/i.test(B.name) &&
+          A.amounts.length === B.amounts.length && A.rawAmounts.length === B.rawAmounts.length) {
+        var nm2 = (A.name.replace(/\s+(?:metres|meters)$/i, '') + ' ' + B.name.replace(/\s*(?:yards|yds)$/i, ''))
+          .replace(/\s{2,}/g, ' ').replace(/^\s+|\s+$/g, '');
+        merged.push({
+          name: nm2.charAt(0).toUpperCase() + nm2.slice(1),
+          width: '',
+          amounts: A.amounts.map(function (a, x) { return a + ' / ' + B.amounts[x]; }),
+          grouped: A.grouped,
+          rawAmounts: A.rawAmounts.map(function (a, x) { return a + ' / ' + B.rawAmounts[x]; }),
+          note: A.note || B.note,
+          line: A.line + ' ' + B.line
+        });
+        mi++;
+        continue;
+      }
+      merged.push(A);
+    }
+    return merged;
   }
 
   /**
@@ -2334,7 +2841,9 @@
   var UNIT_RE = /(\d{2,4})\s+(flying geese|half[\s-]square triangles|hsts?|quarter[\s-]square triangles|qsts?|blocks|squares|units|hexies|triangles)\b/gi;
   // 'Make a total of 4 Unit 2a', 'make (1) each Blocks 2b-2d', 'Block 3 - Make 4'
   // — the named-unit form every pieced-quilt booklet uses under its diagrams.
-  var UNIT_MAKE_RE = /\bmake\s+(?:a\s+total\s+of\s+)?\(?(\d{1,4})\)?\s+(?:each\s+)?((?:unit|block)s?\s*[0-9a-z]{0,3})/gi;
+  // (sewing-audit) 'make 4Unit 7b' is printed with no space, and 'Make a total
+  // of 4 Inner Borders' counts a pieced border like a unit (FreeSpirit Harmony).
+  var UNIT_MAKE_RE = /\bmake\s+(?:a\s+total\s+of\s+)?\(?(\d{1,4})\)?\s*(?:each\s+)?((?:unit|block|inner\s+border)s?\s*[0-9a-z]{0,3})/gi;
   var UNIT_NAMED_RE = /\b((?:unit|block)\s*[0-9]{1,2}[a-z]?)\s*[-–—]?\s*make\s+\(?(\d{1,4})\)?/gi;
 
   /** parseUnits(text) -> [{ id, name, target, done }] - quilt block counters. */
@@ -2352,7 +2861,7 @@
         if (target > byName[k].target) byName[k].target = target;
         return;
       }
-      if (out.length >= 12) return;
+      if (out.length >= 24) return;   // the data model keeps 24 (Harmony needs 17)
       var row = { id: uid('u'), name: name, target: target, done: 0 };
       byName[k] = row;
       out.push(row);
@@ -2373,11 +2882,18 @@
     return out;
   }
 
-  var COPYRIGHT_RE = /(?:©|\(c\)|copyright)\s*(?:\d{4}\s*)?([A-Z][^\n©|]{2,40}?)\s*(?:\d{4})?\s*$/gim;
+  // '(c)' only counts before a year: '(C) Little Somewhere Plum' is fabric C
+  // in FreeSpirit's requirements table, not a copyright line (sewing-audit).
+  var COPYRIGHT_RE = /(?:©|\(c\)(?=\s*\d{4})|copyright)\s*(?:\d{4}\s*)?([A-Z][^\n©|]{2,40}?)\s*(?:\d{4})?\s*$/gim;
   var VERSION_RE = /\b(?:v(?:ersion)?\s*\.?\s*)(\d+(?:\.\d+)?)\b/i;
   var VIEW_RE = /\bview\s+([A-Z])\b/g;
   var NAME_SKIP_RE = /^(?:instructions?|sewing pattern|pattern|contents|page \d+|https?:|www\.|©|copyright|all rights reserved)/i;
-  var NAME_HINT_RE = /\b(top|shirt|dress|tank|tee|jacket|coat|bag|tote|pouch|quilt|skirt|pants|trousers|shorts|blouse|jumpsuit|robe|hoodie|sweater|cardigan|vest|apron|backpack|sling|wallet|cushion|pillow)\b/i;
+  var NAME_HINT_RE = /\b(top|shirt|dress|sundress|tank|tee|jacket|coat|bag|handbag|purse|clutch|tote|pouch|quilt|skirt|pants|joggers?|trousers|shorts|blouse|jumpsuit|robe|hoodie|sweater|cardigan|vest|apron|backpack|sling|wallet|cushion|pillow|bathers|swimsuit|bikini)\b/i;
+  // A cover line that is not a name: the test square, the legend, a tile
+  // label, a measurement ('10 centimeters').
+  // ('QUILT DESIGNED BY JESSICA SWIFT', 'Harmony by Carolyn Gavin' are credits.)
+  var NAME_JUNK_RE = /^(?:test\s*square|this is\b|page\s*\d+\s*[a-z]?$|\d|featuring\b|for\s|collection\b|technique\b|skill\b)|free\s*pattern|\bdesigned\s+by\b|\s+by\s+[A-Za-z]|\s+by$/i;
+  var TITLED_NAME_RE = /^(?:(?:instructions?|pattern)\s*(?:&|and)\s*)?(?:instructions?|pattern)\s*[:\-–—]?\s+([A-Z].{2,47})$/i;
 
   var DESIGNER_STOP = /^(?:and|the|to|of|in|for|by|this|that|it|is|are|be|with|from|or|all|any|no|not|its|their|our|your|info|information|copyright|reserved|rights|use|only|pattern|patterns|free)\b/i;
   var DOMAIN_RE = /(?:www\.|https?:\/\/)([a-z0-9][a-z0-9-]{2,30})\.(?:com|net|org|co|co\.uk|com\.au|nz|de|fr)\b/i;
@@ -2436,22 +2952,45 @@
     meta.designer = best;
 
     // pattern name: the strongest headline-looking line on the first page
-    var bestName = '', bestScore = 0;
-    for (var i = 0; i < lines.length && i < 40; i++) {
-      var t = lines[i].text;
-      if (!t || lines[i].pageMark) continue;
-      if (lines[i].page !== null && lines[i].page > 1) break;
-      if (t.length < 3 || t.length > 48) continue;
-      if (NAME_SKIP_RE.test(t)) continue;
-      if (headingKind(headingText(t))) continue;
-      if (/[.!?]$/.test(t)) continue;
-      var score = 0;
-      if (!/[a-z]/.test(t)) score += 2;
-      else if (/^[A-Z]/.test(t)) score += 1;
-      if (NAME_HINT_RE.test(t)) score += 3;
-      if (t.split(/\s+/).length <= 5) score += 1;
-      if (i < 12) score += 1;
-      if (score > bestScore) { bestScore = score; bestName = t; }
+    // (sewing-audit) Swoon prints the real name only as 'Instructions &
+    // Pattern Mabel Vintage Handbag' on page 2; the cover says 'swoon'.
+    var bestName = '', bestScore = 0, lowFull = fullText.toLowerCase();
+    for (var j = 0; j < lines.length && j < 120 && !bestName; j++) {
+      if (lines[j].pageMark || !lines[j].text) continue;
+      if (lines[j].page !== null && lines[j].page > 3) break;
+      var tm = TITLED_NAME_RE.exec(lines[j].text);
+      if (tm && NAME_HINT_RE.test(tm[1])) bestName = tm[1];
+    }
+    // Page 1 first; a tiled pattern sheet prints its name on a later tile
+    // (Tiana's joggers: page 1 is only the test square).
+    for (var pass = 1; pass <= 2 && !bestName; pass++) {
+      var lastPage = pass === 1 ? 1 : 3;
+      for (var i = 0; i < lines.length && i < (pass === 1 ? 40 : 250); i++) {
+        var t = lines[i].text;
+        if (!t || lines[i].pageMark) continue;
+        if (lines[i].page !== null && lines[i].page > lastPage) break;
+        if (t.length < 3 || t.length > 48) continue;
+        // a label line ('Finished Block Sizes:', 'Technique: Pieced') is not a name
+        if (NAME_SKIP_RE.test(t) || NAME_JUNK_RE.test(t) || /:/.test(t)) continue;
+        // 'f r e e p a t t e r n', 'F R E EF R E E P A T T E R N' (AGF covers)
+        if (/(?:^|\s)(?:\S\s){3,}\S(?:\s|$)/.test(t)) continue;
+        if (headingKind(headingText(t))) continue;
+        if (/[.!?]$/.test(t)) continue;
+        // Past the cover only a line that names a garment or item will do.
+        if (pass === 2 && !NAME_HINT_RE.test(t)) continue;
+        var score = 0;
+        if (!/[a-z]/.test(t)) score += 2;
+        else if (/^[A-Z]/.test(t)) score += 1;
+        if (NAME_HINT_RE.test(t)) score += 3;
+        if (t.split(/\s+/).length <= 5) score += 1;
+        if (i < 12) score += 1;
+        // The real name is printed more than once ('REQUIREMENTS TRIPLE T
+        // TOTE' and 'Triple T Tote'); a strapline like 'Standard Piecing Bag'
+        // is printed once.
+        var low = t.toLowerCase(), at = lowFull.indexOf(low);
+        if (at >= 0 && lowFull.indexOf(low, at + low.length) >= 0) score += 2;
+        if (score >= 3 && score > bestScore) { bestScore = score; bestName = t; }
+      }
     }
     meta.patternName = bestName
       .replace(/\s*[-—|]\s*(?:instructions?|sewing pattern|pattern)\s*$/i, '')
@@ -2571,18 +3110,74 @@
     try {
       var cutLines = [];
       var pushedAt = -1;
-      function pushCut(at) {
+      function pushCut(at, wide) {
         // The piece's name is often printed as a label on the line above the cut
         // ('Main Panel' / 'Cut 2 Lining Fabric'), so carry that line along.
-        if (at > 0 && pushedAt !== at - 1 && lines[at - 1].text && labelCandidate(lines[at - 1].text)) {
-          cutLines.push(lines[at - 1]);
+        // A layered size-per-layer sheet glues its overprinted size labels onto
+        // the piece name ('FRONTSIZE 12MSIZE 18M', 'cut 2BACKSIZE 6SIZE 3T',
+        // Tiana's joggers): they are stripped, and a line that was nothing but
+        // size labels is stepped over to find the name (sewing-audit).
+        var own = sheetClean(lines[at].text);
+        if (wide) {
+          var near = sheetLabelNear(at);
+          if (near) cutLines.push(near);
+        } else {
+          var up = at - 1;
+          if (up >= 0 && lines[up].text && !sheetClean(lines[up].text) && SIZE_RUN_TEST.test(lines[up].text)) up--;
+          if (up >= 0 && pushedAt < up && lines[up].text && !lines[up].pageMark) {
+            var lab = sheetClean(lines[up].text);
+            if (lab && labelCandidate(lab)) cutLines.push(lab === lines[up].text ? lines[up] : { text: lab, page: lines[up].page });
+          }
         }
-        cutLines.push(lines[at]);
+        cutLines.push(own === lines[at].text ? lines[at] : { text: own, page: lines[at].page });
         pushedAt = at;
+      }
+      /**
+       * The piece label for a cut line on a pattern SHEET. Rotated labels come
+       * out of the PDF above or below their 'Cut N' lines, with the brand
+       * stamp, '®' and 'FOLD' in between (Swoon Mabel p11-13): the nearest
+       * label above wins, a cut line above means "same piece as that one", and
+       * only then is the label looked for below (sewing-audit).
+       */
+      function sheetLabelNear(at) {
+        function pick(u) {
+          var tx = lines[u].text;
+          if (/^cut\s+size\b/i.test(tx)) return null;          // a dimension, not a count
+          if (/^cut\b/i.test(tx) || STRONG_CUT_RE.test(tx)) return 'stop';
+          var cl = sheetClean(tx);
+          // an all-lowercase line is a brand stamp ('swoon', 'vintage handbag')
+          if (!cl || SIZE_RUN_TEST.test(tx) || SHEET_JUNK_RE.test(cl) || /^cut\s+size\b/i.test(cl) ||
+              /^[a-z][a-z ]*$/.test(cl)) return null;
+          var lb = labelCandidate(cl);
+          if (!lb || SHEET_JUNK_RE.test(lb) || /\b(?:placement|test square|printed|correct size|this is)\b/i.test(lb)) return null;
+          return { text: lb, page: lines[u].page };
+        }
+        for (var u = at - 1, n1 = 0; u >= 0 && n1 < 4; u--) {
+          if (lines[u].pageMark) break;
+          if (!lines[u].text) continue;
+          n1++;
+          var r1 = pick(u);
+          if (r1 === 'stop') return null;
+          if (r1) return r1;
+        }
+        for (var d = at + 1, n2 = 0; d < lines.length && n2 < 6; d++) {
+          if (lines[d].pageMark) break;
+          if (!lines[d].text) continue;
+          n2++;
+          var r2 = pick(d);
+          if (r2 === 'stop') return null;
+          if (r2) return r2;
+        }
+        return null;
       }
       for (var c = 0; c < lines.length; c++) {
         if (kinds[c] === 'cut') { cutLines.push(lines[c]); pushedAt = c; continue; }
         if (kinds[c] === 'head' && headingKind(heads[c]) === 'cut') { cutLines.push(lines[c]); pushedAt = c; continue; }
+        // A group label inside the cutting list ('Bikini Top' / 'Bikini
+        // Briefs') tells two 'Cut x 1 front on the fold' rows apart.
+        if (kinds[c] === 'head' && info.owners && info.owners[c] === 'cut' && !headingKind(heads[c])) {
+          cutLines.push(lines[c]); pushedAt = c; continue;
+        }
         var ct = lines[c].text;
         if (!ct) continue;
         if (STRONG_CUT_RE.test(ct)) { pushCut(c); continue; }
@@ -2590,10 +3185,10 @@
           // The pattern-sheet pages bound in after the instructions still carry
           // the cutting information: a short, count-led line that is not a
           // sentence ('Cut 2 Lining Fabric') is a piece, wherever it sits.
-          if (/^cut\s*\(?\s*\d/i.test(ct) && ct.length <= 45 && !/[.!?]$/.test(ct)) pushCut(c);
+          if (/^cut\s*\(?\s*\d/i.test(ct) && ct.length <= 45 && !/[.!?]$/.test(ct)) pushCut(c, true);
           continue;
         }
-        if (kinds[c] === 'none' && /^cut\b/i.test(ct)) pushCut(c);
+        if (kinds[c] === 'none' && /^cut\b/i.test(ct)) pushCut(c, res.kind === 'sheet');
       }
       res.cuttingList = Array.prototype.slice.call(parseCutting(cutLines));
       if (!res.cuttingList.length) pushUnique(res.warnings, 'No cutting list found — add the pieces yourself.');
@@ -2651,6 +3246,32 @@
         }
       }
       res.fabric = parseFabric(fabLines, res.sizes ? res.sizes.labels : null);
+      // A column-split table read back together beats the one stray row the
+      // line reader salvaged from it (FreeSpirit: only the 44" backing line).
+      var zipped = zipFabricColumns(lines, kinds, heads);
+      if (zipped.length >= 3 && zipped.length > res.fabric.length) res.fabric = zipped;
+      // '1/2 yard 44" wide quilting weight exterior fabric' printed in the
+      // materials list is a fabric requirement, not a notion (Swoon Mabel).
+      var keptNotions = [];
+      for (var fn = 0; fn < res.notions.length; fn++) {
+        var nt = res.notions[fn].text;
+        var nAmt = amountsIn(nt), nW = widthsIn(nt);
+        if (/\bfabrics?\b/i.test(nt) && nAmt.length && FAB_UNIT_RE.test(nAmt[0].text) && res.fabric.length < 40) {
+          // Whatever is left once the amount and the bolt width are taken out:
+          // 'quilting weight exterior fabric', 'fabric' (Peppermint apron).
+          var chars = nt.split('');
+          nAmt.concat(nW).forEach(function (r) { for (var ci = r.at; ci < r.end; ci++) chars[ci] = ' '; });
+          var fName = chars.join('');
+          fName = fName.replace(/\b(?:wide|width|of|minimum)\b/gi, ' ').replace(/\(\s*\)/g, ' ')
+            .replace(/\s{2,}/g, ' ').replace(/^[\s,:\-—]+|[\s,:\-—]+$/g, '');
+          res.fabric.push({ name: fName ? fName.charAt(0).toUpperCase() + fName.slice(1) : 'Fabric',
+            width: nW.length ? nW[0].text : '', amounts: [nAmt[0].text], grouped: false,
+            rawAmounts: [nAmt[0].text], note: '', line: nt });
+          continue;
+        }
+        keptNotions.push(res.notions[fn]);
+      }
+      res.notions = keptNotions;
     } catch (e9) { pushUnique(res.warnings, 'The fabric requirements could not be read.'); }
 
     // --- quilt unit counters ------------------------------------------------
@@ -2678,6 +3299,11 @@
     }
     if (res.kind === 'quilt' && !res.fabric.length) {
       pushUnique(res.warnings, 'No fabric requirements found — add the yardage yourself.');
+    }
+    // The booklet prints a fabric table the reader could not put back together
+    // (Peppermint Samford's size-group grid): say so rather than stay silent.
+    if (res.kind !== 'quilt' && res.kind !== 'sheet' && !res.fabric.length && /fabric\s+requirements/i.test(norm)) {
+      pushUnique(res.warnings, 'The fabric requirements table could not be read — add the yardage yourself.');
     }
 
     if (res.warnings.length > 20) res.warnings = res.warnings.slice(0, 20);
@@ -2951,6 +3577,9 @@
     opts = opts || {};
     var groups = opts.groups || {};
     function want(name) { return groups[name] !== false; }
+    // The import sheet unticks a group it found nothing for; "Just keep the
+    // text" unticks them all. Only a real import clears template placeholders.
+    var realImport = !opts.groups || Object.keys(groups).some(function (g) { return groups[g] !== false; });
 
     var prev = normalizeData(existing || null, null);
     var pr = isObj(parseResult) ? parseResult : emptyParse();
@@ -3027,6 +3656,16 @@
         });
       }
       out.cutting = cutting;
+    } else if (realImport && isArr(pr.cuttingList) && str(pr.sourceText, '')) {
+      // A real import that found no cutting list must not leave the new-project
+      // template's placeholder pieces (Front / Back / Sleeve / Facing /
+      // Interfacing) standing in for the pattern's: the home card read "0 of 5
+      // cut" for the Peppermint apron, whose pieces are only on the pattern
+      // sheet (sewing-audit). Rows the user touched or added stay.
+      out.cutting = out.cutting.filter(function (r) { return !(r.cutCount === 0 && isTemplateCut(r)); });
+    }
+    if (realImport && isArr(pr.notions) && !pr.notions.length && str(pr.sourceText, '')) {
+      out.notions = out.notions.filter(function (r) { return !(!r.have && isTemplateNotion(r)); });
     }
 
     // --- steps: preserve done by normalised text ----------------------------
@@ -3105,8 +3744,16 @@
       var bits = [];
       if (d.meta.patternName) bits.push(d.meta.patternName);
       if (d.steps.length) {
-        var at = Math.min(d.currentStep, d.steps.length - 1) + 1;
-        bits.push('step ' + at + ' of ' + d.steps.length);
+        // Counted over the construction steps: the optional variation / care
+        // extras kept after them are not "step 12 of 15" (sewing-audit).
+        // In the pattern's own numbering ('step 4 of 6' for the pencil skirt,
+        // whatever its cards), per numbering run (coordinator, Wave E).
+        var ps = printedSteps(d.steps);
+        var atIdx = Math.min(d.currentStep, d.steps.length - 1);
+        var pos = ps.of[atIdx];
+        if (pos) bits.push('step ' + pos.n + ' of ' + pos.runTotal);
+        else if (ps.total) bits.push(printedDone(d.steps, ps) >= ps.total ? 'all ' + ps.total + ' steps done' : 'optional extras');
+        else bits.push('step ' + (atIdx + 1) + ' of ' + d.steps.length);
       }
       if (d.cutting.length) {
         var cut = 0;
@@ -3211,6 +3858,85 @@
 
   function templates() { return deepCopy(TEMPLATES) || []; }
 
+  /**
+   * Sewing.printedSteps(steps) -> the pattern's OWN numbering over the cards.
+   *
+   * The user reads the paper alongside the phone, so the header says "Step 3
+   * of 6" as printed, not "card 5 of 11". Consecutive construction cards that
+   * share a printed number are one printed step: its '(continued)' cards and
+   * its titled sub-paragraphs ('Centre Back Seam:' under step 4). A number
+   * lower than the one before starts a new run (the bathers top 1-10, then
+   * the briefs 1-5), and each run is counted on its own. Optional extras
+   * (variations, care notes) are not steps. Untitled paragraph steps carry
+   * their card order as their number, so they fall back to card numbering.
+   *
+   * -> { groups: [{ n, run, cards: [index…] }], total, runTotal: {run: count},
+   *      of: { index: { group, n, run, runIndex, runTotal, card, cards } } }
+   */
+  function printedSteps(steps) {
+    var groups = [], of = {}, runTotal = {}, run = 0;
+    steps = isArr(steps) ? steps : [];
+    for (var i = 0; i < steps.length; i++) {
+      var s = steps[i];
+      if (!isObj(s) || s.optional) continue;
+      var n = (typeof s.n === 'number' && s.n > 0) ? s.n : null;
+      var last = groups[groups.length - 1];
+      if (last && n !== null && n === last.n) { last.cards.push(i); continue; }
+      if (last && n !== null && last.n !== null && n < last.n) run++;
+      groups.push({ n: n, run: run, cards: [i] });
+    }
+    // The printed count is the highest printed number in the run (a step the
+    // reader missed must not make the paper's "22" read "22 of 21").
+    var runMax = {};
+    for (var g = 0; g < groups.length; g++) {
+      var r = groups[g].run;
+      runTotal[r] = (runTotal[r] || 0) + 1;
+      groups[g].runIndex = runTotal[r];
+      if (groups[g].n !== null) runMax[r] = Math.max(runMax[r] || 0, groups[g].n);
+    }
+    for (var rk in runMax) if (runMax.hasOwnProperty(rk)) runTotal[rk] = Math.max(runTotal[rk], runMax[rk]);
+    for (var h = 0; h < groups.length; h++) {
+      var gr = groups[h];
+      for (var c = 0; c < gr.cards.length; c++) {
+        of[gr.cards[c]] = {
+          group: h, n: gr.n === null ? gr.runIndex : gr.n, run: gr.run,
+          runIndex: gr.runIndex, runTotal: runTotal[gr.run], card: c + 1, cards: gr.cards.length
+        };
+      }
+    }
+    return { groups: groups, total: groups.length, runTotal: runTotal, runs: run + 1, of: of };
+  }
+
+  /** How many printed steps are fully done (every card of them ticked). */
+  function printedDone(steps, ps) {
+    ps = ps || printedSteps(steps);
+    var n = 0;
+    for (var g = 0; g < ps.groups.length; g++) {
+      var all = true;
+      for (var c = 0; c < ps.groups[g].cards.length; c++) if (!steps[ps.groups[g].cards[c]].done) { all = false; break; }
+      if (all) n++;
+    }
+    return n;
+  }
+
+  /** Is this cutting row / notion exactly one a built-in template seeds? */
+  function isTemplateCut(r) {
+    for (var t = 0; t < TEMPLATES.length; t++) {
+      var rows = (TEMPLATES[t].craftData && TEMPLATES[t].craftData.cutting) || [];
+      for (var i = 0; i < rows.length; i++) {
+        if (key(rows[i].piece) === key(r.piece) && rows[i].qty === r.qty && rows[i].material === r.material) return true;
+      }
+    }
+    return false;
+  }
+  function isTemplateNotion(r) {
+    for (var t = 0; t < TEMPLATES.length; t++) {
+      var rows = (TEMPLATES[t].craftData && TEMPLATES[t].craftData.notions) || [];
+      for (var i = 0; i < rows.length; i++) if (key(rows[i].text) === key(r.text)) return true;
+    }
+    return false;
+  }
+
   // =====================================================================
   // Exports
   // =====================================================================
@@ -3230,6 +3956,8 @@
     sizeGroups: sizeGroups,
     fabricAmounts: amountTexts,
     fabricForSize: fabricForSize,
+    printedSteps: printedSteps,
+    printedDone: printedDone,
     parseMeta: parseMeta,
     detectKind: detectKind,
     toCraftData: toCraftData,

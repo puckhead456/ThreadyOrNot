@@ -64,6 +64,19 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* 'card 2 of 3': one printed step on several cards (Wave E). Secondary to
+   the printed "STEP n" beside it. */
+.sw-card-chip {
+  flex: 0 0 auto;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 1px 8px;
+  white-space: nowrap;
+}
+.sw-card-chip[hidden] { display: none; }
 .sw-step-text {
   font-size: 17px;
   line-height: 1.45;

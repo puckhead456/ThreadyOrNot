@@ -198,6 +198,55 @@
     return autoUpsideDown(prt) ? 'Auto — bottom-up from the pattern' : 'Auto — top-down';
   }
 
+  /* ---- UK or US stitch names (Wave E: the Part.dialect chip) ---- */
+
+  var DIALECT_OPTIONS = [
+    { id: 'auto', label: 'Auto' },
+    { id: 'uk', label: 'UK' },
+    { id: 'us', label: 'US' }
+  ];
+
+  /** The chip's own value — never a guess. @returns {'auto'|'uk'|'us'} */
+  function partDialectPick(prt) {
+    var v = prt && prt.dialect;
+    return v === 'uk' || v === 'us' ? v : 'auto';
+  }
+
+  /**
+   * What Auto reads for this piece with the chip taken out of the way — the
+   * piece's own text through `Store.partDialect`, the same resolver the model
+   * carries to `expand` and so to the heights the 3D piece is drawn at.
+   * @returns {'uk'|'us'|null}
+   */
+  function autoDialect(prt) {
+    if (!prt || !window.Store || typeof Store.partDialect !== 'function') return null;
+    var tmp = {};
+    for (var k in prt) if (prt.hasOwnProperty(k)) tmp[k] = prt[k];
+    // A separate id: the Store memoises per part, and this is not that part.
+    tmp.id = (prt.id || 'part') + ':dialectpreview';
+    tmp.dialect = 'auto';
+    try {
+      return Store.partDialect(tmp) || null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /**
+   * The line beside the Terms chips. UK and US count the same, so this never
+   * moves a stitch target; it says what it changes, which is how tall a `tr`
+   * (and so the 3D piece) is.
+   * @param {'auto'|'uk'|'us'} pick
+   */
+  function dialectHint(pick, prt, short) {
+    if (pick === 'uk') return short ? 'UK: tr = US dc' : 'UK terms — a tr is a US dc. Counts do not change.';
+    if (pick === 'us') return short ? 'US: tr = tall treble' : 'US terms — a tr is the tall treble. Counts do not change.';
+    var d = autoDialect(prt);
+    if (d === 'uk') return short ? 'Auto — UK, from the text' : 'Auto — UK terms from the pattern';
+    if (d === 'us') return short ? 'Auto — US, from the text' : 'Auto — US terms from the pattern';
+    return short ? 'Auto — not stated (US)' : 'Auto — the pattern does not say; read as US';
+  }
+
   /* ================================================================== *
    * 3. Optional collaborators (defensive)
    * ================================================================== */
@@ -290,12 +339,78 @@
    * 5. Live region + toasts
    * ================================================================== */
 
+  /**
+   * The one live region, shared by every craft (through `ctx.announce`).
+   *
+   * Policy (UX sweep D7, Wave E) — the same in all three crafts: announce
+   * MILESTONES, never a single stitch. A row / round done, a stitch group
+   * done, a piece / part / project done, a colour done, a step done, a block
+   * or cut count moved, and — only where there is no grouping to mark it —
+   * every 50th stitch. Per-stitch speech would make the big button unusable
+   * with a screen reader on.
+   *
+   * A19: it used to clear the region and write 30 ms later, so a second call
+   * inside that window ("Cream done" then "Now stitching Teal") dropped the
+   * first. Calls that land together are now spoken together.
+   */
+  /**
+   * UX sweep D5 / A15 — keep keyboard focus across a rebuild. Every list in
+   * the app is re-rendered by clearing and rebuilding it, so the button you
+   * just pressed was destroyed under you and focus fell to <body> (tick three
+   * checklist items with the keyboard and you started over three times).
+   *
+   * `preserveFocus(fn)` notes the focused element's key — `data-focus-key`,
+   * else its id, else its aria-label — runs `fn`, and if that element is gone
+   * afterwards, focuses its replacement (or, when the replacement is now
+   * disabled, the first control in the same row). It never moves focus that
+   * is still on a live element. Published as `ctx.preserveFocus` so the craft
+   * modules get the same behaviour.
+   * @template T
+   * @param {function(): T} fn
+   * @returns {T}
+   */
+  function preserveFocus(fn) {
+    var a = document.activeElement;
+    var key = null;
+    if (a && a !== document.body && a.getAttribute) {
+      if (a.getAttribute('data-focus-key')) key = ['data-focus-key', a.getAttribute('data-focus-key')];
+      else if (a.id) key = ['id', a.id];
+      else if (a.getAttribute('aria-label')) key = ['aria-label', a.getAttribute('aria-label')];
+    }
+    var scope = a && a.closest ? a.closest('dialog') : null;
+    var out = fn();
+    if (!key || (a && document.contains(a))) return out;
+    var root = scope && document.contains(scope) ? scope : document;
+    var hit = null;
+    var all = root.querySelectorAll('[' + key[0] + ']');
+    for (var i = 0; i < all.length; i++) {
+      if (all[i].getAttribute(key[0]) === key[1]) { hit = all[i]; break; }
+    }
+    if (hit && (hit.disabled || hit.hidden)) {
+      var row = hit.closest('.list-item, [data-focus-row]') || hit.parentNode;
+      var alt = row ? focusablesIn(row) : [];
+      hit = alt[0] || null;
+    }
+    if (hit) {
+      try { hit.focus({ preventScroll: true }); } catch (e) { try { hit.focus(); } catch (e2) { /* ignore */ } }
+    }
+    return out;
+  }
+
+  var announceQueue = [];
+  var announceTimer = null;
+
   function announce(text) {
-    if (!els.live) return;
+    if (!els.live || !text) return;
+    announceQueue.push(String(text));
+    if (announceTimer) return;
     els.live.textContent = '';
     // A fresh text node in the next frame makes screen readers re-announce.
-    window.setTimeout(function () {
-      els.live.textContent = text;
+    announceTimer = window.setTimeout(function () {
+      announceTimer = null;
+      var said = announceQueue.join('. ');
+      announceQueue = [];
+      els.live.textContent = said;
     }, 30);
   }
 
@@ -809,12 +924,81 @@
     if (opts.build) opts.build(body, api);
 
     openSheets.push(api);
-    if (typeof dlg.showModal === 'function') {
+    if (typeof dlg.showModal === 'function' && !forceSheetFallback) {
       dlg.showModal();
     } else {
-      dlg.setAttribute('open', '');
+      openFallbackSheet(dlg, api);
     }
     return api;
+  }
+
+  /** TEST/QA hook: `App.__forceSheetFallback(true)` drives the no-showModal path. */
+  var forceSheetFallback = false;
+
+  var FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), ' +
+    'select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+  function focusablesIn(root) {
+    return Array.prototype.filter.call(root.querySelectorAll(FOCUSABLE), function (n) {
+      return !n.hidden && n.getAttribute('aria-hidden') !== 'true' &&
+        (n.offsetWidth > 0 || n.offsetHeight > 0 || n.getClientRects().length > 0);
+    });
+  }
+
+  /**
+   * UX sweep D3 / A14 — the sheet without `showModal` (older iOS Safari, which
+   * the PWA targets). `setAttribute('open')` alone gave a non-modal dialog: no
+   * top layer, no tint, no focus trap, and focus never came back. So on that
+   * path the sheet brings its own: `.sheet-fallback` paints the backdrop and
+   * lifts it above the app (the dialog already fills the viewport, so a tap on
+   * the tint IS a tap on the dialog and the existing backdrop-close works),
+   * `aria-modal` tells assistive tech, Tab wraps inside it, focus that escapes
+   * is pulled back, and closing puts focus back where it was.
+   */
+  function openFallbackSheet(dlg, api) {
+    var before = document.activeElement;
+    dlg.classList.add('sheet-fallback');
+    dlg.setAttribute('open', '');
+    dlg.setAttribute('aria-modal', 'true');
+    dlg.setAttribute('role', 'dialog');
+
+    function topmost() {
+      var open = openSheets.filter(function (s) { return s.dialog.classList.contains('sheet-fallback'); });
+      return open.length && open[open.length - 1] === api;
+    }
+    function onKey(e) {
+      if (e.key !== 'Tab' || !topmost()) return;
+      var f = focusablesIn(dlg);
+      if (!f.length) { e.preventDefault(); return; }
+      var first = f[0];
+      var last = f[f.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    }
+    function onFocusIn(e) {
+      if (!topmost() || dlg.contains(e.target)) return;
+      // The guided tour's card sits above sheets on purpose; leave it be.
+      if (e.target && e.target.closest && e.target.closest('.tour-overlay, .tour-card, #toasts')) return;
+      var f = focusablesIn(dlg);
+      (f[0] || dlg).focus();
+    }
+    dlg.addEventListener('keydown', onKey);
+    document.addEventListener('focusin', onFocusIn, true);
+    if (!dlg.hasAttribute('tabindex')) dlg.setAttribute('tabindex', '-1');
+
+    var close = api.close;
+    api.close = function (value) {
+      document.removeEventListener('focusin', onFocusIn, true);
+      dlg.removeEventListener('keydown', onKey);
+      close(value);
+      if (before && before.focus && document.contains(before)) {
+        try { before.focus(); } catch (e) { /* ignore */ }
+      }
+    };
+    // showModal() focuses the first focusable; do the same.
+    var f = focusablesIn(dlg);
+    var target = f.filter(function (n) { return !n.classList.contains('sheet-close'); })[0] || f[0] || dlg;
+    try { target.focus(); } catch (e) { /* ignore */ }
   }
 
   function closeAllSheets() {
@@ -1217,6 +1401,8 @@
     closeAllSheets: closeAllSheets,
     toast: toast,
     announce: announce,
+    // Wrap a list rebuild so keyboard focus survives it (UX sweep D5).
+    preserveFocus: preserveFocus,
     fb: fb,
     render: render,
 
@@ -1295,7 +1481,12 @@
    * 11. Render — router
    * ================================================================== */
 
+  /** Rebuild whatever screen is showing, keeping keyboard focus (D5). */
   function render() {
+    preserveFocus(renderNow);
+  }
+
+  function renderNow() {
     closeOrphanSheets();
     syncStorageBanner();
     var p = currentProject();
@@ -1335,7 +1526,39 @@
 
     var prt = Store.activePart(p);
     if (!prt) return '';
-    var bits = [prt.name, shortRowWord(p) + ' ' + prt.row];
+    return crochetPartSummary(p, prt);
+  }
+
+  /** The terminal state of a part — the same test as the Store's own. */
+  function partFinished(prt) {
+    return !!(prt && prt.targetRows && prt.piecesDone >= prt.makeCount && prt.row >= prt.targetRows);
+  }
+
+  /**
+   * Wave E — the home card's crochet line. It used to pair the COMPLETED row
+   * count with the stitch target of the row AFTER it ("Rnd 1 · 0/12 sts" is
+   * round 2's twelve), used the project's word for every piece, said "Rnd 0"
+   * for a piece nobody had started (D9), and "Rnd 20 · 0 sts" for a finished
+   * one. Now: the round being worked with its own target, "of N" when the
+   * piece has a target, "piece 2 of 4" for a make-count, "done ✓" when it is.
+   */
+  function crochetPartSummary(p, prt) {
+    var word = partShortRowWord(p, prt);
+    var bits = [prt.name];
+    if (partFinished(prt)) {
+      bits.push(prt.makeCount > 1 ? 'all ' + prt.makeCount + ' done ✓' : 'done ✓');
+      var left = 0;
+      p.parts.forEach(function (q) { if (!partFinished(q)) left++; });
+      if (p.parts.length > 1) bits.push(left ? plural(left, 'part') + ' to go' : 'every part done');
+      return bits.join(' · ');
+    }
+    if (!prt.row && !prt.stitch && !prt.piecesDone) {
+      bits.push('not started yet');
+      return bits.join(' · ');
+    }
+    var ri = Store.repeatInfo(prt);
+    bits.push(word + ' ' + ri.workingRow + (prt.targetRows ? ' of ' + prt.targetRows : ''));
+    if (prt.makeCount > 1) bits.push('piece ' + Math.min(prt.piecesDone + 1, prt.makeCount) + ' of ' + prt.makeCount);
     var target = Store.currentTarget(prt);
     bits.push(target ? prt.stitch + '/' + target + ' sts' : prt.stitch + ' sts');
     return bits.join(' · ');
@@ -1431,6 +1654,8 @@
     p.parts.forEach(function (prt) {
       var isActive = prt.id === p.activePartId;
       var tab = button('tab' + (isActive ? ' active' : ''));
+      // Its label changes when it becomes the current part; the key does not.
+      tab.setAttribute('data-focus-key', 'part-tab:' + prt.id);
       tab.setAttribute('aria-pressed', isActive ? 'true' : 'false');
       tab.setAttribute(
         'aria-label',
@@ -1485,6 +1710,40 @@
     els.pTimer.setAttribute('aria-label', (running ? 'Stop' : 'Start') + ' timer, ' + fmtDuration(Store.elapsedMs(p)));
   }
 
+  /**
+   * "Group 4 of 4 · stitch 3 of 6". Wave E: the last group of a round is only
+   * as long as what is left of the round — a 36-stitch round in groups of 10
+   * ends in a group of 6, and a 6-stitch magic ring is one group of 6, not
+   * "stitch 0 of 10". Past the target (an over-count) the group is full size.
+   * @param {number} stitch  stitches done in this row
+   * @param {number} g       group size (> 0)
+   * @param {number|null} target  this row's stitch target
+   * @param {string} approx  '≈ ' when the target was computed
+   */
+  function groupReadout(stitch, g, target, approx) {
+    var groupNo = stitch === 0 ? 1 : Math.ceil(stitch / g);
+    var within = stitch === 0 ? 0 : ((stitch - 1) % g) + 1;
+    var size = g;
+    if (target) {
+      var groups = Math.ceil(target / g);
+      if (groupNo === groups && stitch <= target) size = target - (groups - 1) * g;
+    }
+    var text = 'Group ' + groupNo;
+    if (target) text += ' of ' + approx + Math.ceil(target / g);
+    return text + ' · stitch ' + within + ' of ' + (size < g ? approx : '') + size;
+  }
+
+  /**
+   * "Pattern says 36 · instructions add up to 24", or '' — from the
+   * `printed` / `computed` pair `Store.roundDeviation` fills only when a
+   * round's printed total disagrees with its own instructions.
+   */
+  function countCheckText(dev) {
+    if (!dev || typeof dev.printed !== 'number' || typeof dev.computed !== 'number') return '';
+    if (dev.printed === dev.computed) return '';
+    return 'Pattern says ' + dev.printed + ' · instructions add up to ' + dev.computed;
+  }
+
   /** Fast path: only the numbers and readouts. */
   function updateCounters(p, prt) {
     if (!p || !prt) return;
@@ -1511,10 +1770,10 @@
       els.repeat.hidden = false;
       if (ri.inside) {
         els.repeat.textContent =
-          'Repeat ' + ri.k + ' of ' + ri.times + ' · ' + rowWord(p).toLowerCase() + ' ' + ri.j + ' of ' + ri.len;
+          'Repeat ' + ri.k + ' of ' + ri.times + ' · ' + partRowWord(p, prt).toLowerCase() + ' ' + ri.j + ' of ' + ri.len;
       } else {
         els.repeat.textContent =
-          'Repeat ' + rowWord(p).toLowerCase() + 's ' + prt.repeat.startRow + '–' + prt.repeat.endRow +
+          'Repeat ' + partRowWord(p, prt).toLowerCase() + 's ' + prt.repeat.startRow + '–' + prt.repeat.endRow +
           ' × ' + prt.repeat.times + ' (not in repeat)';
       }
     } else {
@@ -1552,12 +1811,12 @@
     var target = Store.currentTarget(prt);
     var approx = target && Store.isComputed(line) ? '≈ ' : '';
     var readout;
-    if (g > 0) {
-      var groupNo = prt.stitch === 0 ? 1 : Math.ceil(prt.stitch / g);
-      var within = prt.stitch === 0 ? 0 : ((prt.stitch - 1) % g) + 1;
-      readout = 'Group ' + groupNo;
-      if (target) readout += ' of ' + approx + Math.ceil(target / g);
-      readout += ' · stitch ' + within + ' of ' + g;
+    if (partFinished(prt)) {
+      // Wave E: a finished piece has no row being worked, and "Group 1 ·
+      // stitch 0 of 10" under a full progress bar was a number about nothing.
+      readout = 'All ' + prt.targetRows + ' ' + partRowWord(p, prt).toLowerCase() + 's done';
+    } else if (g > 0) {
+      readout = groupReadout(prt.stitch, g, target, approx);
     } else {
       // Grouping off: just the plain stitch number.
       readout = 'stitch ' + prt.stitch;
@@ -1585,10 +1844,17 @@
       } catch (e) {
         dev = null;
       }
-      if (dev && dev.delta > 0) {
+      var lines = [];
+      if (dev && dev.delta > 0) lines.push(dev.delta + ' more than the pattern’s ' + dev.expected);
+      /* Wave E: the round's printed total and what its own instructions add
+         up to disagree (Baphomet R29 prints 36, "(2sc, dec)x8" makes 24). The
+         target stays the printed number — the pattern is quoted, never
+         corrected — but the maker is told before the round goes wrong. */
+      var chk = countCheckText(dev);
+      if (chk && !partFinished(prt)) lines.push(chk);
+      if (lines.length) {
         els.stitchDev.hidden = false;
-        els.stitchDev.textContent =
-          dev.delta + ' more than the pattern’s ' + dev.expected;
+        els.stitchDev.textContent = lines.join(' · ');
       } else {
         els.stitchDev.hidden = true;
         els.stitchDev.textContent = '';
@@ -1804,12 +2070,18 @@
         fb('tap');
         updateCounters(p, prt);
         pushDiagram('stitch');
+        // Announcement policy (see announce): with grouping off there is no
+        // group to mark, so every 50th stitch is the milestone.
+        if (!(p.groupSize > 0) && res.stitch > 0 && res.stitch % 50 === 0) {
+          announce('Stitch ' + res.stitch);
+        }
         break;
 
       case 'group':
         fb('group');
         updateCounters(p, prt);
         pushDiagram('stitch');
+        announce('Stitch ' + res.stitch + ', group ' + res.group + ' done');
         break;
 
       case 'alert':
@@ -1826,7 +2098,9 @@
         updateCounters(p, prt);
         updateBottomBar(p, prt);
         pushDiagram('round');
-        announce(rowWord(p) + ' ' + prt.row);
+        // "Round 5 done" — the piece's own word, and what the number means
+        // (`row` counts COMPLETED rows; "Round 5" alone read as "on round 5").
+        announce(partRowWord(p, prt) + ' ' + prt.row + ' done');
         // 12 #1: a finished row is the earliest honest moment to ask the
         // browser to keep this data. Once, after a real gesture.
         askForPersistOnce();
@@ -2465,11 +2739,33 @@
   /** "Rnd 5 · 13 / 24" for the viewer header. */
   function viewerReadoutText(p, prt) {
     if (!p || !prt) return '';
+    /* Wave E (07, viewer header row): a finished piece has no round being
+       worked, so the working round (row + 1) read "Row 47 · 0 sts" at 46/46.
+       The last round it HAS is the one to name. */
+    if (partFinished(prt)) {
+      return partShortRowWord(p, prt) + ' ' + prt.targetRows + ' · done';
+    }
     var ri = Store.repeatInfo(prt);
     var target = Store.currentTarget(prt);
     var text = partShortRowWord(p, prt) + ' ' + ri.workingRow + ' · ' + prt.stitch;
     text += target ? ' / ' + target : ' sts';
     return text;
+  }
+
+  /**
+   * The viewer header: "Rnd 29 · 3 / 36", and under it, only when the round
+   * being worked prints a total its own instructions do not make, "Pattern
+   * says 36 · instructions add up to 24" (Wave E). The target stays printed.
+   */
+  function setViewerReadout(node, p, prt) {
+    if (!node) return;
+    clear(node);
+    node.appendChild(document.createTextNode(viewerReadoutText(p, prt)));
+    var note = '';
+    if (prt && !partFinished(prt)) {
+      try { note = countCheckText(Store.roundDeviation(prt)); } catch (e) { note = ''; }
+    }
+    if (note) node.appendChild(el('span', 'viewer-readout-note', note));
   }
 
   /**
@@ -2567,6 +2863,14 @@
     var pick = partOrientation(prt);
     viewer.orientSeg.set(pick);
     if (viewer.orientHint) viewer.orientHint.textContent = orientationHint(pick, prt);
+    // Wave E: the other two chip rows follow the Store the same way, so an
+    // Undo moves Worked in and Terms too (only orientation used to).
+    if (viewer.modeSeg) viewer.modeSeg.set(prt.workMode === 'rounds' || prt.workMode === 'rows' ? prt.workMode : 'auto');
+    if (viewer.dialectSeg) {
+      var dpick = partDialectPick(prt);
+      viewer.dialectSeg.set(dpick);
+      if (viewer.dialectHint) viewer.dialectHint.textContent = dialectHint(dpick, prt, true);
+    }
   }
 
   function updateViewerReadout() {
@@ -2574,7 +2878,7 @@
     var p = currentProject();
     var prt = p ? Store.activePart(p) : null;
     syncViewerOrientation();
-    viewer.readout.textContent = viewerReadoutText(p, prt);
+    setViewerReadout(viewer.readout, p, prt);
     if (viewer.shape) {
       var sum = shapeSummary(currentModel());
       viewer.shape.textContent = sum ? sum.name : (prt ? prt.name : '');
@@ -2603,6 +2907,9 @@
     viewer.shapeSub = null;
     viewer.orientSeg = null;
     viewer.orientHint = null;
+    viewer.modeSeg = null;
+    viewer.dialectSeg = null;
+    viewer.dialectHint = null;
     viewer.note = null;
     viewer.sheet = null;
     // give the button its piece back
@@ -2717,7 +3024,8 @@
         viewer.sheet = api;
 
         // The round / stitch readout lives in the sheet header, beside the name.
-        var readout = el('div', 'viewer-readout', viewerReadoutText(p, prt));
+        var readout = el('div', 'viewer-readout', '');
+        setViewerReadout(readout, p, prt);
         viewer.readout = readout;
         var head = api.dialog.querySelector('.sheet-head');
         if (head) {
@@ -2753,6 +3061,7 @@
         );
         modeSeg.node.setAttribute('aria-label', 'Worked in rounds or rows');
         bar.appendChild(modeSeg.node);
+        viewer.modeSeg = modeSeg;
 
         /* Which way up (3D wave C). Second row of the bar so 375 still fits:
            the chips write `Part.orientation` and the hint says what Auto read
@@ -2773,8 +3082,33 @@
         bar.appendChild(orientRow);
         viewer.orientSeg = orientSeg;
         viewer.orientHint = orientHint;
-        syncViewerOrientation();
+
+        /* Wave E — which side of the Atlantic named the stitches. Third row,
+           same shape as the one above: the chips write `Part.dialect`
+           (undoable, template-carried), the hint says what Auto read. It
+           moves heights only — a UK tr is a US dc — never a count. */
+        var dialectRow = el('div', 'viewer-bar-row viewer-bar-row-inline');
+        var dialectLabel = el('span', 'viewer-bar-label', 'Terms');
+        var dialectHintEl = el('div', 'viewer-bar-hint', '');
+        var dialectSeg = segmented(DIALECT_OPTIONS, partDialectPick(prt), function (v) {
+          Store.updatePart(p.id, prt.id, { dialect: v });
+          syncViewerOrientation();
+          pushDiagram('none');
+          updateViewerReadout();
+          render();
+          fb('tap');
+        });
+        dialectSeg.node.setAttribute('aria-label', 'Stitch terms: UK or US');
+        dialectRow.appendChild(dialectLabel);
+        dialectRow.appendChild(dialectSeg.node);
+        dialectRow.appendChild(dialectHintEl);
+        bar.appendChild(dialectRow);
+        viewer.dialectSeg = dialectSeg;
+        viewer.dialectHint = dialectHintEl;
         body.appendChild(bar);
+        /* Fill the shape line now, not only on the canvas's first frame: with
+           no WebGL (or a throttled rAF) the summary used to stay blank. */
+        updateViewerReadout();
 
         var stage = el('div', 'viewer-stage');
         body.appendChild(stage);
@@ -2917,6 +3251,9 @@
     var chosenCraft = p ? p.craft || 'crochet' : 'crochet';
     var nameInput, notesArea, emoji, modeSeg, groupStep;
     var modeField, groupField, craftFieldsWrap, craftFieldsApi, pdfWrap;
+    var craftPdfWrap = null;
+    var craftZone = null;
+    var sheetApi = null;
     var pdf = null;
 
     /* Rows/Rounds and the stitch group size only mean something to crochet. */
@@ -2924,9 +3261,74 @@
       var crochet = chosenCraft === 'crochet';
       if (modeField) modeField.hidden = !crochet;
       if (groupField) groupField.hidden = !crochet;
-      // Importing a crochet pattern into a cross-stitch project makes no sense;
-      // those crafts have their own importers on the project screen.
+      // The crochet PDF block (sections, "From this PDF", save as template)
+      // is crochet's; another craft gets its own importer's drop zone below.
       if (pdfWrap) pdfWrap.hidden = !crochet;
+      mountCraftPdf();
+    }
+
+    /** What the Save button would create, as a patch for Store.createProject. */
+    function newProjectPatch(fallbackName) {
+      var patch = {
+        name: nameInput.value,
+        emoji: emoji.get(),
+        countMode: modeSeg.get(),
+        groupSize: groupStep.get(),
+        notes: notesArea.value
+      };
+      if (!patch.name.trim() && fallbackName) patch.name = fallbackName;
+      patch.templateId = chosenTemplate === PDF_TEMPLATE_ID ? 'blank' : chosenTemplate;
+      patch.craft = chosenCraft;
+      // Whatever the craft's own new-project fields collected.
+      var seed = null;
+      if (craftFieldsApi && typeof craftFieldsApi.get === 'function') {
+        try { seed = craftFieldsApi.get(); } catch (e) { seed = null; }
+      }
+      patch.craftData = seed && typeof seed === 'object' ? seed : {};
+      return patch;
+    }
+
+    /**
+     * Wave E (cross-stitch audit): the New project drop zone for a craft other
+     * than crochet. It catches the file without reading it, creates the
+     * project from the sheet as Save would, and hands the file to that craft's
+     * own importer — `def.openImportSheet`, the very sheet ⋯ → Import pattern
+     * opens — so its preview and its confirm step are the ones shown. Before
+     * this, a cross-stitch or sewing project could only get its PDF after it
+     * had been created, through the ⋯ menu.
+     */
+    function mountCraftPdf() {
+      if (!craftPdfWrap) return;
+      if (craftZone && craftZone.destroy) craftZone.destroy();
+      craftZone = null;
+      clear(craftPdfWrap);
+      var def = chosenCraft === 'crochet' ? null : craftDefs[chosenCraft];
+      craftPdfWrap.hidden = !(def && typeof def.openImportSheet === 'function');
+      if (craftPdfWrap.hidden) return;
+      var accept = Array.isArray(def.importAccept) && def.importAccept.length ? def.importAccept : ['.pdf'];
+      var extra = accept.filter(function (a) { return a !== '.pdf' && a !== '.xml'; });
+      var info = craftInfo(chosenCraft);
+      craftZone = pdfDropZone({
+        accept: accept,
+        icon: info.emoji,
+        ariaLabel: 'Choose a ' + info.name.toLowerCase() + ' pattern file',
+        label: 'Drop a ' + info.name.toLowerCase() + ' PDF' +
+          (extra.length ? ' or ' + extra.join(' / ') + ' file' : '') + ' here, or choose a file',
+        rejectMessage: 'That needs to be a PDF' + (extra.length ? ' or ' + extra.join(' / ') : ''),
+        handOff: function (file) {
+          var base = String(file.name || '').replace(/\.[a-z0-9]+$/i, '').trim();
+          var created = Store.createProject(newProjectPatch(base));
+          Store.setActiveProject(created.id);
+          if (sheetApi) sheetApi.close();
+          render();
+          importFileIntoCraft(def, created.id, file);
+        }
+      });
+      craftPdfWrap.appendChild(craftZone);
+      craftPdfWrap.appendChild(
+        el('p', 'muted craft-pdf-hint', 'The project is made from this sheet, then the ' +
+          info.name.toLowerCase() + ' importer reads the file and shows you what it found before anything is saved into it.')
+      );
     }
 
     function mountCraftFields() {
@@ -2947,6 +3349,7 @@
       subject: editing ? projectId : null,
       title: editing ? 'Edit project' : 'New project',
       build: function (body, api) {
+        sheetApi = api;
         nameInput = textInput(p ? p.name : '', 'Sunny the sheep');
         body.appendChild(field('Name', nameInput));
 
@@ -3080,6 +3483,11 @@
             function () { return modeSeg ? rowWord({ countMode: modeSeg.get() }) : 'Row'; }
           );
           body.appendChild(pdfWrap);
+
+          // Cross-stitch / sewing: the craft's own importer, fed from here.
+          craftPdfWrap = el('div', 'new-pdf new-craft-pdf');
+          craftPdfWrap.hidden = true;
+          body.appendChild(craftPdfWrap);
         }
 
         modeSeg = segmented(
@@ -3131,6 +3539,9 @@
         // The drop zone hangs a document-level guard on dragover/drop.
         if (pdf) pdf.destroy();
         pdf = null;
+        if (craftZone && craftZone.destroy) craftZone.destroy();
+        craftZone = null;
+        sheetApi = null;
       },
       footer: [
         { text: 'Cancel', cls: 'btn ghost', onClick: function (api) { api.close(); } },
@@ -3180,19 +3591,38 @@
               if (res && res.placed) bits.push('placing notes');
               if (extra) bits.push(plural(extra, 'checklist item'));
               if (pdf.wantsTemplate()) {
+                /* Wave E: the template is what the import MADE, not what went
+                   into it. The project's word after the import (it flips a
+                   rows project to rounds when every section is worked in
+                   rounds — the panda's template used to say "Row"), and each
+                   part's readings — above all the dialect the importer lends
+                   from the abbreviations page (the Stylecraft motif's own text
+                   says only tr/dc/ch, so a project made from its template read
+                   UK trebles as US ones). Matched on the text the part got. */
+                var madeParts = fresh ? fresh.parts : [];
+                var madeFor = function (s) {
+                  for (var k = 0; k < madeParts.length; k++) {
+                    if (madeParts[k].patternText === s.text) return madeParts[k];
+                  }
+                  return null;
+                };
                 try {
                   Store.saveTemplate({
                     name: pdf.templateName(),
                     emoji: patch.emoji,
-                    countMode: patch.countMode,
+                    countMode: fresh ? fresh.countMode : patch.countMode,
                     groupSize: patch.groupSize,
                     craft: 'crochet',
                     parts: secs.map(function (s) {
+                      var made = madeFor(s);
                       return {
                         name: s.name || 'Part',
                         makeCount: s.makeCount,
                         patternText: s.text,
-                        placementNotes: s.placement || ''
+                        placementNotes: s.placement || '',
+                        workMode: made ? made.workMode : 'auto',
+                        orientation: made ? made.orientation : 'auto',
+                        dialect: made ? made.dialect : 'auto'
                       };
                     }),
                     checklist: pdf.checkedChecklist()
@@ -3413,7 +3843,7 @@
 
     var nameInput, makeStep, targetInput, repEnable, repStart, repEnd, repTimes,
       alertsInput, placeArea, patternArea, extras, modeSeg, syncModeHint,
-      orientSeg, syncOrientHint;
+      orientSeg, syncOrientHint, dialectSeg, syncDialectHint;
     var repeatOn = !!prt.repeat.enabled;
     var sizeIndex = prt.sizeIndex || 0;
 
@@ -3438,7 +3868,8 @@
         patternText: patternArea.value,
         sizeIndex: sizeIndex,
         workMode: modeSeg ? modeSeg.get() : 'auto',
-        orientation: orientSeg ? orientSeg.get() : 'auto'
+        orientation: orientSeg ? orientSeg.get() : 'auto',
+        dialect: dialectSeg ? dialectSeg.get() : 'auto'
       };
     }
 
@@ -3450,10 +3881,10 @@
     function summaryLine(s, tmp) {
       var bits = [];
       if (!s.rows) {
-        bits.push('No numbered ' + rowWord(p).toLowerCase() + 's found yet');
+        bits.push('No numbered ' + partRowWord(p, prt).toLowerCase() + 's found yet');
       } else {
         bits.push(
-          s.rows + ' ' + rowWord(p).toLowerCase() + (s.rows === 1 ? '' : 's') +
+          s.rows + ' ' + partRowWord(p, prt).toLowerCase() + (s.rows === 1 ? '' : 's') +
           (s.maxRow ? ' (up to ' + s.maxRow + ')' : '')
         );
         if (!s.hasTargets) bits.push('no stitch counts');
@@ -3483,12 +3914,12 @@
     function suggestionBits(sug) {
       var out = [];
       if (sug.targetRows) {
-        out.push('Target ' + rowWord(p).toLowerCase() + 's: ' + sug.targetRows);
+        out.push('Target ' + partRowWord(p, prt).toLowerCase() + 's: ' + sug.targetRows);
       }
       var r = sug.repeat;
       if (r && r.startRow && r.endRow && r.endRow >= r.startRow) {
         out.push(
-          'Repeat ' + rowWord(p).toLowerCase() + 's ' + r.startRow + '–' + r.endRow +
+          'Repeat ' + partRowWord(p, prt).toLowerCase() + 's ' + r.startRow + '–' + r.endRow +
           ' × ' + suggestedTimes(r)
         );
       }
@@ -3521,6 +3952,9 @@
       }
       if (syncOrientHint) {
         try { syncOrientHint(); } catch (e) { /* ignore */ }
+      }
+      if (syncDialectHint) {
+        try { syncDialectHint(); } catch (e) { /* ignore */ }
       }
       if (!extras) return;
       clear(extras);
@@ -3654,8 +4088,29 @@
         };
         syncOrientHint();
 
+        /* Wave E — UK or US stitch names, per piece (`Part.dialect`). The
+           importer lends a section the document's answer, but a section the
+           document could not decide for had no way to be corrected by hand.
+           Saved with the rest of the sheet, so it is one Undo like the two
+           above; Auto reads the text in the box, as they do. */
+        var dialectHintEl = el('div', 'field-hint');
+        dialectSeg = segmented(DIALECT_OPTIONS, partDialectPick(prt), function () {
+          syncDialectHint();
+        });
+        dialectSeg.node.setAttribute('aria-label', 'Stitch terms: UK or US');
+        var dialectWrap = el('div', 'field');
+        dialectWrap.appendChild(el('div', 'field-label', 'Terms'));
+        dialectWrap.appendChild(dialectSeg.node);
+        dialectWrap.appendChild(dialectHintEl);
+        body.appendChild(dialectWrap);
+
+        syncDialectHint = function () {
+          dialectHintEl.textContent = dialectHint(dialectSeg.get(), previewMode());
+        };
+        syncDialectHint();
+
         targetInput = numInput(prt.targetRows == null ? '' : prt.targetRows, 1, 999999, 'e.g. 40');
-        body.appendChild(field('Target ' + rowWord(p).toLowerCase() + 's', targetInput, 'Leave blank for open-ended.'));
+        body.appendChild(field('Target ' + partRowWord(p, prt).toLowerCase() + 's', targetInput, 'Leave blank for open-ended.'));
 
         // Repeat
         var repWrap = el('div', 'field');
@@ -3780,7 +4235,11 @@
           var item = button('menu-item');
           var main = el('div');
           main.appendChild(el('div', null, prt.name + (prt.makeCount > 1 ? ' ×' + prt.makeCount : '')));
-          var sub = shortRowWord(p) + ' ' + prt.row + (prt.targetRows ? ' / ' + prt.targetRows : '');
+          // The same "5 / 20" the counter's bar shows, in the piece's own word
+          // (it used the project's: "Row 5 / 20" for a round piece).
+          var sub = partFinished(prt)
+            ? 'done ✓'
+            : partShortRowWord(p, prt) + ' ' + prt.row + (prt.targetRows ? ' / ' + prt.targetRows : '');
           if (prt.makeCount > 1) sub += ' · ' + prt.piecesDone + ' of ' + prt.makeCount + ' done';
           main.appendChild(el('div', 'toggle-sub', sub));
           item.appendChild(main);
@@ -3923,7 +4382,20 @@
       parts: (source.parts || []).map(function (p) {
         // The pattern text rides along through renames, moves and saves; the
         // editor only ever shows a tag for it and offers to drop it.
-        return { name: p.name, makeCount: p.makeCount, patternText: typeof p.patternText === 'string' ? p.patternText : '' };
+        // Wave E: so do the placing notes and the three per-piece readings
+        // (Worked in / Orientation / Terms). The editor used to rebuild every
+        // part from name + count + text alone, so renaming a template — or
+        // saving a project as one, which goes through this sheet — quietly
+        // dropped all four, and the next project made from it lost them.
+        return {
+          name: p.name,
+          makeCount: p.makeCount,
+          patternText: typeof p.patternText === 'string' ? p.patternText : '',
+          placementNotes: typeof p.placementNotes === 'string' ? p.placementNotes : '',
+          workMode: p.workMode || 'auto',
+          orientation: p.orientation || 'auto',
+          dialect: p.dialect || 'auto'
+        };
       }),
       checklist: (source.checklist || []).slice()
     };
@@ -4180,13 +4652,25 @@
   function sectionRowInfo(text, seq) {
     var probe = { id: 'import:' + seq, patternText: text, sizeIndex: 0 };
     var s = Store.patternSummary(probe);
+    // Wave E: rounds or rows is the SECTION's own reading, not the project's
+    // Count segment — the panda's seven parts were listed as "20 rows" while
+    // every line reads "Rnd 1: …" and the import itself flips the project to
+    // rounds. Null when the text does not say.
+    var mode = null;
+    if (window.Patterns && typeof window.Patterns.workMode === 'function') {
+      try { mode = window.Patterns.workMode(text); } catch (e) { mode = null; }
+    }
     return {
       rows: s.rows,
       computedOnly: s.computedOnly,
       hasTargets: s.hasTargets,
-      // What Store.importPatternSections will set as targetRows (01 #1). Same
-      // rule: rows 1..maxRow, contiguous, at least two of them.
-      target: contiguousTarget(probe)
+      mode: mode === 'rounds' || mode === 'rows' ? mode : null,
+      // What Store.importPatternSections will set as targetRows (01 #1) —
+      // the Store's own rule, asked directly, so the preview can never quote
+      // a different number from the one the part gets.
+      target: typeof Store.targetRowsFromText === 'function'
+        ? Store.targetRowsFromText(text)
+        : contiguousTarget(probe)
     };
   }
 
@@ -4477,6 +4961,16 @@
     function takeFile(file) {
       if (reading || !file) return;
       var isPdf = wantsPdf && isPdfFile(file);
+      // `handOff`: this zone only CATCHES the file and passes it on unread —
+      // the New project sheet for a craft whose own importer reads it.
+      if (typeof opts.handOff === 'function') {
+        if (!isPdf && !matchesAccept(file)) {
+          toast(opts.rejectMessage || (accept.length === 1 && wantsPdf ? 'That isn’t a PDF' : 'That file type isn’t supported'));
+          return;
+        }
+        try { opts.handOff(file); } catch (e) { fail(e); }
+        return;
+      }
       if (!isPdf) {
         if (matchesAccept(file) && typeof opts.onFile === 'function') {
           try { opts.onFile(file); } catch (e) { fail(e); }
@@ -4586,7 +5080,42 @@
       document.removeEventListener('drop', docGuard);
       docGuard = null;
     };
+    // A file handed over by `importFileIntoCraft` (the New project sheet):
+    // the first zone built while it is pending reads it, once it is mounted —
+    // exactly as if it had been dropped here.
+    if (pendingZoneFile) {
+      var handed = pendingZoneFile;
+      pendingZoneFile = null;
+      window.setTimeout(function () {
+        if (document.contains(wrap)) takeFile(handed);
+      }, 0);
+    }
     return wrap;
+  }
+
+  /** See `importFileIntoCraft`. Only ever set for one synchronous call. */
+  var pendingZoneFile = null;
+
+  /**
+   * Open a craft's own importer (`def.openImportSheet`, the same sheet its
+   * ⋯ → Import pattern uses) with `file` already dropped into it, so its own
+   * preview / confirm step is the one the user sees. Both craft importers
+   * build their drop zone through `ctx.pdfDropZone` while the sheet opens, so
+   * the file is parked for exactly that call and cleared after it.
+   * @returns {boolean} whether the importer took the file
+   */
+  function importFileIntoCraft(def, projectId, file) {
+    if (!def || typeof def.openImportSheet !== 'function' || !file) return false;
+    pendingZoneFile = file;
+    try {
+      def.openImportSheet(projectId, ctx);
+    } catch (e) {
+      toast('That sheet could not open');
+    }
+    var taken = pendingZoneFile === null;
+    pendingZoneFile = null;
+    if (!taken) toast('Drop the file again in the import sheet');
+    return taken;
   }
 
   /* ================================================================== *
@@ -4683,6 +5212,7 @@
           rows: info.rows,
           computedOnly: info.computedOnly,
           hasTargets: info.hasTargets,
+          mode: info.mode,
           target: info.target
         };
       });
@@ -4738,7 +5268,11 @@
 
         var meta = [];
         if (r.makeCount > 1) meta.push('×' + r.makeCount);
-        meta.push(r.rows ? r.rows + ' ' + word() + (r.rows === 1 ? '' : 's') : 'no rows');
+        // The section's own word when it has one; the rows it will COUNT (the
+        // target, which includes "Rep 3rd Rnd 3 times") when it has a target.
+        var w = r.mode ? (r.mode === 'rounds' ? 'round' : 'row') : word();
+        var n = r.rows && r.target && !noTargets ? r.target : r.rows;
+        meta.push(r.rows ? n + ' ' + w + (n === 1 ? '' : 's') : 'no ' + w + 's');
         // 01 #1: say the target out loud so it is visible and correctable.
         if (r.rows && r.target && !noTargets) meta.push('→ target ' + r.target);
         if (r.rows && r.computedOnly) meta.push('counts computed ≈');
@@ -5073,9 +5607,12 @@
           }
 
           var isCurrent =
-            hasRow &&
+            (hasRow &&
             lineCoversRow(line, ri.patternRow) &&
-            (currentSection === null || typeof line.section !== 'number' || line.section === currentSection);
+            (currentSection === null || typeof line.section !== 'number' || line.section === currentSection)) ||
+            // Past the written rows the repeat sentence that owns the row is
+            // the current line ("Rep 3rd Rnd 3 times" is rounds 4-6).
+            (!hasRow && line.kind === 'repeat' && line === currentLine);
           var cls = 'pline' + (hasRow ? ' has-row' : ' plain') + (isCurrent ? ' on' : '');
           var node = button(cls, line.text);
           if (hasRow && Store.isComputed(line)) {
@@ -5092,8 +5629,8 @@
           if (hasRow) {
             on(node, 'click', function () {
               confirmSheet({
-                title: 'Jump to ' + rowWord(p).toLowerCase() + ' ' + line.row + '?',
-                message: 'The counter will move to ' + rowWord(p).toLowerCase() + ' ' + line.row +
+                title: 'Jump to ' + partRowWord(p, prt).toLowerCase() + ' ' + line.row + '?',
+                message: 'The counter will move to ' + partRowWord(p, prt).toLowerCase() + ' ' + line.row +
                   ' and stitches reset to 0.',
                 confirmText: 'Jump'
               }).then(function (ok) {
@@ -5101,7 +5638,7 @@
                 Store.jumpToRow(p.id, prt.id, line.row);
                 api.close();
                 render();
-                announce(rowWord(p) + ' ' + Math.max(0, line.row - 1));
+                announce('Working ' + partRowWord(p, prt).toLowerCase() + ' ' + line.row);
               });
             });
           } else {
@@ -5171,6 +5708,7 @@
           var row = el('div', 'list-item' + (item.done ? ' done' : ''));
 
           var chk = button('check', '✓', item.text);
+          chk.setAttribute('data-focus-key', 'chk:' + item.id);
           chk.setAttribute('role', 'checkbox');
           chk.setAttribute('aria-checked', item.done ? 'true' : 'false');
           on(chk, 'click', function () {
@@ -5184,6 +5722,7 @@
             var inp = textInput(item.text, 'Sew the tail on');
             inp.className = 'item-edit';
             inp.setAttribute('aria-label', 'Rename ' + item.text);
+            inp.setAttribute('data-focus-key', 'rename:' + item.id);
             var settled = false;
             function commit() {
               if (settled) return;
@@ -5218,6 +5757,7 @@
             }, 0);
           } else {
             var text = button('item-text item-text-btn', item.text, 'Rename ' + item.text);
+            text.setAttribute('data-focus-key', 'rename:' + item.id);
             on(text, 'click', function () {
               editingId = item.id;
               refresh();
@@ -5226,12 +5766,14 @@
           }
 
           var up = button('item-move', '▲', 'Move ' + item.text + ' up');
+          up.setAttribute('data-focus-key', 'up:' + item.id);
           up.disabled = idx === 0;
           on(up, 'click', function () {
             Store.moveChecklistItem(p.id, item.id, -1);
             refresh();
           });
           var down = button('item-move', '▼', 'Move ' + item.text + ' down');
+          down.setAttribute('data-focus-key', 'down:' + item.id);
           down.disabled = idx === p.checklist.length - 1;
           on(down, 'click', function () {
             Store.moveChecklistItem(p.id, item.id, 1);
@@ -5311,7 +5853,12 @@
           }
         }
 
+        // D5: rebuild the list without dropping keyboard focus.
         function refresh() {
+          preserveFocus(refreshNow);
+        }
+
+        function refreshNow() {
           var done = 0;
           p.checklist.forEach(function (i) { if (i.done) done++; });
           count.textContent = p.checklist.length ? done + ' of ' + p.checklist.length + ' done' : '';
@@ -5445,7 +5992,9 @@
         for (var i = p.history.length - 1; i >= 0; i--) {
           var h = p.history[i];
           var row = el('div', 'hist-item');
-          row.appendChild(el('span', null, h.partName + ' · ' + shortRowWord(p) + ' ' + h.row));
+          // The piece's own word when the piece is still there.
+          var hp = Store.part(p, h.partId);
+          row.appendChild(el('span', null, h.partName + ' · ' + (hp ? partShortRowWord(p, hp) : shortRowWord(p)) + ' ' + h.row));
           row.appendChild(el('span', 'hist-when', fmtClock(h.ts)));
           list.appendChild(row);
         }
@@ -5668,13 +6217,36 @@
     return 'skip';                                  // identical, or local is newer
   }
 
-  function countsLine(counts) {
+  /**
+   * "Projects: 1 new · 1 newer in the file · 5 already here". Wave E: this
+   * used to be one line of `preview.counts`, which adds projects AND
+   * templates — the built-in ones included — so a backup of seven projects
+   * read "1 new · 1 will be replaced · 17 identical · 0 older", a number that
+   * matched nothing on the screen. Now it counts each list it sits above, and
+   * leaves out the zeroes.
+   */
+  function countsFor(rows) {
+    var c = { 'new': 0, replace: 0, identical: 0, older: 0 };
+    rows.forEach(function (r) { if (c[r.status] !== undefined) c[r.status]++; });
     var bits = [];
-    bits.push(counts['new'] + ' new');
-    bits.push(counts.replace + ' will be replaced');
-    bits.push(counts.identical + ' identical');
-    bits.push(counts.older + ' older');
+    if (c['new']) bits.push(c['new'] + ' new');
+    if (c.replace) bits.push(c.replace + ' newer in the file');
+    if (c.older) bits.push(c.older + ' older in the file');
+    if (c.identical) bits.push(c.identical + ' already here');
     return bits.join(' · ');
+  }
+
+  function countsLine(preview) {
+    var lines = [];
+    var pl = countsFor(preview.projects || []);
+    // Built-in templates are in every backup and on every phone; they only
+    // count when the file changes one.
+    var tl = countsFor((preview.templates || []).filter(function (r) {
+      return !(r.builtIn && r.status === 'identical');
+    }));
+    if (pl) lines.push('Projects: ' + pl);
+    if (tl) lines.push('Templates: ' + tl);
+    return lines.join('\n') || 'Nothing in this file.';
   }
 
   function importRow(row, choices, label) {
@@ -5683,7 +6255,8 @@
     main.appendChild(el('div', 'imp-row-name', row.name || '(unnamed)'));
     var meta = [];
     if (label) meta.push(label);
-    if (row.craft) meta.push(row.craft);
+    // The craft's own name ("Cross-stitch"), not its id ("crossstitch").
+    if (row.craft) meta.push(craftInfo(row.craft).name);
     meta.push('in the file: ' + fmtBackupDate(row.updatedAt));
     meta.push('on this phone: ' + (row.localUpdatedAt ? fmtBackupDate(row.localUpdatedAt) : 'not here yet'));
     main.appendChild(el('div', 'imp-row-meta', meta.join(' · ')));
@@ -5712,7 +6285,9 @@
       title: 'Import this backup?',
       cls: 'sheet-import-preview',
       build: function (body) {
-        body.appendChild(el('p', 'imp-counts', countsLine(preview.counts)));
+        countsLine(preview).split('\n').forEach(function (line) {
+          body.appendChild(el('p', 'imp-counts', line));
+        });
 
         var changedProjects = preview.projects.filter(function (r) { return r.status !== 'identical'; });
         var changedTemplates = preview.templates.filter(function (r) { return r.status !== 'identical'; });
@@ -5733,7 +6308,7 @@
         }
 
         body.appendChild(
-          el('p', 'muted', 'Keep both copies have no page images — those stay with the project that owns them.')
+          el('p', 'muted', 'A “Keep both” copy has no page images — those stay with the project that owns them.')
         );
       },
       footer: [
@@ -5753,7 +6328,14 @@
             api.close();
             applyTheme(Store.settings().theme, false);
             render();
-            toast('Imported ' + plural(n, 'project'), {
+            // Wave E: a templates-only import said "Imported 0 projects".
+            var tplsIn = preview.templates.filter(function (r) {
+              return r.status !== 'identical' && choices.templates[r.id] && choices.templates[r.id] !== 'skip';
+            }).length;
+            var what = [];
+            if (n || !tplsIn) what.push(plural(n, 'project'));
+            if (tplsIn) what.push(plural(tplsIn, 'template'));
+            toast('Imported ' + what.join(' and '), {
               ms: 8000,
               actionText: Store.canUndoImport() ? 'Undo import' : '',
               onAction: Store.canUndoImport()
@@ -6255,7 +6837,8 @@
       if (res && res.event === 'none') return;
       fb('undo');
       render();
-      announce(rowWord(p) + ' ' + Store.activePart(p).row);
+      var back = Store.activePart(p);
+      announce('Back to ' + partRowWord(p, back).toLowerCase() + ' ' + (back.row + 1));
     });
 
     // Pattern line
@@ -6411,7 +6994,9 @@
     crafts: craftList,
     ctx: ctx,
     pdfDropZone: pdfDropZone,
-    version: APP_VERSION
+    version: APP_VERSION,
+    /** QA only: open every sheet down the no-`showModal` path (UX sweep D3). */
+    __forceSheetFallback: function (on) { forceSheetFallback = !!on; return forceSheetFallback; }
   };
 
   if (document.readyState === 'loading') {

@@ -2395,6 +2395,90 @@ group('parseOXS: ornament types Ursa Software actually writes');
   assertEqual(r.warnings.join('|').indexOf('unknown objecttype'), -1, 'and nothing is unknown');
 })();
 
+group('parseKey: wave E ground-truth fixes (xstitch-audit)');
+
+(function () {
+  /* KG-Chart key page: the "62 / 62" footer sorted in after the code. */
+  var r = X.parseKey('Color Table (DMC)\nCross Stitch\n208 (1171 ct)\n34062 / 62 (1273 ct)\n3022 (1694 ct)');
+  assertEqual(r.entries.map(function (e) { return e.code; }), ['208', '340', '3022'],
+    'footer glued after the code: "34062 / 62" is DMC 340');
+  assertEqual(r.entries[1].stitchCount, 1273, 'and keeps its count');
+  assertEqual(X.parseKey('Color Table (DMC)\n38 / 383756 (905 ct)').entries[0].code, '3756',
+    'footer glued in front still works');
+
+  /* Tiny Modernist "Welcome": the 958 row's Cosmo number wrapped onto a line of its own. */
+  var w = X.parseKey('X BS DMC Cosmo\n14-ct 4" x 5.7" 725 701\n3609 482\n57h x 80w 958\n844\n' +
+    'Stitches used: 906 326\n905 327');
+  assertEqual(w.entries.map(function (e) { return e.code; }), ['725', '3609', '958', '906', '905'],
+    'a wrapped equivalents number (Cosmo 844) is not a DMC row of its own');
+  var w2 = X.parseKey('X BS DMC Cosmo\n725 701\n3609 482\n3801 838');
+  assertEqual(w2.entries.length, 3, 'complete two-column rows are all kept');
+
+  /* Tiny Modernist "Foxy": DMC 666 and the 2017 shade 19. */
+  var f = X.parseKey('X DMC\nBlanc\n19\n3854\nO 666\n2 3347\nAnchor\n1 or 2\nn/a\n313\n1003\n9\n46\n266');
+  assertEqual(f.entries.map(function (e) { return e.code; }), ['Blanc', '19', '3854', '666', '3347'],
+    '"O 666" is DMC 666, "19" between two DMC rows is DMC 19, the Anchor 9 is not DMC 9');
+  assertEqual(X.parseKey('Colour key\n19\n20 30').entries.length, 0,
+    'a bare 19 outside a DMC column is not a colour');
+
+  /* Size rows: hyphenated counts, curly inch marks, turned to w x h. */
+  var s = X.parseKey('Fabric Design Size\n14-ct 2.5” x 3.5”\n16-ct 2" x 3"\nStitch Count: 35h x 49w');
+  assertEqual(s.sizes, [{ count: 14, wIn: 3.5, hIn: 2.5 }, { count: 16, wIn: 3, hIn: 2 }],
+    '"14-ct 2.5” x 3.5”" is read and turned to match "35h x 49w"');
+
+  /* KG-Chart prints every finished size for stitching over two. */
+  var aida = X.parseKey('Stitch Count: 500w x 500h\nCloth: Aida\n' +
+    'Finished Size: 181.42 cm x 181.42 cm (14 ct./inch)');
+  assertEqual(aida.sizes, [{ count: 14, wIn: 35.71, hIn: 35.71 }],
+    'on aida the doubled printed size is corrected to the real one');
+  assertTrue(/printed finished size is twice/.test(aida.warnings.join(' ')), 'and flagged');
+  assertEqual(aida.fabric.over, null, 'aida is not made "over two"');
+  var linen = X.parseKey('Stitch Count: 224w x 288h\nCloth: Linen\n' +
+    'Finished Size: 71.12 cm x 91.44 cm (16 ct./inch)');
+  assertEqual(linen.fabric.over, 2, 'on linen the doubled printed size means over two');
+  assertEqual(linen.sizes, [{ count: 16, wIn: 28, hIn: 36 }], 'and the printed size stands');
+  assertEqual(X.parseKey('Stitch Count: 100w x 100h\nAida 14 ct\nFinished Size: 7.14 x 7.14 in on 14 ct')
+    .warnings.join(' ').indexOf('twice'), -1, 'a correct printed size is left alone');
+
+  /* Magazine: "14 HPI (28-count evenweave)" and knot strands. */
+  var m = X.parseKey('DESIGN AREA 14 HPI (28-count evenweave)\nCross stitch in two strands\n' +
+    'Backstitch in one strand\nFrench knots in one strand');
+  assertEqual([m.fabric.count, m.fabric.over], [28, 2], '"14 HPI" on 28-count is over two');
+  assertEqual([m.strandsDefault, m.bsStrands, m.knotStrands], [2, 1, 1],
+    'cross, backstitch and French-knot strands are read separately');
+
+  /* A three-column KG-Chart key handed over one visual row at a time. */
+  var kg = X.parseKey('Color Table (DMC)\nCross Stitch 798 (2003 ct) 926 (2868 ct)\n' +
+    '310 (21207 ct) 3810 (1188 ct) 3837 (827 ct)\n939 (7398 ct) 3760 (2599 ct) ♪ 210 (757 ct)\n' +
+    '815 (1583 ct) 38 / 383756 (905 ct)\n500 (18643 ct) 34062 / 62 (1273 ct)');
+  assertEqual(kg.entries.map(function (e) { return e.code; }),
+    ['310', '939', '815', '500', '798', '3810', '3760', '3756', '340', '926', '3837', '210'],
+    'a key read across its columns is put back in column order, footers and all');
+  assertEqual(kg.entries[7].stitchCount, 905, 'the glued footer leaves the count alone');
+  assertEqual(kg.entries[11].symbol, '♪', 'a surviving symbol stays with its row');
+
+  /* 'Stitches Length' glued onto the row. */
+  var len = X.parseKey('X BS DMC Name:\n453 Shell Grey LT 132 28.8 in.\n310 Black 79 20.2 in.');
+  assertEqual(len.entries.map(function (e) { return [e.name, e.stitchCount]; }),
+    [['Shell Grey LT', 132], ['Black', 79]], 'a trailing floss length is not part of the name');
+
+  /* DMC library: two legends side by side, each with its own footnote. */
+  var dmc = X.parseKey('* 1 skein in each colour\ncross stitch Use 2 strands backstitch Use 1 strand\n' +
+    '503 3832\n3833 E677\n* 1 skein in each colour\n3808 3831\n501 3832\n* 1 skein in each colour');
+  assertEqual(dmc.entries.map(function (e) { return e.code + '/' + e.kind; }),
+    ['503/cross', '3832/cross', '3833/cross', 'E677/cross', '3808/back', '3831/back', '501/back', '3832/back'],
+    'headings side by side: the first table is cross stitch, the next backstitch');
+  assertEqual([dmc.strandsDefault, dmc.bsStrands], [2, 1],
+    'and "Use 1 strand" after "backstitch" is the backstitch number');
+  assertEqual(X.parseKey('X DMC\n3347\n(2 strands) p 8 pppp\n3345').entries.map(function (e) { return e.code; }),
+    ['3347', '3345'], '"(2 strands)" between two DMC rows is not DMC 2');
+  assertEqual(X._key.stripChartSoup('O 666 46 p 22222 8 22222222 Ê ü Ê ü 2 888 Ê 88 ÊÊ 2 « OOO 2'),
+    'O 666 46', 'chart soup is cut after a real 666, not in front of it');
+
+  assertEqual(X.flossFor('DMC', '158').name, 'Cornflower Blue Medium Very Dark',
+    'DMC 158 is spelled "Blue" (the floss list shown in the app had "Blu")');
+})();
+
 /* =====================================================================
  * Summary
  * ===================================================================== */

@@ -1032,6 +1032,100 @@ var PANDA_TEXT = [
 })();
 
 /* ---------------------------------------------------------------------- */
+/* Wave E (app-shell): the numbers the counter shows must be the pattern's.
+   Synthetic text in the shape of the two fixtures that broke — the Stylecraft
+   hood motif ("Rep 3rd Rnd 3 times" = rounds 4-6) and the Premier throw
+   ("Rep Row 2 …" past the written rows). No fixture text is copied here.   */
+
+(function () {
+  group('Wave E — targets and lines past the written rows');
+  fresh();
+
+  var MOTIF = 'Motif (make 2)\n' +
+    'Foundation Rnd: 3ch, 2tr, (2ch, 3tr) 3 times, 2ch, join with a sl st. Fasten off.\n' +
+    '1st Rnd: 1 standing tr in any 2ch sp, (2tr, 2ch, 3tr) in same sp, (3tr, 2ch, 3tr) in each 2ch sp around, sl st to top of first tr. Fasten off.\n' +
+    '2nd Rnd: (3tr, 2ch, 3tr) in each corner sp, 3tr in each sp between groups, sl st to top of first tr. Fasten off.\n' +
+    '3rd Rnd: (3tr, 2ch, 3tr) in each corner sp, 3tr in each sp between groups, sl st to top of first tr. Fasten off.\n' +
+    'Rep 3rd Rnd 3 times changing colours.\n';
+  var THROW = 'Blanket\n' +
+    'Row 1: 1 hdc in 3rd ch from hook, 1 hdc in each ch to end. (94)\n' +
+    'Row 2: ch 2, 1 hdc in back loop of each st to end. (94)\n' +
+    'Rep Row 2 12 more times.\n';
+  var AMI = 'Rnd 1: 6 sc in magic ring (6)\nRnd 2: inc in each st around (12)\nRnd 3: (sc, inc) x6 (18)\n';
+
+  var motifMax = Patterns.summary(Patterns.parse(MOTIF)).maxRow;
+  assertEqual(Store.targetRowsFromText(MOTIF), 6,
+    'targetRowsFromText: "Rep 3rd Rnd 3 times" after rounds 1-3 makes a 6-round target (was 3: the counter called the motif done halfway)');
+  assertEqual(Store.targetRowsFromText(MOTIF), motifMax, 'and it is the same number Patterns.summary().maxRow reports');
+  assertEqual(Store.targetRowsFromText(AMI), 3, 'a plain contiguous section is unchanged');
+  assertEqual(Store.targetRowsFromText(THROW), Patterns.summary(Patterns.parse(THROW)).maxRow,
+    'a counted repeat of Row 2 extends the throw\'s target to the parser\'s own maxRow');
+
+  var proj = Store.createProject({ name: 'Wave E motif', countMode: 'rounds' });
+  var res = Store.importPatternSections(proj.id, [{ name: 'Motif', makeCount: 2, text: MOTIF }], { mode: 'parts', text: MOTIF });
+  proj = Store.project(proj.id);
+  var motif = proj.parts.filter(function (p) { return p.name === 'Motif'; })[0];
+  assertEqual(motif && motif.targetRows, 6, 'importPatternSections sets the 6-round target on the motif');
+  assertEqual(res.targeted, 1, 'and reports it as targeted');
+
+  var lines = Store.linesFor(motif);
+  var agree = 0;
+  for (var r = 1; r <= 8; r++) if (Store.lineForRow(motif, r) === Patterns.lineFor(lines, r)) agree++;
+  assertEqual(agree, 8, 'lineForRow answers rows 1-8 exactly as Patterns.lineFor (the index missed the repeat line)');
+  var l5 = Store.lineForRow(motif, 5);
+  assertEqual(l5 && l5.kind, 'repeat', 'round 5 of the motif shows the "Rep 3rd Rnd" sentence as its pattern line (was blank)');
+  assertEqual(Store.lineForRow(motif, 7), null, 'and round 7, past the repeat, has no line');
+
+  var tp = Store.createProject({ name: 'Wave E throw', countMode: 'rows' });
+  Store.updatePart(tp.id, tp.parts[0].id, { patternText: THROW });
+  var throwPart = Store.project(tp.id).parts[0];
+  var tl = Store.linesFor(throwPart);
+  var bad = [];
+  for (var q = 1; q <= 16; q++) {
+    var theirs = Patterns.targetFor(tl, q);
+    theirs = typeof theirs === 'number' && theirs > 0 ? Math.floor(theirs) : null;
+    if (Store.targetFor(throwPart, q) !== theirs) bad.push(q);
+  }
+  assertEqual(bad, [], 'targetFor agrees with Patterns.targetFor on rows 1-16 of the throw');
+  assertEqual(Store.targetFor(throwPart, 10), 94, 'row 10 of the throw targets row 2\'s 94 stitches (was no target at all)');
+})();
+
+(function () {
+  group('Wave E — a project made from a template gets the targets its text implies');
+  fresh();
+  var AMI = 'Rnd 1: 6 sc in magic ring (6)\nRnd 2: inc in each st around (12)\nRnd 3: (sc, inc) x6 (18)\nRnd 4-5: sc around (18)\n';
+  var tpl = Store.saveTemplate({
+    name: 'Wave E ami',
+    emoji: '🧸',
+    countMode: 'rounds',
+    groupSize: 10,
+    parts: [
+      { name: 'Head', makeCount: 1, patternText: AMI, dialect: 'uk', workMode: 'rounds', orientation: 'bottom-up' },
+      { name: 'Scarf', makeCount: 1, patternText: '' }
+    ],
+    checklist: []
+  });
+  var made = Store.createProject({ name: 'From Wave E ami', templateId: tpl.id });
+  var head = made.parts[0];
+  var scarf = made.parts[1];
+  assertEqual(head.targetRows, 5, 'the Head part gets targetRows 5 from its template text (was null: no bar, no "Head complete")');
+  assertEqual(scarf.targetRows, null, 'a template part with no text stays open-ended');
+  assertEqual([head.dialect, head.workMode, head.orientation], ['uk', 'rounds', 'bottom-up'],
+    'and the three per-piece readings ride along');
+})();
+
+(function () {
+  group('Wave E — assembly steps the PDF wrapped mid-phrase');
+  function sug(text) { return Store.suggestChecklist(text).map(function (s) { return s.text + ' [' + s.confidence + ']'; }); }
+  var got = sug('Making up\nAttach the next motif onto the centre motif of the first 3-motif\n' +
+    'strip, then attach the sides of this centre motif to the side edges of the first and third motif.\n');
+  assertEqual(got, ['Attach the next motif onto the centre motif of the first 3-motif strip, then attach… [weak]'],
+    'a line with no closing stop whose next line starts lower-case is rejoined (weak), and the cut never ends on "the"');
+  assertEqual(sug('Sew the ears on firmly.\nthen weave in the ends.\n'), ['Sew the ears on firmly [strong]'],
+    'a line that ends its own sentence is not glued to the next one');
+})();
+
+/* ---------------------------------------------------------------------- */
 
 wipe();
 try { window.localStorage.removeItem(K + '.preimport'); } catch (e) { /* ignore */ }

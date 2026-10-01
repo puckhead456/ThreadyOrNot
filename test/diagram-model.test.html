@@ -242,7 +242,10 @@ function everyStitchWellFormed(model) {
       if (!(s.c === null || (typeof s.c === 'string' && /^#[0-9a-f]{6}$/.test(s.c)))) {
         return 'round ' + i + ' stitch ' + j + ' colour is ' + JSON.stringify(s.c);
       }
-      if (!(typeof s.h === 'number' && isFinite(s.h) && s.h > 0)) return 'round ' + i + ' stitch ' + j + ' h';
+      // h 0 is a chain space (wave E); anything else must stand up
+      if (!(typeof s.h === 'number' && isFinite(s.h) && (s.h > 0 || (s.h === 0 && s.t === 'ch')))) {
+        return 'round ' + i + ' stitch ' + j + ' h';
+      }
       if (!(typeof s.w === 'number' && isFinite(s.w) && s.w > 0)) return 'round ' + i + ' stitch ' + j + ' w';
     }
   }
@@ -989,7 +992,8 @@ group('9. Deviation: my count vs the pattern\'s (05 #12)');
 
   assertEqual(m.deviation, { expected: 24, actual: 29 }, 'the pattern says 24, the needle says 29');
   assertEqual(Store.roundDeviation(prt),
-    { expected: 24, actual: 29, row: 4, delta: 5 }, 'roundDeviation spells out the gap');
+    { expected: 24, actual: 29, row: 4, delta: 5, printed: null, computed: null },
+    'roundDeviation spells out the gap (no printed/computed pair: the round agrees with itself)');
   assertEqual(m.rounds[m.current].count, 29, 'the round itself grows to what was tapped');
 
   prt.stitch = 20;
@@ -1019,9 +1023,9 @@ group('9. Deviation: my count vs the pattern\'s (05 #12)');
   // A part on row 0 with nothing tapped.
   var zp = mkProject('ZD Dev zero', 'rounds');
   var zprt = mkPart(zp, SPHERE, { row: 0, stitch: 0 });
-  assertEqual(Store.roundDeviation(zprt), { expected: 6, actual: 0, row: 1, delta: -6 },
+  assertEqual(Store.roundDeviation(zprt), { expected: 6, actual: 0, row: 1, delta: -6, printed: null, computed: null },
     'a fresh part is six short of round 1');
-  assertEqual(Store.roundDeviation(null), { expected: null, actual: 0, row: 0, delta: null },
+  assertEqual(Store.roundDeviation(null), { expected: null, actual: 0, row: 0, delta: null, printed: null, computed: null },
     'and roundDeviation(null) never throws');
 })();
 
@@ -1448,6 +1452,138 @@ group('13b. Chain spaces are positions, not stitches');
 })();
 
 /* ====================================================================== */
+group('13c. Wave E: chain heights, lace corner sites, turned R-rows');
+/* ====================================================================== */
+
+(function () {
+  fresh();
+  // A chain is a SPACE: expand says h 0 and the model must keep that 0, not
+  // stand the chain up as a one-sc-high stitch (posNum used to turn 0 into 1).
+  withPatterns({
+    expand: function () {
+      return { stitches: [{ t: 'sc', c: null, h: 1, w: 1 }, { t: 'ch', c: null, h: 0, w: 0.75 },
+        { t: 'dc', c: null, h: 2.01, w: 1 }, { t: 'sc', c: null, w: 1 }],
+        inc: [], dec: [], color: null, height: 1, state: null };
+    }
+  }, function () {
+    var proj = mkProject('ZD ch height', 'rounds');
+    var prt = mkPart(proj, 'Rnd 1: sc, ch 3, dc, sc (4)\n', { row: 0, stitch: 0, workMode: 'rounds' });
+    var st = Store.diagramModel(prt, proj).rounds[0].stitches;
+    assertEqual(st.map(function (s) { return s.h; }), [1, 0, 2.01, 1],
+      'a chain keeps h 0; a record with no height at all still falls back to 1');
+    assertEqual(st[1].w, 0.75, 'and a loop chain keeps its chord width (Patterns.LOOP_CHAIN_W)');
+  });
+
+  // Post and loop placement pass through when expand sends them (07 D9), and
+  // their absence — or a value the renderer does not know — adds nothing.
+  withPatterns({
+    expand: function () {
+      return { stitches: [
+        { t: 'dc', c: null, h: 2.01, w: 1, post: 'front' },
+        { t: 'dc', c: null, h: 2.01, w: 1, post: 'back' },
+        { t: 'sc', c: null, h: 1, w: 1, lp: 'blo' },
+        { t: 'sc', c: null, h: 1, w: 1, lp: 'flo' },
+        { t: 'sc', c: null, h: 1, w: 1 },
+        { t: 'sc', c: null, h: 1, w: 1, post: 'sideways', lp: 'both' }],
+        inc: [], dec: [], color: null, height: 2.01, state: null };
+    }
+  }, function () {
+    var proj = mkProject('ZD post lp', 'rounds');
+    var prt = mkPart(proj, 'Rnd 1: fpdc, bpdc, sc blo, sc flo, sc, sc (6)\n', { row: 0, stitch: 0, workMode: 'rounds' });
+    var st = Store.diagramModel(prt, proj).rounds[0].stitches;
+    assertEqual(st.map(function (s) { return s.post || null; }), ['front', 'back', null, null, null, null],
+      'post: front / back pass through; absent or unknown stays absent');
+    assertEqual(st.map(function (s) { return s.lp || null; }), [null, null, 'blo', 'flo', null, null],
+      'lp: blo / flo pass through; absent or unknown stays absent');
+    assertTrue(!('post' in st[4]) && !('lp' in st[4]),
+      'a plain stitch carries no post / lp key at all', JSON.stringify(st[4]));
+  });
+
+  // Persian Tiles round 4: `dc in next 3 sc, ch 3, (sc, ch 2, sc) in ch-3 sp,
+  // ch 3` — 20 stitches over 52 records, four corner groups with a chain run
+  // inside each. The count does not grow, so the old "+1 per site" test called
+  // every such round a CIRCLE and three of them vetoed the corner prior.
+  function lace() {
+    var list = [], r, k;
+    function add(t, h, w, n) { for (k = 0; k < n; k++) list.push({ t: t, c: null, h: h, w: w }); }
+    for (r = 0; r < 4; r++) {
+      add('dc', 2.01, 1, 3); add('ch', 0, 1, 3); add('inc', 1, 1, 1); add('ch', 0, 1, 2);
+      add('inc+', 1, 1, 1); add('ch', 0, 1, 3);
+    }
+    return list;
+  }
+  withPatterns({
+    expand: function () { return { stitches: lace(), color: null, height: 2.01, state: null }; }
+  }, function () {
+    var proj = mkProject('ZD lace corners', 'rounds');
+    var prt = mkPart(proj, 'Rnd 1: lace\nRnd 2: lace\nRnd 3: lace\nRnd 4: lace\n',
+      { row: 0, stitch: 0, workMode: 'rounds' });
+    var m = Store.diagramModel(prt, proj);
+    assertEqual(m.rounds[0].inc, [6, 19, 32, 45], 'the four corner groups are the increase sites');
+    assertEqual(m.shape.corners, 4, 'and they read as four corners, measured by record width');
+    assertEqual(m.shape.cornersSource, 'sites', '...from the sites themselves, not vetoed as a circle');
+  });
+
+  // A bare `R1:` is Round in amigurumi and Row in a turned piece.
+  var proj3 = mkProject('ZD turned R rows', 'rounds');
+  var scarf = mkPart(proj3, 'Scarf\nR1: Ch71, turn.\nR2: sc in the 2nd chain from the hook: 70sc, ch1, turn\n' +
+    'R3: sc in each st across 70sc.\nFasten off.\n', { row: 0, stitch: 0 });
+  assertEqual(Store.partWorkMode(scarf, proj3), 'rows',
+    'the snowman Scarf — R lines that TURN the work are rows (it drew as a 70-around tube); ' +
+    'Patterns.workMode decides this now, the store-side workaround is gone');
+  var proj4 = mkProject('ZD R rounds', 'rows');
+  var ami = mkPart(proj4, 'R1: 6 sc in MR (6)\nR2: inc x6 (12)\nR3: (sc, inc) x6 (18)\n', { row: 0, stitch: 0 });
+  assertEqual(Store.partWorkMode(ami, proj4), 'rounds', 'an amigurumi R1/R2/R3 that never turns is still rounds');
+  // A designer error kept as printed (Baphomet R29 "(2sc, dec)x8 [36]" makes
+  // 24 from 48): `expected` is the printed 36, and the pair is published.
+  var projE = mkProject('ZD printed vs computed', 'rounds');
+  var errText = 'R1: 8 sc in MR (8)\nR2: inc x8 (16)\nR3: (sc, inc)x8 (24)\nR4: (2sc, inc)x8 (32)\n' +
+    'R5: (sc, inc)x16 (48)\nR6: (2sc, dec)x8 [36]\n';
+  var errPart = mkPart(projE, errText, { row: 5, stitch: 24 });
+  var dvE = Store.roundDeviation(errPart);
+  assertEqual([dvE.expected, dvE.printed, dvE.computed, dvE.delta], [36, 36, 24, -12],
+    'roundDeviation keeps the PRINTED 36 as expected and says the instructions make 24');
+  var okPart = mkPart(mkProject('ZD printed ok', 'rounds'), errText, { row: 4, stitch: 48 });
+  var dvOk = Store.roundDeviation(okPart);
+  assertEqual([dvOk.expected, dvOk.printed, dvOk.computed], [48, null, null],
+    'a round whose printed total agrees with its instructions carries no pair');
+  var mE = Store.diagramModel(errPart, projE);
+  assertEqual([mE.rounds[5].count, mE.rounds[5].printed, mE.rounds[5].computed, mE.rounds[4].printed],
+    [36, 36, 24, null], 'the model round is kept as printed and carries the same pair');
+  // The shape the parser is adding on the expand record wins over the parse line.
+  withPatterns({
+    expand: function () {
+      return { stitches: [{ t: 'sc', c: null, h: 1, w: 1 }], printed: 18, computed: 9,
+        inc: [], dec: [], color: null, height: 1, state: null };
+    }
+  }, function () {
+    var pj = mkProject('ZD expand pair', 'rounds');
+    var pp = mkPart(pj, 'Rnd 1: (sc, inc) (18)\n', { row: 0, stitch: 0, workMode: 'rounds' });
+    var r0 = Store.diagramModel(pp, pj).rounds[0];
+    assertEqual([r0.printed, r0.computed], [18, 9], 'expand’s own printed / computed on a round record are read');
+  });
+
+  // A closing round under a third of the round before it is not a round: no
+  // decrease takes more than three stitches to one (cato Ears: 21, 21, 2).
+  var proj6 = mkProject('ZD partial last', 'rounds');
+  var stray = mkPart(proj6, 'Rnd 1: 6 sc in magic ring (6)\nRnd 2: inc x6 (12)\nRnd 3: (sc, inc) x6 (18)\n' +
+    'Rnd 4: (2 sc, inc) x6 (24)\nRnd 5: sc 2, then fasten off (2)\n', { row: 0, stitch: 0 });
+  var sm = Store.diagramModel(stray, proj6);
+  assertEqual(counts(sm), [6, 12, 18, 24, 2], 'the ear-like sequence');
+  assertEqual(sm.rounds.map(function (r) { return r.outlier; }), [false, false, false, false, true],
+    'the trailing "sc 2, then fasten off" is flagged, so it cannot cap the cup shut');
+  var shut = mkPart(mkProject('ZD pull shut', 'rounds'), 'Rnd 1: 6 sc in magic ring (6)\nRnd 2: inc x6 (12)\n' +
+    'Rnd 3: (sc, inc) x6 (18)\nRnd 4: (sc, dec) x6 (12)\nRnd 5: dec x6 (6)\n', { row: 0, stitch: 0 });
+  var shm = Store.diagramModel(shut, null);
+  assertEqual(shm.rounds.map(function (r) { return r.outlier; }), [false, false, false, false, false],
+    'a real close — 18, 12, 6, each at least a third of the one before — is never flagged');
+  var proj5 = mkProject('ZD Rnd turn', 'rows');
+  var rt = mkPart(proj5, 'Rnd 1: 12 dc in ring, join, turn.\nRnd 2: 2 dc in each st, join, turn (24)\nRnd 3: dc around, join, turn\n',
+    { row: 0, stitch: 0 });
+  assertEqual(Store.partWorkMode(rt, proj5), 'rounds', 'a piece that says "Rnd" is rounds even when it turns');
+})();
+
+/* ====================================================================== */
 group('14. The corner prior: Model.shape.corners (01 §1.4.7)');
 /* ====================================================================== */
 
@@ -1576,8 +1712,13 @@ group('15. Outlier rounds: a misread line is not fabric (finding 3)');
 
   var n = flagsFor(NOTE_ROUND, 'rounds');
   assertEqual(n.counts, [24, 30, 2, 36, 42, 2], 'a note misread as a round, mid-piece');
-  assertEqual(n.flags, [false, false, true, false, false, false],
-    'the mid-piece round is flagged; the LAST round never is, it is the piece closing');
+  /* Wave E: the last round used to be exempt outright ("it is the piece
+     closing"). A close is kept — see the 18, 12, 6 case in 13c — but 42 -> 2
+     is not one: no decrease takes more than three stitches into one, so a
+     round under a third of the one before is a note or a partial round (cato
+     Ears' "Sc 2, then FO"), and it is flagged like the note mid-piece. */
+  assertEqual(n.flags, [false, false, true, false, false, true],
+    'the mid-piece note is flagged, and so is a last "round" of 2 after 42 — no decrease closes that fast');
 
   // The first round is never flagged either — a magic ring is small by nature.
   var mr = flagsFor(
@@ -2537,9 +2678,16 @@ function runMotifFixtures() {
 
     var sw = models['cardigan.pdf'];
     assertEqual(sw.part.name, 'Swatch', 'the cardigan gauge swatch');
-    assertEqual(sw.counts, [18, 18, 2, 2, 2, 2], 'the sequence the review saw');
-    assertEqual(sw.flags, [false, false, true, true, true, true],
-      'rows 3-6 are flagged, so the capital-T tower is not drawn as fabric');
+    /* The review saw 18, 18, 2, 2, 2, 2; the parser has since expanded more of
+       the swatch (14 rows during wave E). The rule is the same whatever the
+       length: the 18s are fabric, every 2-wide row of the tower is flagged. */
+    assertEqual(sw.counts.slice(0, 6), [18, 18, 2, 2, 2, 2], 'the sequence the review saw (first six rows)');
+    var towerOk = sw.counts.length >= 6;
+    for (var ti = 0; ti < sw.counts.length; ti++) {
+      if (sw.flags[ti] !== (sw.counts[ti] === 2)) towerOk = false;
+    }
+    assertTrue(towerOk, 'every 2-wide row is flagged and no 18 is, so the capital-T tower is not drawn as fabric',
+      JSON.stringify(sw.counts) + ' → ' + JSON.stringify(sw.flags));
 
     var wr = models['crochet-premier-sparkling-wrap.pdf'];
     var wc = wr.counts;

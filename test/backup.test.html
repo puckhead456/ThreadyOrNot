@@ -343,6 +343,17 @@ group('4. previewImport says what would happen, and writes nothing (12 #3)');
   var p4 = Store.previewImport(FIXTURE_V1);
   assertEqual(p4.projects[0].status, 'older', 'an older file is flagged as older, not silently applied');
   assertEqual(p4.counts.older, 1, 'and counted');
+
+  // Wave E: the sheet's header counted the shipped templates that are in
+  // every backup, so seven projects read "17 identical". Rows now say which
+  // templates are built in, so the header can leave the unchanged ones out.
+  var full = JSON.parse(Store.exportJSON());
+  var p5 = Store.previewImport(JSON.stringify(full));
+  var builtInRows = p5.templates.filter(function (r) { return r.builtIn; });
+  var shipped = Store.templates().filter(function (t) { return t.builtIn; }).length;
+  assertEqual(builtInRows.length, shipped, 'every shipped template in a full backup is flagged builtIn on its preview row');
+  assertEqual(p5.templates.filter(function (r) { return r.id === 'zw1-tpl' || r.name === 'ZW1 Frozen template'; })
+    .every(function (r) { return !r.builtIn; }), true, 'and a user template is not');
 })();
 
 /* ====================================================================== */

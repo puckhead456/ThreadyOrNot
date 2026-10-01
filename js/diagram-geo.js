@@ -192,6 +192,29 @@
    A PLAIN RING IS NEVER ASKED: kf = 1 leaves `grannyRatio` unset, so no sphere,
    tube or disc round can reach the rule.
 
+   1.4.0 (wave E, docs/wave-e/3d-geometry.md) — lace and terraces.
+
+   (10) LACE LOOPS STAND AS TALL AS THEY ARCH (`LOOP_W`, `loopReach`). A chain
+   run at `Patterns.LOOP_CHAIN_W` is a loop whose chord is shorter than its
+   length; it arches loopSag(n) past the stitch that closes it, so a round of
+   sc + ch-3 loops reaches sc + 0.84 sc, not sc. Persian Tiles round 5 stopped
+   being a frill. Chains themselves are spaces (h 0) and never vote on height.
+   Increase SITES are placed by record width, not by the stitch count (a lace
+   round has more records than stitches), a round whose count FELL or whose
+   increase groups hold a chain run is never a "spread increase", and a spread
+   round of a text-prior motif gets the motif's POLY_FLAT_TOL before it frills.
+
+   (11) FANS AND FILLS (`fanFill`). A motif round past its own flat reach
+   followed by one under GRANNY_FLAT is fans and the round that fills them;
+   the pair shares its step by reach, the fan's ring moving in. Persian Tiles
+   round 4 now steps out 2.15 instead of standing up as a dc-high wall.
+
+   (12) TERRACES (`terraceSmooth`, 04 defect J). A 3-tap filter on the ring at
+   each corner of a staircase of steps and 1-3-round plateaus, strength scaled
+   by the stuffing slack, run ends / the widest ring / genuine steps pinned, and
+   each run's rise handed back so no measured number moves. `classify(model,
+   {terrace: false})` turns it off (the tests compare the two).
+
    No modules, no build step. Attaches window.DiagramGeo.
    ===================================================================== */
 (function (global) {
@@ -241,6 +264,7 @@
   var BOWL_MAX_ROUNDS = 8;  // "small piece"
   var BOWL_MIN_END = 0.5;   // ends at >= half its widest = a SLIGHT decrease
   var FLAT_TOL = 0.85;      // an increase round is "at the flat rate" above this
+  var OPEN_TURN_IN = 0.8;   // ends at <= 80% of its widest: a body segment, filled
 
   var RUFFLE_EPS = 0.08;    // |dr| over h by more than this and the round frills
   var RUFFLE_RISE = 0.12;   // a ruffled round still rises this fraction of h
@@ -376,6 +400,38 @@
   var RIPPLE_AMP = 0.06;        // chevron: a gentle radial wave, still a ring
   var OVAL_MIN_END = 0.15;      // smallest end radius of a stadium
 
+  /* ---------------------------------------------- 1.4.0 (wave E, see (10)-(12))
+     LACE LOOPS STAND AS TALL AS THEY ARCH. `Patterns` gives a chain that closes
+     into a loop — `ch 3, sc in next sp` — the width of its CHORD, LOOP_W of a
+     stitch per chain (`Patterns.LOOP_CHAIN_W`, exported for this file), because
+     a loop is slack: its two ends are closer than its length. The same slack
+     that shortens the chord makes the chains ARCH outward past the stitches that
+     anchor them, so a round of loops reaches further than its sc does. A
+     circular arc of length L over a chord c has sagitta sqrt(3c(L - c)/8) to
+     first order — 0.80 of a stitch width for a ch-3 loop. */
+  var LOOP_W = 0.75;
+  var LOOP_MIN_FRAC = 0.10;     // loops must be >= 10% of the round's width
+  /* TERRACES ARE SMOOTHED (04 defect J, 06 defect 7). A count sequence that
+     alternates a step with one to three straight rounds — the snowman hat's
+     36,36,42,42,48,48, the cato horn's 5,5,5,10,10,10,15,15 — is honest about
+     the counts and wrong about the fabric: each step round lies nearly flat and
+     each straight round stands vertical, so the silhouette is a staircase. Yarn
+     will not turn a sharper corner than the stitch that makes it (the same
+     argument as FILLET_BEND), and stuffing pushes the fabric out to fill the
+     re-entrant corner as well. So the ring at each corner of a terrace is moved
+     toward the mean of its neighbours — the 3-tap filter [a/2, 1-a, a/2] —
+     with a = TERRACE_ALPHA at full stuffing and TERRACE_YARN of that on an
+     unstuffed piece. Only inside a monotone run with >= TERRACE_MIN_TREADS
+     treads of 1..TERRACE_FLAT_MAX straight rounds: a longer plateau is a WALL
+     and its shoulder is the fillet's business, and nothing that is a genuine
+     step is ever touched — a ruffle or a flattened round (a hat brim, a flared
+     cup rim), a polygon / oval / granny round, the widest ring, or the two ends
+     of the run (a neck, a waist and a rim are all run ends by construction). */
+  var TERRACE_ALPHA = 0.5;
+  var TERRACE_YARN = 0.5;
+  var TERRACE_FLAT_MAX = 3;
+  var TERRACE_MIN_TREADS = 2;
+
   var SHEET_CURVE = 3;          // rows: bend radius as a multiple of the width
 
   /* Outlier rows / rounds (07 D4). `round.outlier` from the store always wins;
@@ -433,7 +489,7 @@
     var count = Math.max(0, r.count | 0);
     var list = arr(r.stitches);
     var perimeter = 0;
-    var hBest = 0, hMean = 0, wSum = 0;
+    var hBest = 0, hMean = 0, wSum = 0, loopH = 0;
 
     if (list && list.length) {
       var tally = {}, keys = [], i, st, h, w, key;
@@ -485,6 +541,11 @@
       }
       if (tallest > 0) hBest = tallest;
       else if (bestKey != null) hBest = parseFloat(bestKey);
+      var lp = loopReach(list);
+      if (lp.w > 0 && perimeter > 0 && lp.w / perimeter >= LOOP_MIN_FRAC && lp.h > hBest) {
+        loopH = lp.h;
+        hBest = lp.h;
+      }
     } else {
       perimeter = count * SW;
     }
@@ -498,8 +559,47 @@
       perimeter: perimeter,
       h: hBest,
       hw: hBest * SH_SC,
+      // > 0 when the round's height is its lace loops' reach, see LOOP_W
+      loop: loopH,
       empty: count <= 0 || perimeter <= 0
     };
+  }
+
+  /** Sagitta of a loop of `n` chains whose chord is n * LOOP_W, in SW. */
+  function loopSag(n) {
+    var L = n, c = n * LOOP_W;
+    return L > c ? Math.sqrt(3 * c * (L - c) / 8) : 0;
+  }
+
+  /**
+   * How far a round of lace loops reaches (see LOOP_W). A loop is a run of
+   * `ch` records at the loop width; it hangs from the stitch that closes it
+   * (the one after the run, else the one before) and arches loopSag(n) past
+   * that stitch's top. The round's loop reach is the width-weighted mean over
+   * its loops, in sc heights so it compares with `h`.
+   * @returns {{w:number, h:number}} total loop width, and the reach (0 = none)
+   */
+  function loopReach(list) {
+    var i = 0, n = list.length, wSum = 0, hSum = 0;
+    while (i < n) {
+      var st = list[i] || {};
+      if (st.t !== 'ch' || !isNum(st.w) || Math.abs(st.w - LOOP_W) > 1e-6) { i++; continue; }
+      var j = i, w = 0;
+      while (j < n && list[j] && list[j].t === 'ch' && isNum(list[j].w) &&
+             Math.abs(list[j].w - LOOP_W) <= 1e-6) { w += list[j].w; j++; }
+      var anchor = anchorH(list[j]) || anchorH(list[i - 1]) || 1;
+      var reach = anchor + loopSag(j - i) / SH_SC;
+      wSum += w;
+      hSum += reach * w;
+      i = j;
+    }
+    return { w: wSum, h: wSum > 0 ? hSum / wSum : 0 };
+  }
+
+  function anchorH(st) {
+    if (!st || st.t === 'ch') return 0;
+    var h = isNum(st.h) && st.h > 0 ? st.h : stitchH(st.t);
+    return h > 0 ? h : 0;
   }
 
   /** Stitches added per round for this stitch to lie flat: 2*pi*h/w. */
@@ -537,6 +637,57 @@
     return { inc: inc, dec: dec };
   }
 
+  /**
+   * Where a round's increase sites sit, measured along the round by the widths
+   * of the records before them (1.4.0). `mod` is the round's own record width.
+   * For a round of one-wide stitches this is exactly the old (index, count).
+   * @returns {{pos:number[]|null, mod:number}}
+   */
+  function sitePositions(round, siteList) {
+    var r = round || {};
+    var list = arr(r.stitches);
+    var count = Math.max(0, r.count | 0);
+    if (!siteList || !list || !list.length) return { pos: siteList, mod: count };
+    var cum = new Array(list.length + 1), i, w, lastW = 1;
+    cum[0] = 0;
+    for (i = 0; i < list.length; i++) {
+      var st = list[i] || {};
+      w = isNum(st.w) && st.w >= 0 ? st.w : stitchW(st.t);
+      lastW = w;
+      cum[i + 1] = cum[i] + w;
+    }
+    var mod = cum[list.length];
+    if (count > list.length) mod += (count - list.length) * lastW;
+    if (!(mod > 0)) return { pos: siteList, mod: count };
+    var pos = [];
+    for (i = 0; i < siteList.length; i++) {
+      var s = siteList[i] | 0;
+      pos.push(s >= 0 && s < list.length ? cum[s] : s);
+    }
+    return { pos: pos, mod: mod };
+  }
+
+  /**
+   * How many of a round's increase groups have a chain run INSIDE them —
+   * `inc … ch … inc+`, i.e. `(sc, ch 2, sc)` or `(3 dc, ch 3, 3 dc)` worked
+   * into one place. Those chains are the next round's corner space, so such a
+   * group is a corner, never one stitch of a spread increase.
+   */
+  function cornerGroups(round) {
+    var list = arr(round && round.stitches);
+    if (!list) return 0;
+    var n = 0, i, inGroup = false, sawCh = false;
+    for (i = 0; i < list.length; i++) {
+      var t = (list[i] && list[i].t) || '';
+      if (t === 'inc') { inGroup = true; sawCh = false; continue; }
+      if (!inGroup) continue;
+      if (t === 'ch') { sawCh = true; continue; }
+      if (t === 'inc+') { if (sawCh) { n++; inGroup = false; } continue; }
+      inGroup = false;
+    }
+    return n;
+  }
+
   function collapse(list) {
     if (!list) return null;
     var out = [], i, v, prev = -99;
@@ -562,7 +713,8 @@
     var n = 0, nInc = 0, nStraight = 0, nDec = 0, nFlatInc = 0;
     var prev = 0, seen = false, i, c, dn, h, nf;
     for (i = 0; i < list.length; i++) {
-      c = list[i] ? Math.max(0, list[i].count | 0) : 0;
+      // a round the store flagged as a misread line is not fabric (1.4.0)
+      c = list[i] && list[i].outlier !== true ? Math.max(0, list[i].count | 0) : 0;
       if (c <= 0) continue;          // an unparsed round is not a straight one
       n++;
       if (seen) {
@@ -648,8 +800,12 @@
     if (closesIn) return 'closed';
     /* A small piece with no stuffing hint that turns a little way back in:
        a cupped brim on a hand's worth of body. The panda ear. */
+    /* ...but not one with a WALL (1.4.0): two or more straight rounds is the
+       CUP_STRAIGHT evidence again, a tube that tapers — the bear Arms,
+       6, 9, 9, 9, 8, 6 — not a brim. */
     if (stuffed === null && cp.rounds > 0 && cp.rounds <= BOWL_MAX_ROUNDS &&
-        cp.inc > 0 && last < max && last >= BOWL_MIN_END * max) return 'shallow-bowl';
+        cp.inc > 0 && cp.straight < CUP_STRAIGHT &&
+        last < max && last >= BOWL_MIN_END * max) return 'shallow-bowl';
     return 'open';
   }
 
@@ -681,13 +837,22 @@
       : null;
 
     var first = 0, last = 0, max = 0, i, c;
+    var lastP = 0, maxP = 0, pm;
     var seen = false;
     for (i = 0; i < rounds.length; i++) {
-      c = rounds[i] ? Math.max(0, rounds[i].count | 0) : 0;
+      c = rounds[i] && rounds[i].outlier !== true ? Math.max(0, rounds[i].count | 0) : 0;
       if (c <= 0) continue;
       if (!seen) { first = c; seen = true; }
       last = c;
       if (c > max) max = c;
+      /* ...and the same by the fabric's own width, for lace (1.4.0): a round
+         that trades stitches for chain spaces can fall in COUNT while its
+         fabric grows — Persian Tiles reads 16, 24, 36, 19, 20, 31 stitches over
+         16, 24, 48, 51, 69, 84 widths — and a flat motif was taken for a
+         "shallow bowl" that turns back in. */
+      pm = roundMetrics(rounds[i]).perimeter;
+      lastP = pm;
+      if (pm > maxP) maxP = pm;
     }
     if (!ringCount && seen) ringCount = first;
 
@@ -704,7 +869,7 @@
     var closedBottom = closesIn;
     /* Open rim: the piece ends at (or within a round of) its widest — a hat, a
        cowl, a sock leg, a motif. Nothing inflates it. */
-    var openEnd = seen && last >= max * 0.92;
+    var openEnd = seen && (last >= max * 0.92 || (maxP > 0 && lastP >= maxP * 0.92));
 
     /* ...but "open rim" is three shapes, not one (see the DEVIATION note at
        the top of the file). Which one is in the count sequence. */
@@ -721,6 +886,15 @@
     else if (closesIn) slack = SLACK_STUFFED;
     else if (openEnd) slack = SLACK_OPEN;
     else if (form === 'shallow-bowl') slack = SLACK_BOWL;
+    /* 06 defect 8 (1.4.0): a piece that grows and then turns back in by a fifth
+       or more, with the text silent about stuffing, is a body segment — the same
+       argument as `closesIn`, which only ever looked at the very last round. Its
+       shape only holds when it is filled; silence is not "do not stuff" (that is
+       `stuffed === false`, handled above). The bear Body — 18 → 40, five
+       straight, back to 24, grown out of the head with no start ring — was drawn
+       unstuffed at slack 0.05 by luck of its missing magic ring. */
+    else if (form === 'open' && stuffed === null && cp.inc > 0 && cp.dec > 0 &&
+             last <= OPEN_TURN_IN * max) slack = SLACK_STUFFED;
     else slack = SLACK_UNSTUFFED;
 
     /* The cap. 04 defect D: the old test was "has any stitches", so every
@@ -1037,7 +1211,7 @@
     var flip = o.upsideDown == null ? shape.upsideDown : o.upsideDown === true;
     return mode === 'rows'
       ? classifyRows(rounds, shape)
-      : classifyRounds(rounds, shape, flip);
+      : classifyRounds(rounds, shape, flip, o.terrace !== false);
   }
 
   /* ------------------------------------------------------- 7a. the dome loft
@@ -1562,7 +1736,178 @@
     return res;
   }
 
-  function classifyRounds(rounds, shape, flip) {
+  /* ------------------------------------------------ 7c. fans and fills (11)
+     A motif round of FANS — Persian Tiles round 3, `* sc in next 3 sc, skip
+     next sc, (3 dc, ch 3, 3 dc) all in next sc, skip next sc` — grows 24 widths
+     over the 24 sc it sits on, 1.57x what a dc round can lay flat on a square.
+     The surplus is not radius: the fans ARE the surplus, four scalloped petals
+     whose tips stand one dc out while the sc between them stand one sc out. The
+     next round FILLS them — `dc in next 3 sc` in the valleys, `ch 3` along each
+     fan's flank, `(sc, ch 2, sc)` on its tip — and grows only 3 widths, 0.2 of
+     its rate, because the length it needs was already made. Drawn one ring per
+     round at perimeter / 2pi, the fan round took the pair's whole step and the
+     fill round stood straight up out of it as a dc-high wall (HANDOFF, "Persian
+     Tiles round 4 does not fan").
+     So a fan round (over its own k-gon flat reach) followed by a fill round
+     (under GRANNY_FLAT of its reach) whose PAIR is flat fabric (combined growth
+     GRANNY_FLAT..POLY_FLAT_TOL of the combined reach) shares the pair's step in
+     proportion to the two rounds' reaches. The fan's ring moves IN, never out,
+     and the fill keeps its perimeter's ring: the Persian square's rings become
+     3.82, 5.97, 8.12 (was 3.82, 7.64, 8.12), which is where 01 §1.4's height
+     arithmetic puts a square of sc + dc + sc + dc rounds (inradius x 1.273:
+     5.67 at the fan tips' base, 8.10 after the fill) — and round 4's own Σw of
+     51 is exactly the square its heights predict (P = 8a = 51.9), so the widths
+     were never the problem. A steady granny (hood, hex socks) has no fill round
+     and is untouched; a plain ring has kf 1 and is never asked.
+     ------------------------------------------------------------------------- */
+
+  /**
+   * Move each fan round's ring in so it and its fill share their step (above).
+   * Mutates `ring`.
+   * @returns {number[]} per round, how far its ring moved in (0 = not a fan)
+   */
+  function fanFill(ring, kfAt, met, bridged, slack) {
+    var n = ring.length, fans = new Array(n), real = [], i, p;
+    for (i = 0; i < n; i++) {
+      fans[i] = 0;
+      if (!met[i].empty && !bridged[i]) real.push(i);
+    }
+    var s1 = 1 - slack;
+    for (p = 1; p + 1 < real.length; p++) {
+      var a = real[p - 1], f = real[p], j = real[p + 1];
+      if (!(kfAt[f] > 1) || !(kfAt[j] > 1)) continue;
+      var rf = met[f].hw * kfAt[f], rj = met[j].hw * kfAt[j];
+      if (!(rf > 0) || !(rj > 0)) continue;
+      var over = s1 * (ring[f] - ring[a]) / rf;
+      var under = s1 * (ring[j] - ring[f]) / rj;
+      var pair = s1 * (ring[j] - ring[a]) / (rf + rj);
+      if (!(over > 1) || !(under < GRANNY_FLAT)) continue;
+      if (pair < GRANNY_FLAT || pair > POLY_FLAT_TOL) continue;
+      var target = ring[a] + (ring[j] - ring[a]) * rf / (rf + rj);
+      if (!(target < ring[f] - 1e-9)) continue;
+      fans[f] = ring[f] - target;
+      ring[f] = target;
+    }
+    return fans;
+  }
+
+  /* --------------------------------------------------- 7d. terraces (12)
+     See TERRACE_*. Runs over the walked entries, before the loft. */
+
+  function terraceReport(alpha) {
+    return { applied: false, alpha: alpha, runs: 0, rings: 0, maxShift: 0 };
+  }
+
+  /**
+   * Smooth the staircase out of a monotone run of steps and short plateaus.
+   * Mutates `radius` / `meanRadius` / `dy` of the rings it moves (the widest
+   * ring, the run's two ends and every genuine step never move) and gives each
+   * run back exactly the rise it had, so `height` and every aspect in 01 §2 are
+   * unchanged — only the staircase is.
+   */
+  function terraceSmooth(out, shape) {
+    var alpha = TERRACE_ALPHA * (TERRACE_YARN + (1 - TERRACE_YARN) * stuffScale(shape.slack));
+    var res = terraceReport(alpha);
+    var list = realEntries(out), m = list.length, j, k;
+    if (m < 4 || !(alpha > 0)) return res;
+    var R = new Array(m), ok = new Array(m), sg = new Array(m), run = new Array(m);
+    var rMax = 0;
+    for (j = 0; j < m; j++) {
+      var e = list[j];
+      R[j] = e.radius;
+      if (R[j] > rMax) rMax = R[j];
+      /* a genuine step, or a round with its own cross-section: never a terrace */
+      ok[j] = e.kind === 'ring' && !e.ruffle && !e.flattened && !e.granny && !e.fan;
+      run[j] = -1;
+    }
+    sg[0] = 0;
+    for (j = 1; j < m; j++) {
+      var d = R[j] - R[j - 1];
+      sg[j] = Math.abs(d) <= 1e-9 ? 0 : (d > 0 ? 1 : -1);
+    }
+    /* Segment the STEPS (step j joins ring j-1 to ring j) into runs: one sign,
+       plateaus of at most TERRACE_FLAT_MAX straight rounds, every step between
+       two ordinary rings. A plateau longer than that is a wall; it belongs to
+       no run and ends the one before it. */
+    var runs = [], cur = null, zeros = 0, zeroFrom = -1;
+    function close(countTrailing) {
+      if (cur && countTrailing && zeros > 0) cur.treads++;
+      cur = null; zeros = 0; zeroFrom = -1;
+    }
+    for (j = 1; j < m; j++) {
+      if (!ok[j] || !ok[j - 1]) { close(true); continue; }
+      if (sg[j] === 0) {
+        if (!cur) { cur = { dir: 0, treads: 0 }; runs.push(cur); }
+        if (!zeros) zeroFrom = j;
+        zeros++;
+        run[j] = runs.length - 1;
+        if (zeros > TERRACE_FLAT_MAX) {
+          /* a wall: take the plateau back off the run, and skip the rest of it */
+          for (k = zeroFrom; k <= j; k++) run[k] = -1;
+          close(false);
+          while (j + 1 < m && ok[j + 1] && sg[j + 1] === 0) j++;
+        }
+        continue;
+      }
+      if (cur && cur.dir !== 0 && sg[j] !== cur.dir) close(true);
+      if (!cur) { cur = { dir: sg[j], treads: 0 }; runs.push(cur); }
+      if (!cur.dir) cur.dir = sg[j];
+      if (zeros > 0) { cur.treads++; zeros = 0; zeroFrom = -1; }
+      run[j] = runs.length - 1;
+    }
+    close(true);
+
+    /* The corners of each terrace: rings whose two steps are in the same run,
+       exactly one of them a plateau. A ring between two steps is a ramp (the
+       loft's business); a ring inside a plateau has nothing to move toward. */
+    var shift = new Array(m), moved = {}, any = false;
+    for (j = 0; j < m; j++) shift[j] = 0;
+    for (j = 1; j < m - 1; j++) {
+      var q = run[j];
+      if (q < 0 || run[j + 1] !== q || runs[q].treads < TERRACE_MIN_TREADS) continue;
+      if ((sg[j] === 0) === (sg[j + 1] === 0)) continue;
+      if (R[j] >= rMax - 1e-9) continue;                // the widest ring
+      shift[j] = alpha * ((R[j - 1] + R[j + 1]) / 2 - R[j]);
+      if (Math.abs(shift[j]) > 1e-12) { moved[q] = true; any = true; }
+    }
+    if (!any) return res;
+
+    /* New rings, new rises for every step of a moved run, and the run's own
+       total rise handed back so the piece's height does not move. */
+    var s1 = 1 - shape.slack;
+    for (q = 0; q < runs.length; q++) {
+      if (!moved[q]) continue;
+      var steps = [], before = 0, after = 0;
+      for (j = 1; j < m; j++) if (run[j] === q) steps.push(j);
+      var dyNew = [];
+      for (k = 0; k < steps.length; k++) {
+        j = steps[k];
+        var el = list[j];
+        var hk = el.h * (el.kf > 0 ? el.kf : 1);
+        var dr = Math.abs((R[j] + shift[j]) - (R[j - 1] + shift[j - 1]));
+        var qq = hk > 0 ? Math.min(1, s1 * dr / hk) : 1;
+        var dyj = el.h * Math.sqrt(Math.max(0, 1 - qq * qq));
+        if (dyj < DY_MIN * el.h) dyj = DY_MIN * el.h;
+        dyNew.push(dyj);
+        before += el.dy;
+        after += dyj;
+      }
+      var scale = after > 0 ? before / after : 1;
+      for (k = 0; k < steps.length; k++) list[steps[k]].dy = dyNew[k] * scale;
+      res.runs++;
+    }
+    for (j = 0; j < m; j++) {
+      if (!shift[j]) continue;
+      list[j].radius = list[j].meanRadius = R[j] + shift[j];
+      list[j].terrace = shift[j];
+      res.rings++;
+      if (Math.abs(shift[j]) > res.maxShift) res.maxShift = Math.abs(shift[j]);
+    }
+    res.applied = true;
+    return res;
+  }
+
+  function classifyRounds(rounds, shape, flip, terraceOn) {
     var n = rounds.length, i;
     var met = [], sit = [], fit = [], spread = [];
     var bridged = outlierFlags(rounds, 'rounds');
@@ -1582,15 +1927,28 @@
       var nDec = sit[i].dec ? sit[i].dec.length : 0;
       var nf = flatRate(met[i].h, 1);
       ripple.push(nInc >= 2 && nDec >= 2 && Math.abs(dn) <= Math.max(1, 0.15 * nf));
-      var pf = ripple[i] ? null : polygonFit(sit[i].inc, met[i].count);
+      /* Sites are RECORD indices, so they are placed by the widths of the
+         records before them, around the round's own record width — not by the
+         stitch count, which leaves chain spaces out. On a lace round (Persian
+         Tiles round 4: 19 stitches in 51 records) the count put four evenly
+         spaced corners at a third of the way round each. */
+      var sp = sitePositions(rounds[i], sit[i].inc);
+      var pf = ripple[i] ? null : polygonFit(sp.pos, sp.mod);
       /* A CORNER takes a group — `(3 dc, ch 2, 3 dc) in the corner sp` — so a
          polygon gains at least two stitches per site per round. One extra
          stitch at k evenly spaced places is a SPREAD increase, i.e. a circle:
          that is what "+6 sc per round" is, and it is not a hexagon. This is
          the test that keeps every amigurumi sphere round — and it is a POSITIVE
          verdict about readable sites, so `spread[i]` records it and the text
-         prior below is not allowed to overrule it. */
-      spread.push(!!(pf && i > 0 && dn / pf.sites < POLY_MIN_PER_SITE));
+         prior below is not allowed to overrule it.
+         Two things are NOT a spread increase (1.4.0): a round whose count did
+         not grow at all (a lace round swaps stitches for chain spaces, so its
+         count can FALL while its fabric grows — Persian round 4 reads 36 -> 19),
+         and a round whose increase groups carry a chain run inside them — `(sc,
+         ch 2, sc) in the corner` is a corner by construction, because the chains
+         are the next round's corner space. */
+      spread.push(!!(pf && i > 0 && dn > 0 && dn / pf.sites < POLY_MIN_PER_SITE &&
+        !cornerGroups(rounds[i])));
       if (spread[i]) pf = null;
       fit.push(pf);
     }
@@ -1667,6 +2025,20 @@
     }
     prevR = startRadius(shape, firstR);
 
+    /* The ring every round draws: its perimeter over 2pi, except where a FAN
+       round's surplus is scallop that the next round fills (`fanFill`, (11)).
+       Computed up front because the granny verdict below is about the piece. */
+    var ovalStart = shape.start === 'chain-oval' && shape.chainLen > 0;
+    var ring = new Array(n), kfAt = new Array(n);
+    for (i = 0; i < n; i++) {
+      ring[i] = Math.max(R_MIN, met[i].perimeter / TAU);
+      /* the same kf the walk below picks, for the cases that have one */
+      kfAt[i] = ripple[i] ? 1
+        : polyK[i] ? polygonRatios(polyK[i]).flat
+          : (!ovalStart && prior > 0 && !spread[i]) ? kfPrior : 1;
+    }
+    var fans = fanFill(ring, kfAt, met, bridged, shape.slack);
+
     /* GRANNY FABRIC (GRANNY_FLAT). Every ring radius is `perimeter / 2pi` and
        the start radius, so the whole growth series is known before any rise is
        walked — which is what lets the verdict be about the PIECE and not just
@@ -1685,18 +2057,14 @@
        every bit of its rise. */
     var grannyRatio = new Array(n);
     var grannyOn = false;
-    var ovalStart = shape.start === 'chain-oval' && shape.chainLen > 0;
     var anyPoly = false;
     for (i = 0; i < n; i++) if (polyK[i]) anyPoly = true;
     if (prior > 0 || anyPoly) {
       var gr = [], rPrev = prevR;
       for (i = 0; i < n; i++) {
         if (met[i].empty || bridged[i]) continue;
-        var rNow = Math.max(R_MIN, met[i].perimeter / TAU);
-        /* the same kf the walk below picks, for the cases that have one */
-        var kfi = ripple[i] ? 1
-          : polyK[i] ? polygonRatios(polyK[i]).flat
-            : (!ovalStart && prior > 0 && !spread[i]) ? kfPrior : 1;
+        var rNow = ring[i];
+        var kfi = kfAt[i];
         if (kfi > 1 && met[i].hw > 0 && rNow > rPrev) {
           grannyRatio[i] = (1 - shape.slack) * (rNow - rPrev) / (met[i].hw * kfi);
           gr.push(grannyRatio[i]);
@@ -1733,7 +2101,10 @@
         continue;
       }
 
-      var rFlatCirc = Math.max(R_MIN, mt.perimeter / TAU);
+      var rFlatCirc = ring[i];
+      entry.radiusCount = Math.max(R_MIN, mt.perimeter / TAU);
+      if (fans[i]) { entry.fan = true; entry.fanShift = fans[i]; }
+      if (mt.loop) entry.loop = true;
       var dr = rFlatCirc - prevR;
       var adr = Math.abs(dr);
       var dy, ruffle = false;
@@ -1761,6 +2132,13 @@
         entry.fromPrior = !!priorUsed[i];   // asserted by the text, not measured
       } else if (ovalOn) kind = 'oval';
       else if (prior > 0 && !spread[i]) { kf = kfPrior; priorRelax = true; }
+      /* A spread round keeps the circle's rate — its own sites say circle — but
+         it is still a round of a piece the TEXT calls a flat motif, so it gets
+         the motif's allowance before it is called a frill (1.4.0). Persian
+         Tiles round 2 is 24 sc around 16 dc, 1.34x the circle's sc rate, and it
+         lies flat under the four rounds that square it off. */
+      else if (prior > 0) priorRelax = true;
+      entry.kf = kf;
 
       /* The first round is worked INTO the start ring, not wrapped around it
          from a previous round, so its apparent |dr| is whatever radius it opens
@@ -1883,6 +2261,10 @@
        run totals are preserved, so `height`, the equator and every aspect in
        01 §2 are exactly what the arc walk produced. */
     var startR = startRadius(shape, firstR);
+    /* ...but first the TERRACES (TERRACE_*): a staircase of steps and short
+       plateaus is smoothed into the slope the yarn actually makes, so the loft
+       below sees one monotone run where it used to see five little ones. */
+    var terrace = (prior > 0 || !terraceOn) ? terraceReport(0) : terraceSmooth(out, shape);
     loftDomes(out, shape, startR);
 
     /* ...and a STUFFED one is not a drum either (the STUFF_* note above): the
@@ -1957,6 +2339,8 @@
       equatorFrac: height > 0 ? clamp(eqY / height, 0, 1) : 0,
       equatorRound: first >= 0 ? Math.round((first + last) / 2) : -1,
       stuff: stuff,
+      terrace: terrace,
+      fans: countTrue(fans),
       corners: corners,
       cornersSource: corners ? (priorRounds > 0 && corners === prior ? shape.cornersSource || 'text' : 'sites') : null,
       priorK: prior,
@@ -2261,7 +2645,7 @@
   /* --------------------------------------------------------------- exports */
 
   global.DiagramGeo = {
-    version: '1.3.0',
+    version: '1.4.0',
 
     // constants (read-only by convention; the test page prints them)
     SW: SW,
@@ -2277,6 +2661,7 @@
       shaped: SLACK_SHAPED, bowl: SLACK_BOWL
     },
     CUP_STRAIGHT: CUP_STRAIGHT,
+    OPEN_TURN_IN: OPEN_TURN_IN,
     RUFFLE_EPS: RUFFLE_EPS,
     RUFFLE_RISE: RUFFLE_RISE,
     DY_MIN: DY_MIN,
@@ -2303,15 +2688,23 @@
     OUTLIER: {
       frac: OUTLIER_FRAC, minMedian: OUTLIER_MIN_MED, minBefore: OUTLIER_MIN_BEFORE
     },
+    LOOP: { w: LOOP_W, minFrac: LOOP_MIN_FRAC },
+    TERRACE: {
+      alpha: TERRACE_ALPHA, yarn: TERRACE_YARN,
+      flatMax: TERRACE_FLAT_MAX, minTreads: TERRACE_MIN_TREADS
+    },
 
     // stitch metrics
     stitchH: stitchH,
     stitchW: stitchW,
     roundMetrics: roundMetrics,
     flatRate: flatRate,
+    loopSag: loopSag,
 
     // structure
     sites: sites,
+    sitePositions: sitePositions,
+    cornerGroups: cornerGroups,
     countProfile: countProfile,
     formOf: formOf,
     shapeOf: shapeOf,

@@ -158,6 +158,9 @@
   function buildUI() {
     var root = el('div', 'tour-overlay');
     root.setAttribute('data-tour-ui', '');
+    // D6: reducedMotion() was defined and never called — no fade-in for
+    // people who asked the system for less motion.
+    if (reducedMotion()) root.style.animation = 'none';
 
     var panels = [];
     for (var i = 0; i < 4; i++) {
@@ -171,7 +174,9 @@
 
     var card = el('div', 'tour-card');
     card.setAttribute('role', 'dialog');
-    card.setAttribute('aria-live', 'polite');
+    // UX sweep D6: no aria-live here. The card is focused on every step, so a
+    // screen reader already reads it as a dialog; a live region on the same
+    // node made it say everything twice. The body is its description.
     card.tabIndex = -1;
 
     var counter = el('div', 'tour-count');
@@ -179,6 +184,8 @@
     title.id = 'tour-card-title';
     card.setAttribute('aria-labelledby', title.id);
     var body = el('p', 'tour-body');
+    body.id = 'tour-card-body';
+    card.setAttribute('aria-describedby', body.id);
     var tryIt = el('p', 'tour-try');
     var extra = el('div', 'tour-extra');
 
@@ -551,12 +558,19 @@
     show(next, delta);
   }
 
-  function finish(reason) {
+  function finish(reason, chained) {
     if (!run) return Promise.resolve({ reason: 'none' });
     var r = run;
     run = null;
     unbindGlobals();
+    var hadFocus = !!(ui && ui.root && document.activeElement && ui.root.contains(document.activeElement));
     destroyUI();
+    // D6: removing the card used to drop focus on <body>. Give it back to
+    // whatever opened the tour, if that is still on the page.
+    if (!chained && hadFocus && r.opener && r.opener.focus && r.opener !== document.body &&
+        document.contains(r.opener)) {
+      try { r.opener.focus({ preventScroll: true }); } catch (e) { /* ignore */ }
+    }
     if (reason === 'done' && TOURS[r.id]) markSeen(r.id);
     var result = { id: r.id, reason: reason, ctx: r.ctx };
     try {
@@ -1037,9 +1051,13 @@
    * ================================================================== */
 
   function runSteps(id, steps, opts, ctx) {
-    if (run) finish('stopped');
+    // UX sweep D6: where focus was before the tour took it, so finishing can
+    // hand it back. A tour chained onto another keeps the first one's.
+    var opener = run && run.opener ? run.opener : document.activeElement;
+    if (run) finish('stopped', true);
     return new Promise(function (resolve) {
       run = {
+        opener: opener,
         id: id,
         steps: steps,
         index: 0,

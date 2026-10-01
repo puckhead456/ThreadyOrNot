@@ -160,6 +160,19 @@ var FIXTURES = [
       t(/pencil skirt/i.test(p.meta.patternName), 'the pattern name comes from the title line');
       t(p.meta.designer === '' || /^[A-Z]/.test(p.meta.designer), 'the designer is blank or a proper name');
       t(!/^(and|the|to|of|in|for|by)$/i.test(p.meta.designer), 'the designer is never a stop word');
+
+      // Wave E (sewing-audit) — against the PDF read page by page.
+      var bust = p.sizes ? p.sizes.chart.filter(function (r) { return r.label === 'Bust'; })[0] : null;
+      t(!!bust && /\/33"$/.test(bust.values[0]), 'audit: the Bust inch value keeps both digits (84cm/33", not /3")');
+      t(every(p.steps, function (s) { return s.text.slice(-1) !== '…'; }), 'audit: no step is cut short (the long hem step carries on instead)');
+      t(every(p.steps, function (s) { return !/www\.|patternrunway@|copyright/i.test(s.text); }),
+        'audit: the back cover is not glued onto the last step');
+      t(p.steps.filter(function (s) { return s.marker === '1.'; }).length === 7 &&
+        has(p.steps, function (s) { return s.n === 6 && /^\(continued\)/.test(s.text); }),
+        'audit: the six printed steps (step 6 on two cards) plus their titled sub-steps');
+      var psP = window.Sewing.printedSteps(p.steps);
+      t(psP.total === 6 && psP.of[p.steps.length - 1].runTotal === 6,
+        'audit: the header counts the six printed steps, got ' + psP.total);
     }
   },
   {
@@ -248,6 +261,21 @@ var FIXTURES = [
         'no ticked candidate is a stray fragment');
 
       t(/sundress|dress/i.test(p.meta.patternName), 'the pattern name comes from the title line');
+
+      // Wave E (sewing-audit)
+      var titled = p.steps.filter(function (s) { return s.marker === 'title'; });
+      t(titled.length >= 3 && every(titled, function (s) { return s.n === 4 || s.n === 5; }),
+        'audit: SHELL / LINING are step 4 and POCKETS step 5, not a second and third step 3');
+      t(has(titled, function (s) { return /^LINING:/.test(s.text) && s.text.length > 200; }),
+        'audit: the LINING paragraph keeps the prose after the "Lining" figure caption');
+      t(every(p.steps.concat(p.variations), function (s) { return !/www\.|E S T/.test(s.text); }),
+        'audit: the logo and web address are not glued onto the last variation');
+      var d40 = window.Sewing.fabricForSize(p.fabric, p.sizes.labels, '40');
+      t(has(d40, function (r) { return !r.width && /lining/i.test(r.name); }),
+        'audit (HANDOFF 5): the LINING row with no bolt width reaches the chosen size');
+      var psS = window.Sewing.printedSteps(p.steps.concat(p.variations));
+      t(psS.total === 8 && psS.of[0].runTotal === 8,
+        'audit: the header counts the eight printed steps, variations excluded, got ' + psS.total);
       t(p.meta.designer === '' || /^[A-Z]/.test(p.meta.designer), 'the designer is blank or a proper name');
     }
   },
@@ -265,7 +293,7 @@ var FIXTURES = [
       t(p.steps.length >= 12, 'the STEP n: instructions were found, got ' + p.steps.length);
       t(every(p.steps, function (s) { return s.marker === 'Step'; }), 'all of them in the Step n style');
       t(/SHOULDER|STRAP|LINING|PLEAT/i.test(p.steps[0].text), 'the first step is real construction');
-      t(/LEG OPENING|ELASTIC|WAISTBAND|HEM/i.test(p.steps[p.steps.length - 1].text),
+      t(/LEG OPENING|ELASTIC|WAISTBAND|HEM/i.test(lastFirstCard(p.steps).text),
         'and the last step finishes the briefs');
 
       // the size run is the extended XS-9X one, and the elastic chart uses it
@@ -289,6 +317,30 @@ var FIXTURES = [
 
       t(!!p.seamAllowance && p.seamAllowance.mm === 10, 'the 1 cm seam allowance was found');
       t(p.variations.length === 0, 'nothing was mistaken for a variations page');
+
+      // Wave E (sewing-audit): 15 printed steps (10 top + 5 briefs), 14 pieces.
+      t(p.steps.filter(function (s) { return !/^\(continued\)/.test(s.text); }).length === 15,
+        'audit: fifteen printed steps, got ' + p.steps.filter(function (s) { return !/^\(continued\)/.test(s.text); }).length);
+      t(p.cuttingList.length === 14, 'audit: fourteen cutting rows, got ' + p.cuttingList.length);
+      var psB = window.Sewing.printedSteps(p.steps);
+      t(psB.total === 15 && psB.of[0].runTotal === 10 && psB.of[p.steps.length - 1].runTotal === 5,
+        'audit: printed numbering runs top 1-10 then briefs 1-5');
+      t(!!p.sizes && every(p.sizes.chart, function (r) { return !/^(cm|inches)$/i.test(r.label); }),
+        'audit: the elastic-length charts are not shown as body measurements');
+      t(!!p.sizes && p.sizes.finished.filter(function (r) { return /elastic/i.test(r.label); }).length === 8,
+        'audit: all four elastic charts (cm and inches) are kept, each under its own name');
+      t(p.cuttingList.filter(function (c) { return c.note === 'Bikini Briefs'; }).length === 4,
+        'audit: the briefs front and back (outer and lining) are not merged into the top\'s');
+      t(every(p.cuttingList, function (c) { return !/elastic|chart/i.test(c.piece); }), 'audit: no elastic length is a piece');
+      t(p.fabric.length === 2 && every(p.fabric, function (f) { return / \/ /.test(f.amounts[0]); }),
+        'audit: two fabrics, each with metres / yards per size');
+      t(every(p.fabric, function (f) { return every(f.amounts, function (a) { return !/\b1[1-3]\/\d/.test(a); }); }),
+        'audit: "11/8 yard" reads as 1 1/8');
+      t(p.notions.length === 5, 'audit: both elastics, sliders, rings and cups, got ' + p.notions.length);
+      t(has(p.notions, function (n) { return /bra cups/i.test(n.text) && n.kind === 'notion'; }), 'audit: cups are not interfacing');
+      t(has(p.steps, function (s) { return s.section === 'Bikini Briefs'; }) &&
+        every(p.steps, function (s) { return !/^Section \d|Elastic Chart|Stitch Line/.test(s.section); }),
+        'audit: the briefs are a named section and no chart or sub-heading is one');
     }
   },
   {
@@ -320,14 +372,28 @@ var FIXTURES = [
       // The fabric table is only reachable when the extractor keeps its heading
       // line; when PdfText drops it there is no block to read (see the report).
       var hasFabricHeading = /fabric\s+requirements/i.test(p.sourceText);
-      t(!hasFabricHeading || p.fabric.length >= 2, 'the fabric widths were read, got ' + p.fabric.length);
-      t(!hasFabricHeading || has(p.fabric, function (f) { return /140\s*cm/i.test(f.width); }),
-        'the 140 cm bolt width is kept');
-      t(!hasFabricHeading || has(p.fabric, function (f) { return /113\s*cm/i.test(f.width); }),
-        'and the 113 cm one');
+      // Wave E (sewing-audit): the grid prints TOP / SHORTS / PANTS x metres /
+      // yards per size group and bolt width, and PdfText scatters it (the TOP
+      // metres column comes out beside the widths, the other five columns
+      // after the notions). Four width-only rows named 'Meters' / 'Sizes A-h'
+      // with no amount were wrong; now the reader says it could not read it.
+      t(every(p.fabric, function (f) { return f.amounts.length > 0; }),
+        'no fabric row is a bolt width with no amount');
+      t(!hasFabricHeading || p.fabric.length >= 2 ||
+        hasWarningLike(p, 'fabric requirements table could not be read'),
+        'the fabric table is either read or reported as unreadable');
+      t(has(p.notions, function (n) { return /^2" \(5cm\) elastic/i.test(n.text); }),
+        'the 2" elastic itself is on the notions list, not just the bodkin that pulls it');
       t(every(p.fabric, function (f) { return !/^fabric requirements$/i.test(f.name); }),
         'the block heading is not used as a fabric name');
       t(!!p.seamAllowance && p.seamAllowance.mm === 10, 'the 3/8" (10 mm) seam allowance was found');
+
+      // Wave E (sewing-audit): 15 numbered steps, the last is the hem.
+      t(p.steps.length === 15 && p.steps[14].n === 15, 'audit: steps 1-15, the hem included, got ' + p.steps.length);
+      t(every(p.steps, function (s) { return s.marker === '1.'; }),
+        'audit: "Step 1 through buttonhole openings" is text, not a restarted step');
+      t(every(p.steps, function (s) { return !/At Tach|El Astic/.test(s.section); }),
+        'audit: kerning-split headings are joined ("Make And Attach Waistband")');
     }
   },
   {
@@ -346,6 +412,16 @@ var FIXTURES = [
       t(has(p.notions, function (n) { return /bias binding/i.test(n.text); }), 'the bias binding is on it');
       t(hasWarningLike(p, 'each paragraph of the sewing instructions'),
         'and the import explains where the steps came from');
+
+      // Wave E (sewing-audit): 4 + 2 intro + pocket paragraphs, deks dropped.
+      t(every(p.steps, function (s) { return /[a-z]/.test(s.text.slice(0, 30)); }),
+        'audit: no step is a capitals magazine dek');
+      t(has(p.steps, function (s) { return s.section === 'Holster'; }) &&
+        every(p.steps, function (s) { return !/Too Cute|Secateurs|Safe And Secure/i.test(s.section); }),
+        'audit: the pocket names are the sections, not the tails of the deks');
+      t(every(p.notions, function (n) { return !/^-?\s*see page/i.test(n.text); }), 'audit: the wrapped "see page" joins its item');
+      t(p.notions.length === 5, 'audit: pattern, binding, scissors, machine and thread, tape measure, got ' + p.notions.length);
+      t(p.fabric.length === 1 && /60\s*cm/.test(p.fabric[0].width), 'audit: "1m of fabric (minimum 60cm width)" is the fabric row');
     }
   },
   {
@@ -397,6 +473,16 @@ var FIXTURES = [
       t(!!p.seamAllowance && p.seamAllowance.included === true, 'and it is included in the pieces');
       t(!hasWarningLike(p, 'No size chart found'), 'a quilt is not nagged about a size chart');
       t(!hasWarningLike(p, 'No fabric requirements found'), 'and its yardage was found');
+
+      // Wave E (sewing-audit): 11 fabrics + binding + backing, 18 cuts, 16 bullets.
+      t(has(p.fabric, function (f) { return /^Binding — /.test(f.name); }) && has(p.fabric, function (f) { return /^Backing — /.test(f.name); }),
+        'audit: the binding and backing rows say what they are');
+      t(p.cuttingList.length === 18, 'audit: eighteen cutting lines, got ' + p.cuttingList.length);
+      t(p.steps.length === 16, 'audit: sixteen bullets incl. "set aside" and "Join rows 1-8.", got ' + p.steps.length);
+      t(every(p.steps, function (s) { return !/responsible|artgallery|a r t g/i.test(s.text); }),
+        'audit: the disclaimer page is not glued onto the last step');
+      t(!/(?:\S ){3}/.test(p.meta.patternName) && !/free\s*pattern|designed by/i.test(p.meta.patternName),
+        'audit: a letter-spaced "free pattern" or a credit is not the name');
     }
   },
   {
@@ -413,6 +499,15 @@ var FIXTURES = [
         'the fabrics past H are labelled too');
       t(p.steps.length >= 10, 'the bulleted construction was read, got ' + p.steps.length);
       t(!!p.seamAllowance && p.seamAllowance.mm === 6, 'the 1/4" seam allowance was found');
+
+      // Wave E (sewing-audit): 18 fabrics + binding + backing, 64 cuts, 34 bullets.
+      t(p.fabric.length === 20, 'audit: eighteen fabrics, the binding and the backing, got ' + p.fabric.length);
+      t(p.cuttingList.length === 64, 'audit: all sixty-four cutting lines, got ' + p.cuttingList.length);
+      t(p.steps.length === 34, 'audit: thirty-four bullets, got ' + p.steps.length);
+      t(every(p.steps, function (s) { return !/^Diagram/i.test(s.section) && !/^Backing/i.test(s.section); }),
+        'audit: no diagram label or fabric group is a section');
+      t(!/(?:\S ){3}/.test(p.meta.patternName) && !/free\s*pattern|designed by/i.test(p.meta.patternName),
+        'audit: a letter-spaced "free pattern" or a credit is not the name');
     }
   },
   {
@@ -446,6 +541,27 @@ var FIXTURES = [
       // 'Use a ⁄4" seam allowance' lost its numerator in the PDF: the guard has
       // to reject 44 inches and fall back to the quilting standard.
       t(!!p.seamAllowance && p.seamAllowance.mm === 6, 'the seam allowance is 6 mm, not 1118 mm');
+
+      // Wave E (sewing-audit)
+      t(p.fabric.length >= 16 && p.fabric.filter(function (f) { return /^Backing/.test(f.name); }).length === 2,
+        'audit: the column-printed table is zipped back (16 fabrics + two backing options), got ' + p.fabric.length);
+      t(has(p.cuttingList, function (c) { return /fabric a/i.test(c.note); }), 'audit: the Fabric A panel is on the cutting list');
+      t(every(p.cuttingList, function (c) { return !/^fabric [a-z] -/i.test(c.piece); }),
+        'audit: no cutting-diagram caption became a row');
+      t(every(p.cuttingList, function (c) {
+        var m = /(^|\s)(\d{1,2})\/(\d{1,2})"/.exec(c.piece);
+        return !m || parseInt(m[2], 10) < parseInt(m[3], 10);
+      }), 'audit: no improper fraction ("6/4"") survives in a piece size');
+      t(p.cuttingList.length === 30, 'audit: thirty cutting lines, got ' + p.cuttingList.length);
+      t(p.units.length >= 17 && has(p.units, function (u) { return /inner border/i.test(u.name); }) &&
+        has(p.units, function (u) { return /unit 7b/i.test(u.name); }) && has(p.units, function (u) { return /unit 10b/i.test(u.name); }),
+        'audit: every repeated unit, "4Unit 7b" and the inner borders included, got ' + p.units.length);
+      t(every(p.steps, function (s) { return !/measure templates|all possible care|template is/i.test(s.text); }),
+        'audit: the layout and template pages are not glued onto step 22');
+      // The title is cover artwork: blank beats a credit or a label line.
+      t(p.meta.patternName === '' || /harmony quilt/i.test(p.meta.patternName),
+        'audit: the name is the quilt or blank, got ' + p.meta.patternName);
+      t(!/plum|somewhere/i.test(p.meta.designer), 'audit: "(C) Little Somewhere Plum" is fabric C, not a copyright line');
     }
   },
   {
@@ -464,6 +580,13 @@ var FIXTURES = [
       t(has(p.notions, function (n) { return n.kind === 'interfacing'; }), 'and the interfacing is flagged');
       t(p.cuttingList.length >= 2, 'the cutting instructions were read, got ' + p.cuttingList.length);
       t(every(p.cuttingList, function (c) { return c.qty === 2; }), 'two of each rectangle');
+
+      // Wave E (sewing-audit)
+      t(p.notions.length === 3 && has(p.notions, function (n) { return /SF101/.test(n.text); }),
+        'audit: zipper, fusible fleece and the Shapeflex/SF101, got ' + p.notions.length);
+      t(/prep|fus/i.test(p.steps[0].text), 'audit: the prep/fusing paragraph is the first step');
+      t(p.steps.length >= 11, 'audit: at least eleven of the fourteen paragraphs, got ' + p.steps.length);
+      t(/triple t tote/i.test(p.meta.patternName), 'audit: the name printed twice wins over the strapline');
     }
   },
   {
@@ -474,7 +597,7 @@ var FIXTURES = [
       t(p.steps.length >= 5, 'the numbered sections became steps, got ' + p.steps.length);
       t(every(p.steps, function (s) { return s.marker === '1)'; }), 'in the "1)" style');
       t(/PREP|PRINT|CUT/i.test(p.steps[0].text), 'the first step is the prep');
-      t(/FINAL ASSEMBLY|ASSEMBLY/i.test(p.steps[p.steps.length - 1].text), 'the last is the final assembly');
+      t(/FINAL ASSEMBLY|ASSEMBLY/i.test(lastFirstCard(p.steps).text), 'the last is the final assembly');
 
       // the hardware / interfacing list, with the product codes intact
       t(p.notions.length >= 5, 'the materials list was read, got ' + p.notions.length);
@@ -496,6 +619,19 @@ var FIXTURES = [
       t(every(p.cuttingList, function (c) { return !/^cut size/i.test(c.piece); }),
         'a printed "Cut Size: 3/4\" x 7\"" is not a piece count');
       t(!!p.seamAllowance && p.seamAllowance.mm === 13, 'the 1/2" seam allowance was found');
+
+      // Wave E (sewing-audit): 17 cut rows across 10 pieces, 2 fabrics.
+      t(p.fabric.length === 2 && every(p.fabric, function (f) { return f.width === '44"'; }),
+        'audit: the two half-yard lines are fabric rows at 44"');
+      t(every(p.notions, function (n) { return !/quilting weight/i.test(n.text); }), 'audit: and no longer notions');
+      t(p.cuttingList.length === 17, 'audit: seventeen cutting rows, got ' + p.cuttingList.length);
+      ['Flap', 'Flap Bottom Stabilizer', 'Flap Top Stabilizer', 'Handle Stabilizer', 'Gusset Stabilizer',
+        'Main Panel Stabilizer', 'Exterior Gusset Interfacing'].forEach(function (nm) {
+        t(has(p.cuttingList, function (c) { return c.piece === nm; }), 'audit: ' + nm + ' is a piece');
+      });
+      t(/mabel/i.test(p.meta.patternName), 'audit: the name comes from "Instructions & Pattern …", got ' + p.meta.patternName);
+      t(every(p.steps, function (s) { return !/Lining Flap|Materials/i.test(s.section); }),
+        'audit: a diagram label or the materials heading is not a section');
     }
   },
   {
@@ -523,6 +659,20 @@ function joggerSheet(p, t) {
   t(every(p.cuttingList, function (c) { return !/^on (the )?fold$/i.test(c.piece) && !/^piece$/i.test(c.piece); }),
     'no row is named after the instruction instead of the piece');
   t(every(p.cuttingList, function (c) { return c.qty >= 1 && c.qty <= 4; }), 'with sane counts');
+  // Wave E (sewing-audit): six pieces, FRONT and BACK freed from the size layers.
+  t(p.cuttingList.length === 6, 'audit: six pieces, got ' + p.cuttingList.length);
+  t(has(p.cuttingList, function (c) { return /^front$/i.test(c.piece); }) && has(p.cuttingList, function (c) { return /^back$/i.test(c.piece); }),
+    'audit: FRONT and BACK are pieces');
+  t(every(p.cuttingList, function (c) { return !/SIZE/.test(c.piece); }), 'audit: no piece is named after a size layer');
+  t(/jogger/i.test(p.meta.patternName), 'audit: the name comes off the piece labels, not the test square');
+}
+
+/** The last step's first card (a long step carries on over '(continued)' cards). */
+function lastFirstCard(steps) {
+  for (var i = steps.length - 1; i >= 0; i--) {
+    if (!/^\(continued\) /.test(steps[i].text)) return steps[i];
+  }
+  return steps[steps.length - 1] || { text: '' };
 }
 
 /** How many different fabrics the cutting rows name. */

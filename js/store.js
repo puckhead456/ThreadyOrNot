@@ -1932,6 +1932,21 @@
     }
     if (max < 2) return null;
     for (var k = 1; k <= max; k++) if (!seen[k]) return null;
+    // Wave E: a flat count of repeats past the last written row is the pattern
+    // stating its own length. "Rep 3rd Rnd 3 times" on the Stylecraft hood
+    // motif owns rounds 4-6 (the parser's `repeatFrom`..`repeatRows`, what
+    // `Patterns.summary().maxRow` reports and `Patterns.lineFor` answers for,
+    // and what the leaflet's own "6 rnds to 16cm" confirms). Without this the
+    // counter called the motif complete after round 3 — half of it. Only a
+    // repeat that picks up exactly where the written rows stop extends the
+    // target, so the run stays contiguous.
+    for (var q = 0; q < lines.length; q++) {
+      var rl = lines[q];
+      if (!rl || rl.kind !== 'repeat') continue;
+      var from = typeof rl.repeatFrom === 'number' ? Math.floor(rl.repeatFrom) : 0;
+      var to = typeof rl.repeatRows === 'number' && isFinite(rl.repeatRows) ? Math.floor(rl.repeatRows) : 0;
+      if (from === max + 1 && to >= from && to - max <= 9999) max = to;
+    }
     return max;
   }
 
@@ -2053,6 +2068,26 @@
     function add(raw, strong, next) {
       if (out.length >= CHECKLIST_MAX) return;
       var t = tidyStep(stripTrailingCount(raw));
+      // Wave E: a sentence the PDF wrapped mid-phrase. The Stylecraft hood's
+      // "Attach the next motif onto the centre motif of the first 3-motif" /
+      // "strip, then attach the sides…" was offered as the first line alone —
+      // a step that stops before its noun. No closing stop on this line and a
+      // lower-case start on the next one is a wrap: rejoin it (weak, as any
+      // reconstructed step is).
+      if (t && next && !/[.!?:)]\s*$/.test(str(raw, '')) && /^\s*[a-z]/.test(str(next, '')) &&
+          !hasRowMarker(str(next, '').trim())) {
+        var wrapped = tidyStep(stripTrailingCount(str(raw, '').replace(/\s+$/, '') + ' ' + str(next, '')));
+        // The 90-character cut can land on "…then attach the…": back off
+        // to the last word that is not a preposition or an article.
+        var guard = 0;
+        while (wrapped && /…$/.test(wrapped) && danglingTail(wrapped) && guard++ < 6) {
+          wrapped = wrapped.replace(/\s*\S+…$/, '…').replace(/[\s,;:.\-–—]+…$/, '…');
+        }
+        if (wrapped && !danglingTail(wrapped)) {
+          t = wrapped;
+          strong = false;
+        }
+      }
       // A wrapped sentence: glue the line below on when that finishes it.
       // A step we had to reconstruct is only ever weak, however good the verb
       // was — the user should look at it before it goes on the list.
@@ -2121,12 +2156,33 @@
     return out;
   }
 
+  /**
+   * Does the parse carry a repeat sentence that owns rows past the written
+   * ones (`repeatOf` + `repeatFrom`, see `Patterns.repeatLineFor`)? Only then
+   * is an index miss worth asking the parser about.
+   */
+  function hasRepeatLine(lines) {
+    for (var i = lines.length - 1; i >= 0; i--) {
+      var l = lines[i];
+      if (l && l.kind === 'repeat' && l.repeatOf && l.repeatFrom >= 1) return true;
+    }
+    return false;
+  }
+
   function lineForRow(prt, rowNumber) {
     var lines = linesFor(prt);
     if (!lines.length) return null;
     if (typeof rowNumber === 'number' && rowNumber >= 1 && rowNumber <= ROW_INDEX_MAX) {
       var hit = rowIndexOf(prt).line[rowNumber];
-      return hit === undefined ? null : hit;
+      if (hit !== undefined) return hit;
+      // Wave E: no WRITTEN row covers this one. The index holds numbered rows
+      // only, but `Patterns.lineFor` also answers past the last written row
+      // with the repeat sentence that owns it ("Rep 3rd Rnd 3 times" is rounds
+      // 4-6 of the hood motif; "Rep Row 2 until it measures 59"" is rows 3-89
+      // of the throw), so the counter showed no pattern line at all there.
+      // Misses are rare (past the end of the rows), so the parser's own scan
+      // is affordable; anything the index did hold is answered above.
+      if (!hasRepeatLine(lines)) return null;
     }
     var api = patternsApi();
     if (!api || typeof api.lineFor !== 'function') return null;
@@ -2146,7 +2202,14 @@
     var lines = linesFor(prt);
     if (!lines.length) return null;
     if (typeof rowNumber === 'number' && rowNumber >= 1 && rowNumber <= ROW_INDEX_MAX) {
-      return usableCount(rowIndexOf(prt).count[rowNumber]);
+      var idx = rowIndexOf(prt);
+      // A written row answers for itself, count or no count. Past the written
+      // rows, the repeat that owns the row answers with the count of the row
+      // it sends you back to (row 40 of the Premier throw is row 2's 94), the
+      // same as `Patterns.targetFor` — see lineForRow.
+      if (idx.line[rowNumber] !== undefined || !hasRepeatLine(lines)) {
+        return usableCount(idx.count[rowNumber]);
+      }
     }
     var api = patternsApi();
     if (!api || typeof api.targetFor !== 'function') return null;
@@ -2509,6 +2572,12 @@
         made.workMode = normalizeWorkMode(p.workMode, 'auto');
         made.orientation = normalizeOrientation(p.orientation, 'auto');
         made.dialect = normalizeDialect(p.dialect, 'auto');
+        // Wave E: the same target the PDF import sets (01 #1). A project made
+        // from a template saved off a PDF came out with its rounds in place but
+        // no target on any part — no progress bar, no "Body complete", and a
+        // project that could never finish on its own — while the project the
+        // template was saved from had all of them.
+        if (made.patternText) made.targetRows = targetRowsFromText(made.patternText);
         return made;
       }),
       checklist: tpl.checklist.map(function (t) { return { id: uid(), text: t, done: false }; }),
@@ -3332,6 +3401,9 @@
       localUpdatedAt: local ? clampInt(local.updatedAt, 0, 1e15, 0) : null,
       status: 'new'
     };
+    // A shipped template is in every backup and on every phone; the preview
+    // leaves an unchanged one out of its tally (Wave E).
+    if (incoming.builtIn) row.builtIn = true;
     if (!local) return row;
     if (sameJson(local, incoming)) row.status = 'identical';
     else if (row.updatedAt > row.localUpdatedAt) row.status = 'replace';
@@ -3956,6 +4028,49 @@
    * store must reach the same verdict the geometry will, because the whole
    * point of the text fallback is to fire only where the sites cannot decide.
    */
+  /**
+   * A round's increase sites as positions along the round, measured by the
+   * widths of the stitch records before them, and the round's own record width
+   * — the mirror of `DiagramGeo`'s `sitePositions`. A round of one-wide stitches
+   * gives back exactly (sites, count).
+   */
+  function sitePlaces(r, sites, count) {
+    var list = r && Array.isArray(r.stitches) ? r.stitches : null;
+    if (!list || !list.length) return { pos: sites, mod: count };
+    var cum = [0], i, w, lastW = 1;
+    for (i = 0; i < list.length; i++) {
+      w = list[i] && typeof list[i].w === 'number' && isFinite(list[i].w) && list[i].w >= 0 ? list[i].w : 1;
+      lastW = w;
+      cum.push(cum[i] + w);
+    }
+    var mod = cum[list.length];
+    if (count > list.length) mod += (count - list.length) * lastW;
+    if (!(mod > 0)) return { pos: sites, mod: count };
+    var pos = [];
+    for (i = 0; i < sites.length; i++) {
+      var s = sites[i] | 0;
+      pos.push(s >= 0 && s < list.length ? cum[s] : s);
+    }
+    return { pos: pos, mod: mod };
+  }
+
+  /** Increase groups with a chain run inside them (`inc … ch … inc+`): the
+   *  mirror of `DiagramGeo`'s `cornerGroups`. */
+  function cornerGroupCount(r) {
+    var list = r && Array.isArray(r.stitches) ? r.stitches : null;
+    if (!list) return 0;
+    var n = 0, i, inGroup = false, sawCh = false;
+    for (i = 0; i < list.length; i++) {
+      var t = (list[i] && list[i].t) || '';
+      if (t === 'inc') { inGroup = true; sawCh = false; continue; }
+      if (!inGroup) continue;
+      if (t === 'ch') { sawCh = true; continue; }
+      if (t === 'inc+') { if (sawCh) { n++; inGroup = false; } continue; }
+      inGroup = false;
+    }
+    return n;
+  }
+
   function cornerFitRound(sites, count) {
     if (!sites || sites.length < 3 || count < 6) return 0;
     var thetas = [], i;
@@ -4006,13 +4121,25 @@
       var c = r && r.count > 0 ? r.count : 0;
       if (!c) { runK = 0; run = 0; prev = 0; continue; }
       var sites = Array.isArray(r.inc) ? r.inc : [];
-      var k = cornerFitRound(sites, c);
+      // Placed along the round by the widths of the records before them, as
+      // `DiagramGeo.polygonFit` now places them: a site is a RECORD index, and a
+      // lace round carries more records (its chain spaces) than its count.
+      var sp = sitePlaces(r, sites, c);
+      var k = cornerFitRound(sp.pos, sp.mod);
       if (k && prev > 0) {
-        if ((c - prev) / sites.length >= CORNER_MIN_PER_SITE) {
+        // Mirrors DiagramGeo's `spread` test. A group with a chain run inside it
+        // — `(sc, ch 2, sc) in the corner` — is a corner by construction, and a
+        // round whose COUNT fell (a lace round trading stitches for chain
+        // spaces: Persian Tiles round 4 reads 36 -> 19) says nothing about
+        // "+1 per site", so it is never counted as a circle.
+        var dnc = c - prev;
+        if (cornerGroupCount(r) > 0 || (dnc > 0 && dnc / sites.length >= CORNER_MIN_PER_SITE)) {
           if (k === runK) { run++; } else { runK = k; run = 1; }
           if (run >= CORNER_PERSIST && !best) best = k;
-        } else {
+        } else if (dnc > 0) {
           circle++;
+          runK = 0; run = 0;
+        } else {
           runK = 0; run = 0;
         }
       } else {
@@ -4154,6 +4281,24 @@
       else if (r.count >= OUTLIER_FRAC * ((prev + next) / 2)) continue;
       r.outlier = true;
     }
+    // The LAST round in rounds mode, which the loop above never judges (a
+    // `pull to close` finish is real fabric). A round cannot shrink faster than
+    // its tightest decrease allows — a 3-into-1 takes three stitches to one — so
+    // a closing round under a third of the round before it is not a round at
+    // all: it is a few stitches worked on the way to fastening off. cato's Ears
+    // end `11. Sc 2, then FO. Pinch ear together` — 21, 21, 2 — and the 2 capped
+    // an open cup and pinched it shut.
+    if (mode !== 'rows') {
+      var li = n - 1;
+      while (li > 0 && !(rounds[li] && rounds[li].count > 0)) li--;
+      if (li > 0 && rounds[li].row !== 1) {
+        var lp = 0;
+        for (j = li - 1; j >= 0; j--) {
+          if (rounds[j] && rounds[j].count > 0 && !rounds[j].outlier) { lp = rounds[j].count; break; }
+        }
+        if (lp > 0 && rounds[li].count * 3 < lp) rounds[li].outlier = true;
+      }
+    }
   }
 
   /* A chain ring's first round is worked into EVERY chain, so `make 240ch,
@@ -4171,16 +4316,57 @@
    * @returns {{expected:number|null, actual:number, row:number, delta:number|null}}
    */
   function roundDeviation(prt) {
-    if (!prt) return { expected: null, actual: 0, row: 0, delta: null };
+    if (!prt) return { expected: null, actual: 0, row: 0, delta: null, printed: null, computed: null };
     var row = clampInt(prt.row, 0, 999999, 0) + 1;
-    var expected = targetFor(prt, patternRowForRow(prt, row));
+    var patternRow = patternRowForRow(prt, row);
+    var expected = targetFor(prt, patternRow);
     var actual = clampInt(prt.stitch, 0, 999999, 0);
+    // A designer error kept as printed (Baphomet R29 "(2sc, dec)x8 [36]" makes
+    // 24; cato Feet R3). `expected` stays the PRINTED count — the pattern is
+    // quoted, never corrected — and the pair rides along so the UI can say
+    // which number the instructions themselves make.
+    var chk = null;
+    try {
+      var idx = linesFor(prt).length ? rowIndexOf(prt) : null;
+      chk = countCheck(idx ? idx.line[patternRow] : null, null);
+    } catch (e) {
+      chk = null;
+    }
     return {
       expected: expected,
       actual: actual,
       row: row,
-      delta: expected === null ? null : actual - expected
+      delta: expected === null ? null : actual - expected,
+      printed: chk ? chk.printed : null,
+      computed: chk ? chk.computed : null
     };
+  }
+
+  function finiteCount(v) {
+    return typeof v === 'number' && isFinite(v) && v >= 0 ? Math.floor(v) : null;
+  }
+
+  /**
+   * `{printed, computed}` when a round's printed total and the count its own
+   * instructions make DISAGREE, else null. Reads, most specific first: the
+   * `deviation` object the parser puts on an `expand` round record and on the
+   * parse line (only for rounds written in plain sc/inc/dec arithmetic, where
+   * its evaluation is reliable), then bare `printed` / `computed` on either.
+   * It does NOT fall back to the parse line's `stitches` / `computed` pair:
+   * the parser leaves `computed` on rounds it could not evaluate exactly, and
+   * flagging those would tell the maker the pattern is wrong when it is not.
+   */
+  function countCheck(line, ex) {
+    var printed = null, computed = null;
+    var srcs = [ex && ex.deviation, line && line.deviation, ex, line], i, s;
+    for (i = 0; i < srcs.length && (printed === null || computed === null); i++) {
+      s = srcs[i];
+      if (!s || typeof s !== 'object') continue;
+      if (printed === null) printed = finiteCount(s.printed);
+      if (computed === null) computed = finiteCount(s.computed);
+    }
+    if (printed === null || computed === null || printed === computed) return null;
+    return { printed: printed, computed: computed };
   }
 
   /**
@@ -4249,6 +4435,11 @@
    * and so `Patterns` reports — never include them. Feeding positions forward as
    * the next row's starting count is what inflated a ch-3 mesh row by 4x a row.
    */
+  /** A stitch record's height: a real 0 (a chain space) is kept, junk is 1. */
+  function diagramStitchH(v) {
+    return typeof v === 'number' && isFinite(v) && v >= 0 ? v : 1;
+  }
+
   function countableStitches(list) {
     var n = 0, i, e;
     for (i = 0; i < list.length; i++) {
@@ -4351,12 +4542,22 @@
               // h/w per stitch: a dc bump is twice as tall as an sc, an inc
               // wider than a dec. `expand` computed them and used to throw
               // them away.
-              stitches.push({
+              var rec = {
                 t: str(st.t, '') || 'x',
                 c: st.c ? resolve(st.c) : null,
-                h: posNum(st.h, 1),
+                // A chain is a SPACE: `expand` gives it h 0 (01 §1.2, "ch-k
+                // bridging k skipped sts: width k, height 0"), and reading that
+                // 0 as "missing" stood every chain up as a one-sc-high stitch,
+                // so a mesh round's height was voted on by its chain spaces.
+                h: diagramStitchH(st.h),
                 w: posNum(st.w, 1)
-              });
+              };
+              // Post and loop placement (07 D9): the renderer gives a front-post
+              // stitch relief, sinks a back-post one and ridges a BLO base. Only
+              // the two known values of each pass, and only when expand sends them.
+              if (st.post === 'front' || st.post === 'back') rec.post = st.post;
+              if (st.lp === 'blo' || st.lp === 'flo') rec.lp = st.lp;
+              stitches.push(rec);
             }
           }
         } else {
@@ -4407,7 +4608,12 @@
       if (row >= first) {
         if (row === anchor) current = rounds.length;
         var marks = incDecPositions(ex, stitches, positions);
+        // A printed total that disagrees with its own instructions is kept as
+        // printed (`count`); the pair is published for whoever wants to say so.
+        var chkR = countCheck(line, ex);
         rounds.push({
+          printed: chkR ? chkR.printed : null,
+          computed: chkR ? chkR.computed : null,
           count: count,
           done: done,
           stitches: stitches,
@@ -4709,6 +4915,9 @@
     makeCountImpact: makeCountImpact,
     importPatternSections: importPatternSections,
     applySuggestions: applySuggestions,
+    // The target the importer (and a project made from a template) sets, so
+    // the import preview can say the same number instead of re-deriving it.
+    targetRowsFromText: targetRowsFromText,
 
     // counting
     tapStitch: tapStitch,

@@ -1103,14 +1103,19 @@ var labelled = PARTS +
   'Attach the safety eyes between rounds 2 and 3.\n';
 assertEqual(placeOf(labelled, 'Ears'), 'Ears: Sew onto the top of the body, three rounds apart.',
   'a "Ears -" sub-label sends its paragraph to the Ears, folded in as "Ears: ..."');
-assertEqual(placeOf(labelled, 'Body'), 'Body: Attach the safety eyes between rounds 2 and 3.',
-  'the next sub-label starts a new paragraph for its own part');
+assertEqual(placeOf(labelled, 'Body'),
+  'Ears: Sew onto the top of the body, three rounds apart.\nBody: Attach the safety eyes between rounds 2 and 3.',
+  'the next sub-label starts a new paragraph for its own part - and the Body, which the Ears paragraph names as where they go, carries that one too (wave E host rule)');
 assertEqual(placeOf(PARTS + 'Assembly:\nEars:\nSew onto the top of the body.\n', 'Ears'),
   'Ears: Sew onto the top of the body.', 'a "Ears:" sub-label works the same way');
 
 // a label wins over the part names inside the sentence
-assertEqual(placeOf(PARTS + 'Assembly:\nEars -\nSew onto the body between rounds 2 and 3.\n', 'Body'), '',
-  'the sub-label wins: the Body is only where the ears go');
+assertEqual(placeOf(PARTS + 'Assembly:\nEars -\nSew onto the body between rounds 2 and 3.\n', 'Ears'),
+  'Ears: Sew onto the body between rounds 2 and 3.',
+  'the sub-label wins: the paragraph is the Ears\' ...');
+assertEqual(placeOf(PARTS + 'Assembly:\nEars -\nSew onto the body between rounds 2 and 3.\n', 'Body'),
+  'Ears: Sew onto the body between rounds 2 and 3.',
+  '...and the Body it is sewn "onto" carries it as well - the rounds it cites are the Body\'s (wave E host rule)');
 
 // --- part-name matching --------------------------------------------------
 assertEqual(placeOf(PARTS + 'Assembly:\nSew the ears to the body on round 3.\n', 'Ears'),
@@ -1214,7 +1219,8 @@ assertEqual(P.splitSections('=== PAGE 7 ===\nAssembly:\nSew the ears on.\nAdditi
 
 // --- the standalone helper -----------------------------------------------
 assertEqual(P.placement(PARTS + 'Assembly:\nSew the ears to the body on round 3.\n'),
-  ['', 'Sew the ears to the body on round 3.'], 'Patterns.placement(text) returns one string per section');
+  ['Sew the ears to the body on round 3.', 'Sew the ears to the body on round 3.'],
+  'Patterns.placement(text) returns one string per section (the Ears, and the Body they go "to")');
 
 // -----------------------------------------------------------------------
 group('v2.3: PdfText - callouts drawn over artwork');
@@ -2632,8 +2638,8 @@ assertEqual(nsOf(untilRows), [10, 10, 10, 10, 10, 10, 0, 0],
 assertEqual(nsOf(walkRef(
   'Row 1: sc in each of 10 ch. Turn. (10)\n' +
   'Row 2: ch 1, sc in each st across. Turn. (10)\n' +
-  'Rep last row 3 times more.\n', 8)), [10, 10, 10, 10, 10, 10, 0, 0],
-  '"Rep last row 3 times more" works row 2 four times in all - rows 3-6, and no further');
+  'Rep last row 3 times more.\n', 8)), [10, 10, 10, 10, 10, 0, 0, 0],
+  '"Rep last row 3 times more" works row 2 four times in all - rows 2-5 - so the repeat adds rows 3-5 and no further (wave E: the written row is one of the four)');
 
 // --- what must NOT be read as a back-reference -------------------------
 (function () {
@@ -2784,6 +2790,147 @@ function anchorRow(rnd3, upTo) {
     'a "rep from * across" wrapped onto the next printed line still closes the repeat');
   assertEqual(split[1].sts, 6,
     '...and the mesh row is five ch-3 spaces and six sc, consuming all 21 stitches');
+})();
+
+// =====================================================================
+// WAVE E - crochet ground-truth audit (docs/wave-e/crochet-audit.md). Every
+// rule below was found by reading a real PDF against the parser's output;
+// these are the PDF-free versions (the fixtures page asserts the PDFs).
+// =====================================================================
+(function () {
+  function rowsOf(text) {
+    return P.parse(text).filter(function (l) { return l.kind === 'row' || l.kind === 'setup'; })
+      .map(function (l) { return (l.kind === 'setup' ? 'S' : (l.row === l.rowEnd ? l.row : l.row + '-' + l.rowEnd)) + '=' + l.count; });
+  }
+  // wrapped size lists (hyphen form) are not rows; the list closes into the row
+  assertEqual(rowsOf('Body\nCh 35 (35-35-41-41-47).\nFoundation row: (RS). 1 dc in 4th ch from hook. Turn. 5 (5-5-6-\n6-7) shells.\n1st row: Ch 3. 1 dc in next dc. Turn.\nRep last row until armhole measures 3 (3-5-5-\n6-6)" [7.5 cm].'),
+    ['S=35', 'S=5', '1=1'], 'wave E: a size list wrapped after a hyphen closes into its row and opens no row 6');
+  // a stand-alone total after "Turn." is the row's count, not a second setup
+  assertEqual(rowsOf('Foundation row: (RS). 1 dc in 4th ch from hook. Rep from * to last ch. Turn.\n17 (19-21-23-27-31) shells.\n1st row: Ch 3. Turn.'),
+    ['S=17', '1=null'], 'wave E: "17 (19-21-23-27-31) shells." under a finished foundation row is its total');
+  // "first 4 (5-5-5-6-7) shells" says where to work, not the total
+  assertEqual(rowsOf('Row 1: sc across (20)\nNext row: Pat across first 4 (5-5-5-6-7) shells, ending with 1 dc in next dc. Turn.'),
+    ['1=20', '2=null'], 'wave E: a size list after "first"/"last"/"next" is a position, not a total');
+  // a sentence-case shaping label on the row's line
+  assertEqual(rowsOf('Row 1: sc across (20)\nDivide for armholes: Next row:\nPat across, ending with 1 dc in next dc. Turn.'),
+    ['1=20', '2=null'], 'wave E: "Divide for armholes: Next row:" is a row');
+  // the publisher page stamp is not a count
+  assertEqual(rowsOf('Row 1: sc across (20)\n2nd row: Ch 2. 1 hdc in last hdc. Turn.\nCAC0129-026985M | July 5, 2019\n| CROCHET\nRep last 2 rows 11 times more.'),
+    ['1=20', '2=null'], 'wave E: "CAC0129-026985M | July 5, 2019" is page furniture, not "= 5"');
+  // "at end of" / "6th row." is a reference, not a row
+  assertEqual(rowsOf('Next 6 rows: sc across. Turn.\n88 (88-92) hdc at end of\n6th row.\nNext row: sc across.').length, 2,
+    'wave E: a row name that finishes a wrapped sentence opens no row');
+  // "N more times": the written block is one of them
+  var more = P.summary(P.parse('Row 1: ch 5, sc in 2nd ch from hook (4)\nRow 2: ch 1, sc across (4)\nRepeat 2nd Row 2 more times.'));
+  assertEqual([more.maxRow, more.suggestions.repeat.times], [4, 3],
+    'wave E: "Repeat 2nd Row 2 more times" -> rows 3-4 (maxRow 4), three times in all');
+  // "Rep 3rd Rnd 3 times" after round 3 is written: three MORE, four in all
+  var hood = P.summary(P.parse('Rnd 1: 12 dc in ring (12)\nRnd 2: 2 dc in each st (24)\nRnd 3: dc around (24)\nRep 3rd Rnd 3 times.'));
+  assertEqual([hood.maxRow, hood.suggestions.repeat.times], [6, 4],
+    'wave E: "Rep 3rd Rnd 3 times" after round 3 -> rounds 4-6, and the offered repeat (3-3 x 4) agrees');
+  // a mid-piece repeat moves the next unnumbered row past it
+  var mid = P.parse('1st row: sc across (10)\n2nd row: sc across (10)\nRep last 2 rows 11 times more.\nNext 6 rows: sc across (10)');
+  var n6 = mid.filter(function (l) { return /^Next 6/.test(l.text); })[0];
+  assertEqual([n6.row, n6.rowEnd], [25, 30], 'wave E: "Next 6 rows" after "Rep last 2 rows 11 times more" are rows 25-30');
+  // foundation lines
+  assertEqual(rowsOf('Ch 100.\n1st row: 1 dc in 4th ch from hook. Turn. 98 sts.'), ['S=100', '1=98'],
+    'wave E: "Ch 100." on its own line is the counted foundation');
+  assertEqual(rowsOf('Shell - brown:\nMR with 6 sc.\nRnd 1: (inc) x6 (12)'), ['S=6', '1=12'],
+    'wave E: "MR with 6 sc." is the 6-stitch magic ring before Rnd 1');
+  assertEqual(rowsOf('With A, ch 21 (23, 25, 27, 29, 31).\nRow 1 (RS): Sc in 2nd ch from hook - 20 (22, 24, 26, 28, 30) sc.'),
+    ['S=21', '1=20'], 'wave E: a chain in six sizes is 21 at size 0, not 31 out of its bracket');
+  // evaluate: loop qualifiers and the closing slip stitch
+  assertEqual(P.evaluate('FRONT LOOP ONLY: (sc, sc inc) around. Slst, fasten off and sew the ends.', 48), 72,
+    'wave E: "FRONT LOOP ONLY: (sc, sc inc) around. Slst, fasten off" -> 72');
+  assertEqual(P.evaluate('(sc, sc inc) around, sl st to first sc.', 48), 72,
+    'wave E: the joining slip stitch is not a stitch of the round');
+  assertEqual(P.evaluate('Ch71, turn.', null), 71, 'wave E: a row that is only its chain holds that many chains');
+  assertEqual(rowsOf('R1: Ch71, turn.\nR2: sc in the 2nd chain from the hook: 70sc, ch1, turn\nR3: sc in each st across 70sc.'),
+    ['1=71', '2=70', '3=70'], 'wave E: "from the hook: 70sc, ch1, turn" is the row total');
+  assertEqual(P.evaluate('ch 1, sc in same dc, ch 2, skip next 2 dc, ** (sc, ch 2, sc) all in next dc, ch 2; rep from ** around', null), null,
+    'wave E: "rep from ** around" with no round below to size it has no total (not "1")');
+  assertEqual(rowsOf('Rnd 1: Work 5 sc in 2nd ch from hook = 5\nsc\nRnd 2: Work 2 sc in each sc = 10 sc\nRnd 3: *Sc in first sc, 2 sc in 2nd sc*, repeat from * around = 15 sc'),
+    ['1=5', '2=10', '3=15'], 'wave E: "... = 15 sc" is a printed total (AllFree Hello Kitty)');
+  assertEqual(P.parse('Row 1: sc across (40)\nRow 2: Ch 3, dc in 3rd ch from hook, skip next 3 ch, SCL in next ch, * work petal, work DCL; repeat from * across; turn.')
+    .filter(function (l) { return l.row === 2; })[0].count !== 1, true,
+    'wave E: a starred row of named special stitches that evaluate() half reads is no "1"');
+  // --- wave E follow-up ---
+  var fur = P.parse('1st row: sc across (40)\nWork a further 14 (16-16-20-24-28)\nrows even in pat.\nNext row: sc across (40)');
+  assertEqual(fur.filter(function (l) { return /^Next row/.test(l.text); })[0].row, 16,
+    'wave E+: "Work a further 14 (...)" / "rows even in pat." is rows 2-15, so the Next row is 16');
+  var dv = P.parse('Rnd 1: 48 sc (48)\nRnd 2: (2sc, dec)x8 [36]').filter(function (l) { return l.row === 2; })[0];
+  assertEqual(dv.deviation, { printed: 36, computed: 24 }, 'wave E+: a printed total its own arithmetic does not reach is kept and flagged as a deviation');
+  assertEqual(P.parse('Row 1: sc across (40)\nRow 2: ch 1, sc in first st, sc2tog-1 st. Fasten off.').filter(function (l) { return l.row === 2; })[0].count, 1,
+    'wave E+: "sc2tog-1 st." is a printed total of 1');
+  assertEqual(P.parse('Row 1: Ch 3. *(Ch 1. Miss next ch. 1 dc in next ch) 3 times. (Ch\n1. Miss next ch. 1 dc in next ch) 4 times. Turn.').filter(function (l) { return l.kind === 'row'; }).length, 1,
+    'wave E+: "(Ch" / "1. Miss next ch..." is the chain\'s length, not a row 1');
+  assertEqual(P.parse('How to make it\n1. Start with a chain.\n2. Hook onto the yarn.').filter(function (l) { return l.kind === 'row'; }).length, 0,
+    'wave E+: three-word numbered tutorial steps are no rows');
+  assertEqual(P.splitSections('FIRST SQUARE 1\nRnd 1: 12 dc in ring (12)')[0].name, 'First Square',
+    'wave E+: "FIRST SQUARE 1" (a stray footnote digit) names the part');
+  var mit = P.gauge('TENSION Scarf/cowl\n1 patt rep and 5 rows = 10x10cm using 4mm hook\ncorrect tension.\nMitts\n1 patt rep and 3.5 rows = 5x5cm using 3mm hook', 'Mitts');
+  assertEqual(mit.rowsPer10cm, 7, 'wave E+: gauge(text, "Mitts") reads the Mitts\' own "3.5 rows = 5x5cm" (7 rows to 10 cm)');
+  var sl = P.splitSections('BACK\nRow 1: sc across (10)\nSLEEVES\nRibbing: With smaller hook, ch 11.\n1st row: sc in 2nd ch from hook and each ch to end. 10 sc.\nBody of Sleeve: Turn work sidewise.\n1st row: Work 44 sc evenly. Turn.\nFINISHING\nSew in sleeves.\nBand: With A, ch 10.\n1st row: sc across. 9 sc.');
+  assertEqual(sl.map(function (s) { return s.name + '/' + s.makeCount; }), ['Back/1', 'Sleeves: Ribbing/2', 'Sleeves: Body Of Sleeve/2', 'Band/1'],
+    'wave E+: a capitals piece heading names its blocks until the next capitals heading, and "Sew in sleeves" makes them twice');
+  // square-bracket sizes
+  assertEqual(rowsOf('Rnd 1: 1ch, 3dc in each sp to end of rnd. 27[30:33:36:45] dc.'), ['1=27'],
+    'wave E: Stylecraft "27[30:33:36:45] dc." is a five-size total');
+  // King Cole: no colon after the row number
+  assertEqual(rowsOf('Row 7 (RS) 1ch, 1dc in each st to end, turn. [145 sts]\nRow 8 (WS) Keep WS facing and re-join Yarn I, 1dc in each st, turn.\nRow 9 Repeat Row 8 joining with Yarn C at end of row.').length, 3,
+    'wave E: "Row 8 (WS) Keep WS facing..." and "Row 9 Repeat Row 8..." are rows though no colon follows the number');
+  // "total of" / "you will have" beat the pick-up counts
+  assertEqual(rowsOf('Row 1 (RS): From RS with C, work 20 (22,\n24, 26, 28, 30) sc evenly spaced along\nbottom edge of First Block, and 10 (10, 10,\n12, 12, 12) sc along right side edge of Second\nBlock (for a total of 30 (32, 34, 38, 40, 42)\nsc).'),
+    ['1=30'], 'wave E: "(for a total of 30 (...) sc)" is the row total, not the first pick-up count');
+  // gauge written as a square swatch
+  assertEqual(P.gauge('TENSION Scarf/cowl\n1 patt rep and 5 rows = 10x10cm (4x4in) using 4mm hook').rowsPer10cm, 5,
+    'wave E: "5 rows = 10x10cm" under "TENSION Scarf/cowl" is 5 rows to 10 cm');
+  // "until measures approx. 28cm" survives the abbreviation's full stop
+  var cowl = P.summary(P.parse('TENSION\n1 patt rep and 5 rows = 10x10cm\nRnd 1: 3tr in each st (60)\nRnd 2: 3tr in each sp (60)\nRep Rnd 2 until cowl measures approx.\n28cm (11in) from start.'));
+  assertEqual(cowl.maxRow, 14, 'wave E: "until cowl measures approx. 28cm" at 5 rows to 10 cm runs to round 14');
+  // a designer's row target inside the until-clause now counts
+  assertEqual(P.summary(P.parse('1st Row: Dc into 2nd ch from hook (10 st)\n2nd Row: Turn, ch 1. Dc BLO along row to end. (10 st)\nRepeat Row 2 until work measures 10 inches long, approx. 44 rows.')).maxRow, 44,
+    'wave E: "approx. 44 rows" is how far the piece goes (maxRow 44)');
+  assertEqual(P.summary(P.parse('Rnd 1: Ch 1 and work around, join and turn. (58)\nWork in the established round pattern\nthrough Rnd 3.')).maxRow, 3,
+    'wave E: "Work in the established round pattern / through Rnd 3." runs to round 3');
+  // make-count from the pattern's own plural
+  var pan = P.splitSections('Body\nRnd 1: 6 sc in ring (6)\nArm\nRnd 1: 6 sc in ring (6)\nSew arms to body on rnd 19.');
+  assertEqual(pan.map(function (s) { return s.name + '/' + s.makeCount + (s.makeCountInferred ? '*' : ''); }), ['Body/1', 'Arm/2*'],
+    'wave E: "Arm" with "Sew arms to body" is made twice (makeCountInferred)');
+  assertEqual(P.splitSections('Body\nRnd 1: 6 sc in ring (6)\nFirst Leg\nRnd 1: 6 sc in ring (6)\nSew legs to body.')[1].makeCount, 1,
+    'wave E: "First Leg" is one of a pair by its own name');
+  // host-part placement
+  var face = P.splitSections('Head\nRnd 1: 6 sc in ring (6)\nEar\nRnd 1: 6 sc in ring (6)\nFinishing:\nSew ears on rnds 5-10 of head.\nWith black yarn, embroider mouth.');
+  assertEqual(face.map(function (s) { return s.placement; }),
+    ['Sew ears on rnds 5-10 of head.\nWith black yarn, embroider mouth.', 'Sew ears on rnds 5-10 of head.'],
+    'wave E: "...of head" also goes to the Head, and an unaddressed face detail goes to the Head, not the first part');
+  // same-as: the referenced rounds travel with the part
+  var sq = P.splitSections('FIRST SQUARE: With CA, ch 4; join to form a ring.\nRnd 1: Ch 3, 15 dc in ring; join - 16 sts.\nRnd 2: Attach CB, 2 sc in each st - 32 sc.\n' +
+    'SECOND SQUARE-Rnds 1-2: Work same as First Square.\nRnd 3-Joining Rnd: Attach CA in any sp; sc around.');
+  assertEqual(P.parse(sq[1].text).filter(function (l) { return l.kind === 'row'; }).map(function (l) { return l.row + '=' + l.count; }),
+    ['1=16', '2=32', '3=null'], 'wave E: "Rnds 1-2: Work same as First Square" carries First Square\'s rounds 1-2');
+  var leg = P.splitSections('First Leg\n1. A(Sc Inc x 8) (16)\n2. A(Sc 1, Inc) x 8 (24)\nSecond Leg\n1. Hdc 8 (8)\nWork the rest of the second leg the same as the first\n(Rounds 1-2 above).');
+  assertEqual(P.parse(leg[1].text).filter(function (l) { return l.kind === 'row'; }).map(function (l) { return l.row + '=' + l.count; }),
+    ['1=8', '2=16', '3=24'], 'wave E: "the same as the first (Rounds 1-2 above)" appends First Leg\'s rounds, renumbered 2-3');
+  // work mode: an unjoined "R1: ... turn" is a row, a joined-and-turned round is not
+  assertEqual(P.workMode('R1: Ch 11, turn.\nR2: sc in 2nd ch from hook: 10sc, ch1, turn\nR3: sc in each st across 10sc.'), 'rows',
+    'wave E: "R1: ... turn" with no join is worked in rows (the snowman Scarf)');
+  assertEqual(P.workMode('R1: 6 sc in MR, sl st to first sc, ch 1, turn (6)\nR2: 2 sc in each st, join, ch 1, turn (12)\nR3: sc around, sl st to first sc, turn (12)'), 'rounds',
+    'wave E: a round that is joined and then turned is still a round');
+  // expand carries post stitches, loops and motif colours
+  var postRow = P.expand(P.parse('Row 1: 1 dc in each ch across. Turn. (8)\nRow 2: Ch 3. *Dcfp around each of next 2 sts. Dcbp around each of next 2 sts. Rep from * across. Turn.'), 2, 8, null);
+  assertEqual(postRow.stitches.slice(0, 4).map(function (s) { return s.post || null; }), ['front', 'front', 'back', 'back'],
+    'wave E: expand() keeps front/back post on each stitch record');
+  var blo = P.expand(P.parse('Row 1: sc across (6)\nRow 2: Ch 1, sc in back loop only of each st across. (6)'), 2, 6, null);
+  assertEqual(blo.stitches.map(function (s) { return s.lp || null; }), ['blo', 'blo', 'blo', 'blo', 'blo', 'blo'],
+    'wave E: a back-loop-only row marks every stitch lp "blo"');
+  var tile = walkRef('Colours: (CA = Aran, CB = Burgundy)\nFIRST SQUARE: With CA, ch 4; join to form a ring.\nRnd 1: Ch 3, 15 dc in ring; join - 16 sts. Fasten off.\nRnd 2: Attach CB in any dc; 2 sc in each dc - 32 sc.', 2);
+  assertEqual(tile.map(function (r) { return r.color; }), ['Aran', 'Burgundy'],
+    'wave E: "With CA" / "Attach CB in ..." set the motif rounds\' colours from the key');
+  assertEqual(P.colors('3 skeins each 313 Aran\nCA and 376 Burgundy CB.').legend, { CA: 'Aran', CB: 'Burgundy' },
+    'wave E: the Red Heart yarn list is the colour key ("313 Aran CA")');
+  assertEqual(P.colors('Colour used A Black 1002, B Cream 1005').legend, { A: 'Black', B: 'Cream' },
+    'wave E: the Stylecraft "Colour used" line is the colour key');
 })();
 
 var summaryEl = document.getElementById('summary');

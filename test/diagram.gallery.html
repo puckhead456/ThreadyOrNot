@@ -403,8 +403,24 @@ function n2(v) { return (Math.round(v * 100) / 100).toFixed(2); }
 
 var partSeq = 0;
 
-function makePart(section, mode) {
+/* `Patterns.dialectHints(text).dialect` → 'uk' | 'us' | null. */
+function textDialectOf(text) {
+  var P = window.Patterns;
+  if (!P || typeof P.dialectHints !== 'function' || !/\S/.test(String(text || ''))) return null;
+  var d = null;
+  try { d = P.dialectHints(String(text)); } catch (e) { return null; }
+  var v = d && typeof d === 'object' ? String(d.dialect || '') : '';
+  return v === 'uk' || v === 'us' ? v : null;
+}
+
+/* Wave E: the part carries the dialect the importer would have written onto it
+   (`lendDialect` in Store.importPatternSections): a section that names its own
+   keeps 'auto', one that does not borrows the whole document's. Without it the
+   Stylecraft hood's Motif (tr / dc / ch only) was drawn at US treble height. */
+function makePart(section, mode, docText) {
   partSeq++;
+  var own = textDialectOf(section.text || '');
+  var doc = own ? null : textDialectOf(docText || '');
   return {
     id: 'ZD4_p' + partSeq,
     name: section.name || '(unnamed)',
@@ -414,7 +430,8 @@ function makePart(section, mode) {
     rowStitches: [],
     sizeIndex: 0,
     piecesDone: 0,
-    repeat: null
+    repeat: null,
+    dialect: doc || 'auto'
   };
 }
 
@@ -514,7 +531,10 @@ var live = [];   // cards with a mounted handle, oldest first
 
 function unmountCard(card) {
   if (!card.handle) return;
-  try { card.handle.destroy(); } catch (e) { /* ignore */ }
+  // the canvas is always replaced below, so its context can go back to the
+  // browser (Diagram.destroy's `release`, which is only safe for a canvas that
+  // is being thrown away)
+  try { card.handle.destroy({ release: true }); } catch (e) { /* ignore */ }
   card.handle = null;
   var fresh = document.createElement('canvas');
   card.wrap.replaceChild(fresh, card.canvas);
@@ -553,7 +573,11 @@ function mountCard(card) {
       reducedMotion: false,
       // a review card is a finished piece in the gallery's frame
       fitPurpose: 'gallery',
-      finished: true
+      finished: true,
+      /* A dropped context used to leave a blank WHITE card while getStats()
+         said `lost` (06 defect 11). Do what the app's viewer does: say so on
+         the card, and remount once on a fresh canvas. */
+      onStatus: function (s) { cardStatus(card, s); }
     });
   } catch (e) {
     var ph = document.createElement('div');
@@ -565,6 +589,38 @@ function mountCard(card) {
   card.handle = h;
   live.push(card);
   applyModel(card);
+}
+
+var CARD_REMOUNTS = 1;   // per card, like the app viewer's single retry
+
+function cardNote(card, text) {
+  if (!card.note) {
+    card.note = document.createElement('div');
+    card.note.className = 'ph';
+    card.note.style.cssText = 'top:auto;bottom:4px;height:auto;pointer-events:none;';
+  }
+  card.note.textContent = text || '';
+  if (text && card.note.parentNode !== card.wrap) card.wrap.appendChild(card.note);
+  if (!text && card.note.parentNode) card.note.parentNode.removeChild(card.note);
+}
+
+/** Diagram's onStatus for one card: 'ok' / 'restored' clear the note, anything
+ *  without WebGL says so, and 'lost' / 'blank' remount on a fresh canvas once. */
+function cardStatus(card, s) {
+  if (!s) return;
+  if (s.webgl && (s.status === 'ok' || s.status === 'restored')) { cardNote(card, ''); return; }
+  cardNote(card, s.status + (s.message ? ': ' + s.message : ''));
+  if ((s.status === 'lost' || s.status === 'blank') && (card.remounts || 0) < CARD_REMOUNTS) {
+    var h = card.handle;
+    setTimeout(function () {
+      if (!h || card.handle !== h) return;       // already replaced or unmounted
+      card.remounts = (card.remounts || 0) + 1;
+      unmountCard(card);
+      mountCard(card);
+      // a fresh live context is the answer; the next onStatus speaks if not
+      if (card.handle && typeof card.handle.isLive === 'function' && card.handle.isLive()) cardNote(card, '');
+    }, 0);
+  }
 }
 
 function applyModel(card) {
@@ -645,7 +701,7 @@ function buildCard(fix, section, idx, guess, page, host) {
     key: key, fix: fix, section: section, idx: idx, guess: guess, page: page,
     handle: null, visible: false, photosDone: false
   };
-  card.part = makePart(section, mode);
+  card.part = makePart(section, mode, fix.docText);
   card.proj = fakeProject(mode);
 
   var el = tag('div', 'card' + (mode === 'rows' ? ' rowsmode' : ''));
@@ -708,7 +764,7 @@ function buildCard(fix, section, idx, guess, page, host) {
     var m = pref.mode || guess.mode;
     card.proj.countMode = m;
     // a new part id drops the store's per-part model + line cache
-    card.part = makePart(section, m);
+    card.part = makePart(section, m, fix.docText);
     el.classList.toggle('rowsmode', m === 'rows');
     modeBadge.className = 'badge ' + m + (pref.mode ? ' ovr' : '');
     modeBadge.textContent = m + (pref.mode ? ' (override)' : '');
@@ -803,6 +859,7 @@ function fillNumbers(card) {
   c.shape.textContent = 'start ' + (sh.start || 'unknown') +
     (sh.chainLen ? ' ch ' + sh.chainLen : '') +
     (sh.ringCount ? ' ring ' + sh.ringCount : '') +
+    '  ·  dialect ' + (sh.dialect || 'none') +
     '  ·  stuffed ' + (sh.stuffed == null ? 'null' : sh.stuffed) +
     ' ⇒ slack ' + cls.slack +
     '  ·  cap top ' + (cls.closedTop ? 'yes' : 'no') +
@@ -954,6 +1011,7 @@ function loadFixture(fix, chip) {
       + sections.length + ' sections' + (sections.length > limit ? ' (showing ' + limit + ')' : '')
       + ', ' + text.length + ' chars';
     var docText = text;
+    fix.docText = text;   // the dialect seed for every card (makePart)
     shown.forEach(function (s, i) {
       var guess = guessMode(s.text, docText);
       var page = pageForSection(pages, s);
