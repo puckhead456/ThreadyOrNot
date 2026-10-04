@@ -32,6 +32,8 @@
 
 <script src="../js/patterns.js"></script>
 <script src="../js/store.js"></script>
+<script src="../js/blobstore.js"></script>
+<script src="../js/zip.js"></script>
 <script>
 'use strict';
 
@@ -450,17 +452,451 @@ group('6. Undo import (09 #3)');
   assertEqual(Store.projects().length, 1, 'the restored state is what is on disk');
 })();
 
-/* ---------------------------------------------------------------------- */
+/* ====================================================================== */
+group('7. js/zip.js — the ZIP writer and reader (12 #4)');
+/* ====================================================================== */
 
-wipe();
+function u8eq(a, b) {
+  if (!a || !b || a.length !== b.length) return false;
+  for (var i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
 
-var summaryEl = document.getElementById('summary');
-var finalLine = passed + ' passed, ' + failed + ' failed';
-summaryEl.textContent = finalLine;
-summaryEl.className = failed === 0 ? 'ok' : 'bad';
-console.log(finalLine);
+function bytesOfBlob(b) {
+  return b.arrayBuffer().then(function (buf) { return new Uint8Array(buf); });
+}
 
-window.setTimeout(wipe, 400);
+function codeOf(fn) {
+  try { fn(); } catch (e) { return e.code || ('threw: ' + e.message); }
+  return 'nothing thrown';
+}
+
+var FIXED_DATE = new Date(2026, 9, 3, 14, 22, 6);
+var JPEG_BYTES = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3, 4, 5, 0xff, 0xd9]);
+var PNG_BYTES = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 9, 8, 7]);
+
+(function () {
+  var Z = window.Zip;
+  assertEqual(Z.crc32(Z.utf8('123456789')), 0xcbf43926, 'CRC-32 of "123456789" is the standard check value cbf43926');
+  assertEqual(Z.crc32(new Uint8Array(0)), 0, 'and of nothing is 0');
+  assertEqual(Z.crc32(Z.utf8('6789'), Z.crc32(Z.utf8('12345'))), 0xcbf43926, 'and it can be continued across chunks');
+
+  var bytes = Z.writeSync([
+    { name: 'backup.json', data: '{"note":"héllo ✓ 🧶"}' },
+    { name: 'pages/zw1/1.jpg', data: JPEG_BYTES },
+    { name: 'pages/zw1/ünï.png', data: PNG_BYTES.buffer }
+  ], { date: FIXED_DATE });
+  assertTrue(Z.isZip(bytes), 'what writeSync makes starts with the PK signature');
+  assertEqual(Z.isZip(Z.utf8('{"version":1}')), false, 'a JSON file does not');
+  var dv = new DataView(bytes.buffer);
+  assertEqual(dv.getUint16(6, true) & 0x0800, 0x0800, 'names are flagged UTF-8 (bit 11)');
+  assertEqual(dv.getUint16(8, true), 0, 'entries are STORED (method 0)');
+
+  var zip = Z.parse(bytes);
+  assertEqual(zip.entries.map(function (e) { return e.name; }),
+    ['backup.json', 'pages/zw1/1.jpg', 'pages/zw1/ünï.png'], 'every name comes back, UTF-8 intact');
+  assertEqual(zip.entries.every(function (e) { return e.crcOk === true; }), true, 'every CRC checks out');
+  assertEqual(Z.fromUtf8(zip.entries[0].data), '{"note":"héllo ✓ 🧶"}', 'text round-trips byte for byte');
+  assertTrue(u8eq(zip.entries[1].data, JPEG_BYTES), 'and so do image bytes');
+
+  // Damage.
+  assertEqual(codeOf(function () { Z.parse(Z.utf8('not a zip at all')); }), 'notZip', 'a non-zip is refused as notZip');
+  assertEqual(codeOf(function () { Z.parse(bytes.slice(0, bytes.length - 30)); }), 'badZip', 'a truncated zip is refused as badZip');
+  var flipped = bytes.slice();
+  var at = 30 + Z.utf8('backup.json').length + 3;   // inside backup.json's data
+  flipped[at] ^= 0xff;
+  var bad = Z.parse(flipped);
+  assertEqual(bad.entries[0].crcOk, false, 'one flipped byte is caught by the CRC');
+  assertEqual(bad.entries[1].crcOk, true, '…and the other entries still read');
+  var locked = bytes.slice();
+  new DataView(locked.buffer).setUint16(bytes.length - 22 - (46 * 3 + Z.utf8('backup.json').length +
+    Z.utf8('pages/zw1/1.jpg').length + Z.utf8('pages/zw1/ünï.png').length) + 8, 0x0801, true);
+  assertEqual(codeOf(function () { Z.parse(locked); }), 'encrypted', 'an encrypted entry is refused by name');
+  assertEqual(codeOf(function () { Z.writeSync([{ name: 'a', data: 'x' }, { name: 'a', data: 'y' }]); }), 'badName',
+    'two entries with one name are refused');
+  assertEqual(codeOf(function () { Z.writeSync([{ name: '', data: 'x' }]); }), 'badName', 'and so is an empty name');
+  assertEqual(Z.parse(Z.writeSync([])).entries.length, 0, 'an empty zip is still a zip');
+})();
+
+/** A one-entry zip whose entry is DEFLATEd, the way an OS "Compress" writes it. */
+function deflatedZip(name, text) {
+  var Z = window.Zip;
+  var raw = Z.utf8(text);
+  var stream = new Blob([raw]).stream().pipeThrough(new CompressionStream('deflate-raw'));
+  return new Response(stream).arrayBuffer().then(function (buf) {
+    var comp = new Uint8Array(buf);
+    var nm = Z.utf8(name);
+    var local = new Uint8Array(30 + nm.length);
+    var lv = new DataView(local.buffer);
+    lv.setUint32(0, 0x04034b50, true); lv.setUint16(4, 20, true); lv.setUint16(8, 8, true);
+    lv.setUint32(14, Z.crc32(raw), true); lv.setUint32(18, comp.length, true); lv.setUint32(22, raw.length, true);
+    lv.setUint16(26, nm.length, true); local.set(nm, 30);
+    var cen = new Uint8Array(46 + nm.length);
+    var cv = new DataView(cen.buffer);
+    cv.setUint32(0, 0x02014b50, true); cv.setUint16(4, 20, true); cv.setUint16(6, 20, true); cv.setUint16(10, 8, true);
+    cv.setUint32(16, Z.crc32(raw), true); cv.setUint32(20, comp.length, true); cv.setUint32(24, raw.length, true);
+    cv.setUint16(28, nm.length, true); cv.setUint32(42, 0, true); cen.set(nm, 46);
+    var end = new Uint8Array(22);
+    var ev = new DataView(end.buffer);
+    ev.setUint32(0, 0x06054b50, true); ev.setUint16(8, 1, true); ev.setUint16(10, 1, true);
+    ev.setUint32(12, cen.length, true); ev.setUint32(16, local.length + comp.length, true);
+    var out = new Uint8Array(local.length + comp.length + cen.length + 22);
+    out.set(local, 0); out.set(comp, local.length); out.set(cen, local.length + comp.length);
+    out.set(end, local.length + comp.length + cen.length);
+    return out;
+  });
+}
+
+/* ---- the asynchronous groups ------------------------------------------ */
+
+var B = window.BlobStore;
+var steps = [];
+function step(fn) { steps.push(fn); }
+
+step(function () {
+  group('7b. Zip.write (Blob entries) and Zip.read');
+  var Z = window.Zip;
+  var entries = [
+    { name: 'backup.json', data: '{"a":1}' },
+    { name: 'pages/zw1/1.jpg', data: JPEG_BYTES }
+  ];
+  var sync = Z.writeSync(entries, { date: FIXED_DATE });
+  return Z.write([
+    { name: 'backup.json', data: '{"a":1}' },
+    { name: 'pages/zw1/1.jpg', data: new Blob([JPEG_BYTES], { type: 'image/jpeg' }) }
+  ], { date: FIXED_DATE }).then(function (blob) {
+    assertEqual(blob.type, 'application/zip', 'Zip.write hands back an application/zip Blob');
+    return bytesOfBlob(blob);
+  }).then(function (built) {
+    assertTrue(u8eq(built, sync), 'built from Blob parts, it is byte-identical to writeSync');
+    return Z.read(built);
+  }).then(function (zip) {
+    assertEqual(zip.entries.length, 2, 'Zip.read finds both entries');
+    assertTrue(u8eq(zip.entries[1].data, JPEG_BYTES) && zip.entries[1].crcOk, 'with the image intact and checked');
+    return Z.read(new Uint8Array([0x50, 0x4b, 3, 4, 9, 9, 9, 9])).then(function () { log(false, 'Zip.read rejects garbage'); },
+      function (err) { assertEqual(err.code, 'badZip', 'Zip.read rejects a zip with no directory as badZip'); });
+  }).then(function () {
+    if (typeof CompressionStream !== 'function') { log(true, 'deflate read skipped (no CompressionStream here)'); return null; }
+    return deflatedZip('backup.json', '{"deflated":"yes, and héllo"}').then(function (zbytes) {
+      return Z.read(zbytes);
+    }).then(function (zip) {
+      assertEqual(window.Zip.fromUtf8(zip.entries[0].data), '{"deflated":"yes, and héllo"}',
+        'a DEFLATEd entry (an OS re-zip) is inflated and read');
+      assertEqual(zip.entries[0].crcOk, true, 'and its CRC checked after inflating');
+    });
+  });
+});
+
+/* A beadwork project whose craftData points at its page images, for the
+   .thready tests. Built from the frozen fixture; the fixture is untouched. */
+var PAGES_BACKUP = variant(function (raw) {
+  raw.projects[1].craftData.pages = [
+    { n: 1, blobKey: 'p:zw1-proj-b:page:1' },
+    { n: 2, blobKey: 'p:zw1-proj-b:page:2' }
+  ];
+});
+
+function textOf(blob) { return blob ? blob.text() : Promise.resolve(null); }
+
+function cleanBlobs() {
+  return Promise.all([B.deletePrefix('p:zw1-'), B.deletePrefix('preimport:')]);
+}
+
+function seedPages() {
+  return B.putMany([
+    { key: 'p:zw1-proj-a:chartpage:0', value: new Blob([JPEG_BYTES], { type: 'image/jpeg' }) },
+    { key: 'p:zw1-proj-b:page:1', value: new Blob([PNG_BYTES], { type: 'image/png' }) },
+    { key: 'p:zw1-proj-b:page:2', value: new Blob(['page two'], { type: 'image/jpeg' }) }
+  ]);
+}
+
+var exported = null;
+
+step(function () {
+  group('8. .thready: backup.json + page images + manifest (12 #4)');
+  if (!B.available()) { log(true, 'IndexedDB unavailable here: .thready page tests skipped'); return null; }
+  fresh();
+  Store.importJSON(PAGES_BACKUP);
+  Store.getState().settings.lastBackupAt = 0;
+  return cleanBlobs().then(seedPages).then(function () {
+    return Store.exportThready({ appVersion: 'test' });
+  }).then(function (res) {
+    exported = res;
+    assertEqual(res.scope, 'all', 'a full export says scope all');
+    assertEqual(res.images, 3, 'it carries all three page images');
+    assertEqual(res.blob.type, 'application/zip', 'as a zip');
+    assertTrue(Store.settings().lastBackupAt > 0, 'and taking it records the backup time');
+    return bytesOfBlob(res.blob);
+  }).then(function (bytes) {
+    var zip = window.Zip.parse(bytes);
+    var names = zip.entries.map(function (e) { return e.name; });
+    assertEqual(names.slice(0, 3), ['backup.json', 'manifest.json', 'README.txt'], 'backup.json, manifest.json and README.txt lead the file');
+    assertTrue(names.indexOf('pages/zw1-proj-a/0.jpg') >= 0, 'a cross-stitch page lands at pages/<id>/<n>.jpg');
+    assertTrue(names.indexOf('pages/zw1-proj-b/1.png') >= 0, 'a PNG keeps its own extension');
+    var manifest = JSON.parse(window.Zip.fromUtf8(zip.entries[1].data));
+    assertEqual(manifest.format, 'thready', 'the manifest names the format');
+    assertEqual(manifest.formatVersion, 1, 'and its version');
+    assertEqual(manifest.counts.images, 3, 'and counts the images');
+    var line = manifest.entries.filter(function (e) { return e.path === 'pages/zw1-proj-a/0.jpg'; })[0];
+    assertEqual(line && line.key, 'p:zw1-proj-a:chartpage:0', 'and maps each image path to its BlobStore key');
+    var json = window.Zip.fromUtf8(zip.entries[0].data);
+    var parsed = JSON.parse(json);
+    assertEqual(parsed.version, 1, 'backup.json is the existing backup format');
+    assertEqual(parsed.projects.length, 2, 'with every project');
+    assertEqual(Store.previewImport(json).projects.length, 2, 'and is importable on its own');
+  });
+});
+
+step(function () {
+  group('9. Import a .thready onto an empty phone, and undo it');
+  if (!exported) { log(true, 'skipped (no export)'); return null; }
+  var read;
+  fresh();
+  return cleanBlobs().then(function () {
+    return Store.readBackupFile(new File([exported.blob], 'x.thready'));
+  }).then(function (r) {
+    read = r;
+    assertEqual(r.kind, 'thready', 'readBackupFile sniffs the zip by its bytes');
+    assertEqual(r.pages.length, 3, 'and finds the three page images');
+    assertEqual(r.skipped, 0, 'none of them damaged');
+    var preview = Store.previewImport(r.text, r.pages);
+    var rowB = preview.projects.filter(function (p) { return p.id === 'zw1-proj-b'; })[0];
+    assertEqual(rowB.pages, 2, 'the preview row says how many page images come with a project');
+    assertEqual(Store.importJSON(r.text), 2, 'importJSON applies both projects');
+    return Store.importPages(r.pages);
+  }).then(function (res) {
+    assertEqual(res.written, 3, 'importPages restores all three images');
+    return Promise.all([B.get('p:zw1-proj-a:chartpage:0'), B.get('p:zw1-proj-b:page:1')]);
+  }).then(function (got) {
+    return Promise.all([bytesOfBlob(got[0]), bytesOfBlob(got[1])]).then(function (b) {
+      assertTrue(u8eq(b[0], JPEG_BYTES), 'the JPEG comes back byte for byte');
+      assertTrue(u8eq(b[1], PNG_BYTES), 'and the PNG');
+      assertEqual(got[1].type, 'image/png', 'with its type');
+    });
+  }).then(function () {
+    assertEqual(Store.undoImport(), true, 'Undo import');
+    return Store.pagesIdle();
+  }).then(function () {
+    assertEqual(Store.projects().length, 0, 'takes the projects away');
+    return B.keys('p:zw1-');
+  }).then(function (keys) {
+    assertEqual(keys, [], 'and the page images it added');
+    return B.keys('preimport:');
+  }).then(function (keys) {
+    assertEqual(keys, [], 'and leaves no snapshot behind');
+  });
+});
+
+step(function () {
+  group('10. Replace keeps an undoable copy; Keep both gets its own pages');
+  if (!exported) { log(true, 'skipped (no export)'); return null; }
+  var read;
+  fresh();
+  Store.importJSON(PAGES_BACKUP);
+  return cleanBlobs().then(function () {
+    return B.putMany([
+      { key: 'p:zw1-proj-b:page:1', value: new Blob(['MY LOCAL PAGE'], { type: 'image/jpeg' }) },
+      { key: 'p:zw1-proj-b:page:9', value: new Blob(['an extra local page'], { type: 'image/jpeg' }) }
+    ]);
+  }).then(function () {
+    return Store.readBackupFile(exported.blob);
+  }).then(function (r) {
+    read = r;
+    Store.importJSON(r.text, { projects: { 'zw1-proj-a': 'skip', 'zw1-proj-b': 'replace' } });
+    return Store.importPages(r.pages);
+  }).then(function (res) {
+    assertEqual(res.written, 2, 'replace writes the file\'s two pages for that project');
+    assertEqual(res.skipped, 1, 'and skips the page of the project the user skipped');
+    return Promise.all([B.get('p:zw1-proj-b:page:1').then(textOf), B.keys('p:zw1-proj-b:'), B.keys('p:zw1-proj-a:')]);
+  }).then(function (got) {
+    assertTrue(got[0] !== 'MY LOCAL PAGE', 'the file\'s page replaced mine');
+    assertEqual(got[1], ['p:zw1-proj-b:page:1', 'p:zw1-proj-b:page:2'], 'and my extra page is set aside, not left dangling');
+    assertEqual(got[2], [], 'the skipped project gets nothing');
+    Store.undoImport();
+    return Store.pagesIdle();
+  }).then(function () {
+    return Promise.all([B.get('p:zw1-proj-b:page:1').then(textOf), B.keys('p:zw1-proj-b:')]);
+  }).then(function (got) {
+    assertEqual(got[0], 'MY LOCAL PAGE', 'undo puts my own page back');
+    assertEqual(got[1], ['p:zw1-proj-b:page:1', 'p:zw1-proj-b:page:9'], 'and exactly my pages, nothing from the file');
+
+    // Keep both, from the .thready: the clone gets the file's pages at its own id.
+    Store.importJSON(read.text, { projects: { 'zw1-proj-a': 'skip', 'zw1-proj-b': 'keepBoth' } });
+    return Store.importPages(read.pages);
+  }).then(function (res) {
+    var clone = Store.projects().filter(function (p) { return p.name === 'ZW1 Loom bracelet (from backup)'; })[0];
+    assertTrue(!!clone, 'Keep both made the copy');
+    assertEqual(clone.craftData.pages[0].blobKey, 'p:' + clone.id + ':page:1', 'whose craftData points at its OWN page keys');
+    assertEqual(Store.project('zw1-proj-b').craftData.pages[0].blobKey, 'p:zw1-proj-b:page:1', 'while the original is untouched');
+    assertEqual(res.written, 2, 'the file\'s two pages are written for the copy');
+    return Promise.all([B.keys('p:' + clone.id + ':'), B.get('p:zw1-proj-b:page:1').then(textOf), clone]);
+  }).then(function (got) {
+    assertEqual(got[0].length, 2, 'under the copy\'s id');
+    assertEqual(got[1], 'MY LOCAL PAGE', 'and the original keeps its own');
+
+    // Keep both from a JSON-only backup: the copy gets a copy of the local pages.
+    fresh();
+    Store.importJSON(PAGES_BACKUP);
+    Store.importJSON(PAGES_BACKUP, { projects: { 'zw1-proj-a': 'skip', 'zw1-proj-b': 'keepBoth' } });
+    return Store.importPages([]);
+  }).then(function (res) {
+    assertEqual(res.copied, 2, 'a JSON keep-both copies the original\'s two local pages to the copy');
+    var clone = Store.projects().filter(function (p) { return p.name === 'ZW1 Loom bracelet (from backup)'; })[0];
+    return B.get('p:' + clone.id + ':page:1').then(textOf);
+  }).then(function (t) {
+    assertEqual(t, 'MY LOCAL PAGE', 'so the twins never share a page they could delete from each other');
+  });
+});
+
+step(function () {
+  group('11. Tolerant reading: no pages folder, partial pages, bad files');
+  var Z = window.Zip;
+  fresh();
+  var manifest = {
+    format: 'thready', formatVersion: 1, scope: 'all',
+    entries: [
+      { path: 'pages/zw1-proj-b/1.png', key: 'p:zw1-proj-b:page:1', type: 'image/png' },
+      { path: 'pages/zw1-proj-b/2.jpg', key: 'p:zw1-proj-b:page:2', type: 'image/jpeg' },
+      { path: 'pages/zw1-proj-b/3.jpg', key: 'p:zw1-proj-b:page:3', type: 'image/jpeg' }
+    ]
+  };
+  var partial = Z.writeSync([
+    { name: 'backup.json', data: PAGES_BACKUP },
+    { name: 'manifest.json', data: JSON.stringify(manifest) },
+    { name: 'pages/zw1-proj-b/1.png', data: PNG_BYTES },          // fine
+    { name: 'pages/zw1-proj-b/2.jpg', data: JPEG_BYTES },         // damaged below
+    // 3.jpg is listed in the manifest but missing from the zip
+    { name: 'pages/zw1-proj-a/0.jpg', data: JPEG_BYTES },         // no manifest line, no key in craftData
+    { name: 'pages/zw1-proj-b/notes.txt', data: 'stray' }         // not a page
+  ]);
+  // Damage page 2's bytes.
+  var z = Z.parse(partial);
+  var e2 = z.entries[3];
+  partial[e2.data.byteOffset + 1] ^= 0xff;
+
+  return Store.readBackupFile(new Blob([partial])).then(function (r) {
+    assertEqual(r.pages.length, 1, 'only the one sound page with a known key is taken');
+    assertEqual(r.pages[0].key, 'p:zw1-proj-b:page:1', 'the PNG, by its manifest key');
+    assertEqual(r.skipped, 3, 'the damaged page, the unkeyed page and the stray file are counted as skipped');
+    assertEqual(Store.importJSON(r.text), 2, 'and the backup itself still imports');
+    return B.available() ? Store.importPages(r.pages) : { written: 1 };
+  }).then(function (res) {
+    assertEqual(res.written, 1, 'restoring the page that survived');
+    // No manifest: the key is worked out from the project's own data.
+    return Store.readBackupFile(Z.writeSync([
+      { name: 'my-backup/backup.json', data: PAGES_BACKUP },
+      { name: 'my-backup/pages/zw1-proj-b/2.jpg', data: JPEG_BYTES }
+    ]));
+  }).then(function (r) {
+    assertEqual(r.pages.length, 1, 'a re-zipped folder (no manifest, one level down) still finds its page');
+    assertEqual(r.pages[0].key, 'p:zw1-proj-b:page:2', 'keyed from the blobKey in the project\'s own data');
+    return Store.readBackupFile(Z.writeSync([{ name: 'backup.json', data: FIXTURE_V1 }]));
+  }).then(function (r) {
+    assertEqual(r.kind, 'thready', 'a .thready with no pages folder at all');
+    assertEqual(r.pages, [], 'has no pages');
+    fresh();
+    assertEqual(Store.importJSON(r.text), 2, 'and imports like the JSON it carries');
+    return Store.readBackupFile(Z.writeSync([{ name: 'photo.jpg', data: JPEG_BYTES }])).then(function () {
+      log(false, 'a zip with no backup.json is refused');
+    }, function (err) {
+      assertEqual(err.code, 'noBackupJson', 'a zip with no backup.json is refused (noBackupJson)');
+    });
+  }).then(function () {
+    var dmg = Z.writeSync([{ name: 'backup.json', data: FIXTURE_V1 }]);
+    dmg[30 + 'backup.json'.length + 4] ^= 0xff;   // inside the JSON itself
+    return Store.readBackupFile(dmg).then(function () { log(false, 'a damaged backup.json is refused'); },
+      function (err) { assertEqual(err.code, 'damaged', 'a damaged backup.json is refused, not half-read'); });
+  }).then(function () {
+    return Store.readBackupFile(Z.writeSync([
+      { name: 'backup.json', data: FIXTURE_V1 },
+      { name: 'manifest.json', data: '{"format":"thready","formatVersion":99}' }
+    ])).then(function () { log(false, 'a newer .thready is refused'); },
+      function (err) { assertEqual(err.code, 'newerVersion', 'a .thready from a newer format version says to update'); });
+  }).then(function () {
+    return Store.readBackupFile(new Blob(['﻿' + FIXTURE_V1]));
+  }).then(function (r) {
+    assertEqual(r.kind, 'json', 'a bare .json is still read');
+    assertEqual(Store.previewImport(r.text).projects.length, 2, 'even with a byte-order mark in front');
+    return Store.readBackupFile(new Blob(['rubbish'])).then(function (r2) {
+      assertThrows(function () { Store.previewImport(r2.text); }, 'notJson', 'and rubbish is still "not valid JSON" at the preview');
+    });
+  }).then(function () {
+    // The 50 MB guard: a message, before a single byte is read.
+    var msg = Store.backupFileProblem(61 * 1024 * 1024);
+    assertTrue(/61 MB/.test(msg) && /50 MB/.test(msg), 'a 61 MB file gets the size guard message', msg);
+    assertEqual(Store.backupFileProblem(49 * 1024 * 1024), null, 'a 49 MB file does not');
+    assertEqual(Store.BACKUP_FILE_MAX_BYTES, 50 * 1024 * 1024, 'the cap is 50 MB');
+    var fakeHuge = { size: 60 * 1024 * 1024, arrayBuffer: function () { throw new Error('must not be read'); } };
+    return Store.readBackupFile(fakeHuge).then(function () { log(false, 'a 60 MB file is refused'); },
+      function (err) {
+        assertEqual(err.code, 'tooBig', 'readBackupFile refuses a 60 MB file without reading it');
+        assertTrue(/60 MB/.test(err.message), 'saying how big it is', err.message);
+      });
+  });
+});
+
+step(function () {
+  group('12. One project, the same container (12 #5)');
+  if (!B.available()) { log(true, 'IndexedDB unavailable here: skipped'); return null; }
+  fresh();
+  Store.importJSON(PAGES_BACKUP);
+  Store.getState().settings.lastBackupAt = 0;
+  var read;
+  return cleanBlobs().then(seedPages).then(function () {
+    return Store.exportThready({ projectId: 'zw1-proj-b' });
+  }).then(function (res) {
+    assertEqual(res.scope, 'project', 'a one-project export says scope project');
+    assertEqual(res.images, 2, 'and carries only that project\'s pages');
+    assertEqual(Store.settings().lastBackupAt, 0, 'and does NOT count as a backup for the reminder');
+    return Store.readBackupFile(res.blob);
+  }).then(function (r) {
+    read = r;
+    assertEqual(r.scope, 'project', 'it reads back as a project file');
+    var parsed = JSON.parse(r.text);
+    assertEqual(parsed.projects.map(function (p) { return p.id; }), ['zw1-proj-b'], 'with just the one project');
+    assertEqual(parsed.templates, [], 'and no templates');
+    assertEqual(parsed.settings, undefined, 'and none of this phone\'s settings');
+    // Sending your own project back to the same device lands on Replace.
+    var preview = Store.previewImport(r.text, r.pages);
+    assertEqual(preview.projects[0].status, 'identical', 're-importing it here is recognised as the same project');
+    Store.importJSON(r.text);
+    assertEqual(Store.projects().length, 2, 'and never silently duplicates it');
+    // Onto another phone.
+    fresh();
+    return cleanBlobs();
+  }).then(function () {
+    assertEqual(Store.importJSON(read.text), 1, 'onto an empty phone it imports the one project');
+    return Store.importPages(read.pages);
+  }).then(function (res) {
+    assertEqual(res.written, 2, 'with its pages');
+    return Store.exportThready({ projectId: 'nope' }).then(function () { log(false, 'an unknown project is refused'); },
+      function (err) { assertEqual(err.code, 'noProject', 'exporting a project that is not here is refused'); });
+  });
+});
+
+function runSteps() {
+  var chain = Promise.resolve();
+  steps.forEach(function (fn) {
+    chain = chain.then(fn).then(null, function (err) {
+      log(false, 'step threw', String(err && (err.stack || err.message) || err));
+    });
+  });
+  return chain;
+}
+
+function finish() {
+  wipe();
+  var summaryEl = document.getElementById('summary');
+  var finalLine = passed + ' passed, ' + failed + ' failed';
+  summaryEl.textContent = finalLine;
+  summaryEl.className = failed === 0 ? 'ok' : 'bad';
+  console.log(finalLine);
+  window.setTimeout(wipe, 400);
+}
+
+runSteps().then(function () {
+  return B.available() ? cleanBlobs() : null;
+}).then(finish, finish);
 </script>
 </body>
 </html>

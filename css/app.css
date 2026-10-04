@@ -2094,6 +2094,153 @@ textarea.mono {
 }
 
 /* --------------------------------------------------------------------------
+   17b. Wave F — size-once, yarn changes, count confidence, set the row
+   -------------------------------------------------------------------------- */
+
+/* "ROW · M": whose numbers these are */
+.row-size-tag { text-transform: none; letter-spacing: 0; font-weight: 700; color: var(--text-muted); }
+
+/* 03 #6: the big number is a control (tap / Enter → "Set the row count") */
+.row-number-btn { cursor: pointer; border-radius: var(--radius-sm); }
+.row-number-btn:focus-visible { outline: 3px solid var(--accent-2); outline-offset: 2px; }
+
+.goto-row { display: flex; align-items: center; justify-content: center; gap: 12px; }
+.goto-row input {
+  width: 7ch;
+  min-height: 56px;
+  font-family: var(--font-display);
+  font-size: 32px;
+  font-weight: 700;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The chosen size's number inside a size list */
+mark.size-mark {
+  background: var(--accent);
+  color: var(--accent-text);
+  border-radius: 4px;
+  padding: 0 2px;
+  font-weight: 800;
+}
+.pline.on mark.size-mark { background: var(--surface); color: var(--text); }
+.pline.other-size { opacity: 0.5; }
+.pline-size { margin: 0 0 8px; font-size: 13px; color: var(--text-muted); font-weight: 700; }
+.pline-count.warn { color: var(--danger); }
+
+/* 02 #3 / 10 #1: the yarn this row is worked in, and the change */
+.yarn-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+}
+.yarn-line[hidden] { display: none; }
+.yarn-cur, .yarn-change { display: inline-flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%; }
+.yarn-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.yarn-tag-swatch {
+  display: inline-block;
+  width: 11px;
+  height: 11px;
+  margin-right: 5px;
+  vertical-align: -1px;
+  border-width: 1.5px;
+}
+.yarn-line.changing {
+  background: var(--accent);
+  color: var(--accent-text);
+  box-shadow: var(--shadow);
+}
+.yarn-line.changing .yarn-swatch { border-color: var(--accent-text); }
+.yarn-change { font-weight: 800; }
+.yarn-arrow { font-weight: 800; }
+.yarn-swatch {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  border: 2px solid var(--text);
+  background: transparent;
+}
+.yarn-swatch.unknown { border-style: dashed; }
+
+/* 06 #1: "≈ why?" beside the stitch readout */
+.count-why {
+  position: relative;
+  margin-left: 8px;
+  vertical-align: middle;
+  min-height: 26px;
+  padding: 1px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 800;
+}
+.count-why[hidden] { display: none; }
+.count-why::before {
+  content: "";
+  position: absolute;
+  top: 50%; left: 50%;
+  width: max(100%, 44px); height: 44px;
+  transform: translate(-50%, -50%);
+}
+.count-why.warn { color: var(--danger); border-color: var(--danger); }
+.why-text { margin: 0 0 10px; line-height: 1.45; }
+.why-line {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px dashed var(--border);
+  background: var(--surface);
+}
+.why-line-text { line-height: 1.35; }
+.why-part { margin-top: 10px; font-size: 13px; }
+
+/* Import preview: the size pick and one confidence line per part */
+.size-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.size-chip {
+  min-height: 44px;
+  min-width: 44px;
+  padding: 0 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  font-weight: 800;
+}
+.size-chip.on { background: var(--accent); color: var(--accent-text); border: var(--tap-border); }
+.size-chip:focus-visible { outline: 3px solid var(--accent-2); outline-offset: 2px; }
+.size-field.needs-pick > label { color: var(--danger); }
+.size-field.nudge { animation: size-nudge 0.5s ease 2; }
+@keyframes size-nudge {
+  0%, 100% { transform: none; }
+  30% { transform: translateX(-4px); }
+  70% { transform: translateX(4px); }
+}
+.size-pick { display: flex; flex-direction: column; gap: 6px; }
+.imp-conf { font-size: 12px; color: var(--text-muted); font-weight: 600; }
+.imp-conf.warn, .parsed-note.warn, .part-conf.warn { color: var(--danger); }
+
+/* On the row where the yarn changes the strip takes one line, so the
+   instruction gives one up (the whole text is a tap away). */
+@media (max-height: 860px) {
+  .yarn-line:not([hidden]) + .pattern-line .pattern-line-text { -webkit-line-clamp: 2; }
+}
+@media (max-height: 760px) {
+  .yarn-line { padding: 2px 8px; font-size: 12px; }
+  .yarn-line:not([hidden]) + .pattern-line .pattern-line-text { -webkit-line-clamp: 1; }
+}
+
+/* --------------------------------------------------------------------------
    18. Touch targets and focus rings
 
    Everything you can tap gets at least 44 x 44 px. Controls that have to stay

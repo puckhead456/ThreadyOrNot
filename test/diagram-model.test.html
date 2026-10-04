@@ -2386,6 +2386,61 @@ group('17g. Templates carry the dialect, like workMode and orientation');
   assertEqual(plain.parts[0].dialect, 'auto', 'a template part without one is auto');
 })();
 
+/* ====================================================================== */
+group('17h. Wave F: the working round with no parsed count is sized by the counter\'s target, else marked countless');
+/* ====================================================================== */
+/* 3D follow mode turns the piece 360/count per tap. A round whose count is
+   only the stitches tapped so far would "close" on every tap, so Store sizes it
+   from the counter's own target for the row (Store.currentTarget, the readout's
+   number) and, with no target either, says `countless: true` so the renderer
+   does not turn by it (getStats().follow.key 'no-count'). */
+(function () {
+  fresh();
+  // Past the written rows, sized only by the pattern's repeat sentence: the
+  // counter's target answers through Patterns.targetFor, which the row index
+  // never sees. `expand` is stubbed silent so nothing else sizes the round.
+  var silentExpand = function (lines, row, prev, state) { return { stitches: [], color: null, height: 1, state: state }; };
+  withPatterns({ targetFor: function () { return 24; }, expand: silentExpand }, function () {
+    var pA = mkProject('ZF RepeatTarget', 'rounds');
+    var prtA = mkPart(pA, 'Rnd 1: 6 sc in magic ring. (6)\nRnd 2: 2 sc in each st around. (12)\nRepeat Rnd 2 until piece measures 3 inches.',
+      { row: 4, stitch: 3 });
+    var mA = Store.diagramModel(prtA, Store.project(pA.id));
+    var cA = mA.rounds[mA.current];
+    assertEqual(Store.currentTarget(prtA), 24, 'the counter shows a target of 24 for round 5 (from the repeat sentence)');
+    assertEqual([cA.row, cA.count, cA.done], [5, 24, 3],
+      'so the working round is a 24-stitch ring with 3 done (it used to be 3 of 3: closed on every tap)');
+    assertEqual(cA.countless, undefined, 'and it is not marked countless');
+  });
+
+  // No counts anywhere and no target: the ring is what has been tapped, and it says so.
+  var pB = mkProject('ZF NoCounts', 'rounds');
+  var prtB = mkPart(pB, 'Rnd 1: 6 sc in magic ring.\nRnd 2: 2 sc in each st around.\nRnd 3: sc around.', { row: 4, stitch: 3 });
+  var mB = Store.diagramModel(prtB, Store.project(pB.id));
+  var cB = mB.rounds[mB.current];
+  assertEqual(Store.currentTarget(prtB), null, 'a pattern with no counts gives the counter no target');
+  assertEqual([cB.row, cB.count, cB.done, cB.countless], [5, 3, 3, true],
+    'so the working round is the 3 stitches tapped and is marked countless');
+  prtB.stitch = 4;
+  var cB2 = Store.diagramModel(prtB, Store.project(pB.id)).rounds[mB.current];
+  assertEqual([cB2.count, cB2.done, cB2.countless], [4, 4, true], 'a tap (the cached live path) keeps the flag');
+
+  // A part with no pattern at all.
+  var pC = mkProject('ZF NoPattern', 'rounds');
+  var prtC = mkPart(pC, '', { row: 0, stitch: 5 });
+  var cC = Store.diagramModel(prtC, Store.project(pC.id));
+  cC = cC.rounds[cC.current];
+  assertEqual([cC.count, cC.countless], [5, true], 'a part with no pattern at all: countless');
+
+  // A written count is never countless, and no other round carries the key.
+  var pD = mkProject('ZF Written', 'rounds');
+  var prtD = mkPart(pD, 'Rnd 1: 6 sc in magic ring. (6)\nRnd 2: 2 sc in each st around. (12)\nRnd 3: *Sc in next st, 2 sc in next st; rep from * around. (18)',
+    { row: 2, stitch: 4, fillRowStitches: true });
+  var mD = Store.diagramModel(prtD, Store.project(pD.id));
+  var flagged = mD.rounds.filter(function (r) { return 'countless' in r; }).length;
+  assertEqual([mD.rounds[mD.current].count, flagged], [18, 0],
+    'a round with a printed count is sized by it, and no round carries `countless`');
+})();
+
 /* ---------------------------------------------------------------------- */
 
 /**

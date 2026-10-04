@@ -2384,6 +2384,243 @@ group('Wave E (sewing-audit): cutting, fabric, notions, names');
 })();
 
 // =======================================================================
+group('Wave F: split and merge step cards (05 #1)');
+// =======================================================================
+(function () {
+  function pr(steps, vars) {
+    return { steps: steps, variations: vars || [], cuttingList: [], notions: [], fabric: [], units: [] };
+  }
+  var base = pr([
+    { n: 1, text: 'Join the side fronts. Repeat for the backs. Press all seams open.', page: 6, section: 'Bodice' },
+    { n: 2, text: 'Sew the shoulders.', page: 6 },
+    { n: 3, text: 'Hem the skirt.', page: 7 }
+  ], [{ n: 3, text: 'Try a longer skirt.', optional: true }]);
+  var d = S.toCraftData(base);
+  d.steps[0].done = true;
+  d.currentStep = 2;
+  assertTrue(S.splitStep(d, 0, 2), 'wave F: a three-sentence card splits before its third sentence');
+  assertEqual(d.steps.length, 5, 'wave F: one card more');
+  assertEqual([d.steps[0].text, d.steps[1].text], ['Join the side fronts. Repeat for the backs.', 'Press all seams open.'],
+    'wave F: the halves are the sentences before and after the split');
+  assertEqual([d.steps[1].n, d.steps[1].section, d.steps[1].page, d.steps[1].done], [1, 'Bodice', 6, true],
+    'wave F: the second half keeps the printed number, section, page and tick');
+  assertEqual(d.currentStep, 3, 'wave F: the card you are on stays the same card');
+  var ps = S.printedSteps(d.steps);
+  assertEqual(ps.total + ' ' + ps.of[0].card + '/' + ps.of[0].cards + ' ' + ps.of[1].card + '/' + ps.of[1].cards, '3 1/2 2/2',
+    'wave F: still three printed steps; step 1 now reads card 1 of 2 and 2 of 2');
+  assertTrue(!!d.steps[0].src && d.steps[0].src === d.steps[1].src, 'wave F: both halves remember the card they came from');
+  assertFalse(S.splitStep(d, 2, 1), 'wave F: a one-sentence card has nowhere to split');
+  assertFalse(S.splitStep(d, 0, 0) || S.splitStep(d, 0, 9) || S.splitStep(d, 99, 1), 'wave F: out-of-range splits change nothing');
+  assertEqual(d.steps.length, 5, 'wave F: and leave the list as it was');
+
+  // Re-import with the same text puts the split back, ticks and all.
+  var again = S.toCraftData(base, d);
+  assertEqual(again.steps.length, 5, 'wave F: a re-import keeps the split');
+  assertEqual(again.steps.slice(0, 2).map(function (s) { return s.done; }), [true, true], 'wave F: and the ticks on both halves');
+  assertTrue(again.steps[0].id !== d.steps[0].id, 'wave F: with fresh ids');
+  var changed = pr([{ n: 1, text: 'Join the side fronts. Repeat for the backs. Press all seams open with a ham.' }, base.steps[1], base.steps[2]]);
+  assertEqual(S.toCraftData(changed, d).steps.length, 3, 'wave F: a step whose text changed comes in as printed');
+
+  // Merge back.
+  assertTrue(S.mergeSteps(d, 0), 'wave F: merge with the next card');
+  assertEqual(d.steps[0].text, 'Join the side fronts. Repeat for the backs. Press all seams open.', 'wave F: merging the halves gives the card back');
+  assertEqual(d.steps.length, 4, 'wave F: one card fewer');
+  assertEqual(d.currentStep, 2, 'wave F: the current card moves with it');
+  d.steps[1].done = false;
+  assertTrue(S.mergeSteps(d, 0), 'wave F: merge two different printed steps');
+  assertEqual([d.steps[0].n, d.steps[0].done], [1, false], 'wave F: the first card\'s number wins, done only when both were');
+  assertFalse(S.mergeSteps(d, 1), 'wave F: a construction card never merges into an optional extra');
+  var merged = S.toCraftData(base, d);
+  assertEqual(merged.steps.length, 3, 'wave F: a re-import keeps a merge of two imported cards');
+  assertTrue(/Sew the shoulders\.$/.test(merged.steps[0].text), 'wave F: as one card');
+
+  // Split into three, merge the last third with the next step: a re-import
+  // keeps all three cards (none is lost to a partial match).
+  var e = S.toCraftData(base);
+  S.splitStep(e, 0, 1);
+  S.splitStep(e, 1, 1);
+  assertEqual(e.steps.length, 6, 'wave F: split twice into three cards');
+  S.mergeSteps(e, 2);
+  assertEqual(e.steps.length, 5, 'wave F: the third merged with step 2');
+  var e2 = S.toCraftData(base, e);
+  assertEqual(e2.steps.map(function (s) { return s.text; }).slice(0, 3),
+    ['Join the side fronts.', 'Repeat for the backs.', 'Press all seams open. Sew the shoulders.'],
+    'wave F: a re-import puts the whole edited run back');
+  assertEqual(e2.steps.length, 5, 'wave F: and nothing is doubled');
+
+  // A merged card can run past the parser's 800-character card.
+  var long1 = new Array(70).join('Sew the seam. '), long2 = new Array(70).join('Press it flat. ');
+  var f = S.toCraftData(pr([{ n: 1, text: long1 }, { n: 1, text: '(continued) ' + long2 }]));
+  S.mergeSteps(f, 0);
+  assertTrue(f.steps[0].text.length > 1500 && !/\(continued\)/.test(f.steps[0].text), 'wave F: a merged card keeps all its text');
+  assertEqual(S.normalize(f, null).steps[0].text.length, f.steps[0].text.length, 'wave F: and normalize keeps it whole');
+  assertEqual(S.normalize({ steps: [{ text: 'a', src: 'bad src!' }] }, null).steps[0].src, undefined, 'wave F: a junk src is dropped');
+  assertTrue(S.textKey('Sew it.') === S.textKey('sew it') && S.textKey('Sew it.') !== S.textKey('Sew it twice.'),
+    'wave F: textKey ignores case and punctuation, not words');
+  var figText = 'Fold the long edges in and press. (Figure 1) Finally, press it in half. (Figure 2)';
+  assertEqual(S.sentences(figText), ['Fold the long edges in and press. (Figure 1)', 'Finally, press it in half. (Figure 2)'],
+    'wave F: a figure reference stays with the sentence it illustrates');
+  assertEqual(S.sentences(figText).join(' '), figText, 'wave F: and the sentences still join back losslessly');
+})();
+
+// =======================================================================
+group('Wave F: cut counts in pieces, mirrored and on-fold rows explained');
+// =======================================================================
+(function () {
+  var d = S.normalize({ cutting: [
+    { piece: '4 1/2" square', qty: 56, cutCount: 3 },
+    { piece: 'Sleeve', qty: 2, cutCount: 2, grain: 'mirrored' },
+    { piece: 'Front', qty: 1, cutCount: 0, onFold: true }
+  ] }, null);
+  assertEqual(S.cutTotals(d), { cut: 5, total: 59, rows: 3, rowsDone: 1 }, 'wave F: 5 of 59 pieces, 1 of 3 rows');
+  assertTrue(/ 5 of 59 cut$/.test(' ' + S.summary({ craftData: d })), 'wave F: the home card counts pieces, not rows');
+  assertTrue(/^2 mirrored = 1 pair/.test(S.cutHint(d.cutting[1])), 'wave F: "2 mirrored" is one pair');
+  assertTrue(/^4 mirrored = 2 pairs/.test(S.cutHint({ qty: 4, grain: 'reversed' })), 'wave F: four reversed are two pairs');
+  assertTrue(/^on the fold/.test(S.cutHint(d.cutting[2])), 'wave F: on-fold rows say what the fold does');
+  assertEqual(S.cutHint(d.cutting[0]), '', 'wave F: a plain row needs no hint');
+  var pairRow = S.cutRow('Cut 1 pair of pockets');
+  assertSubset(pairRow, { qty: 2, grain: 'pair' }, 'wave F: "Cut 1 pair of pockets" is two pieces, a pair');
+  assertTrue(!!pairRow && !/pair/i.test(pairRow.piece), 'wave F: and the piece is not called "pair"');
+  assertSubset(S.cutRow('Pocket: cut 1 pair'), { piece: 'Pocket', qty: 2, grain: 'pair' }, 'wave F: "Pocket: cut 1 pair" too');
+  assertSubset(S.cutRow('Cut 2 sleeves'), { qty: 2, grain: '' }, 'wave F: no pair, no change');
+
+  // Re-import keeps a count on the row it belongs to (the Mabel bag cuts a
+  // Main Panel from three fabrics; all three used to inherit one count).
+  var cl = [
+    { piece: 'Main Panel', qty: 2, material: 'main', note: '' },
+    { piece: 'Main Panel', qty: 2, material: 'lining', note: '' },
+    { piece: 'Main Panel', qty: 4, material: 'interfacing', note: '' },
+    { piece: 'Handle', qty: 1, material: 'main', note: '' }
+  ];
+  var bag = S.toCraftData({ steps: [], cuttingList: cl, notions: [], fabric: [], units: [], variations: [] });
+  bag.cutting[0].cutCount = 1;
+  bag.cutting[3].cutCount = 1;
+  bag.cutting[3].material = 'contrast';   // changed in the editor
+  var bag2 = S.toCraftData({ steps: [], cuttingList: cl, notions: [], fabric: [], units: [], variations: [] }, bag);
+  assertEqual(bag2.cutting.map(function (r) { return r.cutCount; }), [1, 0, 0, 1],
+    'wave F: a re-import keeps the main-fabric count on the main-fabric Main Panel only, and a unique piece by name');
+})();
+
+// =======================================================================
+group('Wave F: variation and hack pages are optional extras (05 #3)');
+// =======================================================================
+(function () {
+  assertEqual(S.optionalHead('PATTERN HACK (OPTIONAL!)'), 'Pattern Hack', 'wave F: a capitals hack heading');
+  assertEqual(S.optionalHead('Pattern Variations'), 'Pattern Variations', 'wave F: a Title Case variations heading');
+  assertEqual(S.optionalHead('This pattern features two length variations: pants and'), '', 'wave F: prose mentioning variations is not one');
+  var booklet = [
+    'CHOOSING YOUR SIZE',
+    'Use your waist measurement to choose the size.',
+    '',
+    'PATTERN HACK (OPTIONAL!)',
+    'To make this a quicker sew, skip the back pockets and draw in the side seam on the front pant instead.',
+    'SHORTEN/LENGTHEN',
+    'This pattern includes shorten and lengthen lines.',
+    '',
+    'SEWING INSTRUCTIONS',
+    '1. Sew the side seams with right sides together.',
+    '2. Press the seams open.',
+    '3. Hem the legs.'
+  ].join('\n');
+  var p = S.parse(booklet);
+  assertEqual(p.steps.length, 3, 'wave F: the construction is still three steps');
+  assertEqual(p.variations.length, 1, 'wave F: the hack page is one optional extra');
+  assertSubset(p.variations[0], { section: 'Pattern Hack', optional: true }, 'wave F: named after its heading, flagged optional');
+  assertTrue(/^To make this a quicker sew/.test(p.variations[0].text) && !/shorten/i.test(p.variations[0].text),
+    'wave F: it stops at the next heading');
+  var d = S.toCraftData(p);
+  assertEqual(S.printedSteps(d.steps).total, 3, 'wave F: and never counts as a step');
+  assertTrue(d.steps[d.steps.length - 1].optional, 'wave F: it travels after the construction');
+  var noBlock = S.parse('PATTERN HACK (OPTIONAL!)\nSkip the pockets for a quicker sew, it is a good one for beginners.\n1. Sew it.\n2. Hem it.');
+  assertTrue(noBlock.variations.every(function (v) { return v.optional; }), 'wave F: without a steps block nothing is flagged wrongly');
+})();
+
+// =======================================================================
+group('Wave F: a garment x unit x size-group fabric grid');
+// =======================================================================
+(function () {
+  var grid = [
+    'FABRIC REQUIREMENTS',
+    'TOP SHORTS PANTS',
+    'METERS YARDS METERS YARDS METERS YARDS',
+    '140CM 1.5 1.65 1.5 1.9 2.6 2.85',
+    'SIZES A-H',
+    '113CM 1.6 1.75 1.8 2 3 3.3',
+    '140CM 1.7 1.9 2.1 2.3 3 3.3',
+    'SIZES I-P',
+    '113CM 2 2.2 2.1 2.3 3.7 4'
+  ].join('\n');
+  var rows = S.gridFabric(grid, null);
+  assertEqual(rows.length, 6, 'wave F: three garments x two bolt widths');
+  assertSubset(rows[4], { name: 'Pants', width: '140 cm', rawAmounts: ['2.6 m / 2.85 yd', '3 m / 3.3 yd'], groupLabels: ['A-H', 'I-P'] },
+    'wave F: pants at 140 cm, one amount per size group, metres with yards');
+  assertSubset(rows[1], { name: 'Top', width: '113 cm', rawAmounts: ['1.6 m / 1.75 yd', '2 m / 2.2 yd'] },
+    'wave F: the second width of each group is its own row');
+  var labels = 'ABCDEFGHIJKLMNOP'.split('');
+  var withSizes = S.gridFabric(grid, labels);
+  assertEqual(withSizes[5].amounts.length, 16, 'wave F: with a size chart the groups spread over its sizes');
+  assertEqual(S.fabricForSize(withSizes, labels, 'J').filter(function (r) { return r.name === 'Pants'; }).map(function (r) { return r.amount; }),
+    ['3 m / 3.3 yd', '3.7 m / 4 yd'], 'wave F: size J is in group I-P');
+  var p = S.parse('PATTERN INFORMATION\nA relaxed pant.\n' + grid + '\nSEWING INSTRUCTIONS\n1. Sew the side seams.\n2. Hem it.');
+  assertEqual(p.fabric.length, 6, 'wave F: parse() takes the grid');
+  assertFalse(hasWarning(p.warnings, 'could not be read'), 'wave F: and no longer says the table could not be read');
+  var kept = S.normalize({ fabric: [rows[0]] }, null).fabric[0];
+  assertEqual(kept.groupLabels, ['A-H', 'I-P'], 'wave F: normalize keeps the group labels');
+  assertEqual(S.normalize({ fabric: [{ name: 'X', rawAmounts: ['1 m'], groupLabels: ['A-H', 'I-P'] }] }, null).fabric[0].groupLabels,
+    undefined, 'wave F: but not when they do not line up with the amounts');
+  assertEqual(S.gridFabric('TOP SHORTS\nMETERS YARDS\n140CM 1.5 1.65', null).length, 0,
+    'wave F: a units line that does not match the columns is not a grid');
+})();
+
+// =======================================================================
+group('Wave F: the shopping list (05 #5)');
+// =======================================================================
+(function () {
+  var d = S.normalize({
+    size: { chosen: '', sizeLabels: ['36', '38', '40', '42', '44'] },
+    fabric: [
+      { name: 'Fabric', width: '115cm / 45"', amounts: ['2.3 m', '2.3 m', '2.3 m', '2.4 m', '2.4 m'] },
+      { name: 'LINING', width: '', amounts: ['1 m', '1 m', '1 m', '1 m', '1 m'] }
+    ],
+    notions: [{ text: 'Invisible zip 40 cm' }, { text: 'Hook and eye', have: true }, { text: 'Matching linings' }]
+  }, null);
+  var l = S.shoppingList(d);
+  assertEqual(l[0], 'fabric, 115cm / 45" wide: 36–40 2.3 m · 42–44 2.4 m', 'wave F: no size yet — every size range with its amount');
+  assertEqual(l[1], '1 m — LINING', 'wave F: an all-sizes row is one amount');
+  assertTrue(l.indexOf('Invisible zip 40 cm') >= 0 && l.indexOf('Hook and eye') < 0, 'wave F: notions not ticked off, and only those');
+  assertTrue(l.indexOf('Matching linings') < 0, 'wave F: a notion that only names a fabric on the list is not listed twice');
+  assertEqual(l[l.length - 1], 'Thread to match', 'wave F: thread, which no pattern lists');
+  d.size.chosen = '42';
+  assertEqual(S.shoppingList(d)[0], '2.4 m — fabric, 115cm / 45" wide (size 42)', 'wave F: with a size, just your amount');
+  assertEqual(S.shoppingList(d, { fabric: false, thread: false }), ['Invisible zip 40 cm', 'Matching linings'],
+    'wave F: the toggles leave fabric and thread off');
+  d.notions.push({ id: 'x', text: 'Matching thread', qty: null, kind: 'notion', have: false });
+  assertTrue(S.shoppingList(d).filter(function (x) { return /thread/i.test(x); }).length === 1, 'wave F: thread already listed is not added again');
+  var g = S.normalize({ fabric: [{ name: 'Pants', width: '140 cm', amounts: ['2.6 m', '3 m'], rawAmounts: ['2.6 m', '3 m'], groupLabels: ['A-H', 'I-P'] }] }, null);
+  assertEqual(S.shoppingList(g, { notions: false, thread: false }), ['Pants, 140 cm wide: sizes A-H 2.6 m · sizes I-P 3 m'],
+    'wave F: a per-group row names its groups');
+})();
+
+// =======================================================================
+group('Wave F: seam-allowance reminders and cutting-layout pages');
+// =======================================================================
+(function () {
+  var ex = 'Except Neckline, Armhole and pocket edge which are 6mm / 1/4".';
+  assertEqual(S.saPhrases(ex), ['neckline', 'armhole', 'pocket edge'], 'wave F: the parts the exception names');
+  var d = S.normalize({ seamAllowance: { text: 'All seams are 1cm / 3/8". ' + ex, mm: 10, inches: '3/8', exceptions: [{ text: ex, mm: 6 }] } }, null);
+  assertSubset(S.saReminder(d, 'Stitch the bodice to the lining around the armholes.'), { mm: 6, inches: '1/4', part: 'armhole' },
+    'wave F: a step that mentions the armholes gets the 6 mm reminder');
+  assertSubset(S.saReminder(d, 'Understitch the pocket edges.'), { part: 'pocket edge' }, 'wave F: and the pocket edges');
+  assertEqual(S.saReminder(d, 'Sew the side seams.'), null, 'wave F: a step that names none of them gets none');
+  assertEqual(S.saReminder(S.normalize({}, null), 'armhole'), null, 'wave F: no seam allowance, no reminder');
+  assertEqual(S.layoutPages('=== PAGE 3 ===\nCUT TING L AYOUTS\n=== PAGE 4 ===\nCutting layouts show approximate position of pattern\n=== PAGE 5 ===\nQuilt Layout'),
+    [3, 4], 'wave F: kerning-split and captioned cutting layouts; a quilt layout is not one');
+  assertEqual(S.layoutPages(''), [], 'wave F: no text, no pages');
+  assertEqual(S.layoutPages('=== PAGE 8 ===\nPRINTING THE PDF\nCUTTING TIPS\nCUTTING LAYOUTS\nTRACE\nFollow the layout on the next page.\n=== PAGE 9 ===\nCUTTING LAYOUTS'),
+    [9], 'wave F: a side heading in a stack of headings is not the layout page');
+})();
+
+// =======================================================================
 var sum = document.getElementById('summary');
 sum.className = failed ? 'bad' : 'ok';
 sum.textContent = (failed ? 'FAILED ' : 'ALL PASS ') + passed + ' passed, ' + failed + ' failed';

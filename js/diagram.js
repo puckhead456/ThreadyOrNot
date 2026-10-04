@@ -21,6 +21,19 @@
          its own pointer events (the one under the stitch button is
          `pointer-events: none`). Same code path as the viewer's own pointer
          handlers, so both agree on direction and inertia.
+     handle.setFollow(bool) / handle.getFollow()          // wave F
+         Follow mode (mount option `follow`, default off here; the app turns
+         it on): every change of the stitch being worked turns the piece so
+         that stitch faces the viewer — yaw = 2π·done/count − π/2 on the turn
+         nearest the current yaw, eased over ~150 ms, snapped under reduced
+         motion — and the clock-driven auto-rotate is off while the piece is
+         being worked. A swipe leaves an offset that the next tap blends back
+         from; a finished piece turns slowly as a trophy (the old rate, no
+         glow, no wedge); a working round Store marks `countless` does not
+         turn (`follow.key` 'no-count'); rows mode slides a sheet wider than
+         the frame so the working stitch stays in view. Camera only: nothing
+         is rebuilt. Pure maths on `Diagram.follow`; `getStats().follow`
+         reports it.
      handle.setSafeInsets({ top, right, bottom, left })   // CSS px
          Margins the piece must stay out of. The stitch button's number and
          pills own the middle of the canvas, and a round-worked solid is also a
@@ -40,7 +53,8 @@
          host closes the button's while the full-screen viewer is open.
 
    mount options: { palette: { ghost, ink, glow, alert, bg }, reducedMotion,
-                    interactive, safeInsets, onStatus }
+                    interactive, safeInsets, onStatus, fitPurpose, finished,
+                    follow }
      onStatus({ webgl, status, message }) fires once per transition
      ('ok' | 'unavailable' | 'lost' | 'blank' | 'restored') so the host can put
      a one-line fallback message up instead of showing an empty rectangle.
@@ -746,6 +760,107 @@
     return clamp(Math.round(dev.expected / r.count * r.n), 0, r.n);
   }
 
+  /* ---- Follow mode (wave F, the owner's request): the piece turns with the
+     taps, so the stitch just made stays at the front.
+
+     Angular convention, checked against the builder and the camera rather
+     than assumed: `buildRoundBand` lays stitch j of a round from angle a0[j]
+     (a0[0] = 0, increasing from +x toward +z), the working-round marker and
+     the over-count wedge are those same slices, and `buildView`'s
+     R = Rx(pitch)·Ry(yaw) puts a ring point at angle A at view depth
+     r·cos(pitch)·sin(A − yaw). The point nearest the camera is therefore at
+     A = yaw + FOLLOW_FRONT (π/2), and stitch k faces the viewer when
+     yaw = angle(k) − π/2. With that yaw, the done slices are to the RIGHT of
+     the front and the unworked ones to the LEFT, so every tap moves the near
+     surface right: the work travels right to left across the front, as it
+     does under a right-handed hook.
+
+     The angle is ABSOLUTE — 2π·index/count — never an accumulated delta, so a
+     jump, an undo or a recount can never leave it drifting. Only the choice
+     of which turn (+2πk) to land on uses the previous yaw: the nearest one, so
+     36 taps on a 36-stitch round add up to exactly one turn and the next round
+     carries on from the seam instead of spinning back. These are pure so the
+     test page can check them without a GL context (`Diagram.follow`). */
+  var FOLLOW_FRONT = Math.PI / 2;
+  var FOLLOW_MS = 150;        // one stitch: a short ease
+  var FOLLOW_MAX_MS = 420;    // a re-sync after a swipe or a jump: up to this
+  var FOLLOW_PAN_MS = 180;    // rows mode: sliding the sheet to the working stitch
+
+  /* Angle of the working point — the boundary between the `index` stitches
+     done and the rest — on a round of `count`. With the round's real slice
+     layout (`a0`/`aw` from the builder: widths, arc length, the 160-slice cap)
+     the point is walked through the slices, so a wide stitch turns the piece
+     further than a narrow one and the front is where the fabric really ends;
+     for a round of equal stitches it is exactly 2π·index/count. */
+  function followAngle(index, count, a0, aw) {
+    count = +count;
+    if (!(count > 0) || !isFinite(count)) return 0;
+    var i = clamp(+index || 0, 0, count);
+    if (!a0 || !aw || !a0.length || aw.length !== a0.length) return TAU * i / count;
+    var n = a0.length;
+    var f = i / count * n;
+    var k = Math.floor(f);
+    if (k >= n) return a0[n - 1] + aw[n - 1];
+    return a0[k] + (f - k) * aw[k];
+  }
+
+  /* The camera yaw that puts angle `a` at the front. */
+  function followYawFor(a) { return a - FOLLOW_FRONT; }
+
+  /* `target` moved by whole turns to the equivalent nearest `ref`. */
+  function nearestTurn(target, ref) {
+    if (!isFinite(target)) return ref;
+    if (!isFinite(ref)) return target;
+    return target + TAU * Math.round((ref - target) / TAU);
+  }
+
+  /* The yaw follow mode lands on after a change: stitch `index` of `count` at
+     the front, on the turn nearest `prevYaw`. */
+  function followStep(prevYaw, index, count, a0, aw) {
+    return nearestTurn(followYawFor(followAngle(index, count, a0, aw)), prevYaw);
+  }
+
+  /* How long a follow move takes: one stitch is FOLLOW_MS; a bigger swing (a
+     re-sync after the user spun the piece, a jump) is given up to
+     FOLLOW_MAX_MS so half a turn is not thrown at the eye in 150 ms. */
+  function followDuration(delta) {
+    var d = Math.abs(delta || 0);
+    if (!(d > 0.5)) return FOLLOW_MS;
+    return Math.min(FOLLOW_MAX_MS, FOLLOW_MS + (d - 0.5) * 102);
+  }
+
+  /* The camera rotation R = Rx(pitch)·Ry(yaw), row-major, exactly as
+     `buildView` uses it (it calls this), so the test page can check "stitch k
+     faces the viewer" against the real matrix rather than a copy of it. */
+  var _rot = new Float64Array(9);
+  function cameraRot(yaw, pitch, out) {
+    var o = out || new Float64Array(9);
+    var cy = Math.cos(yaw), sy = Math.sin(yaw);
+    var cp = Math.cos(pitch), sp = Math.sin(pitch);
+    o[0] = cy; o[1] = 0; o[2] = sy;
+    o[3] = sp * sy; o[4] = cp; o[5] = -sp * cy;
+    o[6] = -cp * sy; o[7] = sp; o[8] = cp * cy;
+    return o;
+  }
+
+  /* The eased value `elapsed` ms into a move; reduced motion snaps. */
+  function followEase(from, to, elapsed, dur, reduced) {
+    if (reduced || !(dur > 0) || elapsed >= dur) return to;
+    if (!(elapsed > 0)) return from;
+    return lerp(from, to, easeOutCubic(elapsed / dur));
+  }
+
+  /* Rows mode: the horizontal centre that keeps world x `xWork` (the working
+     stitch) in view, for a sheet spanning [xMin, xMax] seen through a frame
+     `halfVis` wide either side of its centre. A sheet that fits gets 0 — no
+     motion at all; a wider one is slid so the working stitch is centred, but
+     never so far that empty space shows past the sheet's own edge. */
+  function followPan(xWork, xMin, xMax, halfVis) {
+    if (!isFinite(xWork) || !isFinite(xMin) || !isFinite(xMax) || !(halfVis > 0)) return 0;
+    if (xMax - xMin <= 2 * halfVis) return 0;
+    return clamp(xWork, xMin + halfVis, xMax - halfVis);
+  }
+
   /* Which relief tier a piece gets: the highest whose entry size the stitch
      has reached (with hysteresis around the tier it is already at), then
      stepped down until the whole piece fits the purpose's vertex budget.
@@ -916,7 +1031,10 @@
       mode: mode, rounds: rounds, current: current, defaultColor: def,
       shape: shape, geo: geo, geoRaw: raw, geoShape: shape,
       geoCounts: countsOf(raw),
-      finished: m.finished != null ? !!m.finished : finishedOf(rounds, current),
+      /* A round Store marks `countless` (wave F: no parsed count, no counter
+         target) is only as long as what has been tapped, so it is always
+         "full"; it is the round being worked, never a finish. */
+      finished: m.finished != null ? !!m.finished : (anyCountless(raw) ? false : finishedOf(rounds, current)),
       deviation: m.deviation && typeof m.deviation === 'object' ? m.deviation : null
     };
   }
@@ -942,6 +1060,11 @@
       lastCountable = i;
     }
     return any && current >= lastCountable;
+  }
+
+  function anyCountless(raw) {
+    for (var i = 0; i < raw.length; i++) if (raw[i] && raw[i].countless) return true;
+    return false;
   }
 
   function countsOf(raw) {
@@ -1453,6 +1576,15 @@
     return Math.min(BUMP * SW, BUMP_R * Math.max(R_MIN, r));
   }
 
+  /* The slice layout rides along on the built band (and so on its GPU chunk),
+     so follow mode reads the angle where the done fabric really ends from
+     the very arrays the mesh was built with — a polygon's arc-length slices,
+     per-stitch widths, the 160-slice cap — instead of re-deriving it. */
+  function withSlices(geo, a0, aw) {
+    if (geo) { geo.a0 = a0; geo.aw = aw; }
+    return geo;
+  }
+
   /* Turns one prepared round + its layout band into geometry. */
   function buildRoundBand(mode, round, band, index, tier) {
     var n = round.n;
@@ -1481,7 +1613,7 @@
          the bottom ring AND wider than it, which is the overhanging lip. */
       var dyAbs = Math.abs(band.yBot - band.yTop);
       var dipReach = Math.min(band.reach, DIP_SPAN * dyAbs / DIP);
-      return buildBand({
+      return withSlices(buildBand({
         n: n, a0: a0, aw: aw, amp: round.amp, col: round.col,
         jit: round.jit, keys: round.keys, descs: round.descs,
         tier: tier, hc: hClass(round.height), sdir: 1,
@@ -1494,7 +1626,7 @@
         anchorCol: 0,
         prof: band.prof || null,
         bumpAmp: bumpAmpOf(band, tier)
-      });
+      }), a0, aw);
     }
     /* rows: a cylinder segment about a vertical axis behind the sheet, so
        world = ( r*sin(a), y, r*cos(a) - Rc ). The shared builder emits
@@ -1519,7 +1651,7 @@
       aw[j] = -dx / Rc;
       x += dx;
     }
-    return buildBand({
+    return withSlices(buildBand({
       n: n, a0: a0, aw: aw, amp: round.amp, col: round.col,
       jit: round.jit, keys: round.keys, descs: round.descs,
       // a row is worked UPWARD: its base is the band's bottom edge (yBot)
@@ -1531,7 +1663,7 @@
       dipScale: band.reach,
       anchorCol: 0,
       thick: THICK * SW
-    });
+    }), a0, aw);
   }
 
   /* ============================================================ WebGL core */
@@ -1716,6 +1848,20 @@
       // camera
       yaw: -0.35, pitch: PITCH,
       spinVel: 0,
+      /* Follow mode (wave F): the piece turns with the taps instead of on a
+         clock. `followAnim` eases the yaw to the stitch being worked;
+         `followKey` is what the last sync followed (round, row, done, count),
+         so a push that did not move the count (a palette change, a resize)
+         never pulls back a piece the user has just spun (`userTurned`).
+         Rows mode slides the sheet instead (`panX`, a world-x offset applied
+         before the rotation). */
+      follow: !!opts.follow,
+      followAnim: null,
+      followKey: null,
+      followYaw: null,
+      userTurned: false,
+      panX: 0,
+      panAnim: null,
       zoom: 1,
       userPitch: 0,
       pauseUntil: 0,
@@ -1844,6 +1990,8 @@
       c.verts = geo.verts.length / FLOATS;
       c.holes = geo.holes || 0;
       c.tier = geo.tier || 0;
+      c.a0 = geo.a0 || null;     // slice layout, for follow mode
+      c.aw = geo.aw || null;
       return c;
     }
 
@@ -2240,17 +2388,13 @@
 
     function buildView() {
       var s = state.fit.scale * state.zoom;
-      var yaw = state.yaw;
-      var cy = Math.cos(yaw), sy = Math.sin(yaw);
-      var pitch = state.pitch + state.userPitch;
-      var cp = Math.cos(pitch), sp = Math.sin(pitch);
+      var R = cameraRot(state.yaw, state.pitch + state.userPitch, _rot);
+      var r00 = R[0], r01 = R[1], r02 = R[2];
+      var r10 = R[3], r11 = R[4], r12 = R[5];
+      var r20 = R[6], r21 = R[7], r22 = R[8];
 
-      // R = Rx(pitch) * Ry(yaw), row-major entries
-      var r00 = cy, r01 = 0, r02 = sy;
-      var r10 = sp * sy, r11 = cp, r12 = -sp * cy;
-      var r20 = -cp * sy, r21 = sp, r22 = cp * cy;
-
-      var cx = state.fit.cx, ccy = state.fit.cy, ccz = state.fit.cz;
+      // panX: rows-mode follow slides the sheet along world x (see followPan)
+      var cx = state.fit.cx + state.panX, ccy = state.fit.cy, ccz = state.fit.cz;
       // view = T(0,0,-d) * R * S(s) * T(-c)
       var m = view;
       m[0] = r00 * s; m[1] = r10 * s; m[2] = r20 * s; m[3] = 0;
@@ -2640,6 +2784,137 @@
       }
     }
 
+    /* ------------------------------------------------------ follow mode */
+
+    /* What follow mode is aiming at for the model on screen: the yaw that puts
+       the working point of the round being worked at the front (rounds), or
+       face-on plus the slide that keeps the working stitch in the frame
+       (rows). A finished piece has nothing to follow: `yaw` is null, so it
+       stays exactly where it is, and a rows sheet slides home. `key` names
+       what was followed, so a push that moved nothing never re-syncs. */
+    function followTarget() {
+      var m = state.model;
+      var rounds = m.rounds;
+      if (!rounds.length) return null;
+      var ci = clamp(m.current, 0, rounds.length - 1);
+      var r = rounds[ci];
+      if (!r) return null;
+      var raw = m.geoRaw ? m.geoRaw[ci] : null;
+      var finished = !!state.fitFinished || !!m.finished;
+      var c = state.chunks[ci];
+      var a0 = c && c.a0 && c.a0.length === r.n ? c.a0 : null;
+      var out = {
+        key: m.mode + ':' + ci + ':' + (raw && raw.row != null ? raw.row : '') + ':' +
+          r.done + '/' + r.count + (finished ? ':finished' : ''),
+        finished: finished, yaw: null, angle: null, pan: 0
+      };
+      if (finished) return out;
+      /* A working round nothing sized (no parsed count, no counter target:
+         Store marks it `countless`) is only as long as what has been tapped,
+         so every tap would "close" it and 360/count means nothing. Do not
+         turn, and say why. */
+      if (raw && raw.countless) {
+        out.key = 'no-count';
+        out.reason = 'no-count';
+        return out;
+      }
+      if (m.mode === 'rows') {
+        out.yaw = 0;
+        out.pan = rowsPan(ci, r, a0 ? c : null);
+        return out;
+      }
+      out.angle = followAngle(r.done, r.count, a0, a0 ? c.aw : null);
+      out.yaw = followYawFor(out.angle);
+      return out;
+    }
+
+    /* Rows mode: world x of the working stitch, the sheet's extent, and the
+       frame's half width at the fit the piece is easing to. */
+    function rowsPan(ci, r, chunk) {
+      var b = state.bands[ci];
+      if (!b || !(r.count > 0)) return 0;
+      var Rc = b.Rc > 0 ? b.Rc : 1e6;
+      var xWork;
+      if (chunk) {
+        // the builder's slice angles: world x = Rc·cos(A) (see buildRoundBand)
+        xWork = Rc * Math.cos(followAngle(r.done, r.count, chunk.a0, chunk.aw));
+      } else {
+        var w = b.width > 0 ? b.width : r.n * SW;
+        var x0 = b.x0 != null ? b.x0 : -w / 2;
+        var xs = (ci & 1) ? x0 + w - w * r.done / r.count : x0 + w * r.done / r.count;
+        xWork = Rc * Math.sin(xs / Rc);
+      }
+      var xMin = Infinity, xMax = -Infinity;
+      for (var i = 0; i < state.bands.length; i++) {
+        var bi = state.bands[i], ri = state.model.rounds[i];
+        if (!bi || !ri || ri.count <= 0) continue;
+        var wi = bi.width > 0 ? bi.width : ri.n * SW;
+        var xl = bi.x0 != null ? bi.x0 : -wi / 2;
+        var R2 = bi.Rc > 0 ? bi.Rc : Rc;
+        xMin = Math.min(xMin, R2 * Math.sin(xl / R2));
+        xMax = Math.max(xMax, R2 * Math.sin((xl + wi) / R2));
+      }
+      var scale = (state.fitTo && state.fitTo.scale > 0 ? state.fitTo.scale : state.fit.scale) * state.zoom;
+      if (!(scale > 0) || !(state.h > 0) || !(state.w > 0)) return 0;
+      var box = insetBox();
+      var halfVis = CAM_DIST * Math.tan(FOV / 2) * (state.w / state.h) * box.fw * FIT_MARGIN / scale;
+      return followPan(xWork, xMin, xMax, halfVis);
+    }
+
+    /* Move to the follow target. `kind`: 'stitch' / 'round' / 'none' from
+       setModel, 'snap' for the first model a canvas sees, 'reset' when follow
+       is switched on or the view is reset. Only a camera change: nothing is
+       rebuilt, so a tap costs a few multiplies per frame for ~150 ms. */
+    function syncFollow(kind) {
+      if (!state.follow) return;
+      var tg = followTarget();
+      if (!tg) return;
+      var changed = tg.key !== state.followKey;
+      /* A push that did not move the count (a yarn colour, a resize, the
+         viewer opening) leaves alone a piece the user has just spun, and an
+         ease already on its way. The next tap blends back. */
+      if (!changed && kind !== 'reset' && kind !== 'snap' &&
+          (state.userTurned || state.followAnim || state.panAnim)) return;
+      // never fight the finger: the next push after the drag syncs instead
+      if (state.dragging) return;
+      state.followKey = tg.key;
+      var snap = kind === 'snap' || state.reducedMotion;
+      var t = now();
+      if (tg.yaw != null) {
+        /* Which turn to land on is measured from where follow mode was
+           already going — not from the yaw on screen, which lags behind fast
+           taps (or a throttled tab) and would pick the backward turn once the
+           lag passed half a turn. After a swipe it is the user's yaw. */
+        var ref = !state.userTurned && state.followYaw != null ? state.followYaw : state.yaw;
+        var to = nearestTurn(tg.yaw, ref);
+        state.followYaw = to;
+        state.userTurned = false;
+        state.spinVel = 0;
+        var d = to - state.yaw;
+        if (snap || Math.abs(d) < 1e-6) { state.yaw = to; state.followAnim = null; }
+        else state.followAnim = { from: state.yaw, to: to, t0: t, dur: followDuration(d) };
+      }
+      var p = tg.pan || 0;
+      if (snap || Math.abs(p - state.panX) < 1e-6) { state.panX = p; state.panAnim = null; }
+      else state.panAnim = { from: state.panX, to: p, t0: t, dur: FOLLOW_PAN_MS };
+      kick();
+    }
+
+    /* A finished piece in follow mode has no stitch to follow; it turns at
+       the old auto-rotate rate after the usual pause (the coordinator's
+       call, wave F), still without the glow and the wedge. */
+    function followTrophy() {
+      return !!state.follow && (!!state.fitFinished || !!state.model.finished);
+    }
+
+    /* Keep the in-flight follow ease in the same turn as the yaw when the
+       loop folds the yaw back into (−2π, 2π). */
+    function shiftYaw(d) {
+      state.yaw += d;
+      if (state.followAnim) { state.followAnim.from += d; state.followAnim.to += d; }
+      if (state.followYaw != null) state.followYaw += d;
+    }
+
     /* ------------------------------------------------------------- loop */
 
     /* Rounds mode turns at a constant 12 deg/s. Rows mode turns a full circle
@@ -2657,6 +2932,13 @@
       if (state.anim || state.glowAnim) return true;
       if (state.dragging) return true;
       if (Math.abs(state.spinVel) > 0.0005) return true;
+      if (state.followAnim || state.panAnim) return true;
+      /* Follow mode turns on events, not on a clock: between taps nothing
+         moves and nothing is drawn, except a user pitch easing home. A
+         finished piece is the exception — it turns slowly, as a trophy. */
+      if (state.follow && !followTrophy()) {
+        return !state.reducedMotion && t >= state.pauseUntil && state.userPitch !== 0;
+      }
       // once the pause is over, auto-rotation and the pitch return both want
       // frames, and both are off under reduced motion
       if (!state.reducedMotion && t >= state.pauseUntil) return true;
@@ -2676,11 +2958,20 @@
         state.yaw += state.spinVel * dt;
         state.spinVel *= Math.pow(0.06, dt);   // inertia decay
         if (Math.abs(state.spinVel) < 0.0005) state.spinVel = 0;
-      } else if (!state.reducedMotion && t >= state.pauseUntil) {
+      } else if (state.followAnim) {
+        var fa = state.followAnim, fEl = now() - fa.t0;
+        state.yaw = followEase(fa.from, fa.to, fEl, fa.dur, state.reducedMotion);
+        if (fEl >= fa.dur || state.reducedMotion) state.followAnim = null;
+      } else if ((!state.follow || followTrophy()) && !state.reducedMotion && t >= state.pauseUntil) {
         state.yaw += spinSpeed(state.yaw) * dt;
       }
-      if (state.yaw > TAU) state.yaw -= TAU;
-      if (state.yaw < -TAU) state.yaw += TAU;
+      if (state.panAnim) {
+        var pa = state.panAnim, pEl = now() - pa.t0;
+        state.panX = followEase(pa.from, pa.to, pEl, pa.dur, state.reducedMotion);
+        if (pEl >= pa.dur || state.reducedMotion) state.panAnim = null;
+      }
+      if (state.yaw > TAU) shiftYaw(-TAU);
+      if (state.yaw < -TAU) shiftYaw(TAU);
 
       /* The yaw the user left behind is theirs to keep — auto-rotation simply
          carries on from it. A pitch is different: held at an odd angle the
@@ -2714,7 +3005,9 @@
       state.running = false; state.lastT = 0; state.fpsT0 = 0;
       state.fpsFrames = 0; state.stats.fps = 0;
       // idle during the post-tap rotation pause: wake up when it expires
-      if (!state.reducedMotion && !state.dragging) {
+      // (in follow mode only a pitch waiting to ease home needs that)
+      if (!state.reducedMotion && !state.dragging &&
+          (!state.follow || followTrophy() || state.userPitch !== 0)) {
         var wait = state.pauseUntil - now();
         if (wait > 0) {
           if (state.resumeTimer) global.clearTimeout(state.resumeTimer);
@@ -2763,6 +3056,12 @@
       canvas.width = w; canvas.height = h;
       state.w = w; state.h = h; state.dpr = dpr;
       applyFit(computeFit(), true);
+      // a rows sheet's slide depends on the frame's width: re-aim it at once
+      if (state.follow && state.model.mode === 'rows') {
+        var tgR = followTarget();
+        state.panX = tgR ? tgR.pan : 0;
+        state.panAnim = null;
+      }
       kick();
     }
 
@@ -2877,6 +3176,9 @@
     function dragBy(dx, dy) {
       if (!state.dragging) dragBegin();
       var k = dragScale();
+      /* The finger owns the yaw: an ease still on its way is dropped, and
+         the offset the user leaves behind is kept until the next tap. */
+      if (dx || dy) { state.followAnim = null; state.userTurned = true; }
       state.yaw += dx * k;
       state.userPitch = clamp(state.userPitch + dy * k, -PITCH_LIMIT, PITCH_LIMIT);
       var t = now();
@@ -2968,10 +3270,17 @@
     function resetView() {
       state.zoom = 1;
       state.userPitch = 0;
-      state.yaw = state.model && state.model.mode === 'rows' ? 0 : -0.35;
       state.spinVel = 0;
       state.pauseUntil = 0;
       applyFit(computeFit(), false);
+      if (state.follow) {
+        // "home" in follow mode is the stitch being worked, at the front,
+        // on the turn nearest wherever the user left it
+        syncFollow('reset');
+        kick();
+        return;
+      }
+      state.yaw = state.model && state.model.mode === 'rows' ? 0 : -0.35;
       kick();
     }
 
@@ -3007,6 +3316,10 @@
       state.model = next;
       rebuild(next);
       applyFit(computeFit(), !prev.rounds.length);
+      /* Follow mode: the first model a canvas sees is faced at once; every
+         later push eases to the absolute angle of the stitch being worked
+         (a tap, an undo, a finished row, a jump — all the same rule). */
+      if (state.follow) syncFollow(!prev.rounds.length ? 'snap' : animate);
 
       if (!state.reducedMotion && animate === 'stitch') {
         var ci = clamp(next.current, 0, Math.max(0, next.rounds.length - 1));
@@ -3102,9 +3415,38 @@
       },
       setReducedMotion: function (on) {
         state.reducedMotion = !!on;
-        if (state.reducedMotion) { state.anim = null; state.spinVel = 0; }
+        if (state.reducedMotion) {
+          state.anim = null; state.spinVel = 0;
+          // a follow move in flight lands where it was going, now
+          if (state.followAnim) { state.yaw = state.followAnim.to; state.followAnim = null; }
+          if (state.panAnim) { state.panX = state.panAnim.to; state.panAnim = null; }
+        }
         kick();
       },
+      /* Follow mode (wave F): turn the piece with the taps so the stitch
+         being worked faces the viewer (rounds), or slide a wide sheet so it
+         stays in the frame (rows), instead of turning on a clock. Off gives
+         the old auto-rotate back after the usual pause. */
+      setFollow: function (on) {
+        on = !!on;
+        if (state.destroyed || on === state.follow) return;
+        state.follow = on;
+        state.followKey = null;
+        state.followYaw = null;    // the free spin moved the yaw: measure from it
+        state.userTurned = false;
+        if (on) {
+          syncFollow('reset');
+        } else {
+          state.followAnim = null;
+          if (state.panX) {
+            if (state.reducedMotion) state.panX = 0;
+            else state.panAnim = { from: state.panX, to: 0, t0: now(), dur: FOLLOW_PAN_MS };
+          }
+          state.pauseUntil = now() + ROT_PAUSE;
+        }
+        kick();
+      },
+      getFollow: function () { return !!state.follow; },
       resetView: resetView,
       /* CSS-pixel margins the piece must stay out of (the stitch button's
          number and pills). The fit box shrinks to what is left and the
@@ -3192,6 +3534,26 @@
           fitFinished: !!state.fitFinished,
           fitCy: Math.round(state.fit.cy * 1000) / 1000,
           dragging: !!state.dragging,
+          /* follow mode (wave F): what it is aiming at and whether it is on
+             its way. `angle` is where the working point sits on its ring
+             (radians from stitch 0), `front` the ring angle facing the camera
+             now (yaw + π/2), `target` the yaw it is easing to (unwrapped),
+             `pan` the rows-mode slide. */
+          follow: (function () {
+            var tg = state.follow ? followTarget() : null;
+            return {
+              on: !!state.follow,
+              angle: tg && tg.angle != null ? r3(tg.angle) : null,
+              front: r3(state.yaw + FOLLOW_FRONT),
+              target: state.followYaw == null ? null : r3(state.followYaw),
+              animating: !!(state.followAnim || state.panAnim),
+              trophy: followTrophy(),
+              reason: tg ? (tg.finished ? 'finished' : (tg.reason || '')) : '',
+              userTurned: !!state.userTurned,
+              pan: r3(state.panX),
+              key: state.followKey
+            };
+          }()),
           /* geometry, so a test or the gallery can assert the reference table
              without re-deriving it (01 ranked change 14) */
           geo: state.geo ? {
@@ -3225,7 +3587,27 @@
 
   global.Diagram = {
     mount: mount,
-    version: '1.4.0',
+    version: '1.5.0',
+    /* Follow mode's pure arithmetic (wave F), for hosts and the test page.
+       angle(index, count[, a0, aw])  ring angle of the working point
+       yawFor(angle)                  camera yaw that puts that angle in front
+       nearest(target, ref)           target moved by whole turns nearest ref
+       step(prevYaw, index, count[, a0, aw])  the yaw follow mode lands on
+       duration(deltaYaw)             ms for a move (150 for one stitch)
+       ease(from, to, elapsedMs, durMs, reducedMotion)   reduced motion snaps
+       pan(xWork, xMin, xMax, halfVisible)   rows: horizontal slide, 0 if it fits
+       rotation(yaw, pitch)           the camera matrix buildView uses */
+    follow: {
+      FRONT: FOLLOW_FRONT, MS: FOLLOW_MS, MAX_MS: FOLLOW_MAX_MS, PAN_MS: FOLLOW_PAN_MS,
+      angle: followAngle,
+      yawFor: followYawFor,
+      nearest: nearestTurn,
+      step: followStep,
+      duration: followDuration,
+      ease: followEase,
+      pan: followPan,
+      rotation: function (yaw, pitch) { return cameraRot(yaw, pitch || 0, null); }
+    },
     // exposed for tests / tuning
     _consts: {
       SW: SW, SH_SC: (global.DiagramGeo ? global.DiagramGeo.SH_SC : FB_SH_SC),

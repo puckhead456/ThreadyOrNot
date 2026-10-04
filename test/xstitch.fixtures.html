@@ -609,16 +609,14 @@ var TEXT_FIXTURES = [
       }), n + ': every row is one the sheet prints, under the right technique',
         k.entries.map(function (e) { return e.code + '/' + e.kind; }).join(', '));
       var crossGot = byKind(k, 'cross').map(function (e) { return e.code; });
-      var crossMissing = crossTruth.filter(function (c) { return crossGot.indexOf(c) < 0; });
-      /* How many survive depends on how PdfText splits the sidebar from
-         the chart beside it: all nine when the sidebar comes out as its own
-         column, seven when its rows arrive interleaved with chart rows. */
-      log(crossMissing.length <= 2, n + ': at least seven of the nine cross-stitch colours',
-        'missing ' + crossMissing.join(', '));
-      if (crossMissing.length) {
-        warn('KNOWN GAP: ' + crossMissing.join(', ') + ' not read — the sidebar rows reached the ' +
-          'parser interleaved with chart rows (PdfText column split)');
-      }
+      /* Wave F: the extractor keeps the sidebar out of the chart rows again
+         (wave E pdftext fix), so DMC 19 and the 3799 row are back and all
+         nine cross colours are asserted exactly, in the sheet's order. */
+      eq(crossGot, crossTruth, n + ': all nine cross-stitch colours, in the order the sheet prints them');
+      log(!!findEntry(k, '19') && findEntry(k, '19').kind === 'cross',
+        n + ': DMC 19 (a 2017 shade, "N 19 n/a") is a cross-stitch row');
+      log(!!findEntry(k, '3799') && findEntry(k, '3799').kind === 'cross',
+        n + ': and the 3799 cross row (the last in the key) is read');
       eq(everyCodeKnown(k), true, n + ': every code is a real DMC colour (19 is a 2017 shade)');
       eq(k.entries.filter(function (e) {
         return /^(\d)\1{2,4}$/.test(e.code) && !X.hexFor('DMC', e.code);
@@ -748,6 +746,13 @@ var POKEMON_TRUTH = {
 /** Every key row of a Pokemon quadrant against the transcribed truth. */
 function pokemonTruth(n, k) {
   var truth = POKEMON_TRUTH[n].split(';').map(function (s) { return s.split(' '); });
+  /* Wave F: the extractor now hands the three newspaper columns over in
+     reading order, so the key's order must be the extractor's own; the
+     column repair in js/xstitch.js is a fallback that must not run here. */
+  eq(k.keyOrder, 'extractor', n + ': the key order is the extractor\'s own (the column repair is not used)');
+  var kLines = (keyTexts[n] || '').split(/\r\n|\r|\n/);
+  eq(X._key.expandCountColumns(kLines).join('\n') === kLines.join('\n'), true,
+    n + ': and the repair leaves the extracted text line for line as it was');
   eq(codesOf(k), truth.map(function (p) { return p[0]; }),
     n + ': every code, in key order, as printed (' + truth.length + ' rows)');
   eq(k.entries.map(function (e) { return e.stitchCount; }),
@@ -1037,6 +1042,7 @@ var GRID_FIXTURES = [
         n + ': two colours share one ink, so there are fewer inks than key rows',
         r.colors + ' inks, ' + key.entries.length + ' rows');
       log(r.matched >= 8, n + ': and at least eight of the ten still match', 'matched ' + r.matched);
+      regionChecks(n, r, 20);
     }
   },
   {
@@ -1045,6 +1051,7 @@ var GRID_FIXTURES = [
       eq(r.ok, true, n + ': the grid reads');
       eq([r.w, r.h], [key.design.w, key.design.h], n + ': the size the key declares');
       eq(r.filled, keySum(key), n + ': including the single-column tile on the right edge');
+      regionChecks(n, r, 12);
     }
   },
   {
@@ -1094,6 +1101,34 @@ var GRID_FIXTURES = [
   { name: 'xs-apl-tapestry-painted', label: 'APL scan, 26 MB (heavy)', noKey: true, check: givesUpFast },
   { name: 'xs-apl-orr-book14', label: 'APL scan, 39 MB (heavy)', noKey: true, check: givesUpFast }
 ];
+
+/**
+ * Wave F (04 #3): every chart page records which stitches it prints, the
+ * regions tile the whole chart with no gap and no overlap (KG-Chart pages do
+ * not overlap, audit: "No page overlaps its neighbours"), and each knows
+ * where on its page the grid sits.
+ */
+function regionChecks(n, r, pages) {
+  eq(r.regions.length, pages, n + ': one region per chart page (' + pages + ')');
+  var cover = new Uint8Array(r.w * r.h), over = 0, gaps = 0, i, x, y;
+  r.regions.forEach(function (g) {
+    for (y = g.region.y; y < g.region.y + g.region.h && y < r.h; y++) {
+      for (x = g.region.x; x < g.region.x + g.region.w && x < r.w; x++) {
+        if (cover[y * r.w + x]++) over++;
+      }
+    }
+  });
+  for (i = 0; i < cover.length; i++) if (!cover[i]) gaps++;
+  eq([gaps, over], [0, 0], n + ': the page regions cover the chart exactly, no gaps, no overlaps');
+  var placed = r.regions.filter(function (g) {
+    var q = g.region;
+    return q.fx !== null && q.fx >= 0 && q.fy >= 0 && q.fx + q.fw <= 1.001 && q.fy + q.fh <= 1.001 && q.fw > 0 &&
+      /* one stitch is about as wide on the page as on every other page of the chart */
+      Math.abs(q.fw / q.w - r.regions[0].region.fw / r.regions[0].region.w) < 0.0005;
+  });
+  eq(placed.length, pages, n + ': and every region knows where its grid sits on the page');
+  eq(r.regions.every(function (g) { return g.page > 1; }), true, n + ': the cover (page 1) holds no stitches');
+}
 
 /** ok:false, said plainly, inside the budget, with nothing made up. */
 function givesUpFast(n, r) {

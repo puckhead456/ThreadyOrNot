@@ -73,7 +73,7 @@ function loadPolicy(href) {
       clients: { claim: function () {} }
     };
     var run = new Function('self', 'caches', 'console',
-      src + '\n;return { policy: self.swPolicy, version: CACHE_VERSION, dev: IS_DEV };');
+      src + '\n;return { policy: self.swPolicy, version: CACHE_VERSION, dev: IS_DEV, precache: PRECACHE_URLS };');
     return run(fakeSelf, undefined, window.console);
   });
 }
@@ -148,11 +148,25 @@ Promise.all([loadPolicy(PROD), loadPolicy(DEV)]).then(function (both) {
   assertEqual(D(req('https://fonts.gstatic.com/s/x.woff2')).strategy, 'skip',
     'dev leaves google fonts to the browser');
 
+  // Wave F: a script index.html loads but the list forgets fails only
+  // offline, on a fresh install — exactly where nobody is looking.
+  var precached = prod.precache.map(function (u) { return u.replace(/^\.\//, ''); });
+  var indexScripts = fetch('../index.html', { cache: 'no-store' }).then(function (r) { return r.text(); });
+
   group('127.0.0.1 is dev too');
   return loadPolicy('http://127.0.0.1:8765/sw.js').then(function (loop) {
     assertEqual(loop.dev, true, '127.0.0.1 is dev');
     assertEqual(loop.policy(req('http://127.0.0.1:8765/js/store.js')).strategy, 'network-first',
       '127.0.0.1 js is network-first');
+    return indexScripts;
+  }).then(function (html) {
+    group('PRECACHE_URLS covers every script index.html loads');
+    var srcs = [];
+    html.replace(/<script\s+src="\.\/([^"]+)"/g, function (m, s) { srcs.push(s); return m; });
+    var missing = srcs.filter(function (s) { return precached.indexOf(s) < 0; });
+    assertEqual(srcs.length > 10 && missing.length === 0, true,
+      'all ' + srcs.length + ' scripts in index.html are precached' + (missing.length ? ' — missing ' + missing.join(', ') : ''));
+    assertEqual(precached.indexOf('js/zip.js') >= 0, true, 'including js/zip.js (the .thready backup)');
   });
 }).then(finish, function (err) {
   log(false, 'harness', String(err && err.message || err));

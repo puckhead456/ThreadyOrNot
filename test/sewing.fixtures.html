@@ -173,6 +173,9 @@ var FIXTURES = [
       var psP = window.Sewing.printedSteps(p.steps);
       t(psP.total === 6 && psP.of[p.steps.length - 1].runTotal === 6,
         'audit: the header counts the six printed steps, got ' + psP.total);
+      // Wave F: no cutting list in the booklet, but the layouts page is found.
+      t(window.Sewing.layoutPages(p.sourceText).join(',') === '5', 'wave F: the cutting layouts are on page 5');
+      t(p.variations.length === 0, 'wave F: nothing here is an optional extra');
     }
   },
   {
@@ -277,6 +280,30 @@ var FIXTURES = [
       t(psS.total === 8 && psS.of[0].runTotal === 8,
         'audit: the header counts the eight printed steps, variations excluded, got ' + psS.total);
       t(p.meta.designer === '' || /^[A-Z]/.test(p.meta.designer), 'the designer is blank or a proper name');
+
+      // Wave F (05 #3): the p9 "Pattern Variations" page is exactly its four
+      // ideas, all in the optional group, after the eight construction steps.
+      t(p.variations.length === 4 && every(p.variations, function (v) { return v.optional && /variations/i.test(v.section); }),
+        'wave F: four optional variations under Pattern Variations, got ' + p.variations.length);
+      t(every(p.variations, function (v) { return v.page === 9; }), 'wave F: all from the variations page (p9)');
+      var sd = window.Sewing.toCraftData(p);
+      var firstOpt = -1;
+      sd.steps.forEach(function (s, i) { if (s.optional && firstOpt < 0) firstOpt = i; });
+      t(firstOpt === p.steps.length && every(sd.steps.slice(firstOpt), function (s) { return s.optional; }),
+        'wave F: the variations travel together after the construction');
+      t(window.Sewing.layoutPages(p.sourceText).join(',') === '5', 'wave F: the cutting layouts are on page 5');
+      // Wave F (05 #15): the 6 mm exception at the point of use.
+      var rem = sd.steps.map(function (s) { var r = window.Sewing.saReminder(sd, s.text); return r ? r.part : ''; });
+      t(rem.indexOf('neckline') >= 0 && rem.indexOf('pocket edge') >= 0,
+        'wave F: the neckline and pocket-edge steps get the 6 mm reminder');
+      t(every(sd.steps, function (s, i) { return !rem[i] || window.Sewing.saReminder(sd, s.text).mm === 6; }),
+        'wave F: every reminder is the 6 mm exception');
+      t(rem.filter(Boolean).length <= 4, 'wave F: and only a few steps get one, got ' + rem.filter(Boolean).length);
+      sd.size.chosen = '42';
+      var shop = window.Sewing.shoppingList(sd);
+      t(/^2\.4 m \/ 3 yd — fabric, 115cm \/ 45" wide/.test(shop.join('\n').split('\n').filter(function (l) { return /115/.test(l); })[0] || ''),
+        'wave F: the shopping list carries size 42\'s 2.4 m of the 115 cm fabric');
+      t(shop[shop.length - 1] === 'Thread to match', 'wave F: and thread');
     }
   },
 
@@ -379,9 +406,33 @@ var FIXTURES = [
       // with no amount were wrong; now the reader says it could not read it.
       t(every(p.fabric, function (f) { return f.amounts.length > 0; }),
         'no fabric row is a bolt width with no amount');
-      t(!hasFabricHeading || p.fabric.length >= 2 ||
-        hasWarningLike(p, 'fabric requirements table could not be read'),
-        'the fabric table is either read or reported as unreadable');
+      // Wave F: the extractor now reads the grid row by row, so the rows are
+      // read (checked against the p5 table): TOP / SHORTS / PANTS x 140 / 113 cm,
+      // metres / yards, sizes A-H and I-P.
+      t(!hasFabricHeading || p.fabric.length === 6,
+        'wave F: the fabric grid is read — three garments at two bolt widths, got ' + p.fabric.length);
+      t(!hasWarningLike(p, 'fabric requirements table could not be read'),
+        'wave F: and no longer reported as unreadable');
+      var grid = {};
+      p.fabric.forEach(function (f) { grid[f.name + ' ' + f.width] = f.rawAmounts.join(' | '); });
+      t(grid['Top 140 cm'] === '1.5 m / 1.65 yd | 1.7 m / 1.9 yd' && grid['Top 113 cm'] === '1.6 m / 1.75 yd | 2 m / 2.2 yd',
+        'wave F: TOP — 140 cm 1.5/1.65 then 1.7/1.9, 113 cm 1.6/1.75 then 2/2.2');
+      t(grid['Shorts 140 cm'] === '1.5 m / 1.9 yd | 2.1 m / 2.3 yd' && grid['Shorts 113 cm'] === '1.8 m / 2 yd | 2.1 m / 2.3 yd',
+        'wave F: SHORTS — 140 cm 1.5/1.9 then 2.1/2.3, 113 cm 1.8/2 then 2.1/2.3');
+      t(grid['Pants 140 cm'] === '2.6 m / 2.85 yd | 3 m / 3.3 yd' && grid['Pants 113 cm'] === '3 m / 3.3 yd | 3.7 m / 4 yd',
+        'wave F: PANTS — 140 cm 2.6/2.85 then 3/3.3, 113 cm 3/3.3 then 3.7/4');
+      t(every(p.fabric, function (f) { return (f.groupLabels || []).join(',') === 'A-H,I-P'; }),
+        'wave F: each amount is labelled with its size group, A-H and I-P');
+      // Wave F (05 #3): the p4 "PATTERN HACK (OPTIONAL!)" page is an optional
+      // extra, not a step and not lost.
+      t(p.variations.length === 1 && p.variations[0].section === 'Pattern Hack' && /quick sew/i.test(p.variations[0].text),
+        'wave F: the pattern hack page is one optional extra, got ' + p.variations.length);
+      t(every(p.variations, function (v) { return !/shorten|lengthen/i.test(v.text); }),
+        'wave F: the shorten/lengthen section after it is not swept in');
+      t(window.Sewing.printedSteps(window.Sewing.toCraftData(p).steps).total === 15,
+        'wave F: the step count stays fifteen');
+      t(window.Sewing.layoutPages(p.sourceText).join(',') === '9,10',
+        'wave F: the cutting layouts are pages 9 and 10 (p8 only names them in its side headings)');
       t(has(p.notions, function (n) { return /^2" \(5cm\) elastic/i.test(n.text); }),
         'the 2" elastic itself is on the notions list, not just the bodkin that pulls it');
       t(every(p.fabric, function (f) { return !/^fabric requirements$/i.test(f.name); }),
@@ -715,6 +766,9 @@ function universal(p, name, t) {
   t(Object.prototype.toString.call(p.variations) === '[object Array]', 'variations is an array');
   t(every(p.variations, function (s) { return s.optional === true; }), 'every variation is flagged optional');
   t(every(p.steps, function (s) { return !s.optional; }), 'and no counted step is');
+  t(every(p.variations, function (s) {
+    return /variation|alternative|hack|make it your own|customi[sz]|inspiration|care|washing|laundry|share|hashtag|about|copyright|thank/i.test(s.section);
+  }), 'wave F: every optional extra sits under a variations / hack / care heading');
   t(/^(garment|bag|quilt|sheet|unknown)$/.test(p.kind), 'kind includes the pattern-sheet case');
   t(p.kind !== 'sheet' || p.steps.length === 0, 'a pattern sheet never has steps');
   t(every(p.cuttingList, function (r) { return typeof r.subcut === 'boolean'; }), 'every cut row says whether it is a subcut');

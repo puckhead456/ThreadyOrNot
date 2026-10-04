@@ -1125,6 +1125,37 @@ var PANDA_TEXT = [
     'a line that ends its own sentence is not glued to the next one');
 })();
 
+/* ====================================================================== */
+group('wave F: updateCraftData(id, fn, { undo: false }) for view state');
+/* ====================================================================== */
+(function () {
+  fresh();
+  var vp = Store.createProject({ name: 'View state', templateId: 'blank' });
+  Store.flush();
+  Store.clearUndo();
+  var revBefore = Store.revision();
+  var updBefore = Store.project(vp.id).updatedAt;
+  var out = Store.updateCraftData(vp.id, function (cd) { cd.view = { zoom: 3, pan: [10, 20], tool: 'mark' }; }, { undo: false });
+  assertEqual(out.view, { zoom: 3, pan: [10, 20], tool: 'mark' }, 'wave F: a silent craftData write applies the mutator');
+  assertTrue(!Store.canUndo(), 'wave F: ...and leaves the undo stack empty (no snapshot)');
+  assertEqual(Store.undoBytes(), 0, 'wave F: ...not even a byte of it');
+  assertEqual(Store.project(vp.id).updatedAt, updBefore, 'wave F: view state does not count as work (updatedAt unchanged)');
+  var res = Store.flush();
+  assertTrue(Store.revision() > revBefore, 'wave F: the write bumps the revision like any other', revBefore + ' -> ' + Store.revision());
+  var raw = null;
+  try { raw = JSON.parse(window.localStorage.getItem(K)); } catch (e) { raw = null; }
+  var saved = raw && raw.projects ? raw.projects.filter(function (p) { return p.id === vp.id; })[0] : null;
+  assertEqual(saved && saved.craftData && saved.craftData.view && saved.craftData.view.zoom, 3, 'wave F: ...and it persists');
+  assertEqual(raw && raw.writerId, Store.writerId(), 'wave F: ...stamped with this tab\'s writerId');
+  Store.updateCraftData(vp.id, { view: { zoom: 4 } }, { undoable: false });
+  assertTrue(!Store.canUndo(), 'wave F: the "undoable: false" spelling and a patch object are silent too');
+  Store.updateCraftData(vp.id, { other: 1 });
+  assertTrue(Store.canUndo(), 'wave F: a plain updateCraftData still snapshots (undoable)');
+  Store.undo();
+  assertEqual(Store.project(vp.id).craftData.view, { zoom: 4 }, 'wave F: undoing the real write keeps the silent view state');
+  void res;
+})();
+
 /* ---------------------------------------------------------------------- */
 
 wipe();

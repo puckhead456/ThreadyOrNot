@@ -624,7 +624,15 @@
   /** One anchor-click download, shared by the backup and the corrupt copy. */
   function downloadText(text, filename, type) {
     try {
-      var url = URL.createObjectURL(new Blob([text], { type: type || 'application/json' }));
+      return downloadBlob(new Blob([text], { type: type || 'application/json' }), filename);
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function downloadBlob(blob, filename) {
+    try {
+      var url = URL.createObjectURL(blob);
       var a = document.createElement('a');
       a.href = url;
       a.download = filename;
@@ -632,7 +640,9 @@
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
-      window.setTimeout(function () { URL.revokeObjectURL(url); }, 1500);
+      // A 20 MB backup can still be streaming to disk after 1.5 s; the URL
+      // only costs memory while it lives, so give it a generous minute.
+      window.setTimeout(function () { URL.revokeObjectURL(url); }, 60000);
       return true;
     } catch (e) {
       return false;
@@ -698,6 +708,37 @@
     if (Store.conflict()) showConflictBanner();
 
     window.addEventListener('resize', debounce(syncBannerHeight, 150));
+    scheduleBlobSweep();
+  }
+
+  /**
+   * 09 #10: page images whose project is gone (the tab closed inside the
+   * 6-second delete-undo window, a crash mid-import) are never reclaimed by
+   * anything else. Once per start, when the app is idle, delete every
+   * 'p:<id>:' blob no project points at. "Points at" is wide on purpose —
+   * the live list, the undo stack, the pre-import snapshot and whatever is on
+   * disk from another tab (Store.referencedProjectIds) — and an unreadable
+   * or conflicted store sweeps nothing.
+   */
+  function scheduleBlobSweep() {
+    var B = window.BlobStore;
+    if (!B || typeof B.sweep !== 'function' || typeof Store.referencedProjectIds !== 'function') return;
+    var run = function () {
+      try {
+        if (Store.isCorrupt() || Store.conflict()) return;
+        var ids = Store.referencedProjectIds();
+        if (!ids.length) return;
+        B.sweep(ids).then(function (r) {
+          if (r && r.count && window.console) {
+            console.info('BlobStore sweep: removed ' + r.count + ' orphaned page images (' + mb(r.bytes) + ')');
+          }
+        }, noop);
+      } catch (e) { /* a sweep is housekeeping; never in the user's way */ }
+    };
+    window.setTimeout(function () {
+      if (typeof window.requestIdleCallback === 'function') window.requestIdleCallback(run, { timeout: 10000 });
+      else run();
+    }, 8000);
   }
 
   /* ---- persistent storage + the backup nag (12 #1, 09 #4) ---- */
@@ -761,11 +802,14 @@
   }
 
   /** iOS Safari that is not installed: Add to Home Screen is the real fix. */
-  function iosNotInstalled() {
+  function isIOSDevice() {
     var ua = String(navigator.userAgent || '');
-    var isIOS = /iPad|iPhone|iPod/.test(ua) ||
+    return /iPad|iPhone|iPod/.test(ua) ||
       (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-    if (!isIOS) return false;
+  }
+
+  function iosNotInstalled() {
+    if (!isIOSDevice()) return false;
     if (navigator.standalone === true) return false;
     try {
       if (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) return false;
@@ -790,10 +834,12 @@
     bar.appendChild(el('p', 'nag-text', text));
 
     var actions = el('div', 'nag-actions');
-    var save = button('btn small primary', 'Download backup');
+    // 13 / 12 #1: the bar's button makes the full .thready file (page images
+    // included) and exportJSON stamps lastBackupAt, which is what clears it.
+    var save = button('btn small primary', 'Back up now');
     on(save, 'click', function () {
-      exportBackup();
-      renderHome();
+      save.disabled = true;
+      exportBackup().then(function () { renderHome(); });
     });
     var not = button('linkish', 'Not now');
     on(not, 'click', function () {
@@ -1744,18 +1790,366 @@
     return 'Pattern says ' + dev.printed + ' · instructions add up to ' + dev.computed;
   }
 
+  /* ---- Wave F: count confidence, size, yarn, "go to row" -------------- */
+
+  /**
+   * One line per part (06 #1 / #8): "20 rounds · 10 counts computed · 1 count
+   * disagrees with the pattern" — from `Patterns.countReport` via the Store.
+   * Counts are per ROW ("Rnd 7-13" is seven). '' when there are no rows.
+   * @param {Object} rep        Store.countReport(...)
+   * @param {string} word       'round' / 'row'
+   * @param {boolean} [inferred] makeCountInferred: say where the ×2 came from
+   */
+  function countLineText(rep, word, inferred) {
+    if (!rep || !rep.rows) return '';
+    var w = String(word || 'row').toLowerCase();
+    var bits = [rep.rows + ' ' + w + (rep.rows === 1 ? '' : 's')];
+    if (rep.computed) bits.push(rep.computed + (rep.computed === 1 ? ' count' : ' counts') + ' computed ≈');
+    if (rep.missing) bits.push(rep.missing + ' with no count');
+    if (rep.unresolved) bits.push(rep.unresolved + ' not given for your size');
+    var d = rep.disagree ? rep.disagree.length : 0;
+    if (d) bits.push(d + (d === 1 ? ' count disagrees' : ' counts disagree') + ' with the pattern');
+    if (inferred) bits.push('made twice (from the assembly text)');
+    return bits.join(' · ');
+  }
+
+  /**
+   * The pattern text with the chosen size's number in every size list marked
+   * (03 #13): "blo sc 88 (<mark>100</mark>, 108)". Fills `node` with text and
+   * <mark> nodes only — never innerHTML of pattern text.
+   */
+  function fillSizeMarked(node, text, prt, proj) {
+    clear(node);
+    var s = String(text || '');
+    var marks = [];
+    var names = proj ? Store.sizeNames(proj) : [];
+    if (names.length >= 2 && window.Patterns && typeof window.Patterns.sizeMarks === 'function') {
+      try {
+        var n = proj && proj.sizes && proj.sizes.length >= 2 ? proj.sizes.length : 0;
+        marks = window.Patterns.sizeMarks(s, prt ? prt.sizeIndex || 0 : 0, n) || [];
+      } catch (e) {
+        marks = [];
+      }
+    }
+    var at = 0;
+    marks.forEach(function (m) {
+      if (m.start < at) return;
+      node.appendChild(document.createTextNode(s.slice(at, m.start)));
+      node.appendChild(el('mark', 'size-mark', s.slice(m.start, m.end)));
+      at = m.end;
+    });
+    node.appendChild(document.createTextNode(s.slice(at)));
+  }
+
+  /** "main color" stays as written; a bare yarn code reads "Yarn A". */
+  function yarnLabel(name) {
+    return String(name || '').trim();
+  }
+
+  /** '#hex' for a yarn name when one is known (the owner's pick or the word), else null. */
+  function yarnHex(proj, name) {
+    if (!name) return null;
+    if (proj && Store.hasYarnColor(proj, name)) return Store.yarnColorFor(proj, name);
+    if (window.Patterns && typeof window.Patterns.colorHex === 'function') {
+      try { return window.Patterns.colorHex(name) || null; } catch (e) { return null; }
+    }
+    return null;
+  }
+
+  function yarnSwatch(proj, name) {
+    var sw = el('span', 'yarn-swatch');
+    sw.setAttribute('aria-hidden', 'true');
+    var hex = yarnHex(proj, name);
+    if (hex) sw.style.background = hex;
+    else sw.classList.add('unknown');
+    return sw;
+  }
+
+  /** "Change to black at the end of this round" / "Change to black". */
+  function yarnChangeText(change, p, prt) {
+    if (!change) return '';
+    var t = 'Change to ' + yarnLabel(change.to);
+    if (change.at === 'end') t += ' at the end of this ' + partRowWord(p, prt).toLowerCase();
+    return t;
+  }
+
+  /**
+   * The yarn strip above the pattern line (02 #3, 10 #1): a swatch for the
+   * yarn this row is worked in and, on the row where it happens, the change.
+   * Built lazily (index.html is not this module's), hidden when the pattern
+   * never names a yarn.
+   */
+  function ensureYarnLine() {
+    if (els.yarnLine && document.contains(els.yarnLine)) return els.yarnLine;
+    if (!els.patternLine || !els.patternLine.parentNode) return null;
+    var row = el('div', 'yarn-line');
+    row.id = 'yarn-line';
+    row.hidden = true;
+    els.patternLine.parentNode.insertBefore(row, els.patternLine);
+    els.yarnLine = row;
+    return row;
+  }
+
+  function updateYarnLine(p, prt, workingRow) {
+    var row = ensureYarnLine();
+    if (!row) return null;
+    var info = null;
+    try { info = Store.rowColorInfo(prt, workingRow); } catch (e) { info = null; }
+    if (!info || (!info.color && !info.change) || partFinished(prt)) {
+      row.hidden = true;
+      clear(row);
+      return null;
+    }
+    clear(row);
+    // The yarn a row is worked in rides in the pattern line's tag as a
+    // swatch (yarnTagSwatch); the strip itself only appears on the row where
+    // the yarn changes, as one line, so the counter keeps its height.
+    if (!info.change) {
+      row.hidden = true;
+      return info;
+    }
+    var ch = el('span', 'yarn-change');
+    if (info.change.at === 'end' && info.color) {
+      ch.appendChild(yarnSwatch(p, info.color));
+      ch.appendChild(el('span', 'yarn-arrow', '→'));
+    }
+    ch.appendChild(yarnSwatch(p, info.change.to));
+    ch.appendChild(el('span', 'yarn-text', yarnChangeText(info.change, p, prt)));
+    row.appendChild(ch);
+    row.setAttribute('role', 'note');
+    row.setAttribute('aria-label', yarnChangeText(info.change, p, prt) +
+      (info.change.at === 'end' && info.color ? ' (working in ' + yarnLabel(info.color) + ')' : ''));
+    row.classList.add('changing');
+    row.hidden = false;
+    return info;
+  }
+
+  /** The current yarn as a swatch in front of "RND 15" (wave F). */
+  function yarnTagSwatch(p, info) {
+    if (!els.patternTag || !info || !info.color) return;
+    var sw = yarnSwatch(p, info.color);
+    sw.classList.add('yarn-tag-swatch');
+    sw.removeAttribute('aria-hidden');
+    sw.setAttribute('role', 'img');
+    sw.setAttribute('aria-label', 'Yarn: ' + yarnLabel(info.color));
+    sw.title = yarnLabel(info.color);
+    els.patternTag.insertBefore(sw, els.patternTag.firstChild);
+  }
+
+  /** The "≈ why?" badge beside the stitch readout (06 #1): tap for the reason. */
+  function ensureCountWhy() {
+    if (els.countWhy) return els.countWhy;
+    if (!els.stitchReadout) return null;
+    // It rides at the end of the readout line (re-appended after every
+    // readout write), so it costs the counter no height of its own.
+    var b = button('count-why', '≈ why?', 'Why this count');
+    b.hidden = true;
+    on(b, 'click', function () {
+      var p = currentProject();
+      var prt = p ? Store.activePart(p) : null;
+      if (p && prt) openCountWhySheet(p, prt);
+    });
+    els.countWhy = b;
+    return b;
+  }
+
+  /**
+   * What the count on this row rests on, in words: printed, worked out from
+   * the instructions (≈), printed but contradicted by its own arithmetic, or
+   * printed as a list that is not one number per size. Null when the row has
+   * a plain printed count (nothing to explain).
+   */
+  function countWhy(p, prt) {
+    var ri = Store.repeatInfo(prt);
+    var line = Store.lineForRow(prt, ri.patternRow);
+    if (!line) return null;
+    var word = partRowWord(p, prt).toLowerCase();
+    var tag = partShortRowWord(p, prt) + ' ' + ri.patternRow;
+    var target = Store.currentTarget(prt);
+    var dev = null;
+    try { dev = Store.roundDeviation(prt); } catch (e) { dev = null; }
+    var chk = countCheckText(dev);
+    if (line.sizeUnresolved && Array.isArray(line.sizes)) {
+      var names = Store.sizeNames(p);
+      return {
+        kind: 'size', tag: tag, line: line, short: '?',
+        text: 'The pattern lists ' + line.sizes.length + ' numbers here (' + line.sizes.join(', ') + ') but names ' +
+          names.length + ' sizes, so they are not one per size — they may be lengths or another choice. ' +
+          'No stitch target is set for this ' + word + '; count from the pattern.'
+      };
+    }
+    if (chk) {
+      return {
+        kind: 'disagree', tag: tag, line: line, short: '≠',
+        text: chk + '. The target stays the printed ' + dev.printed + ' — the pattern is quoted, never corrected — ' +
+          'but check this ' + word + ' before you finish it.'
+      };
+    }
+    if (line.approxRow) {
+      // the tape sentence this row's number was counted past
+      var lenLine = null;
+      var all = Store.linesFor(prt);
+      for (var li = 0; li < all.length && all[li] !== line; li++) {
+        if (all[li] && all[li].lengthEstimate) lenLine = all[li];
+      }
+      var le = lenLine ? lenLine.lengthEstimate : null;
+      var said = le ? '“' + String(lenLine.text).replace(/\s+/g, ' ').slice(0, 90) + '”' : 'an “until it measures …” sentence';
+      return {
+        kind: 'approxRow', tag: '≈ ' + tag, line: line, short: '≈',
+        text: 'The pattern does not number this ' + word + '. It comes after ' + said +
+          ', so it is counted on from the last counted ' + word + ' and your real ' + word + ' number may differ' +
+          (le && le.rows ? ' (the pattern’s gauge puts ' + le.value + (le.unit === 'in' ? '"' : ' ' + le.unit) + ' at about ' + le.rows + ' ' + word + 's' + (le.fromStart ? ' from the very beginning' : '') + ')' : '') +
+          '. Measure your piece and set the ' + word + ' count by tapping the big number if it differs.' +
+          (target && Store.isComputed(line) ? ' Its stitch count ≈ ' + target + ' is worked out from the instructions.' : '')
+      };
+    }
+    if (target && Store.isComputed(line)) {
+      return {
+        kind: 'computed', tag: tag, line: line, short: '≈',
+        text: 'The pattern prints no stitch count for ' + tag + '. ' + target +
+          ' is worked out from its instructions and the ' + word + ' before it, so it is shown as ≈ ' + target + '.'
+      };
+    }
+    return null;
+  }
+
+  function openCountWhySheet(p, prt) {
+    var why = countWhy(p, prt);
+    if (!why) return;
+    openSheet({
+      subject: p.id,
+      title: { computed: 'Where ≈ comes from', approxRow: 'Why this row number is ≈', size: 'No count for your size' }[why.kind] ||
+        'The pattern disagrees with itself',
+      build: function (body) {
+        body.appendChild(el('p', 'why-text', why.text));
+        var q = el('div', 'why-line');
+        q.appendChild(el('span', 'pattern-line-tag', why.tag));
+        var t = el('span', 'why-line-text');
+        fillSizeMarked(t, why.line.text, prt, p);
+        q.appendChild(t);
+        body.appendChild(q);
+        var rep = Store.countReport(prt);
+        var all = countLineText(rep, partRowWord(p, prt), !!prt.makeCountInferred);
+        if (all) body.appendChild(el('p', 'muted why-part', prt.name + ': ' + all));
+      },
+      footer: [{ text: 'OK', cls: 'btn primary', onClick: function (api) { api.close(); } }]
+    });
+  }
+
+  /**
+   * 03 #5 / #6: tap the big row number to set it. A number field, pre-filled
+   * with the count the counter shows (rows COMPLETED, as the big number is),
+   * focused and selected; Enter sets it. Undoable — it is the same
+   * `Store.jumpToRow` the pattern sheet's "Jump to row" uses.
+   */
+  function openGoToRowSheet(p, prt) {
+    var word = partRowWord(p, prt).toLowerCase();
+    var max = prt.targetRows ? prt.targetRows : 99999;
+    var input = numInput(prt.row, 0, max);
+    input.setAttribute('aria-label', partRowWord(p, prt) + 's completed');
+    input.setAttribute('enterkeyhint', 'done');
+    var hint = el('div', 'field-hint');
+    hint.setAttribute('aria-live', 'polite');
+    function value() {
+      var v = parseInt(input.value, 10);
+      if (!isFinite(v) || v < 0) return null;
+      return Math.min(v, max);
+    }
+    function sync() {
+      var v = value();
+      hint.textContent = v === null
+        ? 'Type how many ' + word + 's are done.'
+        : 'The counter will show ' + v + ' — you will be working ' + word + ' ' + (v + 1) +
+          (prt.targetRows ? ' of ' + prt.targetRows : '') + ', stitches back to 0.';
+    }
+    function commit(api) {
+      var v = value();
+      if (v === null) { input.focus(); return; }
+      if (v === prt.row) { api.close(); return; }
+      Store.jumpToRow(p.id, prt.id, v + 1);
+      api.close();
+      render();
+      announce('Working ' + word + ' ' + (v + 1));
+    }
+    var sheetApi = null;
+    openSheet({
+      subject: p.id,
+      title: 'Set the ' + word + ' count',
+      build: function (body, api) {
+        sheetApi = api;
+        var stepRow = el('div', 'goto-row');
+        var minus = button('round-btn', '–', 'One ' + word + ' fewer');
+        var plus = button('round-btn', '+', 'One ' + word + ' more');
+        on(minus, 'click', function () { var v = value(); input.value = String(Math.max(0, (v === null ? prt.row : v) - 1)); sync(); });
+        on(plus, 'click', function () { var v = value(); input.value = String(Math.min(max, (v === null ? prt.row : v) + 1)); sync(); });
+        stepRow.appendChild(minus);
+        stepRow.appendChild(input);
+        stepRow.appendChild(plus);
+        body.appendChild(field(partRowWord(p, prt) + 's completed', stepRow));
+        body.appendChild(hint);
+        on(input, 'input', sync);
+        on(input, 'keydown', function (e) {
+          if (e.key === 'Enter') { e.preventDefault(); commit(api); }
+        });
+        sync();
+        window.setTimeout(function () {
+          try { input.focus(); input.select(); } catch (e) { /* ignore */ }
+        }, 30);
+      },
+      footer: [
+        { text: 'Cancel', cls: 'btn ghost', onClick: function (api) { api.close(); } },
+        { text: 'Set', cls: 'btn primary', onClick: function (api) { commit(api); } }
+      ]
+    });
+    return sheetApi;
+  }
+
+  /** Make the big row number a keyboard-reachable control, once. */
+  function bindRowNumber() {
+    var n = els.rowNumber;
+    if (!n || n.getAttribute('data-goto') === '1') return;
+    n.setAttribute('data-goto', '1');
+    n.setAttribute('role', 'button');
+    n.setAttribute('tabindex', '0');
+    n.classList.add('row-number-btn');
+    function go() {
+      var p = currentProject();
+      var prt = p ? Store.activePart(p) : null;
+      if (p && prt) openGoToRowSheet(p, prt);
+    }
+    on(n, 'click', go);
+    on(n, 'keydown', function (e) {
+      if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') { e.preventDefault(); go(); }
+    });
+  }
+
+  /** "Size M" beside the ROW label, so the counter says whose numbers these are. */
+  function sizeTagText(p, prt) {
+    var info = Store.partSize(p, prt);
+    if (!info.label) return '';
+    return info.label;
+  }
+
   /** Fast path: only the numbers and readouts. */
   function updateCounters(p, prt) {
     if (!p || !prt) return;
 
     els.rowLabel.textContent = partRowWord(p, prt, true);
+    // Wave F (size-once): whose numbers these are, beside the word.
+    var sizeTag = sizeTagText(p, prt);
+    if (sizeTag) els.rowLabel.appendChild(el('span', 'row-size-tag', ' · ' + sizeTag));
     els.rowNumber.textContent = String(prt.row);
+    // 03 #6: the number is a control — tap (or Enter) to set it.
+    bindRowNumber();
+    els.rowNumber.setAttribute('aria-label',
+      partRowWord(p, prt) + 's done: ' + prt.row + '. Set the ' + partRowWord(p, prt).toLowerCase() + ' count');
 
     if (prt.targetRows) {
       els.rowProgress.hidden = false;
       var pct = Math.max(0, Math.min(100, (prt.row / prt.targetRows) * 100));
       els.rowBarFill.style.width = pct + '%';
-      var lbl = prt.row + ' / ' + prt.targetRows;
+      // Wave F (03 #5): a row total read off a tape measure is an estimate.
+      var lbl = prt.row + ' / ' + (Store.targetApprox(prt) ? '≈ ' : '') + prt.targetRows;
       if (prt.makeCount > 1) {
         lbl += ' · piece ' + Math.min(prt.piecesDone + 1, prt.makeCount) + ' of ' + prt.makeCount;
       }
@@ -1784,17 +2178,24 @@
     var setup = ri.workingRow === 1 ? Store.setupLine(prt) : null;
     if (setup && setup.text && els.setupLine) {
       els.setupLine.hidden = false;
-      els.setupText.textContent = setup.text;
+      fillSizeMarked(els.setupText, setup.text, prt, p);
     } else if (els.setupLine) {
       els.setupLine.hidden = true;
     }
 
     // Pattern line
     var line = Store.lineForRow(prt, ri.patternRow);
+    // Wave F (02 #3): the yarn this row is worked in, and the change on the
+    // row where it happens.
+    var yarnInfo = updateYarnLine(p, prt, ri.workingRow);
+
     if (line && line.text) {
       els.patternLine.hidden = false;
-      els.patternTag.textContent = partShortRowWord(p, prt) + ' ' + ri.patternRow;
-      els.patternText.textContent = line.text;
+      // "≈ Row 25": the parser numbered this row after an unresolved length
+      els.patternTag.textContent = (line.approxRow ? '≈ ' : '') + partShortRowWord(p, prt) + ' ' + ri.patternRow;
+      yarnTagSwatch(p, yarnInfo);
+      // Wave F: the chosen size's number marked in every size list.
+      fillSizeMarked(els.patternText, line.text, prt, p);
       var notes = Store.notesOf(line);
       if (els.patternNotes) {
         els.patternNotes.hidden = !notes.length;
@@ -1822,6 +2223,23 @@
       readout = 'stitch ' + prt.stitch;
     }
     els.stitchReadout.textContent = readout;
+    // Wave F (06 #1): "≈" (and a count that disagrees, or none for your size)
+    // is tappable — it says what the number rests on.
+    var whyBtn = ensureCountWhy();
+    if (whyBtn) {
+      var why = partFinished(prt) ? null : countWhy(p, prt);
+      whyBtn.hidden = !why;
+      if (why) els.stitchReadout.appendChild(whyBtn);
+      if (why) {
+        whyBtn.textContent = why.short + ' why';
+        whyBtn.setAttribute('aria-label', {
+          computed: 'Why the count is approximate',
+          approxRow: 'Why the row number is approximate',
+          size: 'Why there is no count for your size'
+        }[why.kind] || 'Why the pattern disagrees with itself');
+        whyBtn.classList.toggle('warn', why.kind === 'size' || why.kind === 'disagree');
+      }
+    }
 
     if (target) {
       els.stitchProgress.hidden = false;
@@ -1852,6 +2270,11 @@
          corrected — but the maker is told before the round goes wrong. */
       var chk = countCheckText(dev);
       if (chk && !partFinished(prt)) lines.push(chk);
+      // Wave F (size-once): a list that is not one number per size gives no
+      // target at all — say why the bar is missing rather than leave a blank.
+      if (line && line.sizeUnresolved && Array.isArray(line.sizes) && !partFinished(prt)) {
+        lines.push('Pattern lists ' + line.sizes.join(' / ') + ' here — not one per size');
+      }
       if (lines.length) {
         els.stitchDev.hidden = false;
         els.stitchDev.textContent = lines.join(' · ');
@@ -2101,6 +2524,11 @@
         // "Round 5 done" — the piece's own word, and what the number means
         // (`row` counts COMPLETED rows; "Round 5" alone read as "on round 5").
         announce(partRowWord(p, prt) + ' ' + prt.row + ' done');
+        // Wave F (02 #3): a colour change is a milestone too (the one
+        // announcement policy) — said once, on the row it belongs to.
+        var yc = null;
+        try { yc = Store.rowColorInfo(prt, prt.row + 1); } catch (eY) { yc = null; }
+        if (yc && yc.change) announce(yarnChangeText(yc.change, p, prt));
         // 12 #1: a finished row is the earliest honest moment to ask the
         // browser to keep this data. Once, after a real gesture.
         askForPersistOnce();
@@ -2280,6 +2708,51 @@
 
   function diagramEnabled() {
     return diagramAvailable() && Store.settings().liveDiagram !== false;
+  }
+
+  /*
+   * Wave F — "3D follows your stitches" (the owner's request): every tap turns
+   * the piece by 360°/count so the stitch just made stays at the front. On by
+   * default. Stored in crochet's own settings bag (`Store.craftSettings
+   * ('crochet').diagramFollow`), the existing per-craft preferences API, because
+   * `Store.setSetting` only takes keys the store already declares; absent
+   * means on. Read and written only through these two functions.
+   */
+  var DIAGRAM_FOLLOW_KEY = 'diagramFollow';
+  function diagramFollowOn() {
+    try {
+      var bag = typeof Store.craftSettings === 'function' ? Store.craftSettings('crochet') : null;
+      return !(bag && bag[DIAGRAM_FOLLOW_KEY] === false);
+    } catch (e) {
+      return true;
+    }
+  }
+
+  function setDiagramFollow(on) {
+    on = !!on;
+    try {
+      if (typeof Store.setCraftSetting === 'function') Store.setCraftSetting('crochet', DIAGRAM_FOLLOW_KEY, on);
+    } catch (e) {
+      /* a failed save must not stop the piece turning (or not) right now */
+    }
+    [live.handle, viewer.handle].forEach(function (h) {
+      if (!h || typeof h.setFollow !== 'function') return;
+      try {
+        h.setFollow(on);
+      } catch (e2) {
+        /* ignore */
+      }
+    });
+    syncFollowButton();
+  }
+
+  /** The viewer header's follow button, in step with the stored setting. */
+  function syncFollowButton() {
+    var b = viewer.followBtn;
+    if (!b) return;
+    var on = diagramFollowOn();
+    b.classList.toggle('on', on);
+    b.setAttribute('aria-pressed', on ? 'true' : 'false');
   }
 
   function cssVar(cs, name, fallback) {
@@ -2473,6 +2946,9 @@
       var r = rounds[i];
       if ((r.count | 0) <= 0) continue;
       if (r.ghost || (r.done | 0) < (r.count | 0)) return false;
+      // Wave F: a round nothing sized is only as long as what was tapped, so
+      // it is always "full" — it is the round being worked, not a finish.
+      if (r.countless) return false;
       any = true;
     }
     if (!any) return false;
@@ -2669,6 +3145,8 @@
              what the caption leaves free (07 finding 2). */
           fitPurpose: 'button',
           finished: modelFinished(currentModel()),
+          // Wave F: the piece turns with the taps (Settings / viewer chip).
+          follow: diagramFollowOn(),
           /* The renderer tells us when there is no piece on screen (a refused
              or lost context). In the button there is nowhere to put a message,
              so the canvas simply goes away and the plain number is back — the
@@ -2910,6 +3388,7 @@
     viewer.modeSeg = null;
     viewer.dialectSeg = null;
     viewer.dialectHint = null;
+    viewer.followBtn = null;
     viewer.note = null;
     viewer.sheet = null;
     // give the button its piece back
@@ -2944,6 +3423,8 @@
            row being counted. `finished` is re-declared on every push. */
         fitPurpose: 'viewer',
         finished: modelFinished(currentModel()),
+        // Wave F: opens facing the stitch being worked, and follows it.
+        follow: diagramFollowOn(),
         /* Never render nothing (05 #7): if there is no piece on screen the
            viewer says so in one line instead of showing a flat rectangle of
            --primary and letting the user conclude the feature is broken. */
@@ -3027,13 +3508,38 @@
         var readout = el('div', 'viewer-readout', '');
         setViewerReadout(readout, p, prt);
         viewer.readout = readout;
+        /* Wave F — the same switch as Settings → "3D follows your stitches",
+           as one compact pressed/unpressed button in the header so the stage
+           keeps its height. A one-button `.seg` borrows the chips' own "on"
+           styling (no new CSS). A device preference, not a part property: no
+           Undo, and it moves both canvases at once. */
+        var followWrap = el('div', 'seg viewer-follow');
+        var followBtn = button(diagramFollowOn() ? 'on' : null, '↻', 'Turns with each stitch');
+        followBtn.style.minWidth = '44px';
+        followBtn.style.padding = '0 12px';
+        followBtn.style.fontSize = '20px';
+        followBtn.title = 'Turns with each stitch';
+        followWrap.appendChild(followBtn);
+        viewer.followBtn = followBtn;
+        syncFollowButton();
+        on(followBtn, 'click', function () {
+          setDiagramFollow(!diagramFollowOn());
+          fb('tap');
+        });
+
         var head = api.dialog.querySelector('.sheet-head');
         if (head) {
           var closeBtn = head.querySelector('.sheet-close');
-          if (closeBtn) head.insertBefore(readout, closeBtn);
-          else head.appendChild(readout);
+          if (closeBtn) {
+            head.insertBefore(readout, closeBtn);
+            head.insertBefore(followWrap, closeBtn);
+          } else {
+            head.appendChild(readout);
+            head.appendChild(followWrap);
+          }
         } else {
           body.appendChild(readout);
+          body.appendChild(followWrap);
         }
 
         /* What the geometry made of the piece, and the per-part rounds/rows
@@ -3105,6 +3611,7 @@
         bar.appendChild(dialectRow);
         viewer.dialectSeg = dialectSeg;
         viewer.dialectHint = dialectHintEl;
+
         body.appendChild(bar);
         /* Fill the shape line now, not only on the canvas's first frame: with
            no WebGL (or a throttled rAF) the summary used to stay blank. */
@@ -3566,6 +4073,13 @@
             // A PDF read in this sheet: its sections become parts right after
             // the project exists, on top of whatever the template made.
             var secs = pdf && chosenCraft === 'crochet' ? pdf.checkedSections() : [];
+            // Wave F (03 #1): a multi-size pattern is read at the size picked
+            // here, so it is picked before anything is made.
+            if (secs.length && pdf.needsSize && pdf.needsSize()) {
+              toast('Pick your size first');
+              pdf.focusSize();
+              return;
+            }
             if (!patch.name.trim() && secs.length && pdf.fileBase()) patch.name = pdf.fileBase();
             patch.templateId = chosenTemplate === PDF_TEMPLATE_ID ? 'blank' : chosenTemplate;
             patch.craft = chosenCraft;
@@ -3582,12 +4096,14 @@
             var importRes = null;
             if (secs.length) {
               var res = Store.importPatternSections(created.id, secs, {
-                mode: 'parts', text: pdf.text(), noTargets: pdf.noTargets()
+                mode: 'parts', text: pdf.text(), noTargets: pdf.noTargets(),
+                size: pdf.size ? pdf.size() : null
               });
               importRes = res;
               var extra = addChecklistItems(created.id, pdf.checkedChecklist());
               var fresh = Store.project(created.id);
               bits.push(plural(fresh ? fresh.parts.length : secs.length, 'part'));
+              if (res && res.sizeSet) bits.push('size ' + res.sizeSet);
               if (res && res.placed) bits.push('placing notes');
               if (extra) bits.push(plural(extra, 'checklist item'));
               if (pdf.wantsTemplate()) {
@@ -3625,7 +4141,10 @@
                         dialect: made ? made.dialect : 'auto'
                       };
                     }),
-                    checklist: pdf.checkedChecklist()
+                    checklist: pdf.checkedChecklist(),
+                    // wave F: the leaflet's size names + the size picked here
+                    sizes: fresh && fresh.sizes ? fresh.sizes : undefined,
+                    size: fresh && fresh.size ? fresh.size : undefined
                   });
                   bits.push('saved as template');
                 } catch (e) {
@@ -3762,6 +4281,10 @@
       sourceLabel: function () { return fileBase ? 'From this PDF' : 'From this pattern'; },
       rerender: function () { picker.rerender(); },
       noTargets: picker.noTargets,
+      // wave F: size-once
+      size: picker.size,
+      needsSize: picker.needsSize,
+      focusSize: picker.focusSize,
       checkedSections: picker.checkedSections,
       checkedChecklist: picker.checkedChecklist,
       wantsTemplate: function () { return wantsTemplate; },
@@ -3846,10 +4369,21 @@
       orientSeg, syncOrientHint, dialectSeg, syncDialectHint;
     var repeatOn = !!prt.repeat.enabled;
     var sizeIndex = prt.sizeIndex || 0;
+    // Wave F (size-once): the Size select sets the PROJECT's size unless
+    // "Only this part" is on (it starts on when this part already differs).
+    var sizeOnlyThis = !!(p.size && p.size.index !== (prt.sizeIndex || 0));
+    var sizeOffered = false;
+    // 03 #6: "N times" or "until N rows total".
+    var repeatMode = prt.repeat.mode === 'untilRows' ? 'untilRows' : 'times';
+    var repModeSeg = null, repUntil = null, repTimesField = null, repUntilField = null;
+    var targetTyped = false;
 
     /** A part-shaped object so the Store can parse the unsaved textarea. */
     function previewPart() {
-      return { id: prt.id + ':preview', patternText: patternArea.value, sizeIndex: sizeIndex };
+      return {
+        id: prt.id + ':preview', patternText: patternArea.value, sizeIndex: sizeIndex,
+        sizeCount: p.sizes && p.sizes.length >= 2 ? p.sizes.length : 0
+      };
     }
 
     function collectPatch() {
@@ -3861,7 +4395,9 @@
           enabled: repeatOn,
           startRow: repStart.value,
           endRow: repEnd.value,
-          times: repTimes.value
+          times: repTimes.value,
+          mode: repeatMode,
+          untilRows: repUntil && repUntil.value !== '' ? repUntil.value : null
         },
         alerts: parseNumberList(alertsInput.value),
         placementNotes: placeArea.value,
@@ -3941,6 +4477,11 @@
         repTimes.value = String(prt.repeat.times);
         repeatOn = !!prt.repeat.enabled;
         syncRepeatSwitch();
+        // wave F: "until N rows" comes back as its own mode
+        repeatMode = prt.repeat.mode === 'untilRows' ? 'untilRows' : 'times';
+        if (repUntil) repUntil.value = prt.repeat.untilRows == null ? '' : String(prt.repeat.untilRows);
+        if (repModeSeg && repModeSeg.set) repModeSeg.set(repeatMode);
+        if (repTimesField) { repTimesField.hidden = repeatMode === 'untilRows'; repUntilField.hidden = repeatMode !== 'untilRows'; }
         toast('Applied: ' + bits.join(' · '));
       });
     }
@@ -3967,9 +4508,21 @@
       var tmp = previewPart();
       var s = Store.patternSummary(tmp);
       extras.appendChild(el('div', 'parsed-note', summaryLine(s, tmp)));
+      // Wave F (06 #1 / #8): what the counts rest on, at the size picked.
+      var rep = Store.countReport(tmp);
+      var conf = countLineText(rep, partRowWord(p, prt), !!prt.makeCountInferred && makeStep && makeStep.get() === prt.makeCount);
+      if (conf) {
+        var confEl = el('div', 'parsed-note imp-conf' + (rep.disagree.length || rep.unresolved ? ' warn' : ''), conf);
+        extras.appendChild(confEl);
+        rep.disagree.slice(0, 3).forEach(function (d) {
+          extras.appendChild(el('div', 'parsed-note warn',
+            partShortRowWord(p, prt) + ' ' + d.row + (d.rowEnd > d.row ? '–' + d.rowEnd : '') +
+            ': pattern says ' + d.printed + ' · instructions add up to ' + d.computed));
+        });
+      }
 
-      /* ---- Size picker ---- */
-      var pickerNames = (s.sizes && s.sizes.length) ? s.sizes : (p.sizes && p.sizes.length ? p.sizes : null);
+      /* ---- Size picker (wave F: the PROJECT's size, once) ---- */
+      var pickerNames = (p.sizes && p.sizes.length >= 2) ? p.sizes : ((s.sizes && s.sizes.length) ? s.sizes : null);
       if (pickerNames || s.multiSize) {
         var n = Math.max(Store.sizeCount(tmp), pickerNames ? pickerNames.length : 0, 1);
         if (n > 1) {
@@ -3982,11 +4535,32 @@
           }
           sel.value = String(Math.min(sizeIndex, n - 1));
           sizeIndex = parseInt(sel.value, 10) || 0;
+          sel.setAttribute('aria-label', 'Size');
+          var sizeWrap = el('div', 'size-pick');
+          sizeWrap.appendChild(sel);
+          // "Only this part" is the rare "body in L, sleeves in M" case; by
+          // default the pick is the project's and moves every part.
+          var onlyRow = switchRow('Only this part', 'Leave the other parts at their size', sizeOnlyThis, function (v) {
+            sizeOnlyThis = v;
+            syncSizeHint();
+          });
+          sizeWrap.appendChild(onlyRow);
+          var sizeHint = el('div', 'field-hint');
+          var syncSizeHint = function () {
+            var lab = sel.options[sel.selectedIndex] ? sel.options[sel.selectedIndex].textContent : '';
+            if (sizeOnlyThis) sizeHint.textContent = lab + ' for ' + (nameInput.value || prt.name) + ' only.';
+            else if (p.size && p.size.index === sizeIndex) sizeHint.textContent = lab + ' — the project’s size. Every part follows it.';
+            else sizeHint.textContent = 'Saving makes ' + lab + ' the project’s size: every part’s counts and targets follow, and progress stays.';
+          };
           on(sel, 'change', function () {
             sizeIndex = parseInt(sel.value, 10) || 0;
             refreshParsed();
           });
-          extras.appendChild(field('Size', sel, 'Multi-size counts use this size.'));
+          var sizeF = field('Size', sizeWrap);
+          sizeF.appendChild(sizeHint);
+          extras.appendChild(sizeF);
+          syncSizeHint();
+          sizeOffered = true;
         }
       }
 
@@ -4110,6 +4684,7 @@
         syncDialectHint();
 
         targetInput = numInput(prt.targetRows == null ? '' : prt.targetRows, 1, 999999, 'e.g. 40');
+        on(targetInput, 'input', function () { targetTyped = true; });
         body.appendChild(field('Target ' + partRowWord(p, prt).toLowerCase() + 's', targetInput, 'Leave blank for open-ended.'));
 
         // Repeat
@@ -4126,10 +4701,43 @@
         repEnd.placeholder = '8';
         repTimes = numInput(prt.repeat.times, 1, 9999);
         repTimes.placeholder = '6';
+        repUntil = numInput(prt.repeat.untilRows == null ? '' : prt.repeat.untilRows, 1, 999999);
+        repUntil.placeholder = '25';
         repRow.appendChild(field('From', repStart));
         repRow.appendChild(field('To', repEnd));
-        repRow.appendChild(field('Times', repTimes));
+        repTimesField = field('Times', repTimes);
+        repUntilField = field('Total ' + partRowWord(p, prt).toLowerCase() + 's', repUntil);
+        repRow.appendChild(repTimesField);
+        repRow.appendChild(repUntilField);
+        // 03 #6: a garment says "until there are a total of 25 Rows", not
+        // "5 times" — and the 25 changes with the size.
+        repModeSeg = segmented(
+          [{ id: 'times', label: 'N times' }, { id: 'untilRows', label: 'Until N ' + partRowWord(p, prt).toLowerCase() + 's total' }],
+          repeatMode,
+          function (id) { repeatMode = id; syncRepeatMode(); }
+        );
+        repModeSeg.node.setAttribute('aria-label', 'Repeat how long');
+        repWrap.appendChild(repModeSeg.node);
         repWrap.appendChild(repRow);
+        var repHint = el('div', 'field-hint');
+        repWrap.appendChild(repHint);
+        var syncRepeatMode = function () {
+          var until = repeatMode === 'untilRows';
+          repTimesField.hidden = until;
+          repUntilField.hidden = !until;
+          var a = parseInt(repStart.value, 10), b = parseInt(repEnd.value, 10), u = parseInt(repUntil.value, 10);
+          if (until && a >= 1 && b >= a && u >= a) {
+            var t = Math.max(1, Math.floor((u - a + 1) / (b - a + 1)));
+            repHint.textContent = partRowWord(p, prt) + 's ' + a + '–' + b + ' worked ' + t + ' time' + (t === 1 ? '' : 's') +
+              ' (' + a + '–' + (a + t * (b - a + 1) - 1) + ')';
+          } else {
+            repHint.textContent = '';
+          }
+        };
+        on(repUntil, 'input', syncRepeatMode);
+        on(repStart, 'input', syncRepeatMode);
+        on(repEnd, 'input', syncRepeatMode);
+        syncRepeatMode();
         body.appendChild(repWrap);
 
         alertsInput = textInput(prt.alerts.join(', '), '40, 80');
@@ -4201,9 +4809,34 @@
       var patch = collectPatch();
       var impact = Store.makeCountImpact(p.id, prt.id, patch.makeCount);
       function commit() {
+        // Wave F (size-once): the Size select is the PROJECT's size unless
+        // "Only this part" is on. setProjectSize moves every part and their
+        // pattern targets first, so the target box only wins if it was typed.
+        var projectSize = sizeOffered && !sizeOnlyThis &&
+          (!p.size || p.size.index !== sizeIndex || p.parts.some(function (q) { return (q.sizeIndex || 0) !== sizeIndex; }));
+        var sizeRes = null;
+        if (projectSize) {
+          // One undo step: the part's edits and the project's size together.
+          if (!targetTyped) delete patch.targetRows;
+          var both = Store.updatePartWithProjectSize(p.id, prt.id, patch, sizeIndex);
+          sizeRes = both ? both.size : null;
+          api.close();
+          render();
+          if (sizeRes) toast('Size ' + sizeRes.label + ' for the whole project' +
+            (sizeRes.retargeted ? ' · ' + plural(sizeRes.retargeted, 'target') + ' updated' : ''), { ms: 3200 });
+          return;
+        } else if (sizeOffered && sizeIndex !== (prt.sizeIndex || 0) && !targetTyped) {
+          // this part only: its pattern target follows its own size
+          var docN = p.sizes && p.sizes.length >= 2 ? p.sizes.length : 0;
+          var was = Store.targetRowsFromText(prt.patternText, prt.sizeIndex || 0, docN);
+          var now = Store.targetRowsFromText(patch.patternText, sizeIndex, docN);
+          if (now && was !== null && prt.targetRows === was) patch.targetRows = now;
+        }
         Store.updatePart(p.id, prt.id, patch);
         api.close();
         render();
+        if (sizeRes) toast('Size ' + sizeRes.label + ' for the whole project' +
+          (sizeRes.retargeted ? ' · ' + plural(sizeRes.retargeted, 'target') + ' updated' : ''), { ms: 3200 });
       }
       if (!impact || impact.piecesLost <= 0) {
         commit();
@@ -4242,6 +4875,10 @@
             : partShortRowWord(p, prt) + ' ' + prt.row + (prt.targetRows ? ' / ' + prt.targetRows : '');
           if (prt.makeCount > 1) sub += ' · ' + prt.piecesDone + ' of ' + prt.makeCount + ' done';
           main.appendChild(el('div', 'toggle-sub', sub));
+          // Wave F (06 #1 / #8): what this part's counts rest on.
+          var rep = Store.countReport(prt);
+          var conf = countLineText(rep, partRowWord(p, prt), !!prt.makeCountInferred);
+          if (conf) main.appendChild(el('div', 'toggle-sub part-conf' + (rep.disagree.length || rep.unresolved ? ' warn' : ''), conf));
           item.appendChild(main);
           on(item, 'click', function () {
             api.close();
@@ -4626,7 +5263,10 @@
                 groupSize: groupStep.get(),
                 parts: model.parts,
                 checklist: model.checklist,
-                craft: templateCraft
+                craft: templateCraft,
+                // wave F: the leaflet's size names and the picked size survive an edit
+                sizes: source && source.sizes ? source.sizes : undefined,
+                size: source && source.size ? source.size : undefined
               });
             } catch (e) {
               toast(e && e.message ? e.message : 'That template is not valid');
@@ -4649,9 +5289,13 @@
     'No rows found yet. Paste the instruction part of your pattern ' +
     '(e.g. “Rnd 1: 6 sc in MR (6)”).';
 
-  function sectionRowInfo(text, seq) {
-    var probe = { id: 'import:' + seq, patternText: text, sizeIndex: 0 };
+  function sectionRowInfo(text, seq, size, sizeCount) {
+    var sz = typeof size === 'number' && size >= 0 ? size : 0;
+    var n = typeof sizeCount === 'number' ? sizeCount : 0;
+    var probe = { id: 'import:' + seq, patternText: text, sizeIndex: sz, sizeCount: n };
     var s = Store.patternSummary(probe);
+    var tgt = typeof Store.targetRowsFromText === 'function' ? Store.targetRowsFromText(text, sz, n) : null;
+    probe.targetRows = tgt;
     // Wave E: rounds or rows is the SECTION's own reading, not the project's
     // Count segment — the panda's seven parts were listed as "20 rows" while
     // every line reads "Rnd 1: …" and the import itself flips the project to
@@ -4668,9 +5312,12 @@
       // What Store.importPatternSections will set as targetRows (01 #1) —
       // the Store's own rule, asked directly, so the preview can never quote
       // a different number from the one the part gets.
-      target: typeof Store.targetRowsFromText === 'function'
-        ? Store.targetRowsFromText(text)
-        : contiguousTarget(probe)
+      target: typeof Store.targetRowsFromText === 'function' ? tgt : contiguousTarget(probe),
+      // wave F (03 #5): the target was read off a tape measure (≈)
+      approx: !!(tgt && typeof Store.targetApprox === 'function' && Store.targetApprox(probe)),
+      // Wave F (06 #1 / #8): printed / computed / disagreeing counts, at the
+      // size being previewed.
+      report: typeof Store.countReport === 'function' ? Store.countReport(probe) : null
     };
   }
 
@@ -4801,6 +5448,8 @@
 
     // 06 #6: there was no way to abort an import at all.
     var signal = null;
+    /** The signal the last onPages handle was opened with (see readPdf). */
+    var handleSignal = null;
     var cancelBtn = button('btn ghost block dz-cancel', 'Cancel');
     cancelBtn.hidden = true;
     on(cancelBtn, 'click', function () {
@@ -4884,52 +5533,70 @@
       toast((err && err.message) || 'Couldn’t read that PDF (it may be scanned images)', { ms: 4200 });
     }
 
-    /** onPages + onText: build the text out of the already-open document. */
-    function gatherText(handle) {
-      var total = handle.numPages || 0;
-      var blocks = [];
-      var chain = Promise.resolve();
-      var step = function (n) {
-        return function () {
-          // PdfText.open has no signal of its own, so Cancel is checked here.
-          if (signal && signal.cancelled) {
-            var err = new Error('Cancelled');
-            err.name = 'AbortError';
-            throw err;
-          }
-          setBusy('Reading page ' + n + ' of ' + total + '…', total ? n / total : 0);
-          return handle.textOf(n).then(function (txt) {
-            blocks.push('=== PAGE ' + n + ' ===\n' + txt);
-          });
-        };
-      };
-      for (var n = 1; n <= total; n++) chain = chain.then(step(n));
-      return chain.then(function () {
-        signal = null;
+    /**
+     * onPages + onText: the WHOLE extract pipeline on the already-open
+     * document (HANDOFF 6) — the cross-page running-head pass, unicode
+     * folding, emptyPages, garbled and ocrNoise, exactly what `onText` alone
+     * gets from PdfText.extract. `allowEmpty`: a scanned chart has no text
+     * but its page images are still worth having, so the caller is handed an
+     * empty result rather than an error.
+     */
+    function gatherText(handle, readOpts, mySignal) {
+      handle.extract({
+        signal: mySignal,
+        maxPages: readOpts.maxPages || 0,
+        allowEmpty: true,
+        onProgress: function (page, total) {
+          setBusy('Reading page ' + page + ' of ' + total + '…', total ? page / total : 0);
+        }
+      }).then(function (res) {
+        if (signal === mySignal) signal = null;
         setBusy('', 0);
-        var text = blocks.join('\n\n').replace(/\n{3,}/g, '\n\n').trim();
-        var res = { text: text, pages: total, chars: text.length, columnsDetected: 0 };
         showResult(res);
         try { opts.onText(res); } catch (e) { fail(e); }
-      }, fail);
+      }, function (err) {
+        if (signal === mySignal) signal = null;
+        fail(err);
+      });
     }
 
     function readPdf(file, readOpts) {
       readOpts = readOpts || {};
-      signal = { cancelled: false };
+      var mySignal = { cancelled: false };
+      signal = mySignal;
       setBusy('Reading page 1…', 0.02);
       if (typeof opts.onPages === 'function') {
-        window.PdfText.open(file).then(function (handle) {
-          setBusy('', 0);
+        // The signal goes into open() itself (HANDOFF 14): Cancel during the
+        // file read or the parse stops it there, and the handle refuses every
+        // later call made under a cancelled signal.
+        window.PdfText.open(file, { signal: mySignal }).then(function (handle) {
+          if (mySignal.cancelled) {
+            try { handle.destroy(); } catch (e) { /* already gone */ }
+            var abort = new Error('Cancelled');
+            abort.name = 'AbortError';
+            throw abort;
+          }
+          // The handle stays bound to this zone's signal for its whole life:
+          // every handle.renderPage() honours it between steps and at the
+          // pdf.js render task, so wrap.cancel() (or Cancel while reading)
+          // stops a page mid-draw, not after it.
+          handleSignal = mySignal;
           try {
             opts.onPages(handle);
           } catch (e) {
             fail(e);
             return;
           }
-          if (typeof opts.onText === 'function') gatherText(handle);
-          else signal = null;
-        }, function (err) { signal = null; fail(err); });
+          if (typeof opts.onText === 'function') {
+            gatherText(handle, readOpts, mySignal);
+          } else {
+            signal = null;
+            setBusy('', 0);
+          }
+        }).then(null, function (err) {
+          if (signal === mySignal) signal = null;
+          fail(err);
+        });
         return;
       }
       window.PdfText.extract(file, {
@@ -5073,6 +5740,17 @@
     wrap.showResult = showResult;
     wrap.take = takeFile;
     wrap.isReading = function () { return reading; };
+    /**
+     * Stop whatever this zone started: the read in progress, and any page
+     * render on the handle it gave to onPages (a craft's "Stop" while it
+     * rasterises chart pages). The handle is unusable afterwards.
+     */
+    wrap.cancel = function () {
+      if (signal) signal.cancelled = true;
+      if (handleSignal) handleSignal.cancelled = true;
+    };
+    /** The signal the onPages handle honours, to pass on as {signal}. */
+    wrap.signal = function () { return handleSignal; };
     /** Call from the sheet's onClose so the document-level guard goes too. */
     wrap.destroy = function () {
       if (!docGuard) return;
@@ -5150,12 +5828,28 @@
     var dialect = null;
     /** 01 #1: the import sets targetRows unless the user says not to. */
     var noTargets = false;
+    /**
+     * Wave F (size-once, 03 #1): the document's sizes and the one picked.
+     * `sizeChoice` null = not picked yet; a multi-size import is not created
+     * until it is, so no part ever counts XS by default.
+     */
+    var sizeNames = [];
+    var sizeDocCount = 0;
+    var sizeChoice = typeof opts.initialSize === 'number' && opts.initialSize >= 0 ? opts.initialSize : null;
 
     var node = el('div', 'imp-picker');
 
     var chips = el('div', 'imp-chips');
     chips.hidden = true;
     node.appendChild(chips);
+
+    var sizeChips = el('div', 'size-chips');
+    sizeChips.setAttribute('role', 'radiogroup');
+    sizeChips.setAttribute('aria-label', 'Your size');
+    var sizeField = field('Your size', sizeChips, 'Every count, row target and instruction is shown for this size. You can change it later in the part editor.');
+    sizeField.classList.add('size-field');
+    sizeField.hidden = true;
+    node.appendChild(sizeField);
 
     var list = el('div', 'imp-list');
     if (opts.tourList) list.setAttribute('data-tour', opts.tourList);
@@ -5195,11 +5889,34 @@
       if (typeof opts.onChange === 'function') opts.onChange();
     }
 
+    /** The document's size names, else "Size 1".."Size N" from its longest list. */
+    function findSizes(secs) {
+      var names = null;
+      if (window.Patterns && typeof window.Patterns.detectSizes === 'function') {
+        try { names = window.Patterns.detectSizes(text); } catch (e) { names = null; }
+      }
+      sizeDocCount = names && names.length >= 2 ? names.length : 0;
+      if (sizeDocCount) return names.slice();
+      var n = 0;
+      secs.forEach(function (sec, i) {
+        var c = Store.sizeCount({ id: 'import-size:' + i, patternText: sec.text, sizeIndex: 0, sizeCount: 0 });
+        if (c > n) n = c;
+      });
+      var out = [];
+      for (var k = 0; k < n && n >= 2; k++) out.push('Size ' + (k + 1));
+      return out;
+    }
+
     function buildRows() {
       var secs = Store.splitSections(text);
+      var prevNames = sizeNames.join('|');
+      sizeNames = findSizes(secs);
+      // a different document's sizes are a different question
+      if (sizeNames.join('|') !== prevNames && prevNames) sizeChoice = null;
+      if (sizeChoice !== null && sizeChoice > sizeNames.length - 1) sizeChoice = null;
       var prev = rows;
       rows = secs.map(function (sec, i) {
-        var info = sectionRowInfo(sec.text, i);
+        var info = sectionRowInfo(sec.text, i, sizeChoice === null ? 0 : sizeChoice, sizeDocCount);
         var old = prev[i];
         var keep = old && old.parserName === sec.name;
         return {
@@ -5207,13 +5924,16 @@
           name: keep ? old.name : sec.name,
           checked: keep ? old.checked : info.rows > 0,
           makeCount: sec.makeCount,
+          makeCountInferred: !!sec.makeCountInferred,
           text: sec.text,
           placement: sec.placement || '',
           rows: info.rows,
           computedOnly: info.computedOnly,
           hasTargets: info.hasTargets,
           mode: info.mode,
-          target: info.target
+          target: info.target,
+          approx: info.approx,
+          report: info.report
         };
       });
       dialect = null;
@@ -5230,6 +5950,44 @@
         any = true;
       }
       chips.hidden = !any;
+      renderSizes();
+    }
+
+    /** "Your size" chips (03 #1): one tap, and every number below follows. */
+    function renderSizes() {
+      clear(sizeChips);
+      var hasRows = rows.some(function (r) { return r.rows > 0; });
+      sizeField.hidden = !(sizeNames.length >= 2 && hasRows);
+      if (sizeField.hidden) return;
+      sizeField.classList.toggle('needs-pick', sizeChoice === null);
+      sizeNames.forEach(function (name, i) {
+        var b = button('size-chip' + (i === sizeChoice ? ' on' : ''), name);
+        b.setAttribute('role', 'radio');
+        b.setAttribute('aria-checked', i === sizeChoice ? 'true' : 'false');
+        b.setAttribute('data-focus-key', 'size-chip-' + i);
+        // roving tabindex: one stop for the group, arrows move inside it
+        b.tabIndex = (sizeChoice === null ? i === 0 : i === sizeChoice) ? 0 : -1;
+        on(b, 'click', function () { pickSize(i); });
+        on(b, 'keydown', function (e) {
+          var d = e.key === 'ArrowRight' || e.key === 'ArrowDown' ? 1 : (e.key === 'ArrowLeft' || e.key === 'ArrowUp' ? -1 : 0);
+          if (!d) return;
+          e.preventDefault();
+          pickSize((i + d + sizeNames.length) % sizeNames.length);
+        });
+        sizeChips.appendChild(b);
+      });
+    }
+
+    function pickSize(i) {
+      sizeChoice = i;
+      preserveFocus(function () {
+        buildRows();
+        renderChips();
+        renderList();
+      });
+      var on_ = sizeChips.querySelector('.size-chip.on');
+      if (on_) { try { on_.focus(); } catch (e) { /* ignore */ } }
+      changed();
     }
 
     function renderList() {
@@ -5267,20 +6025,32 @@
         main.appendChild(nameIn);
 
         var meta = [];
-        if (r.makeCount > 1) meta.push('×' + r.makeCount);
+        if (r.makeCount > 1) meta.push('×' + r.makeCount + (r.makeCountInferred ? ' (from the assembly text)' : ''));
         // The section's own word when it has one; the rows it will COUNT (the
         // target, which includes "Rep 3rd Rnd 3 times") when it has a target.
         var w = r.mode ? (r.mode === 'rounds' ? 'round' : 'row') : word();
-        var n = r.rows && r.target && !noTargets ? r.target : r.rows;
-        meta.push(r.rows ? n + ' ' + w + (n === 1 ? '' : 's') : 'no ' + w + 's');
+        // Wave F: with sizes and none picked, the target is not known yet.
+        var sizePending = sizeNames.length >= 2 && sizeChoice === null;
+        var n = r.rows && r.target && !noTargets && !sizePending ? r.target : r.rows;
+        meta.push(r.rows ? (r.approx && n === r.target ? '≈ ' : '') + n + ' ' + w + (n === 1 ? '' : 's') : 'no ' + w + 's');
         // 01 #1: say the target out loud so it is visible and correctable.
-        if (r.rows && r.target && !noTargets) meta.push('→ target ' + r.target);
-        if (r.rows && r.computedOnly) meta.push('counts computed ≈');
-        else if (r.rows && r.hasTargets) meta.push('counts found');
+        if (r.rows && r.target && !noTargets && !sizePending) meta.push('→ target ' + (r.approx ? '≈ ' : '') + r.target);
+        if (r.rows && sizePending) meta.push('pick your size for targets');
         // The parser found assembly prose for this piece - it lands in the
         // part's Placing button, not in its rounds.
         if (r.placement) meta.push('placing notes');
         main.appendChild(el('div', 'imp-meta', meta.join(' · ')));
+        // Wave F (06 #1 / #8): one confidence line per part - what the
+        // counts rest on. A disagreement is the line people need to see.
+        var rep = r.report;
+        if (r.rows && rep && rep.rows) {
+          var conf = countLineText(rep, w, false).replace(/^\d+ \w+(?: · |$)/, '');
+          if (!conf) conf = rep.printed === rep.rows ? 'every count printed' : '';
+          if (conf) {
+            var cl = el('div', 'imp-conf' + (rep.disagree.length || rep.unresolved ? ' warn' : ''), conf);
+            main.appendChild(cl);
+          }
+        }
 
         item.appendChild(chk);
         item.appendChild(main);
@@ -5350,12 +6120,14 @@
       var out = [];
       rows.forEach(function (r) {
         if (r.checked) {
-          out.push({
+          var sec = {
             name: (r.name || '').trim(),
             makeCount: r.makeCount,
             text: r.text,
             placement: r.placement || ''
-          });
+          };
+          if (r.makeCountInferred) sec.makeCountInferred = true;
+          out.push(sec);
         }
       });
       return out;
@@ -5374,6 +6146,22 @@
       rerender: renderList,
       /** `opts.noTargets` for Store.importPatternSections. */
       noTargets: function () { return noTargets; },
+      /** Wave F: the picked size index for Store.importPatternSections, or null. */
+      size: function () { return sizeNames.length >= 2 ? sizeChoice : null; },
+      /** Wave F: the document has sizes and none is picked yet. */
+      needsSize: function () {
+        return sizeNames.length >= 2 && sizeChoice === null && rows.some(function (r) { return r.rows > 0 && r.checked; });
+      },
+      /** Wave F: bring the size chips into view and focus them (the "pick first" nudge). */
+      focusSize: function () {
+        if (sizeField.hidden) return;
+        try { sizeField.scrollIntoView({ block: 'center' }); } catch (e) { /* ignore */ }
+        var b = sizeChips.querySelector('.size-chip');
+        if (b) { try { b.focus(); } catch (e2) { /* ignore */ } }
+        sizeField.classList.remove('nudge');
+        void sizeField.offsetWidth;
+        sizeField.classList.add('nudge');
+      },
       checkedSections: checkedSections,
       checkedChecklist: function () {
         return checkItems.filter(function (c) { return c.checked; }).map(function (c) { return c.text; });
@@ -5465,7 +6253,9 @@
         picker = importPicker({
           rowWord: rowWord(p),
           tourList: 'import-list',
-          tourChecklist: 'import-checklist'
+          tourChecklist: 'import-checklist',
+          // wave F: a re-import keeps the size already picked for the project
+          initialSize: p.size ? p.size.index : null
         });
         body.appendChild(picker.node);
 
@@ -5486,10 +6276,15 @@
               toast('Nothing to import yet');
               return;
             }
+            if (picker.needsSize()) {
+              toast('Pick your size first');
+              picker.focusSize();
+              return;
+            }
             Store.importPatternSections(
               p.id,
               [{ name: activeName, makeCount: 1, text: area.value }],
-              { mode: 'active', text: area.value, noTargets: picker.noTargets() }
+              { mode: 'active', text: area.value, noTargets: picker.noTargets(), size: picker.size() }
             );
             var extra = addChecklistItems(p.id, picker.checkedChecklist());
             api.close();
@@ -5507,8 +6302,13 @@
               toast('Tick at least one section first');
               return;
             }
+            if (picker.needsSize()) {
+              toast('Pick your size first');
+              picker.focusSize();
+              return;
+            }
             var res = Store.importPatternSections(p.id, secs, {
-              mode: 'parts', text: area.value, noTargets: picker.noTargets()
+              mode: 'parts', text: area.value, noTargets: picker.noTargets(), size: picker.size()
             });
             var extra = addChecklistItems(p.id, picker.checkedChecklist());
             api.close();
@@ -5523,6 +6323,7 @@
             } else {
               msg = 'Nothing imported';
             }
+            if (res.sizeSet) msg += ' · size ' + res.sizeSet;
             toast(msg + placingSuffix(res.placed) + checklistSuffix(extra), { ms: 3600 });
             modeFlipToast(res);
           }
@@ -5583,6 +6384,18 @@
           return;
         }
 
+        // Wave F (size-once): whose numbers are marked, and the per-size
+        // blocks ("Size XS:", "Sizes M, L … only:") that are not yours dimmed.
+        var sizeInfo = Store.partSize(p, prt);
+        if (sizeInfo.label) {
+          var sizeHead = el('p', 'pline-size', 'Your size: ');
+          sizeHead.appendChild(el('mark', 'size-mark', sizeInfo.label));
+          sizeHead.appendChild(document.createTextNode(
+            sizeInfo.source === 'part' ? ' (this part only)' : (sizeInfo.source === 'project' ? '' : ' — not picked yet, change it in the part editor')));
+          body.appendChild(sizeHead);
+        }
+        var scopeMine = null;  // a "Size XS:" label carries over the lines below it
+
         var wrap = el('div', 'pattern-lines');
         var currentNode = null;
         lines.forEach(function (line) {
@@ -5590,17 +6403,38 @@
           var isSetup = line.kind === 'setup' || (line.row === 0 && line.kind !== 'header' && line.kind !== 'note');
           var notes = Store.notesOf(line);
 
+          // A wrapped line the parser merged into the row above is already
+          // in that row's text; listing it again doubled it (wave F).
+          if (line.consumed) return;
           // Section headers are not tappable.
           if (line.kind === 'header') {
+            scopeMine = null;
             wrap.appendChild(el('div', 'pline-header', line.text));
             return;
           }
 
+          var mine = null;
+          if (sizeInfo.names.length >= 2 && window.Patterns && typeof window.Patterns.sizeScope === 'function') {
+            var sc = null;
+            try { sc = window.Patterns.sizeScope(line.text, sizeInfo.names); } catch (eS) { sc = null; }
+            if (sc) {
+              mine = !sc.indices || sc.indices.indexOf(sizeInfo.index) >= 0;
+              scopeMine = sc.label ? mine : null;
+            } else if (hasRow) {
+              scopeMine = null;
+            } else {
+              mine = scopeMine;
+            }
+          }
+          var sizeCls = mine === false ? ' other-size' : '';
+
           // Setup / foundation lines: labelled, not tappable (there is no row 0).
           if (!hasRow && isSetup) {
-            var setupNode = el('div', 'pline pline-setup');
+            var setupNode = el('div', 'pline pline-setup' + sizeCls);
             setupNode.appendChild(el('span', 'pline-tag', 'Setup'));
-            setupNode.appendChild(el('span', 'pline-body', line.text));
+            var setupBody = el('span', 'pline-body');
+            fillSizeMarked(setupBody, line.text, prt, p);
+            setupNode.appendChild(setupBody);
             wrap.appendChild(setupNode);
             appendNotes(wrap, notes);
             return;
@@ -5613,8 +6447,12 @@
             // Past the written rows the repeat sentence that owns the row is
             // the current line ("Rep 3rd Rnd 3 times" is rounds 4-6).
             (!hasRow && line.kind === 'repeat' && line === currentLine);
-          var cls = 'pline' + (hasRow ? ' has-row' : ' plain') + (isCurrent ? ' on' : '');
-          var node = button(cls, line.text);
+          var cls = 'pline' + (hasRow ? ' has-row' : ' plain') + (isCurrent ? ' on' : '') + sizeCls;
+          var node = button(cls, '');
+          // Wave F (size-once): the chosen size's numbers marked.
+          var txt = el('span', 'pline-text');
+          fillSizeMarked(txt, line.text, prt, p);
+          node.appendChild(txt);
           if (hasRow && Store.isComputed(line)) {
             var c = Store.countOf(line);
             if (c !== null) {
@@ -5622,6 +6460,16 @@
               node.appendChild(el('span', 'pline-count', '≈' + c));
             }
           }
+          // Wave F (06 #1): what the count rests on, where it is not simply printed.
+          if (hasRow && line.deviation) {
+            node.appendChild(document.createTextNode(' '));
+            node.appendChild(el('span', 'pline-count warn',
+              'says ' + line.deviation.printed + ' · makes ' + line.deviation.computed));
+          } else if (hasRow && line.sizeUnresolved) {
+            node.appendChild(document.createTextNode(' '));
+            node.appendChild(el('span', 'pline-count warn', 'no count for your size'));
+          }
+          if (mine === false) node.setAttribute('aria-description', 'for another size');
           if (isCurrent && !currentNode) {
             currentNode = node;
             node.setAttribute('aria-current', 'true');
@@ -6088,7 +6936,7 @@
     items.push({ icon: '📝', label: 'Notes', run: function () { openNotesSheet(p.id); } });
     items.push({ icon: '🕘', label: 'History', run: function () { openHistorySheet(p.id); } });
     items.push({ icon: '🏷️', label: 'Status', run: function () { openStatusSheet(p.id); } });
-    items.push({ icon: '📤', label: 'Download backup', run: function () { exportBackup(); } });
+    fileMenuItems(p).forEach(function (it) { items.push(it); });
     items.push({
       icon: '❓',
       label: 'Show me around',
@@ -6127,9 +6975,12 @@
           openTemplateEditor({ draft: draft });
         }
       },
-      { icon: '📤', label: 'Download backup', run: function () { exportBackup(); } },
       { icon: '❓', label: 'Show me around', run: function () { startTour('counter'); } }
     ];
+    if (!isCraftProject(p)) {
+      var at = items.length - 1;
+      fileMenuItems(p).forEach(function (it) { items.splice(at++, 0, it); });
+    }
     openSheet({
       subject: projectId,
       title: p.name,
@@ -6154,37 +7005,147 @@
    * 19. Export / import
    * ================================================================== */
 
-  function backupFilename() {
+  /*
+   * A backup is one `.thready` file (12 #4): backup.json + the page images +
+   * a manifest, built by Store.exportThready. When the zip writer is missing
+   * or fails, the plain JSON backup is written instead — still a backup.
+   */
+
+  function dateStamp() {
     var d = new Date();
-    return 'thready-or-not-backup-' + d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()) + '.json';
+    return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
   }
 
-  function backupBlob() {
-    Store.flush();
-    return new Blob([Store.exportJSON()], { type: 'application/json' });
+  function backupFilename(ext) {
+    return 'thready-or-not-backup-' + dateStamp() + '.' + (ext || 'thready');
   }
 
-  function exportBackup() {
-    var text;
+  /** "Sleepy Sheep!" → "sleepy-sheep-2026-10-03.thready" */
+  function projectFilename(p, ext) {
+    var slug = String((p && p.name) || 'project').toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'project';
+    return slug + '-' + dateStamp() + '.' + (ext || 'thready');
+  }
+
+  function jsonBackupFile(projectId) {
     try {
-      Store.flush();
-      text = Store.exportJSON();
+      var text = projectId ? Store.exportProjectJSON(projectId) : Store.exportJSON();
+      if (!text) return null;
+      return {
+        blob: new Blob([text], { type: 'application/json' }),
+        filename: projectId ? projectFilename(Store.project(projectId), 'json') : backupFilename('json'),
+        images: 0,
+        kind: 'json'
+      };
     } catch (e) {
-      toast('Could not create the backup file');
-      return;
+      return null;
     }
-    if (!downloadText(text, backupFilename(), 'application/json')) {
-      toast('Could not create the backup file');
-      return;
+  }
+
+  /**
+   * @param {string} [projectId]  one project (12 #5) instead of everything
+   * @returns {Promise<{blob, filename, images, kind}|null>}
+   */
+  function buildBackupFile(projectId) {
+    try { Store.flush(); } catch (e) { /* the export reads the in-memory state anyway */ }
+    if (typeof Store.exportThready !== 'function' || !window.Zip) {
+      return Promise.resolve(jsonBackupFile(projectId));
     }
-    toast('Backup downloaded');
+    return Store.exportThready({ projectId: projectId || null, appVersion: APP_VERSION }).then(function (res) {
+      return {
+        blob: res.blob,
+        filename: projectId ? projectFilename(Store.project(projectId)) : backupFilename('thready'),
+        images: res.images,
+        kind: 'thready'
+      };
+    }, function () {
+      return jsonBackupFile(projectId);
+    });
+  }
+
+  /** Share sheet where the browser can share this file, download otherwise. */
+  function deliverFile(f, title) {
+    var file = null;
+    try {
+      file = new File([f.blob], f.filename, { type: f.blob.type || 'application/octet-stream' });
+    } catch (e) {
+      file = null;
+    }
+    var shareable = false;
+    if (file && navigator.share && navigator.canShare) {
+      try { shareable = navigator.canShare({ files: [file] }); } catch (e) { shareable = false; }
+    }
+    if (!shareable) return Promise.resolve(downloadBlob(f.blob, f.filename) ? 'downloaded' : 'failed');
+    return navigator.share({ files: [file], title: title }).then(function () {
+      return 'shared';
+    }, function (err) {
+      if (err && err.name === 'AbortError') return 'cancelled';
+      // NotAllowedError: the zip took long enough that the tap no longer
+      // counts as a gesture. The file is ready, so just save it.
+      return downloadBlob(f.blob, f.filename) ? 'downloaded' : 'failed';
+    });
+  }
+
+  var backupBusy = false;
+
+  /** The full backup. Resolves true when a file was handed over. */
+  function exportBackup(viaShare) {
+    if (backupBusy) return Promise.resolve(false);
+    backupBusy = true;
+    return buildBackupFile(null).then(function (f) {
+      if (!f) return 'failed';
+      if (viaShare === true) return deliverFile(f, 'Thready or Not backup').then(function (how) { return { how: how, f: f }; });
+      return { how: downloadBlob(f.blob, f.filename) ? 'downloaded' : 'failed', f: f };
+    }).then(function (r) {
+      backupBusy = false;
+      if (!r || r === 'failed' || r.how === 'failed') {
+        toast('Could not create the backup file');
+        return false;
+      }
+      if (r.how === 'cancelled') return false;
+      var what = r.how === 'shared' ? 'Backup shared' : 'Backup downloaded';
+      toast(r.f.images ? what + ' · ' + plural(r.f.images, 'page image') : what);
+      return true;
+    }, function () {
+      backupBusy = false;
+      toast('Could not create the backup file');
+      return false;
+    });
+  }
+
+  /** "Send this project" (12 #5): the same container, one project in it. */
+  function exportProject(projectId) {
+    var p = Store.project(projectId);
+    if (!p) return Promise.resolve(false);
+    return buildBackupFile(projectId).then(function (f) {
+      if (!f) {
+        toast('Could not create the project file');
+        return false;
+      }
+      return deliverFile(f, p.name).then(function (how) {
+        if (how === 'failed') toast('Could not create the project file');
+        else if (how === 'shared' || how === 'downloaded') {
+          toast('“' + p.name + '” saved as ' + f.filename + (f.images ? ' · ' + plural(f.images, 'page image') : ''), { ms: 4200 });
+        }
+        return how === 'shared' || how === 'downloaded';
+      });
+    });
+  }
+
+  /** The file entries in every project's ⋯ menu. */
+  function fileMenuItems(p) {
+    return [
+      { icon: '📦', label: 'Send this project', run: function () { exportProject(p.id); } },
+      { icon: '📂', label: 'Open a project file', run: function () { importBackup(); } },
+      { icon: '📤', label: 'Back up everything', run: function () { exportBackup(); } }
+    ];
   }
 
   function canShareBackup() {
     if (!navigator.share || !navigator.canShare || typeof window.File !== 'function') return false;
     try {
-      var probe = new File([new Blob(['{}'], { type: 'application/json' })], 'probe.json', {
-        type: 'application/json'
+      var probe = new File([new Blob(['PK'], { type: 'application/zip' })], 'probe.thready', {
+        type: 'application/zip'
       });
       return navigator.canShare({ files: [probe] });
     } catch (e) {
@@ -6193,17 +7154,26 @@
   }
 
   function shareBackup() {
-    try {
-      var file = new File([backupBlob()], backupFilename(), { type: 'application/json' });
-      navigator.share({ files: [file], title: 'Thready or Not backup' }).catch(noop);
-    } catch (e) {
-      exportBackup();
-    }
+    return exportBackup(true);
+  }
+
+  /** "Last backup: 3 days ago" for the Settings sheet (13 / 12 #1). */
+  function lastBackupText() {
+    var status = null;
+    try { status = Store.backupStatus(); } catch (e) { status = null; }
+    var last = status && status.lastBackupAt;
+    if (!last) return 'Last backup: never';
+    var dayStart = function (ts) {
+      var d = new Date(ts);
+      return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+    };
+    var days = Math.round((dayStart(Date.now()) - dayStart(last)) / 86400000);
+    if (days <= 0) return 'Last backup: today';
+    if (days === 1) return 'Last backup: yesterday';
+    return 'Last backup: ' + days + ' days ago';
   }
 
   /* ---- import: preview first, then choose (09 #3, 12 #3) ---- */
-
-  var BACKUP_MAX_BYTES = 25 * 1024 * 1024;
 
   function fmtBackupDate(ts) {
     if (!ts) return 'never';
@@ -6259,6 +7229,7 @@
     if (row.craft) meta.push(craftInfo(row.craft).name);
     meta.push('in the file: ' + fmtBackupDate(row.updatedAt));
     meta.push('on this phone: ' + (row.localUpdatedAt ? fmtBackupDate(row.localUpdatedAt) : 'not here yet'));
+    if (row.pages) meta.push(plural(row.pages, 'page image'));
     main.appendChild(el('div', 'imp-row-meta', meta.join(' · ')));
     item.appendChild(main);
 
@@ -6276,13 +7247,19 @@
     return item;
   }
 
-  function openImportPreviewSheet(text, preview) {
+  /**
+   * @param {{kind, scope, text, pages, skipped}} read  Store.readBackupFile
+   * @param {object} preview  Store.previewImport(read.text, read.pages)
+   */
+  function openImportPreviewSheet(read, preview) {
+    var text = read.text;
+    var pages = Array.isArray(read.pages) ? read.pages : [];
     var choices = { projects: Object.create(null), templates: Object.create(null) };
     preview.projects.forEach(function (r) { choices.projects[r.id] = defaultChoice(r); });
     preview.templates.forEach(function (r) { choices.templates[r.id] = defaultChoice(r); });
 
     openSheet({
-      title: 'Import this backup?',
+      title: read.scope === 'project' && preview.projects.length === 1 ? 'Import this project?' : 'Import this backup?',
       cls: 'sheet-import-preview',
       build: function (body) {
         countsLine(preview).split('\n').forEach(function (line) {
@@ -6307,8 +7284,19 @@
           body.appendChild(field('Templates', tl));
         }
 
+        if (pages.length) {
+          // Only the projects that are imported bring theirs (a skipped
+          // project's images stay in the file), so the count is the file's.
+          body.appendChild(el('p', 'muted', 'This file has ' + plural(pages.length, 'page image') +
+            '; each project you import brings its own back.'));
+        } else if (read.kind === 'json') {
+          body.appendChild(el('p', 'muted', 'This is a JSON backup, so it has no page images; a project you already have keeps the ones on this phone.'));
+        }
+        if (read.skipped) {
+          body.appendChild(el('p', 'muted', plural(read.skipped, 'page image') + ' in the file could not be read and will be left out.'));
+        }
         body.appendChild(
-          el('p', 'muted', 'A “Keep both” copy has no page images — those stay with the project that owns them.')
+          el('p', 'muted', 'A “Keep both” copy gets its own copy of the page images.')
         );
       },
       footer: [
@@ -6335,20 +7323,31 @@
             var what = [];
             if (n || !tplsIn) what.push(plural(n, 'project'));
             if (tplsIn) what.push(plural(tplsIn, 'template'));
-            toast('Imported ' + what.join(' and '), {
-              ms: 8000,
-              actionText: Store.canUndoImport() ? 'Undo import' : '',
-              onAction: Store.canUndoImport()
-                ? function () {
-                    if (!Store.undoImport()) {
-                      toast('That import can no longer be undone');
-                      return;
+            // Page images go to IndexedDB after the state is in (12 #4); the
+            // toast waits for them so it can say how many came back.
+            var pagesDone = typeof Store.importPages === 'function'
+              ? Store.importPages(pages)
+              : Promise.resolve({ written: 0, copied: 0 });
+            pagesDone.then(null, function () { return { written: 0, copied: 0 }; }).then(function (pr) {
+              var images = (pr && (pr.written + pr.copied)) || 0;
+              if (images) render();
+              toast('Imported ' + what.join(' and ') + (images ? ' · ' + plural(images, 'page image') : ''), {
+                ms: 8000,
+                actionText: Store.canUndoImport() ? 'Undo import' : '',
+                onAction: Store.canUndoImport()
+                  ? function () {
+                      if (!Store.undoImport()) {
+                        toast('That import can no longer be undone');
+                        return;
+                      }
+                      applyTheme(Store.settings().theme, false);
+                      render();
+                      toast('Import undone');
+                      // The page images follow the state back.
+                      if (typeof Store.pagesIdle === 'function') Store.pagesIdle().then(function () { render(); });
                     }
-                    applyTheme(Store.settings().theme, false);
-                    render();
-                    toast('Import undone');
-                  }
-                : null
+                  : null
+              });
             });
           }
         }
@@ -6366,40 +7365,57 @@
   function importBackup() {
     var input = document.createElement('input');
     input.type = 'file';
-    input.accept = 'application/json,.json';
+    // iOS does not know the .thready extension and greys such a file out
+    // under any accept filter; the file is sniffed by its bytes anyway.
+    if (!isIOSDevice()) input.accept = '.thready,.json,application/json,application/zip';
     input.style.display = 'none';
     document.body.appendChild(input);
     on(input, 'change', function () {
       var file = input.files && input.files[0];
       document.body.removeChild(input);
-      if (!file) return;
-      // A wrong file (a video, a disk image) would otherwise hang the main
-      // thread inside readAsText.
-      if (file.size > BACKUP_MAX_BYTES) {
-        toast('That file is ' + mb(file.size) + ' — a backup is never that big', { ms: 4200 });
-        return;
-      }
-      guardQuota(file, 'that backup').then(function (ok) {
-        if (!ok) return;
-        var reader = new FileReader();
-        reader.onload = function () {
-          var text = String(reader.result);
-          var preview;
-          try {
-            preview = Store.previewImport(text);
-          } catch (err) {
-            toast(importErrorText(err), { ms: 5200 });
-            return;
-          }
-          openImportPreviewSheet(text, preview);
-        };
-        reader.onerror = function () {
-          toast('Could not read that file');
-        };
-        reader.readAsText(file);
-      });
+      if (file) importBackupFile(file);
     });
     input.click();
+  }
+
+  /**
+   * A chosen `.thready` or `.json` file → the preview sheet. Exposed as
+   * App.__importBackupFile for QA (a File can be built in the console).
+   * @returns {Promise<boolean>} true when the preview sheet opened
+   */
+  function importBackupFile(file) {
+    // A wrong file (a video, a disk image) would otherwise hang the main
+    // thread while it is read.
+    var tooBig = typeof Store.backupFileProblem === 'function'
+      ? Store.backupFileProblem(file && file.size)
+      : null;
+    if (tooBig) {
+      toast(tooBig, { ms: 5200 });
+      return Promise.resolve(false);
+    }
+    if (typeof Store.readBackupFile !== 'function') {
+      toast('This copy of the app cannot read backup files');
+      return Promise.resolve(false);
+    }
+    return Store.readBackupFile(file).then(function (read) {
+      // Only backup.json reaches localStorage; page images go to IndexedDB,
+      // so the quota pre-flight is about the JSON, not the whole zip.
+      return guardQuota({ size: read.text.length }, 'that backup').then(function (ok) {
+        if (!ok) return false;
+        var preview;
+        try {
+          preview = Store.previewImport(read.text, read.pages);
+        } catch (err) {
+          toast(importErrorText(err), { ms: 5200 });
+          return false;
+        }
+        openImportPreviewSheet(read, preview);
+        return true;
+      });
+    }, function (err) {
+      toast(importErrorText(err), { ms: 5200 });
+      return false;
+    });
   }
 
   /* ================================================================== *
@@ -6467,9 +7483,10 @@
     },
     {
       q: 'Where are my projects saved, and how do I back them up?',
-      a: 'Everything lives on this device, in this browser — nothing is uploaded anywhere. Use Download ' +
-        'backup above for a JSON file you can keep or move to another phone, and Import backup to read one ' +
-        'back in. Imports merge by project id, so the imported copy wins.'
+      a: 'Everything lives on this device, in this browser — nothing is uploaded anywhere. Back up now ' +
+        '(above) saves one .thready file with every project and its page images, to keep or move to another ' +
+        'phone; Import backup reads it back and shows you what will change first. To move a single project, ' +
+        'use Send this project in its ⋯ menu.'
     }
   ];
 
@@ -6677,6 +7694,13 @@
               else destroyLiveDiagram();
             })
           );
+          // Wave F: the owner's request, on by default (see diagramFollowOn).
+          toggles.appendChild(
+            switchRow('3D follows your stitches', 'Each tap turns the piece so the stitch you just made faces you.',
+              diagramFollowOn(), function (v) {
+                setDiagramFollow(v);
+              })
+          );
         }
         if (wakeSupported) {
           toggles.appendChild(
@@ -6712,18 +7736,24 @@
         /* ---- Backup ---- */
         var backup = el('div', 'field');
         backup.appendChild(el('div', 'field-label', 'Backup'));
-        var exp = button('btn block', '📥 Download backup');
-        on(exp, 'click', exportBackup);
+        var lastLine = el('p', 'muted backup-last', lastBackupText());
+        lastLine.setAttribute('aria-live', 'polite');
+        backup.appendChild(lastLine);
+        var refreshLast = function () { lastLine.textContent = lastBackupText(); };
+        var exp = button('btn block', '📥 Back up now');
+        on(exp, 'click', function () { exportBackup().then(refreshLast); });
         backup.appendChild(exp);
         if (canShareBackup()) {
           var shareBtn = button('btn block', '📤 Share backup');
-          on(shareBtn, 'click', shareBackup);
+          on(shareBtn, 'click', function () { shareBackup().then(refreshLast); });
           backup.appendChild(shareBtn);
         }
         var imp = button('btn block', '📂 Import backup');
         on(imp, 'click', importBackup);
         backup.appendChild(imp);
-        backup.appendChild(el('div', 'field-hint', 'Importing a backup adds anything new and replaces a project you already have with the copy in the file.'));
+        backup.appendChild(el('div', 'field-hint',
+          'A backup is one .thready file with every project, template and page image in it. ' +
+          'Import reads a .thready file or an older .json backup, and lets you choose what comes back.'));
         body.appendChild(backup);
 
         /* ---- Help & tours ---- */
@@ -6996,7 +8026,11 @@
     pdfDropZone: pdfDropZone,
     version: APP_VERSION,
     /** QA only: open every sheet down the no-`showModal` path (UX sweep D3). */
-    __forceSheetFallback: function (on) { forceSheetFallback = !!on; return forceSheetFallback; }
+    __forceSheetFallback: function (on) { forceSheetFallback = !!on; return forceSheetFallback; },
+    /** QA only: run a File through Settings → Import backup without a picker. */
+    __importBackupFile: importBackupFile,
+    /** QA only: the .thready (or JSON fallback) the backup buttons would save. */
+    __buildBackupFile: buildBackupFile
   };
 
   if (document.readyState === 'loading') {

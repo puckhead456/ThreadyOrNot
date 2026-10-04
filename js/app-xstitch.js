@@ -127,7 +127,6 @@
    * ================================================================== */
 
   var view = null;
-
   function freshView(p) {
     return {
       projectId: p.id,
@@ -155,6 +154,7 @@
       img: null, imgCanvas: null,        // chart look: pale swatches + done
       liveImg: null, liveCanvas: null,   // button preview: fabric + done only
       cursor: 0,
+      tapHistory: [],      // cells the big button marked, newest last (for −1)
       isolate: false,
       sortMode: 'key',
       stats: null,
@@ -388,6 +388,33 @@
 
   var GRID_MIN_PX = 8;
 
+  /* Ruler gutters (wave F, 04 #1), in CSS px. The left one widens for a
+     four-digit row count (Pokémon quadrants are 1000 rows tall). */
+  var RULER_T = 16, RULER_L = 26, RULER_L_WIDE = 32;
+  var RULER_FONT = 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
+
+  /* Theme colours for the rulers, read once per theme rather than per frame
+     (getComputedStyle on every pan frame forces a style recalc). */
+  var rulerTheme = null;
+  function rulerColours() {
+    if (rulerTheme) return rulerTheme;
+    var cs = null;
+    try { cs = window.getComputedStyle(document.documentElement); } catch (e) { cs = null; }
+    function v(name, dflt) {
+      if (!cs) return dflt;
+      var s = C && C.cssVar ? C.cssVar(cs, name, dflt) : (cs.getPropertyValue(name) || '').trim();
+      return s || dflt;
+    }
+    rulerTheme = {
+      bg: v('--surface', '#ffffff'),
+      text: v('--text', '#222222'),
+      line: v('--border', '#cccccc'),
+      mark: v('--primary', '#d23c3c'),
+      centre: v('--danger', '#c0392b')
+    };
+    return rulerTheme;
+  }
+
   /* Which half of a cell a fractional stitch fills. OXS `direction` 1-4 names
      one of the four corner triangles; when the part stitch carries a second
      palette index that colour takes the complementary half. */
@@ -421,10 +448,23 @@
     canvas.setAttribute('aria-label', 'Chart');
     wrap.appendChild(canvas);
 
+    /* Wave F (04 #1): the position readout is permanent. Line 1 counts from
+       the top-left like the rulers, line 2 from the centre arrows. It follows
+       the crosshair (the tapped / current stitch); a mouse hovering over the
+       chart shows the stitch under it until it leaves. */
     var coord = el('div', 'xs-coord');
+    coord.setAttribute('aria-live', 'off');
+    var coordGrid = el('span', 'xs-coord-grid');
+    var coordCentre = el('span', 'xs-coord-centre');
+    coord.appendChild(coordGrid);
+    coord.appendChild(coordCentre);
     wrap.appendChild(coord);
 
-    var st = { z: 0, ox: 0, oy: 0, fitted: false };
+    /* `laidOut`: fitted or restored for the canvas's current size.
+       `userView`: the stitcher has zoomed or panned away from Fit, so a
+       resize keeps the middle stitch in the middle instead of re-fitting. */
+    var st = { z: 0, ox: 0, oy: 0, laidOut: false, userView: false, cw: 0, ch: 0, pendingView: null };
+    var rulers = opts.rulers !== false;
     var pending = false;
     var ro = null;
     var pointers = {};
@@ -432,31 +472,92 @@
     var painting = null;
     var lastTapAt = 0;
     var destroyed = false;
+    var hover = null;
+    var coordKey = '';
 
     function cssSize() {
       var r = canvas.getBoundingClientRect();
       return { w: Math.max(1, r.width), h: Math.max(1, r.height) };
     }
 
-    function fit() {
+    /* The ruler gutters overlay the canvas, so Fit and the pan limits leave
+       room for them: the first column and row are never hidden underneath. */
+    function insets() {
+      if (!rulers) return { l: 0, t: 0 };
+      return { l: view.h >= 1000 ? RULER_L_WIDE : RULER_L, t: RULER_T };
+    }
+
+    function fitZ(s) {
+      var ins = insets();
+      var z = Math.min((s.w - ins.l) / view.w, (s.h - ins.t) / view.h);
+      return z > 0 ? z : 1;
+    }
+
+    function fit(silent) {
       var s = cssSize();
       if (!view.w || !view.h) return;
-      var z = Math.min(s.w / view.w, s.h / view.h);
-      if (!(z > 0)) z = 1;
+      var ins = insets();
+      var z = fitZ(s);
       st.z = z;
-      st.ox = (s.w - view.w * z) / 2;
-      st.oy = (s.h - view.h * z) / 2;
-      st.fitted = true;
+      st.ox = ins.l + (s.w - ins.l - view.w * z) / 2;
+      st.oy = ins.t + (s.h - ins.t - view.h * z) / 2;
+      st.laidOut = true;
+      st.userView = false;
+      st.cw = s.w; st.ch = s.h;
       invalidate();
+      if (!silent) changed();
     }
 
     function clampPan() {
       var s = cssSize();
+      var ins = insets();
       var cw = view.w * st.z, ch = view.h * st.z;
-      if (cw <= s.w) st.ox = (s.w - cw) / 2;
-      else st.ox = Math.min(0, Math.max(s.w - cw, st.ox));
-      if (ch <= s.h) st.oy = (s.h - ch) / 2;
-      else st.oy = Math.min(0, Math.max(s.h - ch, st.oy));
+      var aw = s.w - ins.l, ah = s.h - ins.t;
+      if (cw <= aw) st.ox = ins.l + (aw - cw) / 2;
+      else st.ox = Math.min(ins.l, Math.max(s.w - cw, st.ox));
+      if (ch <= ah) st.oy = ins.t + (ah - ch) / 2;
+      else st.oy = Math.min(ins.t, Math.max(s.h - ch, st.oy));
+    }
+
+    /** The stitch (fractional) at the middle of the chart area. */
+    function centreCell(s) {
+      var ins = insets();
+      return {
+        x: (ins.l + (s.w - ins.l) / 2 - st.ox) / st.z,
+        y: (ins.t + (s.h - ins.t) / 2 - st.oy) / st.z
+      };
+    }
+
+    function placeCentre(s, x, y) {
+      var ins = insets();
+      st.ox = ins.l + (s.w - ins.l) / 2 - x * st.z;
+      st.oy = ins.t + (s.h - ins.t) / 2 - y * st.z;
+      clampPan();
+    }
+
+    /** Restore a saved { z, x, y }, never below Fit for this canvas. */
+    function applyView(v) {
+      var s = cssSize();
+      if (!view.w || !view.h || !v) { fit(true); return; }
+      var fz = fitZ(s);
+      st.z = Math.max(fz, Math.min(X.VIEW_MAX_Z, v.z));
+      placeCentre(s, v.x, v.y);
+      st.laidOut = true;
+      st.userView = st.z > fz * 1.001;
+      st.cw = s.w; st.ch = s.h;
+      invalidate();
+    }
+
+    /* Tell the owner the view moved (the chart sheet persists it). */
+    function changed() {
+      if (typeof opts.onViewChange === 'function') {
+        try { opts.onViewChange(st.userView ? api.getView() : null); } catch (e) { /* ignore */ }
+      }
+    }
+
+    function userMoved() {
+      st.userView = true;
+      changed();
     }
 
     function invalidate() {
@@ -476,8 +577,8 @@
       if (canvas.width !== pw || canvas.height !== ph) {
         canvas.width = pw;
         canvas.height = ph;
-        if (!st.fitted) fit();
       }
+      if (!st.laidOut || st.cw !== s.w || st.ch !== s.h) relayout(s);
       var g = canvas.getContext('2d');
       if (!g) return;
       g.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -490,10 +591,172 @@
       var z = st.z;
       g.drawImage(view.imgCanvas, 0, 0, view.w, view.h, st.ox, st.oy, view.w * z, view.h * z);
 
-      if (z >= GRID_MIN_PX) drawGrid(g, s, z);
+      if (z >= GRID_MIN_PX) drawGrid(g, s, z, true);
+      /* Below 8 px a stitch the minor lines are noise, but the 10×10 blocks
+         are how a stitcher counts, so they stay while a block is ~5 px. */
+      else if (z * 10 >= 5) drawGrid(g, s, z, false);
       if (z >= GRID_MIN_PX * 1.5) drawSymbols(g, s, z);
       if (z >= GRID_MIN_PX) drawExtras(g, s, z);
+      drawCentreLines(g, s, z);
       drawCrosshair(g, z);
+      if (rulers) drawRulers(g, s, z);
+      syncCoord();
+    }
+
+    /* The canvas changed size (first paint, rotate, sheet resize): restore a
+       pending saved view, keep the middle stitch in the middle of a zoomed
+       view, or fit. */
+    function relayout(s) {
+      if (st.pendingView) {
+        var v = st.pendingView;
+        st.pendingView = null;
+        applyView(v);
+        return;
+      }
+      if (st.laidOut && st.userView && st.cw > 1 && st.ch > 1) {
+        var ins = insets();
+        var cx = (ins.l + (st.cw - ins.l) / 2 - st.ox) / st.z;
+        var cy = (ins.t + (st.ch - ins.t) / 2 - st.oy) / st.z;
+        st.z = Math.max(fitZ(s), st.z);
+        st.cw = s.w; st.ch = s.h;
+        placeCentre(s, cx, cy);
+        return;
+      }
+      fit(true);
+    }
+
+    function syncCoord() {
+      var c = hover || { x: clampInt(view.cx, 0, Math.max(0, view.w - 1), 0), y: clampInt(view.cy, 0, Math.max(0, view.h - 1), 0) };
+      var key = c.x + ',' + c.y + ',' + view.w + ',' + view.h;
+      if (key === coordKey) return;
+      coordKey = key;
+      var lab = X.positionLabel(c.x, c.y, view.w, view.h);
+      coordGrid.textContent = lab.grid;
+      coordCentre.textContent = lab.centre;
+      coord.title = lab.text + ' · ' + lab.block;
+      canvas.setAttribute('aria-label', 'Chart, ' + view.w + ' by ' + view.h + ' stitches. Current stitch ' +
+        lab.text + '.');
+    }
+
+    /**
+     * The design centre, the way paper charts mark it: a hairline across the
+     * chart at floor-free w/2 and h/2 (between the two middle stitches of an
+     * even count, through the middle of the centre stitch of an odd one).
+     * The arrows themselves sit on the rulers.
+     */
+    function drawCentreLines(g, s, z) {
+      var mx = st.ox + view.w / 2 * z, my = st.oy + view.h / 2 * z;
+      var c = rulerColours();
+      g.save();
+      g.lineWidth = z >= GRID_MIN_PX ? 2 : 1;
+      g.strokeStyle = c.centre;
+      g.globalAlpha = 0.55;
+      if (g.setLineDash) g.setLineDash([6, 4]);
+      g.beginPath();
+      if (mx > 0 && mx < s.w) { g.moveTo(Math.round(mx) + 0.5, Math.max(0, st.oy)); g.lineTo(Math.round(mx) + 0.5, Math.min(s.h, st.oy + view.h * z)); }
+      if (my > 0 && my < s.h) { g.moveTo(Math.max(0, st.ox), Math.round(my) + 0.5); g.lineTo(Math.min(s.w, st.ox + view.w * z), Math.round(my) + 0.5); }
+      g.stroke();
+      g.restore();
+    }
+
+    /**
+     * Sticky rulers in screen space (04 #1): a top strip numbering columns and
+     * a left strip numbering rows, every 10 stitches (or 20, 50, 100 when ten
+     * stitches are too narrow to label), counted from 1 like a printed chart.
+     * The crosshair's column and row are highlighted on them and the centre
+     * arrows (▼ / ▶) sit at the design centre at every zoom.
+     */
+    function drawRulers(g, s, z) {
+      var c = rulerColours();
+      var ins = insets();
+      var L = ins.l, T = ins.t;
+      var step = X.rulerStep(z, 30);
+      var x, y, px, py;
+
+      g.save();
+      /* opaque: symbols showing through made the row numbers hard to read */
+      g.fillStyle = c.bg;
+      g.fillRect(0, 0, s.w, T);
+      g.fillRect(0, T, L, s.h - T);
+      g.strokeStyle = c.line;
+      g.lineWidth = 1;
+      g.beginPath();
+      g.moveTo(L, T + 0.5); g.lineTo(s.w, T + 0.5);
+      g.moveTo(L + 0.5, T); g.lineTo(L + 0.5, s.h);
+      g.stroke();
+
+      /* the crosshair's column and row, as a band on each ruler */
+      var cx = clampInt(view.cx, 0, Math.max(0, view.w - 1), 0);
+      var cy = clampInt(view.cy, 0, Math.max(0, view.h - 1), 0);
+      g.fillStyle = c.mark;
+      px = st.ox + cx * z;
+      if (px + z > L && px < s.w) g.fillRect(Math.max(L, px), T - 4, Math.max(2, Math.min(z, s.w - px)), 4);
+      py = st.oy + cy * z;
+      if (py + z > T && py < s.h) g.fillRect(L - 4, Math.max(T, py), 4, Math.max(2, Math.min(z, s.h - py)));
+
+      /* numbers, with a tick at each, and a short minor tick every 10 when
+         the labels are further apart than that and ten stitches still show */
+      g.font = '600 10px ' + RULER_FONT;
+      g.fillStyle = c.text;
+      g.strokeStyle = c.text;
+      g.textBaseline = 'middle';
+      /* a number under a centre arrow is skipped: the arrow wins */
+      var amx = st.ox + view.w / 2 * z, amy = st.oy + view.h / 2 * z;
+      var x0 = Math.max(0, Math.floor((L - st.ox) / z)), x1 = Math.min(view.w, Math.ceil((s.w - st.ox) / z));
+      var y0 = Math.max(0, Math.floor((T - st.oy) / z)), y1 = Math.min(view.h, Math.ceil((s.h - st.oy) / z));
+      g.beginPath();
+      g.textAlign = 'center';
+      for (x = Math.ceil(Math.max(1, x0) / step) * step; x <= x1; x += step) {
+        px = Math.round(st.ox + x * z) + 0.5;
+        if (px < L + 2 || px > s.w - 2) continue;
+        g.moveTo(px, T - 5); g.lineTo(px, T);
+        /* the label for stitch x sits over the line that ends stitch x */
+        var lx = Math.min(s.w - 12, Math.max(L + 12, px));
+        if (Math.abs(lx - amx) >= 14) g.fillText(String(x), lx, T / 2 - 1);
+      }
+      if (step > 10 && z * 10 >= 4) {
+        for (x = Math.ceil(Math.max(1, x0) / 10) * 10; x <= x1; x += 10) {
+          if (x % step === 0) continue;
+          px = Math.round(st.ox + x * z) + 0.5;
+          if (px < L + 2 || px > s.w) continue;
+          g.moveTo(px, T - 2); g.lineTo(px, T);
+        }
+      }
+      g.textAlign = 'right';
+      for (y = Math.ceil(Math.max(1, y0) / step) * step; y <= y1; y += step) {
+        py = Math.round(st.oy + y * z) + 0.5;
+        if (py < T + 2 || py > s.h - 2) continue;
+        g.moveTo(L - 5, py); g.lineTo(L, py);
+        var ly = Math.min(s.h - 6, Math.max(T + 6, py));
+        if (Math.abs(ly - amy) >= 9) g.fillText(String(y), L - 6, ly);
+      }
+      if (step > 10 && z * 10 >= 4) {
+        for (y = Math.ceil(Math.max(1, y0) / 10) * 10; y <= y1; y += 10) {
+          if (y % step === 0) continue;
+          py = Math.round(st.oy + y * z) + 0.5;
+          if (py < T + 2 || py > s.h) continue;
+          g.moveTo(L - 2, py); g.lineTo(L, py);
+        }
+      }
+      g.stroke();
+
+      /* centre arrows */
+      g.fillStyle = c.centre;
+      var mx = st.ox + view.w / 2 * z, my = st.oy + view.h / 2 * z;
+      if (mx >= L && mx <= s.w) {
+        g.beginPath();
+        g.moveTo(mx - 5, 1); g.lineTo(mx + 5, 1); g.lineTo(mx, T - 1);
+        g.closePath(); g.fill();
+      }
+      if (my >= T && my <= s.h) {
+        g.beginPath();
+        g.moveTo(1, my - 5); g.lineTo(1, my + 5); g.lineTo(9, my);
+        g.closePath(); g.fill();
+      }
+      /* the corner square, so the two strips read as one frame */
+      g.fillStyle = c.bg;
+      g.fillRect(0, 0, L, T);
+      g.restore();
     }
 
     /**
@@ -564,32 +827,34 @@
       }
     }
 
-    function drawGrid(g, s, z) {
+    function drawGrid(g, s, z, minor) {
       var x0 = Math.max(0, Math.floor(-st.ox / z));
       var x1 = Math.min(view.w, Math.ceil((s.w - st.ox) / z));
       var y0 = Math.max(0, Math.floor(-st.oy / z));
       var y1 = Math.min(view.h, Math.ceil((s.h - st.oy) / z));
       var x, y;
-      g.lineWidth = 1;
-      g.strokeStyle = 'rgba(0,0,0,0.16)';
-      g.beginPath();
-      for (x = x0; x <= x1; x++) {
-        if (x % 10 === 0) continue;
-        var px = Math.round(st.ox + x * z) + 0.5;
-        g.moveTo(px, Math.max(0, st.oy));
-        g.lineTo(px, Math.min(s.h, st.oy + view.h * z));
+      if (minor) {
+        g.lineWidth = 1;
+        g.strokeStyle = 'rgba(0,0,0,0.16)';
+        g.beginPath();
+        for (x = x0; x <= x1; x++) {
+          if (x % 10 === 0) continue;
+          var px = Math.round(st.ox + x * z) + 0.5;
+          g.moveTo(px, Math.max(0, st.oy));
+          g.lineTo(px, Math.min(s.h, st.oy + view.h * z));
+        }
+        for (y = y0; y <= y1; y++) {
+          if (y % 10 === 0) continue;
+          var py = Math.round(st.oy + y * z) + 0.5;
+          g.moveTo(Math.max(0, st.ox), py);
+          g.lineTo(Math.min(s.w, st.ox + view.w * z), py);
+        }
+        g.stroke();
       }
-      for (y = y0; y <= y1; y++) {
-        if (y % 10 === 0) continue;
-        var py = Math.round(st.oy + y * z) + 0.5;
-        g.moveTo(Math.max(0, st.ox), py);
-        g.lineTo(Math.min(s.w, st.ox + view.w * z), py);
-      }
-      g.stroke();
 
       // 10x10 majors, aligned to the gridding on the fabric.
-      g.lineWidth = 2;
-      g.strokeStyle = 'rgba(0,0,0,0.5)';
+      g.lineWidth = minor ? 2 : 1;
+      g.strokeStyle = minor ? 'rgba(0,0,0,0.5)' : 'rgba(0,0,0,0.32)';
       g.beginPath();
       for (x = x0 - (x0 % 10); x <= x1; x += 10) {
         var mx = Math.round(st.ox + x * z) + 0.5;
@@ -654,9 +919,13 @@
       return { x: x, y: y, i: y * view.w + x, fx: fx, fy: fy };
     }
 
+    /* A temporary readout (mouse hover, a drag in progress); null hands the
+       chip back to the crosshair. */
     function showCoord(c) {
-      coord.textContent = c ? ('col ' + (c.x + 1) + ' · row ' + (c.y + 1)) : '';
+      hover = c ? { x: c.x, y: c.y } : null;
+      syncCoord();
     }
+    on(canvas, 'pointerleave', function () { if (hover) showCoord(null); });
 
     function ptrList() {
       var out = [];
@@ -712,6 +981,7 @@
         st.ox = pinch.mx - pinch.cx * z;
         st.oy = pinch.my - pinch.cy * z;
         clampPan();
+        gestured = true;
         invalidate();
         e.preventDefault();
         return;
@@ -733,15 +1003,19 @@
       st.ox += dx;
       st.oy += dy;
       clampPan();
+      if (p.moved) gestured = true;
       invalidate();
       e.preventDefault();
     });
+
+    var gestured = false;
 
     function endPointer(e) {
       var p = pointers[e.pointerId];
       delete pointers[e.pointerId];
       if (ptrList().length < 2) pinch = null;
-      if (painting && !ptrList().length) painting = null;
+      if (painting && !ptrList().length) { painting = null; showCoord(null); }
+      if (gestured && !ptrList().length) { gestured = false; userMoved(); }
       if (!p) return;
       if (p.moved) return;
 
@@ -755,7 +1029,7 @@
 
       var c = cellAt(e.clientX, e.clientY);
       if (!c) return;
-      showCoord(c);
+      showCoord(null);
       if (opts.interactive && opts.onTap) opts.onTap(c);
       else if (opts.onMove) opts.onMove(c);
     }
@@ -774,13 +1048,12 @@
       st.oy = my - cy * z;
       clampPan();
       invalidate();
+      userMoved();
     });
 
     if (window.ResizeObserver) {
-      ro = new window.ResizeObserver(function () {
-        st.fitted = false;
-        invalidate();
-      });
+      // draw() notices the new size itself (st.cw / st.ch) and relayouts.
+      ro = new window.ResizeObserver(function () { invalidate(); });
       ro.observe(canvas);
     }
 
@@ -789,23 +1062,41 @@
       canvas: canvas,
       coord: coord,
       state: st,
-      fit: fit,
+      fit: function () { fit(); },
       invalidate: invalidate,
       zoomBy: function (f) {
         var s = cssSize();
-        var cx = (s.w / 2 - st.ox) / st.z, cy = (s.h / 2 - st.oy) / st.z;
-        st.z = Math.max(0.05, Math.min(64, st.z * f));
-        st.ox = s.w / 2 - cx * st.z;
-        st.oy = s.h / 2 - cy * st.z;
-        clampPan();
+        var c = centreCell(s);
+        st.z = Math.max(0.05, Math.min(X.VIEW_MAX_Z, st.z * f));
+        placeCentre(s, c.x, c.y);
         invalidate();
+        userMoved();
       },
-      centerOn: function (x, y) {
+      /** Centre stitch (x, y); `minZ` zooms in to at least that many px a stitch. */
+      centerOn: function (x, y, minZ) {
         var s = cssSize();
-        st.ox = s.w / 2 - (x + 0.5) * st.z;
-        st.oy = s.h / 2 - (y + 0.5) * st.z;
-        clampPan();
+        if (minZ && st.z < minZ) st.z = Math.min(X.VIEW_MAX_Z, minZ);
+        placeCentre(s, x + 0.5, y + 0.5);
         invalidate();
+        userMoved();
+      },
+      /** { z, x, y }: zoom in CSS px a stitch and the stitch at the middle. */
+      getView: function () {
+        var s = st.laidOut ? { w: st.cw, h: st.ch } : cssSize();
+        var c = centreCell(s);
+        return { z: st.z, x: c.x, y: c.y };
+      },
+      /** Restore a saved view now, or on first layout if the canvas has no size yet. */
+      setView: function (v) {
+        if (!v) { if (st.laidOut) fit(true); return; }
+        var r = canvas.getBoundingClientRect();
+        if (!r.width || !r.height) { st.pendingView = v; st.laidOut = false; invalidate(); return; }
+        applyView(v);
+      },
+      /** The stitch at the middle of the chart area (integer, clamped). */
+      middleCell: function () {
+        var c = centreCell(st.laidOut ? { w: st.cw, h: st.ch } : cssSize());
+        return { x: clampInt(Math.floor(c.x), 0, Math.max(0, view.w - 1), 0), y: clampInt(Math.floor(c.y), 0, Math.max(0, view.h - 1), 0) };
       },
       destroy: function () {
         destroyed = true;
@@ -831,6 +1122,7 @@
       !view.nodes.bar || view.nodes.bar.parentNode !== main || view.shape !== shape;
 
     if (rebuild) {
+      rulerTheme = null;              // the theme may have changed while away
       var keepIsolate = view && view.projectId === project.id ? view.isolate : false;
       var keepSort = view && view.projectId === project.id ? view.sortMode : 'key';
       destroyProject();
@@ -877,7 +1169,11 @@
       n.chart = makeChartView({
         cls: 'xs-strip',
         interactive: false,
-        onMove: function (c) { setCrosshair(c.x, c.y); }
+        onMove: function (c) {
+          setCrosshair(c.x, c.y);
+          // a view detail: remembered, never undoable
+          saveViewState(project.id, { cx: c.x, cy: c.y });
+        }
       });
       n.chartCard.appendChild(n.chart.node);
       var expand = button('xs-expand', '⤢', 'Open the full chart');
@@ -890,6 +1186,13 @@
       n.pageFrame.appendChild(n.pageImg);
       n.pageEmpty = el('div', 'xs-page-empty');
       n.pageFrame.appendChild(n.pageEmpty);
+      /* Wave F (04 #14): the page full screen, pinch-zoomable. */
+      n.pageExpand = button('xs-expand', '⤢', 'Open this page full screen');
+      on(n.pageExpand, 'click', function () {
+        var pp = Store.project(project.id);
+        if (pp) openPageViewer(project.id, { page: clampInt(dataOf(pp).current.page, 0, 9999, 0) });
+      });
+      n.pageFrame.appendChild(n.pageExpand);
       n.chartCard.appendChild(n.pageFrame);
       n.pageBar = el('div', 'xs-pagebar');
       n.pagePrev = button('xs-page-nav', '‹', 'Previous page');
@@ -1187,7 +1490,20 @@
 
     var group = clampInt(project.groupSize, 0, 50, 10);
     var readBits = [];
-    if (layer === 'cross' && group > 0 && tally.done > 0) {
+    if (layer === 'cross' && cur >= 0 && hasChart(data) && data.progress.mode === 'cells' && view.cells) {
+      /* 04 #15: in cells mode the button works block by block, so say
+         where: 'block 12,7 · 6 left here' (the crosshair's 10×10 block). */
+      var bx = Math.floor(view.cx / 10) * 10, by = Math.floor(view.cy / 10) * 10, hereLeft = 0;
+      var bb = view.bits.bytes;
+      for (var yy = by; yy < by + 10 && yy < view.h; yy++) {
+        for (var xx = bx; xx < bx + 10 && xx < view.w; xx++) {
+          var ci = yy * view.w + xx;
+          if (view.cells[ci] === cur && !((bb[ci >> 3] >> (ci & 7)) & 1)) hereLeft++;
+        }
+      }
+      readBits.push(X.positionLabel(view.cx, view.cy, view.w, view.h).block + ' · ' +
+        comma(hereLeft) + ' left here');
+    } else if (layer === 'cross' && group > 0 && tally.done > 0) {
       readBits.push('Group ' + (Math.floor((tally.done - 1) / group) + 1) +
         ' · stitch ' + (((tally.done - 1) % group) + 1) + ' of ' + group);
     }
@@ -1268,8 +1584,10 @@
       n.pageEmpty.hidden = false;
       n.pageEmpty.textContent = 'No chart pages yet. Import a PDF or an OXS file from the ⋯ menu.';
       n.pageBar.hidden = true;
+      if (n.pageExpand) n.pageExpand.hidden = true;
       return;
     }
+    if (n.pageExpand) n.pageExpand.hidden = false;
     n.pageEmpty.hidden = true;
     n.pageBar.hidden = false;
     var idx = clampInt(data.current.page, 0, pages.length - 1, 0);
@@ -1388,20 +1706,6 @@
     on(btn, 'click', function (e) { if (e.detail === 0) advanceStitch(projectId); });
   }
 
-  /** The next not-done cell of `pi` in reading order, or -1. */
-  function nextCellFor(pi, from) {
-    var cells = view.cells, bits = view.bits.bytes, n = cells.length;
-    var start = clampInt(from, 0, n, 0);
-    var i;
-    for (i = start; i < n; i++) {
-      if (cells[i] === pi && !((bits[i >> 3] >> (i & 7)) & 1)) return i;
-    }
-    for (i = 0; i < start; i++) {
-      if (cells[i] === pi && !((bits[i >> 3] >> (i & 7)) & 1)) return i;
-    }
-    return -1;
-  }
-
   /** The last done cell of `pi` in reading order, or -1. */
   function lastDoneCellFor(pi) {
     var cells = view.cells, bits = view.bits.bytes;
@@ -1493,7 +1797,13 @@
           return;
         }
       }
-      var at = nextCellFor(pi, view.cursor);
+      /* Wave F (04 #15): the next stitch is in the block the stitcher is
+         at (the crosshair), in reading order, then the nearest block with
+         this colour left — not the next one along row 1. */
+      var bitsNow = view.bits.bytes;
+      var at = X.nextStitchNear(view.cells, view.w, view.h, pi, view.cx, view.cy, function (i) {
+        return ((bitsNow[i >> 3] >> (i & 7)) & 1) === 1;
+      });
       if (at < 0) {
         toast(paletteLabel(entry) + ' done ✓');
         fb('done');
@@ -1502,6 +1812,8 @@
       X.setBit(view.bits, at, true);
       paintCell(at, 1);
       view.cursor = at + 1;
+      view.tapHistory.push(at);
+      if (view.tapHistory.length > 500) view.tapHistory.shift();
       var b64 = X.bitsB64(view.bits);
       var cx = at % view.w, cy = (at / view.w) | 0;
       Store.updateCraftData(projectId, function (cd) {
@@ -1630,7 +1942,14 @@
           return;
         }
       }
-      var at = lastDoneCellFor(pi);
+      /* −1 takes back the stitch the button marked last, not whichever
+         done stitch of this colour happens to be last in reading order. */
+      var at = -1;
+      while (view.tapHistory.length && at < 0) {
+        var h = view.tapHistory.pop();
+        if (view.cells[h] === pi && X.getBit(view.bits, h)) at = h;
+      }
+      if (at < 0) at = lastDoneCellFor(pi);
       if (at < 0) { toast('Nothing to undo'); return; }
       X.setBit(view.bits, at, false);
       paintCell(at, 0);
@@ -1881,21 +2200,35 @@
       toast('This project has no cell chart — import an OXS file or make one from a photo.');
       return;
     }
-    var tool = 'tap';
+    /* Wave F (04 #2): the tool, the layer and the view come back as the
+       stitcher left them. Unmark is deliberately not remembered: reopening a
+       chart in erase mode would quietly undo the next tap. */
+    var layers0 = availableLayers(data);
+    var tool = TOOL_IDS[data.current.tool] ? data.current.tool : 'tap';
     var layer = 'cross';
+    for (var li = 0; li < layers0.length; li++) if (layers0[li].id === data.current.layer) layer = data.current.layer;
     var erase = false;
     var chart = null;
+    var viewTimer = null, pendingView;
+    var findSeen = {};
+
+    function flushView() {
+      if (viewTimer) { window.clearTimeout(viewTimer); viewTimer = null; }
+      if (pendingView === undefined) return;
+      saveViewState(projectId, { view: pendingView });
+      pendingView = undefined;
+    }
 
     C.openSheet({
       title: 'Chart',
       cls: 'sheet-chart',
       build: function (body) {
-        var layers = availableLayers(data);
+        var layers = layers0;
         var hint = el('p', 'muted xs-hint');
 
         function setHint() {
           hint.textContent = (layer === 'cross'
-            ? 'Drag to pan, pinch or use the buttons to zoom, double-tap to fit. Symbols appear once the squares are big enough.'
+            ? 'Drag to pan, pinch or use the buttons to zoom, double-tap to fit. 📄 shows the PDF page for this spot, 🎯 finds the nearest stitch of this colour still to do.'
             : 'Marking ' + LAYER_NOUNS[layer] + '. Tap one to mark it, or switch to Drag and sweep along them. ' +
               'Zoom in until the squares are big enough to see them.');
         }
@@ -1904,6 +2237,7 @@
           var layerSeg = C.segmented(layers, layer, function (v) {
             layer = v;
             setHint();
+            saveViewState(projectId, { layer: v });
             C.announce('Marking ' + LAYER_NOUNS[layer]);
           });
           layerSeg.node.classList.add('xs-layer-seg');
@@ -1911,7 +2245,10 @@
         }
 
         var toolbar = el('div', 'xs-tools');
-        var seg = C.segmented(TOOLS, tool, function (v) { tool = v; });
+        var seg = C.segmented(TOOLS, tool, function (v) {
+          tool = v;
+          saveViewState(projectId, { tool: v });
+        });
         seg.node.classList.add('xs-tool-seg');
         toolbar.appendChild(seg.node);
         var eraseBtn = button('btn ghost xs-erase', 'Unmark');
@@ -1930,7 +2267,12 @@
           paintMode: function () { return tool === 'paint'; },
           paintEvery: function () { return layer !== 'cross'; },
           onPaint: function (c) { paintAt(projectId, layer, c, !erase, true); },
-          onTap: function (c) { applyTool(projectId, tool, layer, c, !erase); }
+          onTap: function (c) { findSeen = {}; applyTool(projectId, tool, layer, c, !erase); },
+          onViewChange: function (v) {
+            pendingView = v ? { z: v.z, x: v.x, y: v.y } : null;
+            if (viewTimer) window.clearTimeout(viewTimer);
+            viewTimer = window.setTimeout(flushView, 300);
+          }
         });
         body.appendChild(chart.node);
 
@@ -1938,18 +2280,34 @@
         var zOut = button('btn ghost', '−', 'Zoom out');
         var zFit = button('btn ghost', 'Fit');
         var zIn = button('btn ghost', '+', 'Zoom in');
+        var zPage = button('btn ghost xs-see-page', '📄', 'See the PDF page for this spot');
+        zPage.title = 'See the PDF page for this spot';
+        var zNext = button('btn ghost xs-find-next', '🎯', 'Find the nearest stitch of this colour still to do');
+        zNext.title = 'Nearest stitch of this colour still to do';
         on(zOut, 'click', function () { chart.zoomBy(1 / 1.4); });
         on(zFit, 'click', function () { chart.fit(); });
         on(zIn, 'click', function () { chart.zoomBy(1.4); });
+        on(zPage, 'click', function () {
+          var at = chartSpot(chart);
+          openPageViewer(projectId, { x: at.x, y: at.y });
+        });
+        on(zNext, 'click', function () { findNextStitch(projectId, chart, findSeen); });
         zoomRow.appendChild(zOut);
         zoomRow.appendChild(zFit);
         zoomRow.appendChild(zIn);
+        var proj0 = Store.project(projectId);
+        if (proj0 && dataOf(proj0).pages.length) zoomRow.appendChild(zPage);
+        zoomRow.appendChild(zNext);
         body.appendChild(zoomRow);
 
         setHint();
         body.appendChild(hint);
 
-        window.requestAnimationFrame(function () { if (chart) chart.fit(); });
+        var saved = data.current.view;
+        window.requestAnimationFrame(function () {
+          if (!chart) return;
+          if (saved) chart.setView(saved); else chart.fit();
+        });
       },
       footer: [
         {
@@ -1974,10 +2332,105 @@
         { text: 'Done', cls: 'btn primary', onClick: function (api) { api.close(); } }
       ],
       onClose: function () {
+        flushView();
         if (chart) chart.destroy();
         chart = null;
       }
     });
+  }
+
+  var TOOL_IDS = { tap: 1, paint: 1, block: 1, page: 1 };
+
+  /**
+   * Write view details — the remembered zoom/pan, tool, layer, page, the
+   * crosshair — into craftData.current WITHOUT an undo snapshot, through
+   * Store.updateCraftData(id, fn, { undo: false }) (no snapshot, no updatedAt
+   * bump, normal save path). A plain updateCraftData snapshots every call, so
+   * a pan would flood the undo stack and Undo would start "undoing" zooms
+   * instead of stitches. A view is not a piece of work (04 #2).
+   */
+  function saveViewState(projectId, patch) {
+    var p = Store.project(projectId);
+    if (!p || !isObj(p.craftData) || !isObj(p.craftData.current)) return false;
+    var cur = p.craftData.current;
+    var next = {};
+    var changedAny = false;
+    Object.keys(patch).forEach(function (k) {
+      var v = patch[k];
+      if (k === 'view' && v) {
+        v = { z: Math.round(v.z * 1000) / 1000, x: Math.round(v.x * 100) / 100, y: Math.round(v.y * 100) / 100 };
+      }
+      if (JSON.stringify(cur[k]) === JSON.stringify(v)) return;
+      next[k] = v;
+      changedAny = true;
+    });
+    if (!changedAny) return false;
+    Store.updateCraftData(projectId, function (cd) {
+      if (!isObj(cd.current)) return;
+      Object.keys(next).forEach(function (k) { cd.current[k] = next[k]; });
+    }, { undo: false });
+    return true;
+  }
+
+  /**
+   * The stitch the chart is "at": the crosshair when it is on screen,
+   * otherwise the stitch in the middle of the view.
+   */
+  function chartSpot(chart) {
+    var st = chart.state, s = { w: st.cw, h: st.ch };
+    var x = clampInt(view.cx, 0, Math.max(0, view.w - 1), 0);
+    var y = clampInt(view.cy, 0, Math.max(0, view.h - 1), 0);
+    var px = st.ox + (x + 0.5) * st.z, py = st.oy + (y + 0.5) * st.z;
+    if (px >= 0 && py >= 0 && px <= s.w && py <= s.h) return { x: x, y: y };
+    return chart.middleCell();
+  }
+
+  /**
+   * 🎯 in the chart sheet: jump to the nearest stitch of the current colour
+   * that is still to do (brainstorm 04 parking lot, "next stitch of this
+   * colour"). Each press moves on to the next-nearest one it has not shown
+   * yet, so two neighbours never ping-pong; a tap on the chart starts over.
+   */
+  function findNextStitch(projectId, chart, seen) {
+    var p = Store.project(projectId);
+    if (!p || !view || !view.cells) return;
+    var data = dataOf(p);
+    if (!data.palette.length) return;
+    var pi = clampInt(data.current.paletteIndex, 0, data.palette.length - 1, 0);
+    var entry = data.palette[pi];
+    var bits = view.bits.bytes;
+    function done(i) { return ((bits[i >> 3] >> (i & 7)) & 1) === 1; }
+    var cx = clampInt(view.cx, 0, Math.max(0, view.w - 1), 0);
+    var cy = clampInt(view.cy, 0, Math.max(0, view.h - 1), 0);
+    var here = cy * view.w + cx;
+    var at = X.nearestCellOf(view.cells, view.w, view.h, pi, cx, cy, function (i) {
+      return done(i) || seen[i] || (i === here && view.cells[i] === pi && seen.started);
+    });
+    if (at < 0 && seen.started) {
+      // every remaining stitch has been shown once: go round again
+      Object.keys(seen).forEach(function (k) { delete seen[k]; });
+      at = X.nearestCellOf(view.cells, view.w, view.h, pi, cx, cy, function (i) { return done(i) || i === here; });
+      if (at < 0) at = X.nearestCellOf(view.cells, view.w, view.h, pi, cx, cy, done);
+    }
+    if (at < 0) {
+      var any = false;
+      for (var i = 0; i < view.cells.length; i++) if (view.cells[i] === pi) { any = true; break; }
+      toast(any ? paletteLabel(entry) + ': every stitch is done ✓'
+        : 'No ' + paletteLabel(entry) + ' stitches on this chart');
+      fb(any ? 'done' : 'alert');
+      return;
+    }
+    seen.started = true;
+    seen[at] = true;
+    var x = at % view.w, y = (at / view.w) | 0;
+    setCrosshair(x, y);
+    saveViewState(projectId, { cx: x, cy: y });
+    chart.centerOn(x, y, 16);
+    var lab = X.positionLabel(x, y, view.w, view.h);
+    var left = view.stats && view.stats.byColor[pi] ? Math.max(0, view.stats.byColor[pi].total - view.stats.byColor[pi].done) : null;
+    toast(paletteLabel(entry) + ' · ' + lab.grid + (left !== null ? ' · ' + comma(left) + ' left' : ''));
+    C.announce(paletteLabel(entry) + ' at ' + lab.grid + ', ' + lab.centre);
+    fb('tap');
   }
 
   function applyTool(projectId, tool, layer, c, value) {
@@ -2164,11 +2617,19 @@
     var bx = Math.floor(c.x / 10) * 10, by = Math.floor(c.y / 10) * 10;
     var changed = {};
     var total = 0;
+    /* 04 #13: with a colour isolated, 10×10 means "this colour in this
+       block" — a parker who has done the black in a block has not done the
+       other colours in it. */
+    var only = -1;
+    if (view.isolate && view.data && view.data.palette.length) {
+      only = clampInt(view.data.current.paletteIndex, 0, view.data.palette.length - 1, 0);
+    }
     for (var y = by; y < by + 10 && y < view.h; y++) {
       for (var x = bx; x < bx + 10 && x < view.w; x++) {
         var i = y * view.w + x;
         var pi = view.cells[i];
         if (pi < 0) continue;
+        if (only >= 0 && pi !== only) continue;
         var was = (view.bits.bytes[i >> 3] >> (i & 7)) & 1;
         if (was === (value ? 1 : 0)) continue;
         X.setBit(view.bits, i, value);
@@ -2177,9 +2638,15 @@
         total += value ? 1 : -1;
       }
     }
-    if (!total) { toast('That block is already ' + (value ? 'done' : 'clear')); return; }
+    var what = only >= 0 ? paletteLabel(view.data.palette[only]) + ' ' : '';
+    if (!total) {
+      toast(only >= 0 ? 'No ' + what + 'stitches left to ' + (value ? 'mark' : 'clear') + ' in that block'
+        : 'That block is already ' + (value ? 'done' : 'clear'));
+      return;
+    }
     commitBulk(projectId, changed, total, c, beforeByColor);
-    toast((value ? 'Marked ' : 'Cleared ') + Math.abs(total) + ' stitches in this 10×10 block');
+    toast((value ? 'Marked ' : 'Cleared ') + Math.abs(total) + ' ' + what + 'stitches in this 10×10 block' +
+      (only >= 0 ? ' (isolated colour only)' : ''));
   }
 
   function markWholeColour(projectId, layer, value) {
@@ -2527,8 +2994,8 @@
           return;
         }
         body.appendChild(el('p', 'muted',
-          'Chart images are stored on this device only — they are not in your backup file. ' +
-          'Keep the PDF and you can always re-import.' +
+          'Chart images are saved with the project on this device, and Back up now includes them. ' +
+          'Tap a page to open it full screen.' +
           (data.pages.length >= MAX_PAGES
             ? ' Only the first ' + MAX_PAGES + ' pages of a chart are saved.' : '')));
 
@@ -2539,13 +3006,15 @@
           cell.appendChild(imgWrap);
           var label = el('span', 'xs-thumb-label', page.label);
           cell.appendChild(label);
+          if (page.region) cell.appendChild(el('span', 'xs-thumb-region', regionText(page.region)));
           var doneMark = el('span', 'xs-thumb-done', '✓');
           doneMark.hidden = !isPageDone(data, i);
           cell.appendChild(doneMark);
+          /* Wave F: a thumbnail opens the page full screen (pinch, pan, ‹ ›),
+             in chart mode as well, where it used to change a strip that is
+             not on screen and so appeared to do nothing. */
           on(cell, 'click', function () {
-            Store.updateCraftData(projectId, function (cd) { cd.current.page = i; });
-            C.render();
-            toast('Showing ' + page.label);
+            openPageViewer(projectId, { page: i });
           });
           var tick = button('btn ghost xs-thumb-tick', isPageDone(data, i) ? 'Done ✓' : 'Mark done');
           on(tick, 'click', function () {
@@ -2650,6 +3119,313 @@
     var list = data.progress.pageDone;
     for (var k = 0; k < list.length; k++) if (list[k].page === i) return !!list[k].done;
     return false;
+  }
+
+  /** 'cols 54–106 · rows 1–77' for a page's chart region. */
+  function regionText(r) {
+    return 'cols ' + (r.x + 1) + '–' + (r.x + r.w) + ' · rows ' + (r.y + 1) + '–' + (r.y + r.h);
+  }
+
+  /** The page to open by default: the current one, else the first chart page. */
+  function defaultPageIndex(data) {
+    var pages = data.pages;
+    if (!pages.length) return -1;
+    var cur = clampInt(data.current.page, 0, pages.length - 1, 0);
+    if (pages[cur] && pages[cur].isChart) return cur;
+    for (var i = 0; i < pages.length; i++) if (pages[i].isChart) return i;
+    return cur;
+  }
+
+  /* ---- the full-screen page viewer (wave F, 04 #3 and #14) ------------ */
+
+  /**
+   * One rendered PDF page, full screen: pinch / drag / wheel to zoom and pan,
+   * double-tap to switch between Fit and close-up, ‹ › between pages, and
+   * "Mark page done". Opened from the chart (📄, `focus = { x, y }`: the page
+   * that printed that stitch, zoomed in on it with the stitch outlined), from
+   * a Pages thumbnail (`focus = { page }`) and from the image-mode strip.
+   */
+  function openPageViewer(projectId, focus) {
+    var p = Store.project(projectId);
+    if (!p) return;
+    var data = dataOf(p);
+    var pages = data.pages;
+    if (!pages.length) { toast('This project has no PDF pages. Import the PDF to keep them.'); return; }
+    focus = focus || {};
+    var cell = (typeof focus.x === 'number' && typeof focus.y === 'number') ? { x: focus.x, y: focus.y } : null;
+    var idx = -1, linked = false;
+    if (typeof focus.page === 'number') idx = clampInt(focus.page, 0, pages.length - 1, 0);
+    else if (cell) {
+      idx = X.pageForCell(pages, cell.x, cell.y);
+      linked = idx >= 0;
+    }
+    if (idx < 0) idx = defaultPageIndex(data);
+    var firstIdx = idx;
+
+    var url = null;
+    var st = { s: 1, tx: 0, ty: 0, iw: 0, ih: 0, fitS: 1 };
+    var pointers = {}, pinch = null, lastTap = 0, loadToken = 0;
+    var frame, stage, img, mark, label, prev, next, doneBtn, note, empty;
+
+    function frameSize() {
+      var r = frame.getBoundingClientRect();
+      return { w: Math.max(1, r.width), h: Math.max(1, r.height) };
+    }
+    function apply() {
+      stage.style.transform = 'translate(' + st.tx + 'px,' + st.ty + 'px) scale(' + st.s + ')';
+      if (!mark.hidden) mark.style.borderWidth = Math.max(1, 2.5 / st.s) + 'px';
+    }
+    function clamp() {
+      var f = frameSize();
+      var w = st.iw * st.s, h = st.ih * st.s;
+      st.tx = w <= f.w ? (f.w - w) / 2 : Math.min(0, Math.max(f.w - w, st.tx));
+      st.ty = h <= f.h ? (f.h - h) / 2 : Math.min(0, Math.max(f.h - h, st.ty));
+    }
+    function fitPage() {
+      if (!st.iw) return;
+      var f = frameSize();
+      st.fitS = Math.min(f.w / st.iw, f.h / st.ih);
+      st.s = st.fitS;
+      clamp();
+      apply();
+    }
+    function zoomAt(factor, mx, my) {
+      var px = (mx - st.tx) / st.s, py = (my - st.ty) / st.s;
+      st.s = Math.max(st.fitS, Math.min(st.fitS * 12, st.s * factor));
+      st.tx = mx - px * st.s;
+      st.ty = my - py * st.s;
+      clamp();
+      apply();
+    }
+    /* Centre image point (ix, iy) at scale s. */
+    function lookAt(ix, iy, s) {
+      var f = frameSize();
+      st.s = Math.max(st.fitS, Math.min(st.fitS * 12, s));
+      st.tx = f.w / 2 - ix * st.s;
+      st.ty = f.h / 2 - iy * st.s;
+      clamp();
+      apply();
+    }
+
+    /* Where `cell` sits on page `i`, in image px, or null. */
+    function cellBox(i) {
+      var r = pages[i] && pages[i].region;
+      if (!cell || !r || r.fx === null || !st.iw) return null;
+      if (cell.x < r.x || cell.y < r.y || cell.x >= r.x + r.w || cell.y >= r.y + r.h) return null;
+      var cw = r.fw / r.w * st.iw, ch = r.fh / r.h * st.ih;
+      return { x: (r.fx * st.iw) + (cell.x - r.x) * cw, y: (r.fy * st.ih) + (cell.y - r.y) * ch, w: cw, h: ch };
+    }
+
+    function describe(i) {
+      var r = pages[i].region;
+      var bits = [];
+      if (cell && r && cell.x >= r.x && cell.y >= r.y && cell.x < r.x + r.w && cell.y < r.y + r.h) {
+        bits.push(X.positionLabel(cell.x, cell.y, view && view.w ? view.w : r.x + r.w, view && view.h ? view.h : r.y + r.h).grid +
+          ' is on this page' + (r.fx !== null ? ', outlined' : '') + '.');
+      }
+      if (cell && linked && r && !(cell.x >= r.x && cell.y >= r.y && cell.x < r.x + r.w && cell.y < r.y + r.h) &&
+          i === firstIdx) {
+        /* the page that printed it was past the MAX_PAGES cap, so it is not
+           on this device; this is the nearest one that is */
+        bits.push(X.positionLabel(cell.x, cell.y, view && view.w ? view.w : 1, view && view.h ? view.h : 1).grid +
+          ' is on a page that was not kept on this device (only the first ' + MAX_PAGES +
+          ' pages of a PDF are saved). This is the nearest page that was.');
+      }
+      if (r) bits.push('This page prints ' + regionText(r) + '.');
+      else if (cell && !linked) {
+        bits.push('This import does not record which page holds which stitches. Re-import the PDF ' +
+          'and read the grid to link them, or find the spot with ‹ ›.');
+      }
+      return bits.join(' ');
+    }
+
+    function show(i) {
+      idx = clampInt(i, 0, pages.length - 1, 0);
+      var page = pages[idx];
+      var d = dataOf(Store.project(projectId) || p);
+      label.textContent = page.label + ' · ' + (idx + 1) + ' of ' + pages.length;
+      prev.disabled = idx <= 0;
+      next.disabled = idx >= pages.length - 1;
+      doneBtn.textContent = isPageDone(d, idx) ? 'Page done ✓' : 'Mark page done';
+      doneBtn.setAttribute('aria-pressed', isPageDone(d, idx) ? 'true' : 'false');
+      note.textContent = describe(idx);
+      saveViewState(projectId, { page: idx });
+      mark.hidden = true;
+      img.hidden = true;
+      empty.hidden = true;
+      var token = ++loadToken;
+      if (!window.BlobStore || !page.blobKey) { empty.hidden = false; empty.textContent = 'That page image is not on this device any more — re-import the PDF.'; return; }
+      window.BlobStore.get(page.blobKey).then(function (blob) {
+        if (token !== loadToken || !frame.isConnected) return;
+        if (url) { try { URL.revokeObjectURL(url); } catch (e) { /* ignore */ } url = null; }
+        if (!blob) { empty.hidden = false; empty.textContent = 'That page image is not on this device any more — re-import the PDF.'; return; }
+        url = URL.createObjectURL(blob);
+        img.onload = function () {
+          if (token !== loadToken) return;
+          st.iw = img.naturalWidth || page.w || 1;
+          st.ih = img.naturalHeight || page.h || 1;
+          stage.style.width = st.iw + 'px';
+          stage.style.height = st.ih + 'px';
+          img.hidden = false;
+          fitPage();
+          var box = cellBox(idx);
+          if (box) {
+            mark.hidden = false;
+            mark.style.left = box.x + 'px';
+            mark.style.top = box.y + 'px';
+            mark.style.width = box.w + 'px';
+            mark.style.height = box.h + 'px';
+            // about 24 stitches across the frame: close enough to read symbols
+            var f = frameSize();
+            lookAt(box.x + box.w / 2, box.y + box.h / 2, Math.max(st.fitS * 2, f.w / (box.w * 24)));
+          }
+        };
+        img.src = url;
+      });
+    }
+
+    C.openSheet({
+      title: 'Chart page',
+      cls: 'sheet-xs-page',
+      build: function (body) {
+        frame = el('div', 'xs-pv-frame');
+        frame.setAttribute('role', 'img');
+        frame.setAttribute('aria-label', 'Chart page. Pinch or use the buttons to zoom, drag to pan.');
+        stage = el('div', 'xs-pv-stage');
+        img = el('img', 'xs-pv-img');
+        img.alt = '';
+        img.draggable = false;
+        mark = el('div', 'xs-pv-mark');
+        mark.hidden = true;
+        stage.appendChild(img);
+        stage.appendChild(mark);
+        frame.appendChild(stage);
+        empty = el('div', 'xs-page-empty');
+        empty.hidden = true;
+        frame.appendChild(empty);
+        body.appendChild(frame);
+
+        var bar = el('div', 'xs-pagebar xs-pv-bar');
+        prev = button('xs-page-nav', '‹', 'Previous page');
+        label = el('span', 'xs-page-label');
+        next = button('xs-page-nav', '›', 'Next page');
+        on(prev, 'click', function () { show(idx - 1); });
+        on(next, 'click', function () { show(idx + 1); });
+        bar.appendChild(prev);
+        bar.appendChild(label);
+        bar.appendChild(next);
+        body.appendChild(bar);
+
+        var zoomRow = el('div', 'xs-zoom');
+        var zOut = button('btn ghost', '−', 'Zoom out');
+        var zFit = button('btn ghost', 'Fit');
+        var zIn = button('btn ghost', '+', 'Zoom in');
+        on(zOut, 'click', function () { var f = frameSize(); zoomAt(1 / 1.5, f.w / 2, f.h / 2); });
+        on(zFit, 'click', fitPage);
+        on(zIn, 'click', function () { var f = frameSize(); zoomAt(1.5, f.w / 2, f.h / 2); });
+        doneBtn = button('btn ghost xs-pv-done', 'Mark page done');
+        on(doneBtn, 'click', function () {
+          var nextDone = !isPageDone(dataOf(Store.project(projectId)), idx);
+          var at = idx;
+          Store.updateCraftData(projectId, function (cd) {
+            var list = cd.progress.pageDone;
+            for (var k = 0; k < list.length; k++) {
+              if (list[k].page === at) { list[k].done = nextDone; return; }
+            }
+            list.push({ page: at, done: nextDone });
+          });
+          doneBtn.textContent = nextDone ? 'Page done ✓' : 'Mark page done';
+          doneBtn.setAttribute('aria-pressed', nextDone ? 'true' : 'false');
+          fb(nextDone ? 'done' : 'undo');
+        });
+        zoomRow.appendChild(zOut);
+        zoomRow.appendChild(zFit);
+        zoomRow.appendChild(zIn);
+        body.appendChild(zoomRow);
+        body.appendChild(doneBtn);
+        note = el('p', 'muted xs-hint xs-pv-note');
+        body.appendChild(note);
+
+        /* gestures */
+        on(frame, 'pointerdown', function (e) {
+          pointers[e.pointerId] = { x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY, moved: false };
+          try { frame.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+          var ids = Object.keys(pointers);
+          if (ids.length === 2) {
+            var a = pointers[ids[0]], b = pointers[ids[1]], r = frame.getBoundingClientRect();
+            pinch = {
+              d: Math.max(1, Math.hypot(a.x - b.x, a.y - b.y)), s: st.s,
+              mx: (a.x + b.x) / 2 - r.left, my: (a.y + b.y) / 2 - r.top
+            };
+            pinch.px = (pinch.mx - st.tx) / st.s;
+            pinch.py = (pinch.my - st.ty) / st.s;
+          }
+          e.preventDefault();
+        });
+        on(frame, 'pointermove', function (e) {
+          var q = pointers[e.pointerId];
+          if (!q) return;
+          var dx = e.clientX - q.x, dy = e.clientY - q.y;
+          q.x = e.clientX; q.y = e.clientY;
+          if (Math.abs(e.clientX - q.sx) > 4 || Math.abs(e.clientY - q.sy) > 4) q.moved = true;
+          var ids = Object.keys(pointers);
+          if (ids.length === 2 && pinch) {
+            var a = pointers[ids[0]], b = pointers[ids[1]];
+            var d = Math.max(1, Math.hypot(a.x - b.x, a.y - b.y));
+            st.s = Math.max(st.fitS, Math.min(st.fitS * 12, pinch.s * d / pinch.d));
+            st.tx = pinch.mx - pinch.px * st.s;
+            st.ty = pinch.my - pinch.py * st.s;
+          } else {
+            st.tx += dx; st.ty += dy;
+          }
+          clamp();
+          apply();
+          e.preventDefault();
+        });
+        function end(e) {
+          var q = pointers[e.pointerId];
+          delete pointers[e.pointerId];
+          if (Object.keys(pointers).length < 2) pinch = null;
+          if (!q || q.moved) return;
+          var now = Date.now();
+          if (now - lastTap < 320) {
+            lastTap = 0;
+            var r = frame.getBoundingClientRect();
+            if (st.s > st.fitS * 1.05) fitPage();
+            else zoomAt(3, e.clientX - r.left, e.clientY - r.top);
+            return;
+          }
+          lastTap = now;
+        }
+        on(frame, 'pointerup', end);
+        on(frame, 'pointercancel', end);
+        on(frame, 'wheel', function (e) {
+          e.preventDefault();
+          var r = frame.getBoundingClientRect();
+          zoomAt(e.deltaY < 0 ? 1.15 : 1 / 1.15, e.clientX - r.left, e.clientY - r.top);
+        });
+        on(frame, 'keydown', function (e) {
+          var f = frameSize();
+          if (e.key === '+' || e.key === '=') { zoomAt(1.25, f.w / 2, f.h / 2); e.preventDefault(); }
+          else if (e.key === '-') { zoomAt(0.8, f.w / 2, f.h / 2); e.preventDefault(); }
+          else if (e.key === 'ArrowLeft') { st.tx += 40; clamp(); apply(); e.preventDefault(); }
+          else if (e.key === 'ArrowRight') { st.tx -= 40; clamp(); apply(); e.preventDefault(); }
+          else if (e.key === 'ArrowUp') { st.ty += 40; clamp(); apply(); e.preventDefault(); }
+          else if (e.key === 'ArrowDown') { st.ty -= 40; clamp(); apply(); e.preventDefault(); }
+        });
+        frame.tabIndex = 0;
+
+        window.requestAnimationFrame(function () { show(idx); });
+      },
+      footer: [{ text: 'Done', cls: 'btn primary', onClick: function (api) { api.close(); } }],
+      onClose: function () {
+        loadToken++;
+        if (url) { try { URL.revokeObjectURL(url); } catch (e) { /* ignore */ } url = null; }
+        // the image-mode strip follows the page the stitcher was last on
+        var pp = Store.project(projectId);
+        if (pp && view && !view.destroyed && view.projectId === projectId && view.nodes) syncScreen(pp, dataOf(pp));
+      }
+    });
   }
 
   /* ---- parking notes -------------------------------------------------- */
@@ -2933,8 +3709,7 @@
 
         body.appendChild(more);
         body.appendChild(el('p', 'muted xs-import-note',
-          'Chart pages are rendered as images and kept on this device only; they are not in ' +
-          'your backup file, so keep the PDF.'));
+          'Chart pages are rendered as images and saved with the project; Back up now includes them.'));
       },
       onClose: function () {
         if (zone && zone.destroy) zone.destroy();
@@ -3009,6 +3784,7 @@
       cd.current.paletteIndex = 0;
       cd.current.cx = 0;
       cd.current.cy = 0;
+      cd.current.view = null;           // a new chart opens at Fit
       cd.sizeWarnedAt = 0;
       cd.source = { kind: 'oxs', fileName: fileName || '', importedAt: Date.now(), warnings: warnings.slice(0, 12) };
       return X.normalize(cd, null);
@@ -3280,6 +4056,7 @@
         cd.progress.mode = 'cells';
         cd.current.cx = 0;
         cd.current.cy = 0;
+        cd.current.view = null;
       }
       cd.notesKey = (key.sizes || []).map(function (s) {
         return s.count + ' ct: ' + s.wIn + ' × ' + s.hIn + ' in';
@@ -3301,7 +4078,11 @@
       return Promise.resolve();
     }
     var totalPages = handle.numPages || 0;
-    return renderPages(projectId, handle, key, progressLine).then(function (pages) {
+    /* Wave F (04 #3): the grid reader winning ADDS a chart; the page images
+       are rendered and kept exactly as for a key-only import, and each one
+       records which stitches it prints so the chart can flip to it. */
+    return renderPages(projectId, handle, key, progressLine,
+      grid && grid.ok ? grid.regions : null).then(function (pages) {
       C.closeAllSheets();
       C.render();
       fb('done');
@@ -3325,7 +4106,32 @@
    * Rasterise the chart pages into BlobStore, one at a time so a 30-page
    * chart never blocks the main thread for long.
    */
-  function renderPages(projectId, handle, key, progressLine) {
+  /**
+   * A re-import with fewer pages used to leave the old tail of page images
+   * in IndexedDB with nothing pointing at them (04 #3: an orphan
+   * `chartpage:0` was still there after the import). Anything under this
+   * project's chartpage prefix that the new page list does not use goes.
+   */
+  function dropOrphanPages(projectId, pages) {
+    if (!window.BlobStore || typeof window.BlobStore.keys !== 'function') return Promise.resolve(0);
+    var keep = {};
+    for (var i = 0; i < pages.length; i++) keep[pages[i].blobKey] = true;
+    return window.BlobStore.keys('p:' + projectId + ':chartpage:').then(function (keys) {
+      var gone = (keys || []).filter(function (k) { return !keep[k]; });
+      return Promise.all(gone.map(function (k) { return window.BlobStore.delete(k); })).then(function () {
+        return gone.length;
+      });
+    }, function () { return 0; });
+  }
+
+  /** pages[i].region for 1-based PDF page `n`, from extractGrid's regions. */
+  function regionForPage(regions, n) {
+    if (!regions) return null;
+    for (var i = 0; i < regions.length; i++) if (regions[i].page === n) return regions[i].region;
+    return null;
+  }
+
+  function renderPages(projectId, handle, key, progressLine, regions) {
     var total = Math.min(handle.numPages || 0, MAX_PAGES);
     if (!total || !window.BlobStore || !window.BlobStore.available()) return Promise.resolve(0);
     var pages = [];
@@ -3348,12 +4154,15 @@
             var done = function (blob) {
               if (!blob) { resolve(); return; }
               window.BlobStore.put(key2, blob).then(function () {
+                var reg = regionForPage(regions, n);
                 pages.push({
                   n: n - 1,
-                  label: n === 1 ? 'Cover' : 'Page ' + n,
+                  // a one-page PDF (Tiny Modernist) is the chart, not a cover
+                  label: n === 1 && allPages > 1 ? 'Cover' : 'Page ' + n,
                   blobKey: key2,
                   w: canvas.width, h: canvas.height,
-                  isChart: n > 1
+                  isChart: regions ? !!reg : (n > 1 || allPages === 1),
+                  region: reg
                 });
                 resolve();
               }, resolve);
@@ -3376,6 +4185,7 @@
         cd.current.page = 0;
       });
       if (handle.destroy) { try { handle.destroy(); } catch (e) { /* ignore */ } }
+      dropOrphanPages(projectId, pages);
       return pages.length;
     });
   }
@@ -3437,13 +4247,16 @@
         return res;
       }
       var head = el('p', 'xs-beta-ok');
-      head.textContent = 'Read ' + res.w + ' × ' + res.h + ' stitches, ' +
-        res.matched + ' of ' + res.colors + ' colours matched.';
+      /* 04 #6: the rectangle is not the stitch count. */
+      head.textContent = 'Read ' + comma(res.filled || 0) + ' stitches over a ' + res.w + ' × ' + res.h +
+        ' grid, ' + res.matched + ' of ' + res.colors + ' colours matched.';
       box.appendChild(head);
       box.appendChild(el('p', 'muted',
-        comma(res.filled || 0) + ' stitches in ' + secs + ' s. Using it replaces the colour ' +
+        'Read in ' + secs + ' s. Using it replaces the colour ' +
         'key with the one read from the grid and switches counting to individual ' +
-        'stitches, which starts from zero — any counts you have now are not carried over.'));
+        'stitches, which starts from zero — any counts you have now are not carried over. ' +
+        'The PDF pages are kept: 📄 on the chart shows the page for any stitch, for the ' +
+        'backstitch and notes the grid reader cannot see.'));
       if (res.warnings.length) box.appendChild(warningList('Notes', res.warnings.slice(0, 4), true));
       var use = button('btn primary block', 'Use it');
       on(use, 'click', function () { onUse(res); });
@@ -3486,7 +4299,17 @@
       cd.current.paletteIndex = 0;
       cd.current.cx = 0;
       cd.current.cy = 0;
+      cd.current.view = null;
       cd.sizeWarnedAt = 0;
+      /* Wave F (04 #3): the pages already in the project stay, and each one
+         learns which stitches of the new chart it prints. */
+      if (Array.isArray(cd.pages) && res.regions && res.regions.length) {
+        cd.pages.forEach(function (pg) {
+          var reg = regionForPage(res.regions, pg.n + 1);
+          pg.region = reg;
+          pg.isChart = !!reg;
+        });
+      }
       var warn = (cd.source.warnings || []).slice(0);
       cd.source.warnings = warn.concat(['grid read from the PDF by the beta reader'])
         .concat(res.warnings || []).slice(0, 12);
@@ -4251,7 +5074,9 @@
   function onTheme() {
     // The chart is painted in real floss and fabric colours, which do not
     // follow the theme; only the surrounding chrome does. A redraw keeps the
-    // canvas crisp after a theme swap changes its size.
+    // canvas crisp after a theme swap changes its size. The rulers do follow
+    // the theme, so their colours are read again.
+    rulerTheme = null;
     if (view) redrawAll();
   }
 
@@ -4291,10 +5116,20 @@
         'confident number. Buy towards the top of it if the dye lot matters.'
     },
     {
+      q: 'How do I find my place on a big chart?',
+      a: 'The chart has rulers numbered every 10 stitches, red ▼ ▶ arrows (and a dashed line) at the ' +
+        'centre, and a box in the corner that reads "col 134 · row 57" and how far that is from the ' +
+        'centre, the way a printed chart counts. The full chart opens where you left it, with the same ' +
+        'tool. 🎯 jumps to the nearest stitch of your colour still to do, and 📄 shows the PDF page ' +
+        'that stitch is printed on, outlined, for backstitch and notes. The big button works the 10×10 ' +
+        'block you are in before moving on to the next block with that colour.'
+    },
+    {
       q: 'Where are my chart images stored?',
-      a: 'On this device only, in the browser’s own storage — never uploaded. They are not in your ' +
-        'backup file because they would make it enormous, so keep the original PDF: re-importing it ' +
-        'brings the pages straight back. Your stitch progress and colour key are in the backup.'
+      a: 'In the browser’s own storage on this device — never uploaded. Back up now (Settings) and ' +
+        '⋯ → Send this project make a .thready file that carries them, along with your stitch ' +
+        'progress and colour key. An older .json backup has no page images; re-importing the PDF ' +
+        'brings them back.'
     }
   ];
 

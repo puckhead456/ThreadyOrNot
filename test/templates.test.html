@@ -496,6 +496,171 @@ assertEqual(tplPartNamed(tplBack, 'Ears').placementNotes, PLACE_EARS,
 assertEqual(partNamed(Store.project(impProj.id), 'Ears').placementNotes, PLACE_EARS,
   'and the project part’s too');
 
+/* ====================================================================== */
+group('wave F: size-once, until-N-rows repeats, colour changes, count report (Store)');
+/* ====================================================================== */
+
+seed(null);
+var GARMENT =
+  'Sizes XS M L\n' +
+  'Body\n' +
+  'Row 1: Ch 1, sc in each ch across. Turn. | 20 (24, 28) sts\n' +
+  'Row 2: Ch 1, sc in each st across. Turn.\n' +
+  'Repeat Row 2 until there are a total of 10 (12, 14) Rows.\n';
+var gSecs = Store.splitSections(GARMENT);
+var gProj = Store.createProject({ name: 'Size-once garment', templateId: 'blank' });
+var gRes = Store.importPatternSections(gProj.id, gSecs, { mode: 'parts', text: GARMENT, size: 1 });
+gProj = Store.project(gProj.id);
+var gBody = partNamed(gProj, 'Body');
+assertEqual(gProj.sizes, ['XS', 'M', 'L'], 'wave F: the import keeps the document\'s size names');
+assertEqual(gProj.size, { index: 1, label: 'M' }, 'wave F: the size picked in the import preview is the project\'s size');
+assertEqual(gRes.sizeSet, 'M', 'wave F: importPatternSections reports the size it set');
+assertEqual([gBody.sizeIndex, gBody.targetRows, Store.targetFor(gBody, 1)], [1, 12, 24],
+  'wave F: the part is read at M - "a total of 10 (12, 14) Rows" is 12, row 1 is 24 sts');
+Store.tapRow(gProj.id, gBody.id);
+Store.tapRow(gProj.id, gBody.id);
+Store.tapStitch(gProj.id, gBody.id);
+var sz = Store.setProjectSize(gProj.id, 2);
+gBody = partNamed(Store.project(gProj.id), 'Body');
+assertEqual([sz.label, gBody.sizeIndex, gBody.targetRows, Store.targetFor(gBody, 1)], ['L', 2, 14, 28],
+  'wave F: setProjectSize moves every part to L and re-derives the pattern\'s target');
+assertEqual([gBody.row, gBody.stitch], [2, 1], 'wave F: ...without losing progress');
+assertEqual(Store.partSize(Store.project(gProj.id), gBody), { index: 2, label: 'L', source: 'project', names: ['XS', 'M', 'L'] },
+  'wave F: partSize says L, from the project');
+Store.undo();
+gBody = partNamed(Store.project(gProj.id), 'Body');
+assertEqual([Store.project(gProj.id).size.index, gBody.sizeIndex, gBody.targetRows], [1, 1, 12],
+  'wave F: one Undo puts the size and the target back');
+Store.updatePart(gProj.id, gBody.id, { targetRows: 40 });
+Store.setProjectSize(gProj.id, 0);
+gBody = partNamed(Store.project(gProj.id), 'Body');
+assertEqual([gBody.targetRows, Store.targetFor(gBody, 1)], [40, 20],
+  'wave F: a target typed by hand is never moved by a size change; the counts are');
+Store.updatePart(gProj.id, gBody.id, { sizeIndex: 2 });
+assertEqual(Store.partSize(Store.project(gProj.id), partNamed(Store.project(gProj.id), 'Body')).source, 'part',
+  'wave F: a part set on its own reports source "part"');
+var gBack = Store.exportJSON();
+seed(null);
+Store.importJSON(gBack);
+assertEqual(Store.project(gProj.id).size, { index: 0, label: 'XS' }, 'wave F: Project.size survives a backup round trip');
+assertEqual(Store.targetRowsFromText(GARMENT.split('\n').slice(1).join('\n'), 2, 3), 14,
+  'wave F: targetRowsFromText(text, size, sizeCount) reads the size\'s own row total');
+
+/* a list that is not one number per size is no target */
+var axisProj = Store.createProject({ name: 'Length axis', templateId: 'blank' });
+var AXIS = 'Sizes XS S M L XL\nRow 1: Ch 1, blo sc across, turn. | 184 (208, 224) sts\nRow 2: Ch 1, blo sc in each st across, turn.';
+Store.importPatternSections(axisProj.id, [{ name: 'Panel', makeCount: 1, text: AXIS.split('\n').slice(1).join('\n') }],
+  { mode: 'parts', text: AXIS, size: 3 });
+var axisPart = partNamed(Store.project(axisProj.id), 'Panel');
+assertEqual([Store.targetFor(axisPart, 1), Store.targetFor(axisPart, 2)], [null, null],
+  'wave F: a 3-entry list in a 5-size pattern gives no stitch target at any row');
+assertEqual(Store.countReport(axisPart).unresolved, 1, 'wave F: ...and the count report calls it unresolved');
+
+/* "until N rows" repeats (03 #6) */
+var rpProj = Store.createProject({ name: 'Until rows', templateId: 'blank' });
+var rpPart = rpProj.parts[0];
+var applied = Store.applySuggestions(rpProj.id, rpPart.id, { repeat: { startRow: 5, endRow: 8, times: null, untilRows: 25 } });
+rpPart = Store.project(rpProj.id).parts[0];
+assertEqual([rpPart.repeat.mode, rpPart.repeat.untilRows, rpPart.repeat.times], ['untilRows', 25, 5],
+  'wave F: "Repeat Rows 5-8 until there are a total of 25 Rows" keeps its intent (times 5 derived)');
+assertEqual(applied.repeat.mode, 'untilRows', 'wave F: applySuggestions reports the mode');
+Store.updatePart(rpProj.id, rpPart.id, { repeat: { enabled: true, startRow: 5, endRow: 8, times: 1, untilRows: 29 } });
+rpPart = Store.project(rpProj.id).parts[0];
+assertEqual([rpPart.repeat.times, Store.repeatTimes(rpPart.repeat)], [6, 6], 'wave F: changing the row total re-derives times (29 -> 6)');
+Store.updatePart(rpProj.id, rpPart.id, { repeat: { enabled: true, startRow: 5, endRow: 8, times: 3, mode: 'times' } });
+assertEqual(Store.project(rpProj.id).parts[0].repeat.times, 3, 'wave F: back in "times" mode the typed count is used');
+
+/* colour changes on the counter (02 #3) */
+var colProj = Store.createProject({ name: 'Colours', templateId: 'blank' });
+Store.updatePart(colProj.id, colProj.parts[0].id, { patternText:
+  'Rnd 1: With white, ch 2, 6 sc in second chain from hook (6)\nRnd 2: sc around (6)\n' +
+  'Rnd 3: Sc in each st around, changing to black in last 2 loops (6)\nRnd 4: sc around (6)\nRnd 5: With white, sc around (6)' });
+var colPart = Store.project(colProj.id).parts[0];
+assertEqual([1, 2, 3, 4, 5].map(function (r) { return Store.rowColorInfo(colPart, r); }), [
+  { color: 'white', change: null },
+  { color: 'white', change: null },
+  { color: 'white', change: { to: 'black', at: 'end' } },
+  { color: 'black', change: null },
+  { color: 'white', change: { to: 'white', at: 'start' } }
+], 'wave F: rowColorInfo - the round worked in, the change it ends with, the one it starts with');
+assertEqual(Store.rowColorInfo(Store.createProject({ name: 'Plain' }).parts[0], 1), { color: null, change: null },
+  'wave F: a part with no pattern has no yarn to show');
+
+/* "made twice, from the assembly text" travels with the part */
+var mcProj = Store.createProject({ name: 'Inferred pairs', templateId: 'blank' });
+Store.importPatternSections(mcProj.id, [
+  { name: 'Body', makeCount: 1, text: BODY_TEXT },
+  { name: 'Arm', makeCount: 2, text: HEAD_TEXT, makeCountInferred: true }
+], { mode: 'parts', text: BODY_TEXT });
+var mcArm = partNamed(Store.project(mcProj.id), 'Arm');
+assertEqual([mcArm.makeCount, mcArm.makeCountInferred, partNamed(Store.project(mcProj.id), 'Body').makeCountInferred],
+  [2, true, undefined], 'wave F: an inferred make-count is kept on the part (and only there)');
+Store.updatePart(mcProj.id, mcArm.id, { makeCount: 3 });
+assertEqual(partNamed(Store.project(mcProj.id), 'Arm').makeCountInferred, undefined,
+  'wave F: setting the count by hand drops the "inferred" mark');
+assertEqual(Store.countReport('Rnd 1: 6 sc in MR (6)\nRnd 2: (sc, inc) x6\nRnd 3: (2sc, dec)x6 [36]').disagree.length, 1,
+  'wave F: Store.countReport reads loose text too');
+
+/* mid-piece repeats and tape-measure targets (03 #5) */
+var MID = 'Row 1: Ch 1, sc across. Turn. (20)\nRow 2: Ch 1, sc in each st across. Turn.\n' +
+  'Rows 3-4: Ch 1, sc in each st across. Turn.\nRepeat Rows 3-4 until there are a total of 12 Rows.\n' +
+  'Next Row: Ch 1, sc in each st across. Turn.';
+assertEqual(Store.targetRowsFromText(MID), 13,
+  'wave F: a repeat between written rows fills the hole - rows 5-12 by the repeat, "Next Row" 13 is the target');
+assertEqual(Store.targetRowsFromText('Ch 42.\nFoundation row: (RS). 1 hdc in 3rd ch from hook. 1 hdc in each ch to end of chain. Turn. 40 hdc.\n' +
+  '1st row: Ch 2. 1 hdc in sp between first 2 hdc. 1 hdc in last hdc. Turn.\nRep last row for pat 6 times more, ending on a WS row.'), 7,
+  'wave F: one written row continued by "Rep last row 6 times more" is a 7-row target (Caron Cardigan block)');
+assertEqual(Store.targetRowsFromText('Rnd 1: 6 sc in MR (6)'), null, 'wave F: ...while a lone written row is still no target');
+var tapeProj = Store.createProject({ name: 'Tape', templateId: 'blank' });
+var THROW_T = 'GAUGE: 9 hdc and 6 rows = 4"\nRow 1: Ch 1, hdc across. (94)\nRow 2: Ch 1, hdc in each st across. (94)\nRep Row 2 until blanket measures approximately 59".';
+Store.importPatternSections(tapeProj.id, [{ name: 'Blanket', makeCount: 1, text: THROW_T }], { mode: 'parts', text: THROW_T });
+var tapePart = partNamed(Store.project(tapeProj.id), 'Blanket');
+assertEqual([tapePart.targetRows, Store.targetApprox(tapePart)], [89, true],
+  'wave F: 59" at 6 rows = 4" is an 89-row target, and it says it is an estimate (≈)');
+Store.updatePart(tapeProj.id, tapePart.id, { targetRows: 90 });
+assertEqual(Store.targetApprox(partNamed(Store.project(tapeProj.id), 'Blanket')), false,
+  'wave F: a target typed by hand is never shown as ≈');
+assertEqual(Store.targetApprox(gBody), false, 'wave F: a target the pattern counts outright is not ≈');
+
+/* templates carry the leaflet's size names and the picked size */
+seed(null);
+var szProj = Store.createProject({ name: 'Sized garment', templateId: 'blank' });
+Store.importPatternSections(szProj.id, Store.splitSections(GARMENT), { mode: 'parts', text: GARMENT, size: 2 });
+var szDraft = Store.templateFromProject(szProj.id);
+assertEqual([szDraft.sizes, szDraft.size], [['XS', 'M', 'L'], { index: 2, label: 'L' }],
+  'wave F: templateFromProject drafts the size names and the picked size');
+var szTpl = Store.saveTemplate(szDraft);
+assertEqual([szTpl.sizes, szTpl.size], [['XS', 'M', 'L'], { index: 2, label: 'L' }], 'wave F: saveTemplate keeps them');
+var szRenamed = Store.saveTemplate({ id: szTpl.id, name: 'Renamed', parts: szTpl.parts, checklist: [] });
+assertEqual(szRenamed.sizes, ['XS', 'M', 'L'], 'wave F: an edit that does not mention sizes keeps them');
+var fromSz = Store.createProject({ name: 'From sized template', templateId: szTpl.id });
+var fromBody = partNamed(fromSz, 'Body');
+assertEqual([fromSz.sizes, fromSz.size, fromBody.sizeIndex, fromBody.targetRows],
+  [['XS', 'M', 'L'], { index: 2, label: 'L' }, 2, 14],
+  'wave F: a project made from it offers the leaflet\'s names, starts at L, and its target is L\'s (14)');
+assertEqual(Store.partSize(fromSz, fromBody).names, ['XS', 'M', 'L'], 'wave F: ...not "Size 1..N"');
+assertEqual(Store.template(szTpl.id).sizes, ['XS', 'M', 'L'], 'wave F: and the template is stored with them');
+var plainTpl = Store.saveTemplate({ name: 'No sizes', parts: [{ name: 'Body', makeCount: 1, patternText: BODY_TEXT }], checklist: [] });
+assertTrue(!('sizes' in plainTpl) && !('size' in plainTpl), 'wave F: a single-size template gets no size fields');
+var tplBack = Store.exportJSON();
+seed(null);
+Store.importJSON(tplBack);
+assertEqual(Store.template(szTpl.id).size, { index: 2, label: 'L' }, 'wave F: a template\'s size survives a backup round trip');
+
+/* the part editor's "project size" save is ONE undo step */
+var oneProj = Store.createProject({ name: 'One undo', templateId: 'blank' });
+Store.importPatternSections(oneProj.id, Store.splitSections(GARMENT), { mode: 'parts', text: GARMENT, size: 0 });
+var oneBody = partNamed(Store.project(oneProj.id), 'Body');
+Store.clearUndo();
+var both = Store.updatePartWithProjectSize(oneProj.id, oneBody.id, { name: 'Body panel', sizeIndex: 1, placementNotes: 'hi' }, 1);
+oneBody = Store.part(Store.project(oneProj.id), oneBody.id);
+assertEqual([both.size.label, Store.project(oneProj.id).size.index, oneBody.name, oneBody.sizeIndex, oneBody.targetRows],
+  ['M', 1, 'Body panel', 1, 12], 'wave F: updatePartWithProjectSize applies the sheet and the size (target follows to 12)');
+Store.undo();
+oneBody = Store.part(Store.project(oneProj.id), oneBody.id);
+assertEqual([Store.project(oneProj.id).size.index, oneBody.name, oneBody.sizeIndex, oneBody.targetRows, Store.canUndo()],
+  [0, 'Body', 0, 10, false], 'wave F: ...and ONE Undo puts both back');
+
 /* ---------------------------------------------------------------------- */
 restore();
 

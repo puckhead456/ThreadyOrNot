@@ -10,6 +10,10 @@
  *   BlobStore.delete(key)                          -> Promise<boolean>
  *   BlobStore.keys(prefix)                         -> Promise<string[]>
  *   BlobStore.deletePrefix(prefix)                 -> Promise<number>
+ *   BlobStore.entries(prefix)                      -> Promise<[{key, blob}]>
+ *   BlobStore.putMany([{key, value}])              -> Promise<number>  (one transaction)
+ *   BlobStore.deleteKeys([key])                    -> Promise<number>
+ *   BlobStore.sweep(liveProjectIds, {prefix})      -> Promise<{count, bytes}>  (09 #10)
  *   BlobStore.available()                          -> boolean
  *   BlobStore.usage()                              -> Promise<{count, bytes}|null>
  *
@@ -242,6 +246,106 @@
     });
   }
 
+  /**
+   * Every `{key, blob}` under `prefix`, sorted by key, in one read
+   * transaction. The backup writer (12 #4) uses it to gather a project's
+   * page images.
+   */
+  function entries(prefix) {
+    var pre = prefix === undefined || prefix === null ? '' : String(prefix);
+    return withStore('readonly', [], function (store, done) {
+      var found = [];
+      var range = null;
+      try {
+        if (pre && typeof IDBKeyRange !== 'undefined') range = IDBKeyRange.bound(pre, pre + '￿');
+      } catch (e) {
+        range = null;
+      }
+      var cur = range ? store.openCursor(range) : store.openCursor();
+      cur.onsuccess = function () {
+        var c = cur.result;
+        if (!c) {
+          done(found);
+          return;
+        }
+        var ck = String(c.key);
+        if (!pre || ck.indexOf(pre) === 0) found.push({ key: ck, blob: c.value });
+        c['continue']();
+      };
+    });
+  }
+
+  /**
+   * Write many `{key, value}` pairs in ONE transaction: all of them land or
+   * none do. Resolves with how many were written (0 when it failed). Items
+   * with an empty key or a value that is not blob-like are left out.
+   */
+  function putMany(list) {
+    if (!Array.isArray(list) || !list.length) return Promise.resolve(0);
+    var items = [];
+    for (var i = 0; i < list.length; i++) {
+      var it = list[i];
+      if (!it) continue;
+      var k = keyOf(it.key);
+      var b = toBlob(it.value);
+      if (k && b) items.push({ key: k, blob: b });
+    }
+    if (!items.length) return Promise.resolve(0);
+    return withStore('readwrite', 0, function (store, done) {
+      for (var j = 0; j < items.length; j++) store.put(items[j].blob, items[j].key);
+      done(items.length);
+    });
+  }
+
+  /** Delete exactly these keys, in one transaction; resolves with the count. */
+  function deleteKeys(list) {
+    if (!Array.isArray(list) || !list.length) return Promise.resolve(0);
+    var ks = [];
+    for (var i = 0; i < list.length; i++) {
+      var k = keyOf(list[i]);
+      if (k) ks.push(k);
+    }
+    if (!ks.length) return Promise.resolve(0);
+    return withStore('readwrite', 0, function (store, done) {
+      for (var j = 0; j < ks.length; j++) store['delete'](ks[j]);
+      done(ks.length);
+    });
+  }
+
+  /**
+   * 09 #10: delete every project blob ('p:<id>:…') whose project id is not in
+   * `liveIds`. Keys that do not follow the 'p:<id>:' convention are never
+   * touched. An empty or missing list sweeps NOTHING (a store that failed to
+   * load must not read as "no projects, delete everything").
+   * Resolves with { count, bytes } of what went. `opts.prefix` (default
+   * 'p:') is the namespace in front of the id; the test page uses its own so
+   * it can never sweep the app's real images.
+   */
+  function sweep(liveIds, opts) {
+    if (!Array.isArray(liveIds) || !liveIds.length) return Promise.resolve({ count: 0, bytes: 0 });
+    var pre = opts && typeof opts.prefix === 'string' && opts.prefix ? opts.prefix : 'p:';
+    var live = Object.create(null);
+    for (var i = 0; i < liveIds.length; i++) live[String(liveIds[i])] = true;
+    return entries(pre).then(function (all) {
+      var doomed = [];
+      var bytes = 0;
+      for (var j = 0; j < all.length; j++) {
+        var k = all[j].key;
+        var end = k.indexOf(':', pre.length);
+        if (end < 0) continue;
+        var id = k.slice(pre.length, end);
+        if (!id || live[id]) continue;
+        doomed.push(k);
+        var v = all[j].blob;
+        if (v && typeof v.size === 'number') bytes += v.size;
+      }
+      if (!doomed.length) return { count: 0, bytes: 0 };
+      return deleteKeys(doomed).then(function (n) {
+        return { count: n, bytes: n ? bytes : 0 };
+      });
+    });
+  }
+
   /** How much of the device this craft's images are eating. */
   function usage() {
     return withStore('readonly', null, function (store, done) {
@@ -280,6 +384,10 @@
     'delete': del,
     keys: keys,
     deletePrefix: deletePrefix,
+    entries: entries,
+    putMany: putMany,
+    deleteKeys: deleteKeys,
+    sweep: sweep,
     available: available,
     usage: usage,
     DB_NAME: DB_NAME,
