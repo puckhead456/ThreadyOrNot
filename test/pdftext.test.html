@@ -214,6 +214,107 @@ step(function () {
   });
 });
 
+step(function () {
+  group('renderPage cancels mid-page (Wave F): between steps and at the pdf.js render task');
+  function within(p, ms) {
+    var t0 = Date.now();
+    return p.then(function (v) { return { ok: true, v: v, ms: Date.now() - t0 }; },
+      function (e) { return { ok: false, err: e, ms: Date.now() - t0 }; });
+  }
+  return blobOf('bear.pdf').then(function (blob) {
+    if (!blob) return skip('renderPage cancel', 'bear.pdf not in tmp-pdf');
+    return window.PdfText.open(blob).then(function (h) {
+      // 1. Cancelled before the page is even fetched.
+      var s1 = { cancelled: false };
+      var p1 = h.renderPage(1, { scale: 4, signal: s1 });
+      s1.cancelled = true;
+      return within(p1).then(function (r) {
+        eq(!r.ok && r.err && r.err.name, 'AbortError', 'a cancel right after the call rejects with AbortError, no canvas');
+        // pdf.js's first draw of a document does one-time synchronous work
+        // (fonts, worker warm-up) that no timer can interrupt; do it once,
+        // small, so the timing below measures the cancel itself.
+        return Promise.race([
+          h.renderPage(1, { maxWidth: 40 }).then(null, function () { return null; }),
+          new Promise(function (resolve) { setTimeout(resolve, 4000); })
+        ]);
+      }).then(function () {
+        // 2. Cancelled while pdf.js is drawing a big page.
+        var s2 = { cancelled: false };
+        var p2 = h.renderPage(1, { scale: 5, signal: s2 });
+        setTimeout(function () { s2.cancelled = true; }, 60);
+        return within(p2);
+      }).then(function (r) {
+        eq(!r.ok && r.err && r.err.name, 'AbortError', 'a cancel mid-render rejects with AbortError');
+        ok(r.ms < 1500, 'and promptly (' + r.ms + ' ms), not when the page finishes');
+        // 3. A real AbortSignal works the same way.
+        if (typeof AbortController !== 'function') return null;
+        var ac = new AbortController();
+        var p3 = h.renderPage(1, { scale: 5, signal: ac.signal });
+        setTimeout(function () { ac.abort(); }, 60);
+        return within(p3).then(function (r3) {
+          eq(!r3.ok && r3.err && r3.err.name, 'AbortError', 'an AbortSignal cancels a render too');
+        });
+      }).then(function () {
+        // 4. The handle still works for an uncancelled call afterwards. pdf.js
+        // draws on animation frames, which a hidden tab never gets: skip then.
+        return Promise.race([
+          h.renderPage(1, { maxWidth: 60 }),
+          new Promise(function (resolve) { setTimeout(function () { resolve('paused'); }, 4000); })
+        ]);
+      }).then(function (canvas) {
+        if (canvas === 'paused') skip('a later render without a cancel still draws', 'tab is not painting frames');
+        else ok(canvas && canvas.width === 60, 'a later render without a cancel still draws (60 px wide)');
+        h.destroy();
+      }, function (err) {
+        log(false, 'a later render without a cancel still draws', String(err && err.message));
+        h.destroy();
+      });
+    }).then(function () {
+      // 5. The signal the document was OPENED with (the drop zone's) also stops a render mid-page.
+      var zone = { cancelled: false };
+      return window.PdfText.open(blob, { signal: zone }).then(function (h) {
+        var p = h.renderPage(1, { scale: 5 });
+        setTimeout(function () { zone.cancelled = true; }, 60);
+        return within(p).then(function (r) {
+          eq(!r.ok && r.err && r.err.name, 'AbortError', 'the open() signal (the drop zone\'s) cancels a render mid-page');
+          ok(r.ms < 1500, 'promptly (' + r.ms + ' ms)');
+          h.destroy();
+        });
+      });
+    });
+  });
+});
+
+step(function () {
+  group('handle.extract({allowEmpty}) — a scanned chart still reaches the drop zone (Wave F)');
+  // A one-page PDF with no text at all, written here (no fixture needed);
+  // pdf.js rebuilds the missing xref table.
+  var blank = new Blob(['%PDF-1.4\n' +
+    '1 0 obj <</Type /Catalog /Pages 2 0 R>> endobj\n' +
+    '2 0 obj <</Type /Pages /Kids [3 0 R] /Count 1>> endobj\n' +
+    '3 0 obj <</Type /Page /Parent 2 0 R /MediaBox [0 0 200 200]>> endobj\n' +
+    'trailer <</Root 1 0 R>>\n%%EOF\n'], { type: 'application/pdf' });
+  return window.PdfText.open(blank).then(function (h) {
+    return h.extract({}).then(function () {
+      log(false, 'without allowEmpty a text-free PDF rejects');
+    }, function (err) {
+      ok(/scanned images/.test(err && err.message), 'without allowEmpty a text-free PDF rejects, as PdfText.extract does');
+    }).then(function () {
+      return h.extract({ allowEmpty: true });
+    }).then(function (res) {
+      eq(res.text, '=== PAGE 1 ===', 'with allowEmpty it resolves with just the page marker');
+      eq(res.pages, 1, '...the page count');
+      eq(res.emptyPages, [1], '...and the page reported empty');
+      h.destroy();
+    }, function (err) {
+      log(false, 'with allowEmpty it resolves', String(err && err.message));
+      h.destroy();
+    });
+  }, function (err) {
+    log(false, 'the blank PDF opens', String(err && err.message));
+  });
+});
+
 /* ---- the real fixtures ----------------------------------------------- */
 step(function () {
   group('bear.pdf');

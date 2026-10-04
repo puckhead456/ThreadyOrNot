@@ -111,6 +111,11 @@
     for (var i = 0; i < d.cutting.length; i++) if (d.cutting[i].cutCount >= d.cutting[i].qty) n++;
     return n;
   }
+  /** '3 of 56 pieces cut': counted in pieces, not rows (05 #3, Wave F). */
+  function cutLine(d) {
+    var t = S.cutTotals(d);
+    return t.cut + ' of ' + plural(t.total, 'piece') + ' cut';
+  }
   function notionsDone(d) {
     var n = 0;
     for (var i = 0; i < d.notions.length; i++) if (d.notions[i].have) n++;
@@ -200,6 +205,17 @@
     v.stepText = el('div', 'sw-step-text');
     v.card.appendChild(head);
     v.card.appendChild(v.stepText);
+    // A long card (a whole booklet paragraph) offers the split right here
+    // (05 #1, Wave F); the step list holds the same tool for every card.
+    v.splitBtn = button('linkish sw-card-split', '✂ Split this card', 'Split this card into two');
+    v.splitBtn.hidden = true;
+    on(v.splitBtn, 'click', function () {
+      var pr = Store.project(viewProjectId);
+      if (!pr) return;
+      var dd = dataOf(pr);
+      openStepsSheet(viewProjectId, { toolsAt: Math.min(dd.currentStep, dd.steps.length - 1) });
+    });
+    v.card.appendChild(v.splitBtn);
     main.appendChild(v.card);
 
     // --- step meta ----------------------------------------------------------
@@ -359,9 +375,21 @@
     } else {
       view.page.hidden = true;
     }
-    var sa = saLabel(d);
+    // The seam-allowance exception, at the point of use (05 #15, Wave F):
+    // on a step that mentions the neckline the chip reads the neckline's
+    // allowance, in the accent colour. A reminder, never a rule.
+    var rem = step ? S.saReminder(d, step.text) : null;
+    var sa = rem
+      ? 'Seam allowance ' + (rem.mm >= 10 ? (rem.mm / 10) + ' cm' : rem.mm + ' mm') +
+        (rem.inches ? ' (' + rem.inches + '")' : '') + ' · ' + rem.part
+      : saLabel(d);
     view.sa.textContent = sa;
     view.sa.hidden = !sa;
+    view.sa.classList.toggle('sw-sa-alt', !!rem);
+    view.sa.setAttribute('aria-label', rem
+      ? 'This step mentions the ' + rem.part + ' — the pattern sews those at ' + rem.mm + ' mm. Tap for the details'
+      : 'Seam allowance — tap for the details');
+    view.splitBtn.hidden = !(step && step.text.length > 350 && S.sentences(step.text).length > 1);
 
     var isDone = ps.total > 0 && done >= ps.total;
     view.btn.disabled = !total;
@@ -377,9 +405,7 @@
     if (d.size.chosen) sizeBits.push('Size ' + d.size.chosen);
     if (d.size.alterations) sizeBits.push(clip(d.size.alterations, 40));
     view.miniSize.text.textContent = sizeBits.length ? sizeBits.join(' · ') : 'Pick your size and note alterations';
-    view.miniCut.text.textContent = d.cutting.length
-      ? cutDone(d) + ' of ' + d.cutting.length + ' pieces cut'
-      : 'No cutting list yet';
+    view.miniCut.text.textContent = d.cutting.length ? cutLine(d) : 'No cutting list yet';
     view.miniNotions.text.textContent = d.notions.length
       ? notionsDone(d) + ' of ' + d.notions.length + ' notions ready'
       : 'No notions list yet';
@@ -586,35 +612,96 @@
 
   // --- Steps -------------------------------------------------------------
 
-  function openStepsSheet(projectId) {
+  /**
+   * The step list. opts.toolsAt opens the split / merge tools on that card
+   * (the step card's "✂ Split this card" lands here). Optional extras
+   * (variations, hacks, care notes) sit in a collapsed group after the
+   * construction and are never counted (05 #3, Wave F).
+   */
+  function openStepsSheet(projectId, opts) {
+    opts = opts || {};
     var p = Store.project(projectId);
     if (!p) return;
+    var toolsAt = typeof opts.toolsAt === 'number' ? opts.toolsAt : -1;
+    var optionalOpen = null;     // null: open only when you are on an extra
+    var scrolled = false;
     var api = C.openSheet({
       title: 'Steps',
       cls: 'sheet-sewing',
       build: function (body) { renderSteps(body); }
     });
 
+    function rebuild(body) {
+      if (C.preserveFocus) C.preserveFocus(function () { renderSteps(body); });
+      else renderSteps(body);
+    }
+
     function renderSteps(body) {
       C.clear(body);
       var proj = Store.project(projectId);
       if (!proj) { api.close(); return; }
       var d = dataOf(proj);
+      var ps = S.printedSteps(d.steps);
+      var optIdx = [];
+      for (var oi = 0; oi < d.steps.length; oi++) if (d.steps[oi].optional) optIdx.push(oi);
       body.appendChild(sheetHeadLine(
-        d.steps.length ? stepsDone(d) + ' of ' + d.steps.length + ' done' : 'No steps yet.'
+        !d.steps.length ? 'No steps yet.'
+          : (ps.total ? S.printedDone(d.steps, ps) + ' of ' + plural(ps.total, 'step') + ' done' : stepsDone(d) + ' of ' + d.steps.length + ' done') +
+            (optIdx.length ? ' · ' + plural(optIdx.length, 'optional extra') : '')
       ));
+      var tools = {
+        at: toolsAt,
+        toggle: function (i) { toolsAt = toolsAt === i ? -1 : i; rebuild(body); },
+        split: function (i, at) { doSplit(body, i, at); },
+        merge: function (i) { doMerge(body, i); }
+      };
 
       var list = C.el('div', 'list sw-steps');
       var section = null;
       for (var i = 0; i < d.steps.length; i++) {
         var st = d.steps[i];
+        if (st.optional) continue;
         if (st.section !== section) {
           section = st.section;
           if (section) list.appendChild(C.el('div', 'sw-section-head', section));
         }
-        list.appendChild(stepRow(proj, d, st, i, renderSteps, body));
+        appendStepRow(list, proj, d, st, i, rebuild, body, tools);
       }
       body.appendChild(list);
+
+      if (optIdx.length) {
+        var onExtra = d.steps[Math.min(d.currentStep, d.steps.length - 1)].optional || (toolsAt >= 0 && d.steps[toolsAt] && d.steps[toolsAt].optional);
+        var det = document.createElement('details');
+        det.className = 'sw-optional';
+        det.open = optionalOpen === null ? !!onExtra : optionalOpen;
+        var sum = document.createElement('summary');
+        sum.className = 'sw-optional-head';
+        sum.textContent = 'Optional — ' + plural(optIdx.length, 'extra') + ', not counted';
+        det.appendChild(sum);
+        C.on(det, 'toggle', function () { optionalOpen = det.open; });
+        det.appendChild(C.el('p', 'field-hint sw-optional-hint',
+          'Variations, hacks and care notes from the pattern. They never count toward your progress.'));
+        var olist = C.el('div', 'list sw-steps');
+        var osec = null;
+        optIdx.forEach(function (ix) {
+          var ost = d.steps[ix];
+          if (ost.section !== osec) {
+            osec = ost.section;
+            if (osec) olist.appendChild(C.el('div', 'sw-section-head', osec));
+          }
+          appendStepRow(olist, proj, d, ost, ix, rebuild, body, tools);
+        });
+        det.appendChild(olist);
+        body.appendChild(det);
+      }
+
+      if (!scrolled && toolsAt >= 0) {
+        scrolled = true;
+        window.setTimeout(function () {
+          var at = body.querySelector('.sw-step-tools-panel');
+          if (at && at.scrollIntoView) at.scrollIntoView({ block: 'center' });
+        }, 60);
+      }
 
       var add = C.button('btn ghost block', '＋ Add step');
       C.on(add, 'click', function () {
@@ -630,10 +717,18 @@
                 var text = input.value.replace(/^\s+|\s+$/g, '');
                 if (!text) { a.close(); return; }
                 edit(projectId, function (dd) {
-                  dd.steps.push({
+                  // After the last construction card, before the optional
+                  // extras, numbered after the last printed step (Wave F).
+                  var at = dd.steps.length, maxN = 0;
+                  for (var q = 0; q < dd.steps.length; q++) {
+                    if (dd.steps[q].optional) { if (at === dd.steps.length) at = q; continue; }
+                    maxN = dd.steps[q].n || maxN;   // the last card's number (a restart counts its own run)
+                  }
+                  dd.steps.splice(at, 0, {
                     id: 'sw' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-                    n: dd.steps.length + 1, section: '', text: text, done: false, page: null, imageRef: null
+                    n: maxN + 1, section: '', text: text, done: false, page: null, imageRef: null
                   });
+                  if (dd.currentStep >= at && at < dd.steps.length - 1) dd.currentStep++;
                 });
                 a.close();
                 renderSteps(body);
@@ -682,9 +777,98 @@
         body.appendChild(clearDone);
       }
     }
+
+    /** Split card `index` before its sentence `at`; one undo step, with an Undo toast. */
+    function doSplit(body, index, at) {
+      var before = dataOf(Store.project(projectId));
+      var st = before.steps[index];
+      if (!st || !(at >= 1 && at < S.sentences(st.text).length)) { C.toast('That card cannot be split there'); return; }
+      edit(projectId, function (dd) { S.splitStep(dd, index, at); });
+      toolsAt = -1;
+      var fresh = dataOf(Store.project(projectId));
+      var pos = S.printedSteps(fresh.steps).of[index];
+      var msg = pos
+        ? 'Step ' + pos.n + ' is now ' + pos.cards + ' cards'
+        : 'Split into two cards';
+      afterStepEdit(body, msg, index);
+    }
+
+    /** Join card `index` with the card after it. */
+    function doMerge(body, index) {
+      var before = dataOf(Store.project(projectId));
+      var a = before.steps[index], b = before.steps[index + 1];
+      if (!a || !b || !!a.optional !== !!b.optional) { C.toast('There is no card after this one to merge with'); return; }
+      edit(projectId, function (dd) { S.mergeSteps(dd, index); });
+      toolsAt = -1;
+      var fresh = dataOf(Store.project(projectId));
+      var pos = S.printedSteps(fresh.steps).of[index];
+      afterStepEdit(body, pos ? 'Merged into step ' + pos.n + (pos.cards > 1 ? ', card ' + pos.card + ' of ' + pos.cards : '') : 'Merged the two cards', index);
+    }
+
+    function afterStepEdit(body, msg, index) {
+      C.fb('tap');
+      var hadFocus = document.activeElement && body.contains(document.activeElement);
+      rebuild(body);
+      // The control that was pressed is gone with its panel; keyboard focus
+      // goes back to the card's ✂.
+      var back = hadFocus ? body.querySelector('[data-focus-key="tool-' + index + '"]') : null;
+      if (back) { try { back.focus({ preventScroll: true }); } catch (e) { /* ignore */ } }
+      paint(Store.project(projectId));
+      C.announce(msg);
+      C.toast(msg, {
+        actionText: 'Undo',
+        onAction: function () {
+          if (Store.undo()) { C.fb('undo'); C.toast('Undone'); }
+          if (api && api.dialog && api.dialog.open) rebuild(body);
+          C.render();
+        }
+      });
+    }
   }
 
-  function stepRow(proj, d, st, index, rerender, body) {
+  /** A step row, plus its split / merge panel when that is open. */
+  function appendStepRow(list, proj, d, st, index, rerender, body, tools) {
+    list.appendChild(stepRow(proj, d, st, index, rerender, body, tools));
+    if (tools && tools.at === index) list.appendChild(stepToolsPanel(d, st, index, tools));
+  }
+
+  /**
+   * "Split here": one choice per sentence boundary, as in the import's
+   * paragraph picker; "Merge with the next card" below. Both keep the printed
+   * step number, so the list reads "4 · 1/2", "4 · 2/2" (05 #1, Wave F).
+   */
+  function stepToolsPanel(d, st, index, tools) {
+    var panel = C.el('div', 'list-item sw-step-tools-panel');
+    var sentences = S.sentences(st.text) || [];
+    var pos = S.printedSteps(d.steps).of[index];
+    var name = pos ? 'step ' + pos.n : 'this extra';
+    if (sentences.length > 1) {
+      panel.appendChild(C.el('div', 'sw-para-split-head', 'Split here — start a new card at…'));
+      for (var s = 1; s < sentences.length; s++) {
+        (function (at) {
+          var b = C.button('sw-para-split-opt', null, 'Split ' + name + ' before: ' + clip(sentences[at], 60));
+          b.setAttribute('data-focus-key', 'split-' + index + '-' + at);
+          b.appendChild(C.el('span', 'sw-para-split-mark', '⤵'));
+          b.appendChild(C.el('span', 'sw-para-split-text', clip(sentences[at], 80)));
+          C.on(b, 'click', function () { tools.split(index, at); });
+          panel.appendChild(b);
+        })(s);
+      }
+    } else {
+      panel.appendChild(C.el('p', 'field-hint', 'This card is a single sentence, so there is nowhere to split it.'));
+    }
+    var next = d.steps[index + 1];
+    if (next && !!next.optional === !!st.optional) {
+      var m = C.button('btn ghost block sw-merge', '⤒ Merge with the next card', 'Merge ' + name + ' with the next card');
+      m.setAttribute('data-focus-key', 'merge-' + index);
+      C.on(m, 'click', function () { tools.merge(index); });
+      panel.appendChild(m);
+      panel.appendChild(C.el('p', 'field-hint sw-merge-next', 'Next: ' + clip(next.text.replace(/^\(continued\)\s*/i, ''), 70)));
+    }
+    return panel;
+  }
+
+  function stepRow(proj, d, st, index, rerender, body, tools) {
     var row = C.el('div', 'list-item sw-step-row' + (st.done ? ' done' : '') + (index === d.currentStep ? ' current' : ''));
     // The printed number, as on the paper; a step on several cards shows its
     // card ('4 · 2/3'); an optional extra shows '+'.
@@ -715,6 +899,15 @@
     if (typeof st.page === 'number') {
       row.appendChild(C.el('span', 'chip sw-page-chip', 'p' + st.page));
     }
+    if (tools) {
+      var open = tools.at === index;
+      var tool = C.button('sw-para-tool sw-step-tool' + (open ? ' on' : ''), '✂',
+        (open ? 'Close the split and merge tools for ' : 'Split or merge ') + rowName);
+      tool.setAttribute('aria-expanded', open ? 'true' : 'false');
+      tool.setAttribute('data-focus-key', 'tool-' + index);
+      C.on(tool, 'click', function () { tools.toggle(index); });
+      row.appendChild(tool);
+    }
     return row;
   }
 
@@ -735,7 +928,7 @@
 
     if (backwards && anyDoneAfter) {
       C.confirmSheet({
-        title: 'Go back to step ' + (index + 1) + '?',
+        title: 'Go back to ' + stepWhere(d, index).replace(/^Step/, 'step').replace(/ of \d+/, '') + '?',
         message: 'Steps you have already ticked off stay ticked — this only moves where you are.',
         confirmText: 'Go back'
       }).then(function (ok) { if (ok) go(); });
@@ -975,9 +1168,38 @@
       var proj = Store.project(projectId);
       if (!proj) { api.close(); return; }
       var d = dataOf(proj);
+      var tot = S.cutTotals(d);
       body.appendChild(sheetHeadLine(
-        d.cutting.length ? cutDone(d) + ' of ' + d.cutting.length + ' pieces cut' : 'No pieces yet.'
+        d.cutting.length
+          ? cutLine(d) + (tot.rows > 1 ? ' · ' + tot.rowsDone + ' of ' + tot.rows + ' rows done' : '')
+          : (d.sourceText ? 'No cutting list was found in the instructions.' : 'No pieces yet.')
       ));
+      // Where the pattern lays its pieces out (05 #7, Wave F): booklets that
+      // keep the cutting list on the pattern sheets still print the layouts.
+      var lp = d.sourceText ? S.layoutPages(d.sourceText) : [];
+      if (lp.length) {
+        var lay = C.el('div', 'sw-layouts');
+        lay.appendChild(C.el('span', 'sw-layouts-label', lp.length > 1 ? 'Cutting layouts' : 'Cutting layout'));
+        lp.forEach(function (n) {
+          var has = !!pageRow(d, n);
+          var chip = C.button('chip sw-page' + (has ? '' : ' sw-page-plain'), '📄 page ' + n,
+            has ? 'Show the cutting layout on page ' + n : 'The cutting layout is on page ' + n + ' of the booklet');
+          chip.disabled = !has;
+          C.on(chip, 'click', function () { if (has) openPageViewer(projectId, n); });
+          lay.appendChild(chip);
+        });
+        body.appendChild(lay);
+        if (!lp.some(function (n) { return !!pageRow(d, n); })) {
+          body.appendChild(C.el('p', 'field-hint sw-layouts-hint', d.pages.length
+            ? 'That page was not kept on this device — look at it in the PDF.'
+            : 'Import the PDF with “Keep the pages” ticked to see it here.'));
+        }
+      }
+      if (!d.cutting.length && d.sourceText) {
+        body.appendChild(C.el('p', 'muted',
+          'Many booklets keep the piece list on the pattern sheets. Add the pieces you need to cut and the ' +
+          'counters keep track as you go.'));
+      }
 
       MATERIAL_ORDER.forEach(function (mat) {
         var rows = [];
@@ -1011,37 +1233,114 @@
     }
   }
 
+  // Up to this many, a tap on the chip counts one; above it (a quilt's 56
+  // squares) the chip opens a stepper with ±10 and all / none (05 #3).
+  var CUT_TAP_MAX = 6;
+
+  /** Set a row's cut count (clamped), announce it, repaint. */
+  function setCut(projectId, index, value, rerender, body) {
+    var before = dataOf(Store.project(projectId)).cutting[index];
+    if (!before) return;
+    var v = Math.max(0, Math.min(before.qty, value | 0));
+    if (v === before.cutCount) return;
+    edit(projectId, function (dd) { if (dd.cutting[index]) dd.cutting[index].cutCount = v; });
+    C.fb(v < before.cutCount ? 'undo' : 'tap');
+    C.announce(before.piece + ', ' + v + ' of ' + before.qty + ' cut');
+    if (rerender) {
+      if (C.preserveFocus) C.preserveFocus(function () { rerender(body); });
+      else rerender(body);
+    }
+    afterCut(projectId);
+  }
+
   function cutRowNode(proj, row, index, body, rerender) {
     var node = C.el('div', 'list-item sw-cut-row' + (row.cutCount >= row.qty ? ' done' : ''));
-    var chip = C.button('chip sw-count-chip', row.cutCount + '/' + row.qty,
-      row.piece + ', ' + row.cutCount + ' of ' + row.qty + ' cut, tap to count');
+    var big = row.qty > CUT_TAP_MAX;
+    var counter = C.el('div', 'sw-cut-counter');
+    var minus = C.button('sw-cut-minus', '−', 'One fewer ' + row.piece + ' cut');
+    minus.disabled = row.cutCount <= 0;
+    minus.setAttribute('data-focus-key', 'cut-minus-' + row.id);
+    C.on(minus, 'click', function () { setCut(proj.id, index, row.cutCount - 1, rerender, body); });
+    var full = row.cutCount >= row.qty;
+    var chip = C.button('chip sw-count-chip' + (big ? ' sw-count-big' : ''),
+      (full ? '✓ ' : '') + row.cutCount + ' of ' + row.qty + ' cut' + (big ? ' ▸' : ''),
+      row.piece + ', ' + row.cutCount + ' of ' + row.qty + ' cut. ' +
+      (big ? 'Opens a counter to set how many are cut' : (full ? 'All cut' : 'Tap when you have cut one more')));
+    chip.setAttribute('data-focus-key', 'cut-chip-' + row.id);
     C.on(chip, 'click', function () {
-      edit(proj.id, function (dd) {
-        var r = dd.cutting[index];
-        if (!r) return;
-        r.cutCount = r.cutCount >= r.qty ? 0 : r.cutCount + 1;
-      });
-      C.fb('tap');
-      var fresh = dataOf(Store.project(proj.id));
-      var r2 = fresh && fresh.cutting ? fresh.cutting[index] : null;
-      if (r2) C.announce(r2.piece + ' ' + r2.cutCount + ' of ' + r2.qty + ' cut');
-      rerender(body);
-      afterCut(proj.id);
+      if (big) { openCutCount(proj.id, index, rerender, body); return; }
+      if (row.cutCount >= row.qty) { C.toast('All ' + row.qty + ' cut — use − to take one off'); return; }
+      setCut(proj.id, index, row.cutCount + 1, rerender, body);
     });
+    counter.appendChild(minus);
+    counter.appendChild(chip);
 
     var mid = C.button('item-text sw-cut-text', null, 'Edit ' + row.piece);
     mid.appendChild(C.el('span', 'sw-cut-name', row.piece));
     var sub = [];
-    if (row.dims) sub.push(row.dims);
-    if (row.grain) sub.push(row.grain);
-    if (row.note) sub.push(row.note);
+    // A quilt piece is named by its size ('10 1/2" x 4 1/2" rectangle'): no need to print it twice.
+    if (row.dims && row.piece.replace(/\s+/g, '').indexOf(row.dims.replace(/\s+/g, '')) < 0) sub.push(row.dims);
+    if (row.grain && !/^pair$/i.test(row.grain)) sub.push(row.grain);
+    // '(on the fold)' printed as a note is already the pill and the hint.
+    if (row.note && !(row.onFold && /^(?:place\s+|cut\s+)?on\s+(?:the\s+)?fold$/i.test(row.note))) sub.push(row.note);
     if (sub.length) mid.appendChild(C.el('span', 'sw-cut-sub', sub.join(' · ')));
+    // '2 mirrored = 1 pair', 'on the fold: one whole piece per cut'.
+    var hint = S.cutHint(row);
+    if (hint) mid.appendChild(C.el('span', 'sw-cut-hint', hint));
     C.on(mid, 'click', function () { openCutEditor(proj.id, index, function () { rerender(body); }); });
 
-    node.appendChild(chip);
+    node.appendChild(counter);
     node.appendChild(mid);
     if (row.onFold) node.appendChild(C.el('span', 'pill sw-fold', 'on fold'));
     return node;
+  }
+
+  /** The stepper for a big row: −10 −1 +1 +10, none / all. Saved once, on Save. */
+  function openCutCount(projectId, index, rerender, body) {
+    var row = dataOf(Store.project(projectId)).cutting[index];
+    if (!row) return;
+    var v = row.cutCount;
+    var readout = null, fill = null;
+    function show() {
+      readout.textContent = v + ' of ' + row.qty + ' cut';
+      fill.style.width = Math.round((v / row.qty) * 100) + '%';
+    }
+    function bump(dlt) { v = Math.max(0, Math.min(row.qty, v + dlt)); C.fb('tap'); show(); }
+    C.openSheet({
+      title: row.piece,
+      cls: 'sheet-sewing',
+      build: function (b) {
+        readout = C.el('p', 'sw-cutcount-readout');
+        readout.setAttribute('aria-live', 'polite');
+        b.appendChild(readout);
+        var bar = C.el('div', 'bar');
+        fill = C.el('div', 'bar-fill');
+        bar.appendChild(fill);
+        b.appendChild(bar);
+        var hint = S.cutHint(row);
+        if (hint) b.appendChild(C.el('p', 'field-hint', hint));
+        var pad = C.el('div', 'sw-cutcount-pad');
+        [[-10, '−10'], [-1, '−1'], [1, '+1'], [10, '+10']].forEach(function (k) {
+          var bt = C.button('btn ghost sw-cutcount-btn', k[1], (k[0] > 0 ? 'Add ' : 'Take off ') + Math.abs(k[0]));
+          C.on(bt, 'click', function () { bump(k[0]); });
+          pad.appendChild(bt);
+        });
+        b.appendChild(pad);
+        var ends = C.el('div', 'sw-cutcount-ends');
+        var none = C.button('btn ghost', 'None cut');
+        var all = C.button('btn ghost', 'All ' + row.qty + ' cut');
+        C.on(none, 'click', function () { v = 0; C.fb('tap'); show(); });
+        C.on(all, 'click', function () { v = row.qty; C.fb('tap'); show(); });
+        ends.appendChild(none);
+        ends.appendChild(all);
+        b.appendChild(ends);
+        show();
+      },
+      footer: [
+        { text: 'Cancel', cls: 'btn ghost', onClick: function (a) { a.close(); } },
+        { text: 'Save', cls: 'btn primary', onClick: function (a) { a.close(); setCut(projectId, index, v, rerender, body); } }
+      ]
+    });
   }
 
   function afterCut(projectId) {
@@ -1171,12 +1470,62 @@
       addWrap.appendChild(add);
       body.appendChild(addWrap);
 
+      // What goes on the shopping list (05 #5, Wave F): the fabric for your
+      // size first, then the notions not ticked off, then thread.
+      body.appendChild(C.el('div', 'sw-group-head', 'Shopping list'));
+      var inc = shopInclude();
+      var togs = C.el('div', 'sw-shop-toggles');
+      [['fabric', 'Fabric'], ['notions', 'Notions'], ['thread', 'Thread']].forEach(function (t) {
+        var on = inc[t[0]] !== false;
+        var pill = C.button('pill sw-size-chip sw-shop-toggle' + (on ? ' on' : ''), t[1],
+          (on ? 'Leave ' : 'Put ') + t[1].toLowerCase() + (on ? ' off' : ' on') + ' the shopping list');
+        pill.setAttribute('aria-pressed', on ? 'true' : 'false');
+        pill.setAttribute('data-focus-key', 'shop-' + t[0]);
+        C.on(pill, 'click', function () {
+          var next = shopInclude();
+          next[t[0]] = !on;
+          setSetting('shopping', next);
+          C.fb('tap');
+          if (C.preserveFocus) C.preserveFocus(function () { renderNotions(body); });
+          else renderNotions(body);
+        });
+        togs.appendChild(pill);
+      });
+      body.appendChild(togs);
+
+      var lines = S.shoppingList(d, inc);
       var copy = C.button('btn primary block', '📋 Copy shopping list');
       C.on(copy, 'click', function () { copyShoppingList(projectId); });
-      copy.disabled = !d.notions.length;
+      copy.disabled = !lines.length;
       body.appendChild(copy);
-      body.appendChild(C.el('p', 'field-hint', 'Copies everything you have not ticked off, ready for the fabric shop.'));
+      var bits = [];
+      if (inc.fabric !== false && d.fabric.length) {
+        bits.push(d.size.chosen ? 'the fabric for size ' + d.size.chosen
+          : (d.size.sizeLabels.length ? 'the fabric per size (choose your size to list only yours)' : 'the fabric'));
+      }
+      if (inc.notions !== false) bits.push('everything you have not ticked off');
+      if (inc.thread !== false && lines.indexOf('Thread to match') >= 0) bits.push('thread to match');
+      body.appendChild(C.el('p', 'field-hint', lines.length
+        ? 'Copies ' + plural(lines.length, 'line') + ' — ' + listJoin(bits) + '.'
+        : 'Nothing to copy — everything is ticked off or left out.'));
+      if (lines.length) {
+        var pv = document.createElement('details');
+        pv.className = 'sw-shop-preview';
+        var ps0 = document.createElement('summary');
+        ps0.textContent = 'Preview';
+        pv.appendChild(ps0);
+        var ul = C.el('ul', 'sw-shop-lines');
+        lines.forEach(function (l) { ul.appendChild(C.el('li', null, l)); });
+        pv.appendChild(ul);
+        body.appendChild(pv);
+      }
     }
+  }
+
+  function shopInclude() {
+    var s = settings().shopping;
+    return (s && typeof s === 'object') ? { fabric: s.fabric !== false, notions: s.notions !== false, thread: s.thread !== false }
+      : { fabric: true, notions: true, thread: true };
   }
 
   function notionRow(proj, row, index, body, rerender) {
@@ -1208,8 +1557,7 @@
     var p = Store.project(projectId);
     if (!p) return;
     var d = dataOf(p);
-    var lines = [];
-    for (var i = 0; i < d.notions.length; i++) if (!d.notions[i].have) lines.push('• ' + d.notions[i].text);
+    var lines = S.shoppingList(d, shopInclude()).map(function (l) { return '• ' + l; });
     if (!lines.length) { C.toast('You already have everything on this list'); return; }
     var title = (d.meta.patternName || p.name) + ' — still to buy';
     var text = title + '\n' + lines.join('\n');
@@ -1254,6 +1602,18 @@
         if (!d.seamAllowance) {
           b.appendChild(C.el('p', 'muted', 'The pattern did not say. Check the first page of the instructions.'));
           return;
+        }
+        // On a step that mentions a part the exception names, say so first
+        // (05 #15, Wave F) — as a reminder to check, not as a rule.
+        var cur = d.steps.length ? d.steps[Math.min(d.currentStep, d.steps.length - 1)] : null;
+        var rem = cur ? S.saReminder(d, cur.text) : null;
+        if (rem) {
+          var rc = C.el('div', 'card sw-sa-reminder');
+          rc.appendChild(C.el('strong', null, 'This step mentions the ' + rem.part + '.'));
+          rc.appendChild(C.el('p', null, 'The pattern sews those at ' +
+            (rem.mm >= 10 ? (rem.mm / 10) + ' cm' : rem.mm + ' mm') + (rem.inches ? ' (' + rem.inches + '")' : '') +
+            ' — check whether this seam is one of them.'));
+          b.appendChild(rc);
         }
         b.appendChild(C.el('p', 'sw-sa-big', saLabel(d).replace(/^Seam allowance /, '')));
         if (d.seamAllowance.text) b.appendChild(C.el('p', 'muted', d.seamAllowance.text));
@@ -1480,6 +1840,15 @@
                 card.appendChild(C.el('div', 'field-hint sw-fabric-grouped',
                   'The pattern prints this per size group — sizes that share a figure show the same amount.'));
               }
+            } else if (row.groupLabels && row.groupLabels.length === row.rawAmounts.length) {
+              // Per size group, as printed ('Sizes A-H', Samford); the
+              // booklet's size letters are not in its text, so nothing is
+              // spread across sizes it never named (Wave F).
+              var gline = C.el('div', 'sw-fabric-amounts');
+              row.rawAmounts.forEach(function (a, gi) {
+                gline.appendChild(C.el('span', 'chip', 'Sizes ' + row.groupLabels[gi] + ' · ' + a));
+              });
+              card.appendChild(gline);
             } else if (row.line) {
               card.appendChild(C.el('div', 'muted sw-fabric-raw', row.line));
             }
@@ -1651,27 +2020,43 @@
     return n;
   }
 
-  var STORED_HERE = 'Pages are stored on this device only — keep the PDF.';
+  var STORED_HERE = 'Pages are saved with the project on this device and go into a .thready backup (Back up now).';
 
   /**
    * Rasterise the PDF's pages into BlobStore, one at a time so a 40-page
    * booklet never blocks the main thread for long. Resolves with the rows for
    * `craftData.pages` plus the total byte count (used for the toast).
    */
-  function renderPageImages(projectId, handle, onProgress, isCancelled) {
+  /**
+   * The render order: the pages the steps and the cutting layouts point at
+   * first, then the rest in order, so "Stop — keep the pages so far" keeps
+   * the diagrams (05 #10, Wave F). Only the first MAX_PAGES are ever kept.
+   */
+  function pageOrder(numPages, priority) {
+    var total = Math.min(numPages || 0, MAX_PAGES);
+    var order = [], seen = {};
+    (priority || []).forEach(function (n) {
+      if (typeof n === 'number' && n >= 1 && n <= total && !seen[n]) { seen[n] = 1; order.push(n); }
+    });
+    for (var n = 1; n <= total; n++) if (!seen[n]) order.push(n);
+    return order;
+  }
+
+  function renderPageImages(projectId, handle, onProgress, isCancelled, priority) {
     var total = Math.min((handle && handle.numPages) || 0, MAX_PAGES);
     if (!total || !blobsAvailable() || typeof handle.renderPage !== 'function') {
       return Promise.resolve({ pages: [], bytes: 0, total: 0 });
     }
+    var order = pageOrder(handle.numPages, priority);
     var pages = [];
     var bytes = 0;
     // A re-render replaces what was there, so clear the old blobs first.
     var chain = window.BlobStore.deletePrefix(pagePrefix(projectId)).then(null, function () { /* ignore */ });
 
-    function step(n) {
+    function step(n, k) {
       return function () {
         if (isCancelled && isCancelled()) return null;
-        if (onProgress) onProgress(n, total);
+        if (onProgress) onProgress(n, total, k);
         return handle.renderPage(n, { maxWidth: 1400 }).then(function (canvas) {
           return new Promise(function (resolve) {
             var blobKey = pagePrefix(projectId) + n;
@@ -1691,7 +2076,7 @@
         }, function () { /* one bad page must not stop the rest */ });
       };
     }
-    for (var n = 1; n <= total; n++) chain = chain.then(step(n));
+    for (var k = 0; k < order.length; k++) chain = chain.then(step(order[k], k + 1));
 
     return chain.then(function () {
       pages.sort(function (a, b) { return a.n - b.n; });
@@ -1898,7 +2283,7 @@
           return;
         }
         body.appendChild(C.el('p', 'muted',
-          STORED_HERE + ' They are not in your backup file.' +
+          STORED_HERE + ' A plain .json backup leaves them out.' +
           (d.pages.length >= MAX_PAGES
             ? ' Only the first ' + MAX_PAGES + ' pages of a booklet are kept.' : '')));
 
@@ -2053,8 +2438,7 @@
       fills[i].node.classList.toggle('done', frac >= 1);
       fills[i].node.classList.toggle('part', frac > 0 && frac < 1);
     }
-    host.setAttribute('aria-label',
-      cutDone(d) + ' of ' + d.cutting.length + ' pieces cut — open the cutting list');
+    host.setAttribute('aria-label', cutLine(d) + ' — open the cutting list');
   }
 
   /* ================================================================== *
@@ -2065,7 +2449,10 @@
     { id: 'steps', label: 'Steps', count: function (pr) { return pr.steps.length; }, note: function (pr) {
       if (!pr.steps.length) return '';
       var m = pr.steps[0].marker;
-      return m === 'Step' ? '(Step N style)' : (m === '1)' ? '(1) style)' : (m === 'none' ? '(from paragraphs)' : '(1. style)'));
+      var style = m === 'Step' ? 'Step N style' : (m === '1)' ? '1) style' : (m === 'none' ? 'from paragraphs' :
+        (m === 'bullet' ? 'bullets' : (m === 'title' ? 'titled paragraphs' : '1. style'))));
+      var nv = (pr.variations || []).length;
+      return '(' + style + (nv ? ' · + ' + plural(nv, 'optional extra') + ', not counted' : '') + ')';
     } },
     { id: 'cutting', label: 'Cutting list', count: function (pr) { return pr.cuttingList.length; }, note: function (pr) {
       var by = {};
@@ -2314,7 +2701,12 @@
 
     function openGroupPreview(g) {
       var rows = [];
-      if (g.id === 'steps') rows = parsed.steps.map(function (s, i) { return (i + 1) + '. ' + clip(s.text, 90); });
+      if (g.id === 'steps') {
+        rows = parsed.steps.map(function (s, i) { return (i + 1) + '. ' + clip(s.text, 90); })
+          .concat((parsed.variations || []).map(function (s) {
+            return 'Optional' + (s.section ? ' (' + s.section + ')' : '') + ': ' + clip(s.text, 80);
+          }));
+      }
       else if (g.id === 'cutting') rows = parsed.cuttingList.map(function (r) { return r.piece + ' × ' + r.qty + ' · ' + MATERIAL_NAMES[r.material]; });
       else if (g.id === 'notions') rows = parsed.notions.map(function (r) { return r.text; });
       else if (g.id === 'sizes' && parsed.sizes) {
@@ -2413,12 +2805,30 @@
       box.appendChild(C.el('p', 'field-hint', STORED_HERE));
       reviewWrap.appendChild(box);
 
+      // The step and layout pages go first (05 #10).
+      // Construction pages, then the cutting layouts, then the optional extras.
+      var priority = [];
+      if (parsed) {
+        var pagesOf = function (list) {
+          return (list || []).map(function (s) { return s.page; }).filter(function (n) { return typeof n === 'number'; })
+            .sort(function (a, b) { return a - b; });
+        };
+        priority = pagesOf(parsed.steps);
+        try { priority = priority.concat(S.layoutPages(parsed.sourceText)); } catch (e) { /* ignore */ }
+        priority = priority.concat(pagesOf(parsed.variations));
+      }
+      var nPriority = 0;
       window.PdfText.open(pdfFile).then(function (handle) {
         pageHandle = handle;
-        return renderPageImages(projectId, handle, function (n, total) {
-          line.textContent = 'Rendering page ' + n + ' of ' + total + '…';
-          fill.style.width = Math.round(((n - 1) / total) * 100) + '%';
-        }, function () { return cancelled; });
+        var cap = Math.min(handle.numPages || 0, MAX_PAGES);
+        nPriority = priority.filter(function (n, i) { return priority.indexOf(n) === i && n >= 1 && n <= cap; }).length;
+        // Every page is a step page: plain numbering reads better.
+        if (nPriority >= cap) nPriority = 0;
+        return renderPageImages(projectId, handle, function (n, total, k) {
+          line.textContent = (k <= nPriority ? 'Rendering the step pages first — page ' : 'Rendering page ') +
+            n + ' (' + k + ' of ' + total + ')…';
+          fill.style.width = Math.round(((k - 1) / total) * 100) + '%';
+        }, function () { return cancelled; }, priority);
       }).then(function (res) {
         var pages = (res && res.pages) || [];
         if (pages.length) edit(projectId, function (dd) { dd.pages = pages; });
@@ -2505,20 +2915,28 @@
     },
     {
       q: 'What does the cutting counter do?',
-      a: 'Tap the little 0/2 chip each time you cut one of that piece. It counts up and starts again at zero ' +
-        'when you pass the total, the same way the crochet piece counter works.'
+      a: 'Tap the “0 of 2 cut” chip each time you cut one of that piece, and − if you counted one too many. ' +
+        'For a big quilt row (“0 of 56 cut ▸”) the chip opens a counter with −10, +10, all and none. ' +
+        '“2 mirrored” means one pair: a left and a right. The home card counts pieces, not rows.'
+    },
+    {
+      q: 'One step is a whole paragraph. Can I break it up?',
+      a: 'Yes. In the step list tap ✂ beside the step and choose the sentence where the new card should start; ' +
+        'both cards keep the pattern’s step number (“4 · 1/2”, “4 · 2/2”). The same ✂ offers “Merge with the next ' +
+        'card”. Undo puts it back, and importing the pattern again keeps your split.'
     },
     {
       q: 'Can I take the notions list to the shop?',
-      a: 'Yes — open Notions and tap “Copy shopping list”. Everything you have not ticked off goes on your ' +
-        'clipboard, ready to paste into a note or a message.'
+      a: 'Yes — open Notions and tap “Copy shopping list”. The fabric for your size goes first (choose your size ' +
+        'in Size & alterations), then everything you have not ticked off, then thread unless the pattern lists it. ' +
+        'The Fabric / Notions / Thread switches above the button choose what goes on it.'
     },
     {
       q: 'Can I see the diagrams from the booklet?',
       a: 'Yes — when you import the PDF, tick “Keep the pages so you can see the diagrams”. ' +
         'Each page is saved as a picture on your phone, the step card grows a 📄 page chip that opens ' +
-        'the right page, and ⋯ → Pages shows them all. They are stored on this device only and are ' +
-        'not in your backup, so keep the PDF. Leave the box unticked and nothing is stored.'
+        'the right page, and ⋯ → Pages shows them all. They are saved with the project and go into a .thready backup (Back up now); ' +
+        'a plain .json backup leaves them out, so keep the PDF too. Leave the box unticked and nothing is stored.'
     },
     {
       q: 'My pattern is a quilt. Where are the block counters?',
@@ -2592,7 +3010,7 @@
         {
           target: '.sw-mini-cut',
           title: 'The cutting list',
-          body: 'Every piece the pattern asks you to cut, grouped by fabric. Tap the little 0/2 chip as you cut ' +
+          body: 'Every piece the pattern asks you to cut, grouped by fabric. Tap the “0 of 2 cut” chip as you cut ' +
             'each one — no forgetting whether you already cut the second sleeve.'
         },
         {

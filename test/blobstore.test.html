@@ -82,7 +82,8 @@ function blobText(b) {
 function run() {
   group('API surface');
   assertTrue(!!B, 'window.BlobStore exists');
-  ['put', 'get', 'delete', 'keys', 'deletePrefix', 'available', 'usage'].forEach(function (k) {
+  ['put', 'get', 'delete', 'keys', 'deletePrefix', 'available', 'usage',
+    'entries', 'putMany', 'deleteKeys', 'sweep'].forEach(function (k) {
     assertTrue(typeof B[k] === 'function', 'BlobStore.' + k + ' is a function');
   });
   assertEqual(B.DB_NAME, 'stitchkeeper-blobs', 'database is stitchkeeper-blobs');
@@ -213,12 +214,77 @@ function run() {
       return B['delete'](kOther);
     })
     .then(function () {
+      return batchTests();
+    })
+    .then(function () {
       return unavailablePath();
     })
     .then(finish, function (err) {
       log(false, 'unexpected rejection', String(err && err.message ? err.message : err));
       finish();
     });
+}
+
+/* ---------------------------------------------------------------------- *
+ * entries / putMany / deleteKeys / sweep — what the .thready backup and the
+ * orphan sweep (09 #10) are built on.
+ * ---------------------------------------------------------------------- */
+function batchTests() {
+  group('putMany / entries / deleteKeys (the .thready backup, 12 #4)');
+  return B.putMany([
+    { key: PRE + 'proj:b', value: new Blob(['bee'], { type: 'image/png' }) },
+    { key: PRE + 'proj:a', value: 'ay' },
+    { key: '', value: 'no key' },
+    { key: PRE + 'proj:bad', value: null },
+    null
+  ]).then(function (n) {
+    assertEqual(n, 2, 'putMany writes the good items in one go and leaves out the bad ones');
+    return B.putMany([]);
+  }).then(function (n) {
+    assertEqual(n, 0, 'putMany of nothing resolves 0');
+    return B.entries(PRE + 'proj:');
+  }).then(function (list) {
+    assertEqual(list.map(function (e) { return e.key; }).join('|'), PRE + 'proj:a|' + PRE + 'proj:b',
+      'entries(prefix) gives every key under the prefix, sorted');
+    assertTrue(list[1].blob instanceof Blob && list[1].blob.type === 'image/png', 'each with its Blob and type');
+    return blobText(list[0].blob);
+  }).then(function (t) {
+    assertEqual(t, 'ay', 'and its bytes');
+    return B.entries(PRE + 'zzz');
+  }).then(function (list) {
+    assertEqual(list.length, 0, 'entries on an unused prefix is empty');
+    return B.deleteKeys([PRE + 'proj:a', PRE + 'proj:never', '']);
+  }).then(function (n) {
+    assertEqual(n, 2, 'deleteKeys counts the non-empty keys it was given');
+    return B.keys(PRE + 'proj:');
+  }).then(function (list) {
+    assertArray(list, [PRE + 'proj:b'], 'and removes exactly those');
+    return B.deletePrefix(PRE);
+  }).then(function () {
+    group('sweep(liveIds) — orphaned page images (09 #10)');
+    // Our own namespace (PRE) stands in for 'p:', so the sweep can never
+    // reach the app's real images in this origin.
+    return B.putMany([
+      { key: PRE + 'live:chartpage:0', value: 'keep me' },
+      { key: PRE + 'live:chartpage:1', value: 'keep me too' },
+      { key: PRE + 'gone:page:1', value: 'orphan 1' },
+      { key: PRE + 'gone:page:2', value: 'orphan 22' },
+      { key: PRE + 'nocolon', value: 'not the convention' }
+    ]);
+  }).then(function () {
+    return B.sweep([], { prefix: PRE });
+  }).then(function (r) {
+    assertEqual(r.count, 0, 'an empty live list sweeps nothing (a failed load is not "no projects")');
+    return B.sweep(['live'], { prefix: PRE });
+  }).then(function (r) {
+    assertEqual(r.count, 2, 'sweep removes the two images of the project that is gone');
+    assertEqual(r.bytes, 'orphan 1'.length + 'orphan 22'.length, 'and reports their bytes');
+    return B.keys(PRE);
+  }).then(function (list) {
+    assertArray(list, [PRE + 'live:chartpage:0', PRE + 'live:chartpage:1', PRE + 'nocolon'],
+      'the live project\'s images and a key outside the convention are untouched');
+    return B.deletePrefix(PRE);
+  });
 }
 
 /* ---------------------------------------------------------------------- *
@@ -267,6 +333,18 @@ function unavailablePath() {
     })
     .then(function (u) {
       assertEqual(u === null, wasHidden, 'usage resolves null instead of rejecting');
+      return B.entries('x:');
+    })
+    .then(function (list) {
+      assertTrue(Array.isArray(list) && list.length === 0, 'entries resolves [] instead of rejecting');
+      return B.putMany([{ key: 'x:1', value: 'v' }]);
+    })
+    .then(function (n) {
+      assertEqual(n, wasHidden ? 0 : 1, 'putMany resolves 0 instead of rejecting');
+      return B.deleteKeys(['x:1']);
+    })
+    .then(function (n) {
+      assertEqual(n, wasHidden ? 0 : 1, 'deleteKeys resolves 0 instead of rejecting');
     })
     .then(function () {
       // Put the browser back the way we found it.

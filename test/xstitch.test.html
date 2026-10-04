@@ -1462,6 +1462,8 @@ function fakeDoc(pages) {
           return Promise.resolve({ fnArray: fn, argsArray: args });
         },
         getTextContent: function () { return Promise.resolve({ items: p.items || [] }); },
+        view: p.view || [0, 0, 612, 792],
+        rotate: p.rotate || 0,
         cleanup: function () { /* no-op */ }
       });
     }
@@ -1641,12 +1643,30 @@ var gridTests = X.extractGrid(fakeDoc(chartPages()), null, { key: synthKey })
     assertEqual(seen, counts, 'the cells themselves hold the right palette indices');
     assertEqual(r.cells[0], 1, 'the top-left cell is the red block');
     assertEqual(r.cells[GW * GH - 1], 0, 'and the bottom-right is the black one');
+    /* Wave F (04 #3): which page printed which stitches. */
+    assertEqual(r.regions.map(function (g) { return [g.page, g.region.x, g.region.y, g.region.w, g.region.h]; }),
+      [[2, 0, 0, TW, TH], [3, TW, 0, TW, TH], [4, 0, TH, TW, TH], [5, TW, TH, TW, TH]],
+      'regions: each chart page records the stitches it prints (page 1 is the cover)');
+    var g0 = r.regions[0].region;
+    assertClose(g0.fx, PX0 / 612, 0.002, 'and where they sit on the page: left edge');
+    assertClose(g0.fw, TW * CELL / 612, 0.002, 'width');
+    assertClose(g0.fy, (792 - (PY0 + TH * CELL)) / 792, 0.002, 'top edge (PDF y grows upwards)');
+    assertClose(g0.fh, TH * CELL / 792, 0.002, 'height');
+    var regPages = [{ n: 0, region: null }].concat(r.regions.map(function (g) {
+      return { n: g.page - 1, region: g.region };
+    }));
+    assertEqual(X.pageForCell(regPages, 25, 3), 2, 'pageForCell: stitch (25, 3) is on the top-right page');
+    assertEqual(X.pageForCell(regPages, 5, 20), 3, 'and (5, 20) on the bottom-left page');
+    assertEqual(X.pageForCell(regPages, 90, 3), 2, 'a stitch off the chart goes to the nearest page');
+    assertEqual(X.pageForCell([{ region: null }], 1, 1), -1, 'and with no regions there is no answer');
     return X.extractGrid(fakeDoc(chartPages({ quarters: true })), null, { key: synthKey });
   })
   .then(function (r) {
     assertEqual(r.ok, true, 'a chart drawn as 2x2 quarter squares reads too');
     assertEqual([r.w, r.h], [GW, GH], 'and the quarter squares are merged back into stitches');
     assertEqual(r.filled, GW * GH, 'with the same number of cells');
+    assertClose(r.regions[0].region.fw, TW * CELL / 612, 0.002,
+      'the quarter-square tile covers the same part of the page');
     return X.extractGrid(fakeDoc(chartPages({ noRulers: true })), null,
       { key: synthKey, design: { w: GW, h: GH } });
   })
@@ -2456,6 +2476,7 @@ group('parseKey: wave E ground-truth fixes (xstitch-audit)');
     'a key read across its columns is put back in column order, footers and all');
   assertEqual(kg.entries[7].stitchCount, 905, 'the glued footer leaves the count alone');
   assertEqual(kg.entries[11].symbol, '♪', 'a surviving symbol stays with its row');
+  assertEqual(kg.keyOrder, 'repaired', 'and parseKey says the column repair was used');
 
   /* 'Stitches Length' glued onto the row. */
   var len = X.parseKey('X BS DMC Name:\n453 Shell Grey LT 132 28.8 in.\n310 Black 79 20.2 in.');
@@ -2477,6 +2498,124 @@ group('parseKey: wave E ground-truth fixes (xstitch-audit)');
 
   assertEqual(X.flossFor('DMC', '158').name, 'Cornflower Blue Medium Very Dark',
     'DMC 158 is spelled "Blue" (the floss list shown in the app had "Blu")');
+})();
+
+/* =====================================================================
+ * Wave F: the newspaper-column repair is a fallback only
+ * ===================================================================== */
+(function () {
+  group('parseKey: wave F — the extractor\'s key order wins when it has one');
+  /* Since wave E the extractor hands a KG-Chart key over column by column,
+     one "code (N ct)" per line. That order is the printed one. */
+  var colText = 'Color Table (DMC)\nCross Stitch\n310 (21207 ct)\n939 (7398 ct)\n815 (1583 ct)\n' +
+    '500 (18643 ct)\n798 (2003 ct)\n3810 (1188 ct)\n3760 (2599 ct)\n3756 (905 ct)';
+  var col = X.parseKey(colText);
+  assertEqual(col.entries.map(function (e) { return e.code; }),
+    ['310', '939', '815', '500', '798', '3810', '3760', '3756'],
+    'a key already in column order comes out in exactly that order');
+  assertEqual(col.keyOrder, 'extractor', 'and keyOrder says the extractor\'s order was used');
+  var lines = colText.split('\n');
+  assertEqual(X._key.expandCountColumns(lines), lines, 'expandCountColumns leaves such a key untouched');
+
+  /* One glued line inside an otherwise one-per-line key used to drag every
+     following row into a two-column "run" and push its second cell to the end. */
+  var glued = X.parseKey('Color Table (DMC)\n310 (21207 ct)\n939 (7398 ct) 815 (1583 ct)\n' +
+    '500 (18643 ct)\n798 (2003 ct)\n3810 (1188 ct)');
+  assertEqual(glued.entries.map(function (e) { return e.code; }),
+    ['310', '939', '815', '500', '798', '3810'],
+    'a single glued line is split in place, not re-ordered as if read across');
+  assertEqual(glued.keyOrder, 'extractor', 'and that is still the extractor\'s order');
+  assertEqual(X.parseKey('').keyOrder, 'extractor', 'keyOrder is always present');
+})();
+
+(function () {
+  group('Wave F: chart position, centre marks, remembered views, page regions');
+  /* Centre arrows the way a printed chart puts them. */
+  assertEqual(X.centreOffset(4, 10), { k: 1, side: 'before' }, 'even width: the stitch left of the centre line is 1 left');
+  assertEqual(X.centreOffset(5, 10), { k: 1, side: 'after' }, 'and the stitch right of it is 1 right');
+  assertEqual(X.centreOffset(0, 10), { k: 5, side: 'before' }, 'the first of ten is 5 left of centre');
+  assertEqual(X.centreOffset(9, 10), { k: 5, side: 'after' }, 'the last is 5 right');
+  assertEqual(X.centreOffset(4, 9), { k: 0, side: 'centre' }, 'odd width: the middle stitch IS the centre');
+  assertEqual(X.centreOffset(8, 9), { k: 4, side: 'after' }, 'and the last of nine is 4 right of it');
+  assertEqual(X.centreOffset(0, 1), { k: 0, side: 'centre' }, 'a one-stitch chart is all centre');
+
+  var pos = X.positionLabel(133, 56, 224, 288);
+  assertEqual(pos.grid, 'col 134 · row 57', 'positionLabel counts from the top-left, 1-based like the rulers');
+  assertEqual(pos.centre, '22 right · 88 up from centre', 'and from the centre arrows (224 wide, 288 high)');
+  assertEqual(pos.block, 'block 14,6', 'and names the 10×10 block');
+  assertEqual(X.positionLabel(4, 4, 9, 9).centre, 'the centre stitch', 'the middle of an odd chart is "the centre stitch"');
+  assertEqual(X.positionLabel(4, 0, 9, 9).centre, 'on the centre column · 4 up from centre',
+    'on the centre column, four rows up');
+  assertEqual(X.positionLabel(-5, 999, 10, 10).grid, 'col 1 · row 10', 'out-of-range positions are clamped');
+
+  assertEqual(X.rulerStep(8), 10, 'rulers number every 10 at 8 px a stitch');
+  assertEqual(X.rulerStep(2), 20, 'every 20 at 2 px');
+  assertEqual(X.rulerStep(1.2), 50, 'every 50 at 1.2 px (a 224-wide chart fitted to a phone)');
+  assertEqual(X.rulerStep(0.3), 100, 'every 100 at 0.3 px');
+
+  /* Next stitch of this colour, near where the stitcher is. */
+  var cells = [0, 1, 1, 0,
+               1, 0, 0, 1,
+               0, 0, 1, 1];
+  assertEqual(X.nearestCellOf(cells, 4, 3, 1, 0, 2, null), 4, 'nearestCellOf: the nearest stitch of the colour');
+  assertEqual(X.nearestCellOf(cells, 4, 3, 1, 3, 2, null), 11, 'from the other corner, the other one');
+  assertEqual(X.nearestCellOf(cells, 4, 3, 1, 3, 2, function (i) { return i === 11 || i === 10; }), 7,
+    'stitches already done are skipped');
+  assertEqual(X.nearestCellOf(cells, 4, 3, 5, 0, 0, null), -1, 'a colour with no stitches gives -1');
+
+  /* The tap button counts where the stitcher is (04 #15): a 30 x 20 chart
+     with colour 0 everywhere except a colour-1 patch in block (2,1). */
+  var big = [], bi;
+  for (bi = 0; bi < 30 * 20; bi++) big.push(0);
+  [[21, 12], [25, 12], [22, 15], [3, 2]].forEach(function (p) { big[p[1] * 30 + p[0]] = 1; });
+  var doneSet = {};
+  function isDone(i) { return !!doneSet[i]; }
+  assertEqual(X.nextStitchNear(big, 30, 20, 1, 24, 18, isDone), 12 * 30 + 21,
+    'nextStitchNear: inside the crosshair\'s block, the first one in reading order');
+  doneSet[12 * 30 + 21] = true;
+  assertEqual(X.nextStitchNear(big, 30, 20, 1, 21, 12, isDone), 12 * 30 + 25, 'then the next along the row');
+  doneSet[12 * 30 + 25] = true;
+  doneSet[15 * 30 + 22] = true;
+  assertEqual(X.nextStitchNear(big, 30, 20, 1, 22, 15, isDone), 2 * 30 + 3,
+    'a finished block moves on to the block of the nearest one left, not back to row 1');
+  assertEqual(X.nextStitchNear(big, 30, 20, 0, 29, 19, isDone), 10 * 30 + 20,
+    'colour 0 from the bottom-right corner starts at the top-left of that block');
+  doneSet[2 * 30 + 3] = true;
+  assertEqual(X.nextStitchNear(big, 30, 20, 1, 0, 0, isDone), -1, 'and -1 when the colour is finished');
+
+  /* current.view / tool / layer survive normalize, and junk does not. */
+  var chartData = {
+    palette: [{ code: '310' }],
+    chart: { w: 10, h: 10, cells: (function () { var c = []; for (var i = 0; i < 100; i++) c.push(0); return c; })() }
+  };
+  var kept = X.normalize(Object.assign({}, chartData, {
+    current: { view: { z: 14.25, x: 6.5, y: 3.25 }, tool: 'block', layer: 'back' }
+  }), null);
+  assertEqual(kept.current.view, { z: 14.25, x: 6.5, y: 3.25 }, 'current.view (zoom and centre) is kept');
+  assertEqual([kept.current.tool, kept.current.layer], ['block', 'back'], 'and so are the tool and the layer');
+  var junk = X.normalize(Object.assign({}, chartData, {
+    current: { view: { z: -1, x: 'a' }, tool: 'laser', layer: 'glitter' }
+  }), null);
+  assertEqual(junk.current.view, null, 'a broken view becomes null (open at Fit)');
+  assertEqual([junk.current.tool, junk.current.layer], ['tap', 'cross'], 'unknown tools and layers fall back to Tap / Crosses');
+  var far = X.normalize(Object.assign({}, chartData, { current: { view: { z: 500, x: 99, y: -4 } } }), null);
+  assertEqual(far.current.view, { z: X.VIEW_MAX_Z, x: 10, y: 0 }, 'zoom is capped and the centre clamped to the chart');
+  assertEqual(X.normalize(null, null).current.view, null, 'a new project has no saved view');
+
+  var withPages = X.normalize({
+    pages: [
+      { n: 1, blobKey: 'k1', region: { x: 0, y: 0, w: 53, h: 77, fx: 0.1, fy: 0.12, fw: 0.8, fh: 0.75 } },
+      { n: 2, blobKey: 'k2', region: { x: 53, y: 0, w: 53, h: 77, fx: 2, fy: 0, fw: 1, fh: 1 } },
+      { n: 3, blobKey: 'k3', region: { x: -1, w: 0 } },
+      { n: 4, blobKey: 'k4' }
+    ]
+  }, null);
+  assertEqual(withPages.pages[0].region, { x: 0, y: 0, w: 53, h: 77, fx: 0.1, fy: 0.12, fw: 0.8, fh: 0.75 },
+    'a page keeps the chart region it prints');
+  assertEqual([withPages.pages[1].region.x, withPages.pages[1].region.fx], [53, null],
+    'fractions that fall off the page are dropped, the cell range stays');
+  assertEqual([withPages.pages[2].region, withPages.pages[3].region], [null, null],
+    'a broken or missing region is null');
 })();
 
 /* =====================================================================

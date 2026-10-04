@@ -18,7 +18,7 @@
                                  "clear the service worker" ritual, ever
      any host    /tmp-pdf/ /test/  never touched by the cache at all
 */
-const CACHE_VERSION = 'he6cf2977ca';
+const CACHE_VERSION = 'h68fba309ae';
 const CACHE_NAME = 'stitchkeeper-' + CACHE_VERSION;
 
 const PRECACHE_URLS = [
@@ -44,6 +44,7 @@ const PRECACHE_URLS = [
   // Crafts (docs/CRAFTS.md). A craft file that has not landed yet simply fails
   // its own cache.add above and the rest of the install carries on.
   './js/blobstore.js',
+  './js/zip.js',
   './js/xstitch.js',
   './js/xstitch-photo.js',
   './js/sewing.js',

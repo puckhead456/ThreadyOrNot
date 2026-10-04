@@ -45,7 +45,8 @@ State = {
     backupNagSnoozedUntil: number,  // ms; "Not now" sets now + 14 days
     touchDays: string[],            // 'YYYY-MM-DD' per day work happened, newest last, cap 60
     persistGranted: boolean,        // navigator.storage.persist() said yes
-    crafts: { [craftId]: object },  // opaque per-craft settings
+    crafts: { [craftId]: object },  // opaque per-craft settings. Crochet's bag holds
+                                    // `diagramFollow` (wave F: absent = on, see "Live 3D diagram")
   },
   templates: Template[],
   projects: Project[],
@@ -67,6 +68,9 @@ Project = {
   activePartId: string,
   checklist: { id: string, text: string, done: boolean }[],   // assembly checklist
   history: { ts: number, partId: string, partName: string, row: number }[], // one entry per completed row, newest last, cap 500
+  sizes: string[]|null,             // the document's size names (['XS','S','M',…]), shared by all parts
+  size: { index: number, label: string }|null,   // wave F: the size the maker picked ONCE for the
+                                    // whole project (see "Size once"). null = never asked
 }
 
 Part = {
@@ -77,7 +81,14 @@ Part = {
   row: number,                      // current row/round number. 0 = not started. "row 5" means 5 rows completed
   stitch: number,                   // stitches completed in the current (in-progress) row
   targetRows: number|null,          // total rows for this part; enables progress bar
-  repeat: { enabled: boolean, startRow: number, endRow: number, times: number },
+  repeat: { enabled: boolean, startRow: number, endRow: number, times: number,
+            mode: 'times'|'untilRows', untilRows: number|null },   // wave F: "until there are a
+                                    // total of 25 Rows" is kept as untilRows (old saves are
+                                    // 'times'); `times` is kept in step (Store.repeatTimes =
+                                    // whole blocks between startRow and untilRows) so every
+                                    // reader of `times` is unchanged
+  makeCountInferred?: true,         // wave F: present only when the parser inferred the make-count
+                                    // from the assembly text; dropped when the owner changes it
   alerts: number[],                 // stitch numbers to flash+buzz at within a row, e.g. [40, 80]
   placementNotes: string,           // 'eyes between rnd 8-9, 6 sts apart'
   patternText: string,              // pasted pattern for this part; parsed by Patterns
@@ -123,7 +134,7 @@ Part = {
 - `Store.untapRow` → the literal inverse of the row tap (13 #4): `row -= 1`, `stitch = 0`, popping this part's last history entry, and returning `{ event: 'row', row, piecesDone }`. Off row 0 with `piecesDone > 0` it steps back into the previous piece (`piecesDone -= 1`, `row = targetRows`); out of the terminal state it steps back to the last row of the last piece. At row 0 of the first piece it clears a part-worked `stitch` if there is one, and otherwise returns `{ event: 'none' }` and changes nothing — in particular it does not eat a history entry, and the app makes no sound and no announcement.
 - `Store.resetPart` → row 0, stitch 0 (keeps piecesDone).
 - `Store.undo()` → every mutating call above first pushes a deep-copy snapshot of the project onto an undo stack (cap 50, in memory only). `undo()` pops and restores. Returns boolean.
-- Repeat readout: if `repeat.enabled`, `len = endRow - startRow + 1`, current row number being worked is `r = row + 1`. If `r >= startRow && r < startRow + len * times`: `k = floor((r - startRow) / len) + 1` (which repeat, 1-based), `j = ((r - startRow) % len) + 1` (row within repeat), `patternRow = startRow + j - 1`. Else not inside repeat; `patternRow = r`. `Store.repeatInfo(part)` returns `{ inside, k, j, len, times, patternRow, workingRow: r }`. **Pattern line highlighting and stitch targets always use `patternRow`**, so a repeated section highlights correctly.
+- Repeat readout: if `repeat.enabled`, `len = endRow - startRow + 1`, current row number being worked is `r = row + 1` (`times` is `Store.repeatTimes(repeat)`, which for `mode: 'untilRows'` is `floor((untilRows − startRow + 1) / len)`, at least 1). If `r >= startRow && r < startRow + len * times`: `k = floor((r - startRow) / len) + 1` (which repeat, 1-based), `j = ((r - startRow) % len) + 1` (row within repeat), `patternRow = startRow + j - 1`. Else not inside repeat; `patternRow = r`. `Store.repeatInfo(part)` returns `{ inside, k, j, len, times, patternRow, workingRow: r }`. **Pattern line highlighting and stitch targets always use `patternRow`**, so a repeated section highlights correctly.
 - Timer: `Store.toggleTimer(projectId)`. `Store.elapsedMs(project)` = `totalMs + (runningSince ? now - runningSince : 0)`. Only one project's timer runs at a time.
 - `Store.save()` writes to localStorage (debounced ~150ms is fine; must also flush on `visibilitychange`/`pagehide`). `Store.load()` on boot; if missing, create default state with NO projects (the home screen shows an empty-state).
 - `Store.exportJSON()` → string of the whole state, and stamps `settings.lastBackupAt` (taking a backup is what resets the nag). `Store.importJSON(str, choices?)` → applies a backup, `choices` being `{projects:{[id]:'skip'|'replace'|'keepBoth'}, templates:{…}}`; anything not named defaults to `'replace'`. Returns how many projects were applied. Throws an `Error` with `code === 'newerVersion'` for a file from a later version. `Store.previewImport(str)` answers what it *would* do without writing.
@@ -136,8 +147,8 @@ The wave-1 data-safety bundle (13 #1–#3, 09 #2/#3/#4, 12 #1/#3). Nothing here 
 - **Unreadable state is quarantined, not overwritten.** An unparseable read is copied to `<KEY>.corrupt.<ts>` and every write is refused until `Store.acknowledgeCorrupt()`. `Store.isCorrupt()`, `corruptSnapshot()`, `corruptKey()`. **App boots into a full-screen locked sheet** "Your saved projects could not be read" with **Download the copy** (the snapshot as `<corruptKey>.json`) and **Start fresh**.
 - **Pre-flight.** `Store.wouldExceedQuota(bytes)`. App calls it before a backup import (`file.size * 2`) and before reading a PDF (the same bound capped at 1 MB, because only the extracted *text* is stored, never the file).
 - **Two tabs.** Every write bumps `state.revision` and stamps `state.writerId`. A `storage` event carrying a foreign writer is adopted silently when nothing local is in flight (`Store.onExternalChange` → App re-renders and toasts "Updated from another tab"), and otherwise raises `Store.conflict()` / `Store.onConflict` — auto-saving stops and **App shows a sticky bar** "This app is open in another tab and both made changes." with **Keep mine** / **Use the other tab's** → `Store.resolveConflict('keepMine'|'takeTheirs')`.
-- **Persistent storage + the backup nag.** `Store.requestPersist()` → `Promise<boolean>`, called by App **once per session after the first completed row** (a gesture, not cold boot). `Store.backupStatus()` → `{due, days, lastBackupAt, snoozedUntil, persistGranted}`; `due` is "5+ separate days of work since the last backup, not snoozed, at least one project". App puts a one-line dismissible bar at the top of the home list — "Your work lives only on this phone. Save a backup →" with **Download backup** and **Not now** (`Store.snoozeBackupNag(14)`) — and appends "Add to Home Screen keeps it safer." on iOS Safari outside standalone mode.
-- **Import preview.** Settings → Import backup caps the file at 25 MB, then `previewImport` drives a sheet: a counts line "N new · M will be replaced · K identical · J older" and a row per non-identical project and template (name, craft, both dates) with a segmented **Skip / Replace / Keep both** (a brand-new item gets **Skip / Import** instead). Defaults: new → import, file-is-newer → replace, identical or local-is-newer → skip. Keep-both clones get fresh ids and " (from backup)" — and no page images, which the sheet says. `importJSON` snapshots the whole state first, so the result toast offers **Undo import** (`Store.canUndoImport()` / `Store.undoImport()`) for the rest of the session.
+- **Persistent storage + the backup nag.** `Store.requestPersist()` → `Promise<boolean>`, called by App **once per session after the first completed row** (a gesture, not cold boot). `Store.backupStatus()` → `{due, days, lastBackupAt, snoozedUntil, persistGranted}`; `due` is "5+ separate days of work since the last backup, not snoozed, at least one project". App puts a one-line dismissible bar at the top of the home list — "Your work lives only on this phone. Save a backup →" with **Back up now** (wave F: it writes the `.thready` file, `exportJSON` stamps `lastBackupAt` and the bar re-renders away) and **Not now** (`Store.snoozeBackupNag(14)`) — and appends "Add to Home Screen keeps it safer." on iOS Safari outside standalone mode.
+- **Import preview.** Settings → Import backup (a `.thready` or a `.json`, see "Backup file" below) caps the file at 50 MB (`Store.BACKUP_FILE_MAX_BYTES`, checked before a byte is read; it was App's 25 MB for JSON until wave F), then `previewImport` drives a sheet: a counts line "N new · M will be replaced · K identical · J older" and a row per non-identical project and template (name, craft, both dates, and "· 1 page image" when the file carries some) with a segmented **Skip / Replace / Keep both** (a brand-new item gets **Skip / Import** instead). Defaults: new → import, file-is-newer → replace, identical or local-is-newer → skip. Keep-both clones get fresh ids and " (from backup)", and since wave F **their own copy of the page images** (the file's, else the local original's), so deleting one twin never strips the other's pages. `importJSON` snapshots the whole state first, so the result toast offers **Undo import** (`Store.canUndoImport()` / `Store.undoImport()`) for the rest of the session; the undo takes the imported images back out and restores any local ones the import replaced.
 - Templates (`Store.templates`): array of `{ id, name, emoji, countMode, parts: [{name, makeCount}], checklist: string[] }`:
   - `blank` "Single piece" 🧶 rows, parts [Main]
   - `blob` "Blobby animal" 🐑 rounds, parts [Body, Head, Ears x2, Legs x4, Tail], checklist [Stuff body, Stuff head, Sew head to body, Attach safety eyes, Sew ears, Sew legs, Sew tail, Embroider face]
@@ -145,6 +156,91 @@ The wave-1 data-safety bundle (13 #1–#3, 09 #2/#3/#4, 12 #1/#3). Nothing here 
   - `garment` "Garment" 🧥 rows, parts [Front, Back, Sleeves x2], checklist [Block pieces, Seam shoulders, Set in sleeves, Seam sides, Weave in ends]
   - `blanket` "Blanket / scarf" 🧣 rows, parts [Main], checklist [Weave in ends, Add border, Block]
 - `Store.createProject({ name, emoji, templateId, groupSize, countMode })` → applies template.
+
+### Backup file (`.thready`, wave F; 12 #4–#5)
+
+A backup is one zip file, `thready-or-not-backup-YYYY-MM-DD.thready`, written by **📥 Back up now**
+in Settings → Backup (under "Last backup: today / yesterday / N days ago / never", with **📤 Share
+backup** only where the browser can share a zip, and **📂 Import backup**), by the home nag and by
+the quota banner. Every project's ⋯ menu has **📦 Send this project** (one-project file,
+`<project-name>-YYYY-MM-DD.thready`), **📂 Open a project file** (the same import) and **📤 Back up
+everything**. The full contract is a block comment in the backup section of `js/store.js`;
+details and the test list are in `docs/wave-f/shell.md`.
+
+```
+backup.json                  exactly Store.exportJSON() (a one-project file: the same format with one
+                             project); importable on its own, forever
+manifest.json                { format:'thready', formatVersion:1, scope:'all'|'project', app, appVersion,
+                               writtenAt, backup:'backup.json', backupVersion,
+                               counts:{projects, templates, images}, entries:[{path, key, type, bytes}] }
+README.txt                   what this is, in plain words
+pages/<projectId>/<n>.<ext>  BlobStore bytes as stored (jpg/png/webp/gif, else .bin); the manifest maps
+                             each path to its BlobStore key
+```
+
+- **Writing.** Every entry is STORED (no compression) with CRC-32 and UTF-8 names. The output Blob
+  is built from Blob parts and each image is read once for its CRC, so a 40-page chart never sits
+  in one ArrayBuffer. A full backup stamps `lastBackupAt` (through `exportJSON`); a one-project file
+  does not (it is not a backup). Without `window.Zip`, or when the build fails, the buttons write the
+  plain JSON file as before.
+- **Reading.** The file is sniffed by its bytes (`PK\3\4`), never by name or MIME type (the iOS
+  picker has no `accept` filter, because iOS greys out an unknown extension). `backup.json` is the
+  truth. A missing manifest or `pages/` folder, a damaged image, an image for a project not in the
+  file and a stray entry are skipped and counted, never errors; without a manifest line an image's
+  key is worked out from the project's own craftData; the shallowest `backup.json` sets the root, so
+  a zip unpacked and re-zipped one folder down still works; DEFLATE entries are inflated with
+  `DecompressionStream` where the browser has it. Refused outright: no `backup.json`
+  (`noBackupJson`), a damaged one (`damaged`), a manifest `formatVersion` above
+  `THREADY_FORMAT_VERSION` (`newerVersion`), and anything over 50 MB (`tooBig`). The quota pre-flight
+  measures `backup.json`'s text, not the zip, because the images go to IndexedDB.
+- **Which images go where** (`Store.importPages`, after `importJSON`): replace/new with images in
+  the file → the local `p:<id>:*` images are copied to `preimport:<key>` (deleted only once the copy
+  succeeded) and the file's are written; replace/new with none in the file → the local images stay
+  (a same-phone restore, or a JSON backup); Keep both → `importJSON` rewrites the clone's craftData
+  blob keys to its new id and the images are written (or copied from the local original) under it;
+  Skip → nothing. The page snapshot lives in BlobStore (`preimport:*` plus `preimport:__list`), so it
+  survives a reload like the localStorage one; `undoImport()` stays synchronous and queues the page
+  undo; a new import clears an older page snapshot first; all page work runs on one serial queue.
+- **Housekeeping.** A boot-time sweep (`BlobStore.sweep`, 8 s in, on `requestIdleCallback`) deletes
+  `p:<id>:*` images whose id nothing references — not the live list, any undo-stack entry, the
+  pre-import snapshot or the raw state on disk (another tab's new project). It does nothing on an
+  empty list, a corrupt store or a two-tab conflict, never touches keys outside `p:<id>:` or the
+  `preimport:` snapshot, and logs rather than toasts.
+- **Known gap.** Import still ignores the file's `settings` block (pinned in
+  `test/backup.test.html`), so themes and the per-craft bags are written into a backup but not
+  restored from it.
+
+```js
+window.Zip   // js/zip.js, loaded after blobstore.js and before app.js; precached
+Zip.write(entries, { date, type }) → Promise<Blob>      // entries: [{ name, data: Blob|bytes|string }]
+Zip.writeSync(entries, opts) → Uint8Array               // no Blobs
+Zip.read(bytes) → Promise<{ entries: [{ name, size, method, crc, data, crcOk, error, dir }] }>
+Zip.parse(bytes)                                         // sync
+Zip.isZip(bytes), Zip.crc32(bytes, [crc]), Zip.utf8(str), Zip.fromUtf8(bytes)
+// errors carry .code: 'notZip' | 'badZip' | 'zip64' | 'encrypted' | 'tooBig' | 'badName' | 'badData';
+// one bad entry never throws: it comes back with crcOk:false or error 'compressed'|'damaged'|'unsupported'
+
+Store.exportThready({ projectId?, appVersion? }) → Promise<{ blob, scope, projects, images, bytes }>
+Store.exportProjectJSON(id) → string|null
+Store.readBackupFile(File|Blob|ArrayBuffer|Uint8Array|string)
+  → Promise<{ kind: 'json'|'thready', scope, text, pages: [{ projectId, key, path, type, bytes }],
+              skipped, manifest }>
+Store.previewImport(text, pages?)                        // rows gain `pages` (count)
+Store.importPages(pages) → Promise<{ written, copied, skipped }>
+Store.pagesIdle() → Promise                              // the queued page work (and page undo) is done
+Store.backupFileProblem(bytes) → string|null             // the 50 MB message
+Store.referencedProjectIds() → string[]                  // what the sweep must keep
+Store.BACKUP_FILE_MAX_BYTES                              // 50 MB
+Store.THREADY_FORMAT_VERSION                             // 1
+
+BlobStore.entries(prefix) → Promise<[{ key, blob }]>     // one read transaction, sorted
+BlobStore.putMany([{ key, value }]) → Promise<count>     // one transaction, all or nothing
+BlobStore.deleteKeys(keys) → Promise<count>
+BlobStore.sweep(liveIds, { prefix = 'p:' }) → Promise<{ count, bytes }>
+```
+`importJSON` keeps its signature and return value; it records each project's outcome for
+`importPages` and rekeys Keep-both clones. `App.__importBackupFile(file)` and
+`App.__buildBackupFile(projectId?)` are QA hooks, like `__forceSheetFallback`.
 
 ## Patterns API (`window.Patterns`, pure, no DOM)
 
@@ -207,7 +303,7 @@ Search, in order: (1) after a pipe `|` anywhere in the line: first number or mul
 When a row line has no explicit count, evaluate the instruction against the previous row's count (previous line in the same section with a count; setup counts as previous). Tokenize on commas/semicolons/`and`; groups in `()`, `[]`, or `* ... *`, with multipliers `x6`, `×6`, `*6`, `6 times`, `repeat 6 times`, `rep from * 5 more times` (= 6 total), or `repeat around` / `around` / `to end` / `across` (fill from previous count). Stitch vocabulary (produced, consumed): `sc`,`hdc`,`dc`,`tr`,`dtr`,`slst`/`sl st` (1,1); `puff`,`bobble`,`popcorn`,`cluster`,`shell` (1,1); `inc`,`increase`,`2 sc in next`,`2sc in same` (2,1); `dec`,`decrease`,`sc2tog`,`invdec`,`inv dec` (1,2); `3 sc in next st` (3,1); `sk`/`skip` (0,1); `ch N`,`turn`,`join`,`fasten off`,`flo/blo` prefixes, `mr`/`magic ring` (0,0). Counts: `6 sc`, `6sc`, `sc 6`, `sc in next 6 sts`, `sc in each of next 6 ch`, `2sc` → 2. Specials: `N sc in mr`, `Nsc in mr`, `N st in mr`, `mr N`, `magic ring N`, `N sc in magic ring/circle`, `MR with N sc` → N. `inc in each st`, `inc around`, `inc all around` → prev×2. `sc in each st`, `sc around`, `sc in each st around`, `sc all around`, `blo sc in each st across`, `sc across`, `work even` → prev. `dec in each st`, `dec all around`, `dec around` → prev/2. `X, Y, repeat around` (no brackets, trailing "repeat around"/"rep around"/"around") → treat the comma list before "repeat" as the group. Group filling: groups = floor(prev / consumedPerGroup); leftover stitches (prev mod consumed) each produce 1. `(inc, sc) x5, inc` → 5×3+2 = 17. `Ch1, turn, (inc, 2sc) x5, inc, sc` → 5×4+2+1 = 23. Typos to tolerate: `inx` → inc, `eact` → each. If anything in the line is not understood and no fill-from-previous rule applies → computed null (never guess). Lines whose only content is "work in pattern"/"continue in established pattern" → prev.
 
 ### Notes attached to rows
-Non-row, non-header lines that are short (≤ 80 chars) and start with an instruction keyword (`colour change`, `color change`, `change to`, `switch to`, `add`, `stuff`, `tie off`, `fasten off`, `sl st`, `slst`, `join`, `place`, `insert`, `attach`, `sew`, `embroider`, `do not`, `don't`, `put`, `with`, `in <colour>`, `cut`, `leave`, `finish`, `close`) attach to the NEXT row line as `notes` (so "Colour change to black" shows when you start round 5). If there is no next row line in the section, attach to the previous row. Everything else (side commentary, page headers, footers like `Chronic.Creator`) is kind 'note' with no attachment.
+Non-row, non-header lines that are short (≤ 80 chars) and start with an instruction keyword (`colour change`, `color change`, `change to`, `switch to`, `add`, `stuff`, `tie off`, `fasten off`, `sl st`, `slst`, `join`, `place`, `insert`, `attach`, `sew`, `embroider`, `do not`, `don't`, `put`, `with`, `in <colour>`, `cut`, `leave`, `finish`, `close`) attach to the NEXT row line as `notes` (so "Colour change to black" shows when you start round 5). If there is no next row line in the section, attach to the previous row. **Exceptions (wave F):** a colour change that names its round ("CC to main color in last stitch of R12", printed under it) is that round's note; a paragraph carrying an end-of-row change ("to end, join with Yarn B at end of" / "final st, turn.") is the tail of the row ABOVE it (`notesAfter`), not a note for the next row. Either way the new colour starts on the following row. Everything else (side commentary, page headers, footers like `Chronic.Creator`) is kind 'note' with no attachment.
 
 ### Repeat / target suggestions
 `Repeat Rows 5-8 ... until there are a total of 25 (29, ...) Rows` → `suggestions.repeat = {startRow:5,endRow:8,times:null,untilRows:25}`, `suggestions.targetRows = 25`. `Repeat Rows 3-6 until you have at least 14 total rows` → same with 14. `Rep Rows 2-3` / `Next Rows: Rep Rows 2-3` / `Repeat rows 2-3 around` → repeat with times null, untilRows null. `Repeat Rows 5-8 six times` / `x6` / `6 more times` → times 6 (or 7 for "more"). `Rnd 6-10: sc around` is a range, not a repeat. Lines that match are kind 'repeat'. Only the first suggestion in section 0 is returned.
@@ -243,8 +339,59 @@ The full rule list, with the fixture each rule came from, is `docs/wave-e/croche
 - **`workMode` and turned rounds.** An `R`-labelled line that ends by turning, with no join, is a row; when half or more of the R lines do, the part is `'rows'` (snowman Scarf). A round that is joined and then turned stays a round.
 - **Stitch records carry `post` and `lp`** (see `expand` v2 under "Live 3D diagram").
 
+### Wave F additions (size once, colour changes, confidence, lengths)
+
+Rules, fixtures and the pane checks are in `docs/wave-f/crochet-core.md`. The contract:
+
+```js
+Patterns.parse(text, { size, sizeCount })   // sizeCount = how many sizes the DOCUMENT names
+Line.sizeUnresolved?: true        // a size list whose length is not sizeCount: no count, nothing computed
+Line.notesAfter?: string[]        // notes that belong to the END of this row (an end-of-row colour change)
+Line.approxRow?: true             // a row numbered after an unresolved length sentence ("≈ Row 25")
+Line.lengthEstimate?: { value, unit, rows, gauge, fromStart }   // on the length sentence itself
+Line.repeatFromLength?: true      // on a 'repeat' line whose row count came from a length + gauge
+summary().lengthRows: boolean     // a row total here was read off a tape measure through a gauge
+Patterns.detectSizes(text)        // also reads "Sizes XS/S M L XL 2/3XL 4/5XL" and "To Fit 4-6yrs … Adult L"
+Patterns.sizeMarks(text, size, sizeCount)   // the chosen size's number marked in every size list
+Patterns.sizeScope(text, names)   // which "Size XS:" / "Sizes M, L … only:" blocks belong to which size
+Patterns.countReport(lines) → { rows, printed, computed, missing, unresolved,
+                                disagree: [{ row, rowEnd, printed, computed, text }] }   // per ROW
+```
+
+- **Size names.** A size label line (Yarnspirations "Sizes XS/S M L XL", Stylecraft "To Fit 4-6yrs …
+  Adult S Adult L", the classic `XS (S, M, L, 1X) (2X …)`) is read token by token, so hook sizes and
+  "To fit chest measurement" are not size lists. A size list whose second bracket wrapped onto the
+  next line is joined.
+- **Honesty rule: one number per size or no number.** When the document names N sizes, a list of
+  any other length resolves to **no count** (`sizeUnresolved`) instead of the clamp's guess. The
+  Wheat Stitch panels print `184 (208, 224)`, three LENGTHS against nine body sizes, so they get no
+  stitch target; the counter says "Pattern lists 184 / 208 / 224 here — not one per size". Without
+  `sizeCount` the parser reads exactly as before.
+- **A colour change made at the END of a row colours the NEXT row.** "changing to black in last 2
+  loops", "in last st", "last st of R5", "at end of final st / row" set `state.pendingColor`, so the
+  panda's Rnd 15 is white and Rnd 16 black, as in the photo (one wave A unit test changed, with the
+  reason in the test). "Using Yarn A", "join with Yarn B", "re-join Yarn I", "pick up Yarn A",
+  "continue with Yarn D" are read through the key; a two-range yarn table ("Azure (3366) x 2 A
+  Turquiose (4044) x 3") is the key; "Starting in secondary color" / "CC to main color" name roles.
+- **Lengths.** A row total that comes from a measurement through a gauge is an estimate (preview
+  "→ target ≈ 89", counter "24 / ≈ 89"). Rows after a length sentence the section cannot resolve
+  (Caron "Cont even in pat until work from beg measures 13"", whose "beg" is another block's
+  foundation) keep the parser's count and carry `approxRow`; they are deliberately not renumbered
+  off the gauge.
+- **Repeats between written rows** fill the hole for the target ("Repeat Rows 5-8 until … 36 Rows"
+  then "Next Row" = 37), and one written row continued by a repeat is a target too.
+
 ### App/Store integration (v2)
-- `Part.sizeIndex: number` (default 0). `Store.linesFor(part)` calls `Patterns.parse(part.patternText, { size: part.sizeIndex })`; cache key includes sizeIndex.
+- `Part.sizeIndex: number` (default 0). `Store.linesFor(part)` calls `Patterns.parse(part.patternText, { size: part.sizeIndex, sizeCount })` (wave F: `sizeCount` = `Project.sizes.length`, so the honesty rule applies); cache key includes sizeIndex.
+- **Size once** (wave F, brainstorm 4 / 03 #1, #13, #14). The size is a property of the PROJECT, picked once: `Project.size = { index, label }`. The contract:
+  - A multi-size import (the New project drop zone or ⋯ → Import pattern) shows a **"Your size"** chip row (`role=radiogroup`, roving tabindex, arrow keys) with the document's own names. Until a size is picked each section says "pick your size for targets" and Save / Create parts refuses with "Pick your size first" and moves focus to the chips (`importPicker({initialSize})` → `size()`, `needsSize()`, `focusSize()`), so a nine-size pattern is never made silently in the first size. `importPatternSections(…, {size})` sets `Project.size`, every touched part's `sizeIndex`, reads each target at that size, and returns `sizeSet`; the toast adds "· size L".
+  - `Store.setProjectSize(id, index)` → `{index, label, retargeted}`: one undo snapshot, every part's `sizeIndex` moves, rows / stitches / pieces are untouched, a target that was the pattern's reading (and an `untilRows` repeat that was the old suggestion) follows the size, a target typed by hand never moves. `Store.partSize(proj, part)` → `{index, label, source: 'project'|'part'|null, names}`; `Store.sizeNames(proj)` gives the document's names, else "Size 1..N". `Part.sizeIndex` keeps its meaning: a part set on its own ("Only this part" in the part editor, for body-in-L-sleeves-in-M) simply differs from `Project.size.index`. `addPart` inherits the project size; `targetRowsFromText(text, size, sizeCount)`.
+  - Counter label "ROW · L"; the chosen size's number is marked in every size list in the pattern line, setup line and pattern sheet (`Patterns.sizeMarks`); the sheet starts "Your size: L" and dims the other sizes' blocks (`Patterns.sizeScope`).
+  - Templates saved from a multi-size import (`templateFromProject`, the "Also save as a template" toggle) carry `sizes` and the picked `size`, and `createProject` starts the project there, so it offers the leaflet's names rather than "Size 1..N".
+- **Colour changes reach the counter** (wave F, brainstorm 8). `Store.colorPlan(part)` walks `expand` once per parse + repeat (cached, never per tap); `Store.rowColorInfo(part, row)` → `{color, change: {to, at: 'start'|'end'}|null}`. The pattern line's tag carries a swatch of the row's yarn; on a change row a one-line strip says "Change to black at the end of this round" (`at: 'end'`) or "Change to Burgundy" (`at: 'start'`), announced once with the row milestone. Swatches use the owner's yarn colour, else the colour word; an unknown shade gets a dashed outline, never an invented colour. On that row the instruction clamps one line tighter, so 375×812 and 375×640 still do not overflow.
+- **Confidence line** (wave F, brainstorm 3 / 06 #1, #8). `Store.countReport(partOrText)` wraps `Patterns.countReport`. The import preview shows one line per section ("10 counts computed ≈ · 1 count disagrees with the pattern", red when something disagrees or is unresolved; "every count printed"; "×2 (from the assembly text)" for `makeCountInferred`), and so do the Parts list and the part editor (plus up to three "Rnd 29: pattern says 36 · instructions add up to 24"). The stitch readout carries a small badge, **"≈ why"** (computed), **"≠ why"** (contradicted by its own arithmetic), **"? why"** (no count for this size) or for an approximate row number, which opens a sheet with the reason, the size-marked line and the part's confidence line.
+- **Tap the row number** (wave F, 03 #6). `#row-number` is made a control from JS (`role=button`, `tabindex=0`, Enter/Space, "Rounds done: 14. Set the round count"). It opens "Set the round count" (− / number / +, pre-filled and selected, live hint "you will be working row 13 of 56, stitches back to 0"); Set runs the same undoable `Store.jumpToRow` as the pattern sheet, capped at the part's target, announced "Working row 13".
+- **Until N rows** (wave F, 03 #5). `applySuggestions` keeps "Repeat Rows 5-8 until there are a total of 25 Rows" as `repeat.mode: 'untilRows'`, `untilRows: 25`; the part editor's Repeat section has "N times | Until N rows total" with a live "Rows 5–8 worked 5 times (5–24)" hint. `Store.targetApprox(part)` is true when the target came from a measurement (never for a hand-typed one); the counter shows "24 / ≈ 89" and an `approxRow` as "≈ Row 25".
 - Part editor: under the pattern textarea show the summary line, e.g. `24 rounds · counts computed ≈ · 3 sections detected`. If `summary.sizes` or `summary.multiSize`: a **Size** select (names from `sizes`, else "Size 1..N" up to the longest list seen) bound to `part.sizeIndex`. If `summary.suggestions` has anything: an **"Apply detected settings"** button that sets targetRows / repeat (confirm shows what it will set). If `summary.sections.length > 1`: a hint "This text has N sections — use Import pattern to split into parts."
 - New project-level sheet **Import pattern** (overflow menu + a link in the part editor): big textarea "Paste the instructions from your PDF", live list of detected sections from `Patterns.splitSections` with name (editable), make-count, row count and computed/explicit indicator, each with a checkbox (default on for sections that have rows). Buttons: **Create parts** (for each checked section: if a part with the same name exists (case-insensitive) → set its patternText and makeCount; else add a new part) and **Put it all in <active part>** (whole text into the active part). Toast with what happened.
 - Each section from `Patterns.splitSections` also carries **`placement: string`** (`''` when there is none): the assembly prose the parser took off an "Assembly / Finishing / Eyes deepen" block and handed to the part it names (and, since wave E, to the host part the sentence puts it on), plus that part's own "Attach safety eyes between R21&R22…" sentences (those stay row notes as well). Assembly blocks and `=== PAGE n ===` / `ADDITIONAL PHOTOS:` furniture never reach a section's `text` or its row notes. `importPatternSections` writes `placement` into `Part.placementNotes` — replacing it on a new part, adding only the lines it does not already hold (case-insensitive) on an existing one — and returns `placed` alongside `created`/`updated`; the section row and the toast say "· placing notes".
@@ -313,8 +460,11 @@ file that failed to load never costs the user their work.
 Store API: `Store.registerCraft({ id, normalize, summary, templates })` (called by the
 pure-logic module at script time), `Store.crafts()`, `Store.craftDef(id)`,
 `Store.templates(craft?)`, `Store.createProject({ craft, craftData, … })`,
-`Store.updateCraftData(projectId, patchOrFn)` (the only door a craft writes project state
-through — undo snapshot, mutate, touch, debounced save), `Store.summaryFor(project)`,
+`Store.updateCraftData(projectId, patchOrFn, opts?)` (the only door a craft writes project state
+through — undo snapshot, mutate, touch, debounced save; with `opts = {undo: false}` (alias
+`{undoable: false}`, wave F) it writes **view state**: no snapshot, no `updatedAt` / touch-day
+bump, the same `save()` so revision / writerId and the multi-tab rules are unchanged; a view is
+not a piece of work, and a pan must never fill the undo stack), `Store.summaryFor(project)`,
 `Store.craftSettings(id)`, `Store.setCraftSetting(id, key, value)`. Craft built-in
 templates re-seed on load and again whenever a craft registers late. Nothing added for
 crafts runs on the crochet tap path.
@@ -324,6 +474,8 @@ puts a **Free up space** button on the quota banner while that craft's project i
 (cross-stitch publishes its switch to counts-only mode), and **`importAccept`** (default
 `['.pdf']`; cross-stitch `['.pdf', '.oxs', '.xml']`) is the accept list of the craft drop zone
 in the New project sheet. The shell's `ctx` also gains `preserveFocus(fn)` (see UX rules).
+Wave F gives the node `ctx.pdfDropZone` returns `wrap.cancel()` and `wrap.signal()` (see "PDF
+import"), and the cross-stitch and sewing enhancements are listed in `docs/CRAFTS.md`.
 
 ## Guided help (tours)
 
@@ -355,7 +507,37 @@ PdfText.extract(file, { onProgress(page, total), maxPages, signal })
 PdfText.isAvailable() → boolean   // false when the library cannot load (offline first run without cache)
 PdfText.SIZE_WARN_BYTES           // 25 MB — over this the app offers the first 20 pages instead
 ```
-`signal` is `{ cancelled: boolean }` (or a real `AbortSignal`), checked at the head of each page; a cancelled read rejects with `err.name === 'AbortError'` and **the textarea is left untouched**. `emptyPages` lists the 1-based pages that carried almost no text — the drop zone says "Pages 12–20 had no readable text (they are probably images)." under the result line, never the word "failed" (06 #4).
+`signal` is `{ cancelled: boolean }` (or a real `AbortSignal`), checked at the head of each page; a cancelled read rejects with `err.name === 'AbortError'` and **the textarea is left untouched**.
+
+The open-document API (crafts read text and rasterise pages from one load; wave E added `signal`
+and `extract`, wave F the render cancel and `allowEmpty`):
+```js
+PdfText.open(file, { signal }) → Promise<handle>   // signal checked before the read, before and after
+                                                   // the parse (a cancel during the parse destroys the
+                                                   // document instead of handing it out), and for the
+                                                   // life of the handle
+handle = { doc, numPages, destroy(),
+  textOf(pageNo) → Promise<string>,                // one page, no unicode folding
+  extract({ onProgress, maxPages, signal, allowEmpty }) → Promise<extract() result>
+                                                   // the WHOLE extract pipeline on this document,
+                                                   // running-head pass, emptyPages, garbled, ocrNoise
+  renderPage(pageNo, { scale | maxWidth, signal }) → Promise<HTMLCanvasElement> }
+```
+- **`allowEmpty`** (wave F): a text-free (scanned) PDF resolves instead of rejecting, with text that
+  is only the page markers (`'=== PAGE 1 ==='`) and `emptyPages: [1]`, so a caller that also has the
+  page images (a scanned cross-stitch chart) still gets its result. `PdfText.extract` and the default
+  `handle.extract` still reject such a file.
+- **`renderPage` cancels mid-page** (wave F). It honours its own `signal` and the one the document
+  was opened with: checked before the call, again after pdf.js fetches the page, and every 40 ms
+  during the draw, when it calls pdf.js's `renderTask.cancel()` and rejects at once with
+  `AbortError` (pdf.js's `RenderingCancelledException` is mapped to `AbortError` too). The first big
+  draw of a document does about 1.8 s of synchronous pdf.js setup that cannot be interrupted.
+- **`ctx.pdfDropZone`** (wave F) passes its signal into `PdfText.open`, destroys a handle that
+  arrives after a cancel, and on the `onPages` + `onText` route calls `handle.extract({signal,
+  maxPages, onProgress, allowEmpty: true})` instead of looping `textOf` (so that route gets the
+  running-head pass, `columnsDetected` and the 20-page cap too). The handle it gives `onPages` stays
+  bound to the zone's signal; the returned node gains `wrap.cancel()` (stop the read and any render
+  on that handle) and `wrap.signal()` (that signal, for a craft to pass on as `{signal}`). `emptyPages` lists the 1-based pages that carried almost no text — the drop zone says "Pages 12–20 had no readable text (they are probably images)." under the result line, never the word "failed" (06 #4).
 Extraction rules (this is what makes the parser's life easy):
 - Per page, group text items into lines by Y (tolerance 2.5 units), sort lines top→bottom, items left→right, join items with a space, collapse whitespace.
 - **Column detection:** for pages with ≥ 12 lines, build the set of x-spans (start..end) of every item; if there is a vertical gap band ≥ 14 units wide located between 30% and 70% of the page width that no item spans, for ≥ 70% of lines, treat the page as two columns: emit all left-column lines (top→bottom) first, then all right-column lines. Same rule applied recursively at most once (3 columns max). Else emit single-column. Report how many pages were split in `columnsDetected`.
@@ -466,7 +648,7 @@ Uses `navigator.vibrate` when present (Android), WebAudio oscillator sounds synt
 6. **Checklist sheet**: checkable items, "3 of 8 done", add item, ✕ delete, ▲▼ reorder, tap an item's text to rename it inline (Enter/blur saves, Escape cancels), "Clear completed" and "Clear all" (both confirm), and "Reload from <template>" (replaces the list with `Project.templateId`'s checklist; hidden when the project has no template or it no longer exists). Store: `renameChecklistItem`, `moveChecklistItem(projectId, itemId, delta)`, `clearChecklist(projectId, { completedOnly })`, `reloadChecklistFromTemplate(projectId)`.
 7. **Notes sheet**: project notes textarea (autosaves).
 8. **History sheet**: list of completed rows with time (newest first), "Clear".
-9. **Settings sheet**: theme grid (6 cards with swatches, grouped Stardew / Dragon, current one highlighted; tap applies instantly), haptics toggle, sounds toggle, auto-advance toggle, Export (downloads `stitchkeeper-backup-YYYY-MM-DD.json` via Blob + `<a download>`; also uses `navigator.share` with a File when available on mobile), Import (file input), About/version.
+9. **Settings sheet**: theme grid (6 cards with swatches, grouped Stardew / Dragon, current one highlighted; tap applies instantly), haptics toggle, sounds toggle, auto-advance toggle, Backup (wave F: "Last backup: …", **📥 Back up now** saves `thready-or-not-backup-YYYY-MM-DD.thready` via Blob + `<a download>`, the object URL kept 60 s; **📤 Share backup** where `navigator.canShare` accepts the zip; **📂 Import backup** reads `.thready` or `.json` — see "Backup file"), About/version.
 
 Status change sheet: Active / Paused / Finished / Frogged with short explanations.
 
@@ -562,7 +744,7 @@ treating them as the same swatch. It exists so **"work until it measures 59″" 
 count**: the pattern told you the rows two pages earlier. With no gauge anywhere, one sc row is
 assumed to be 5 mm and everything derived from it is `estimated`.
 
-**2. Renderer (`js/diagram.js`, `window.Diagram` v1.3) — 3D, WebGL**
+**2. Renderer (`js/diagram.js`, `window.Diagram` v1.5.0) — 3D, WebGL**
 
 **Model v2** (what `Store.diagramModel` returns; v1 — no `shape`, no `inc`/`dec`, no
 per-stitch `h`/`w`, no `window`/`deviation` — still renders, it just gets rings instead of
@@ -590,6 +772,12 @@ Model = {
     truncated: boolean,            // `stitches` is a SAMPLE of the round, not all of it
                                    // (over `STITCH_DETAIL_MAX` = 999 records). The
                                    // `count` itself is never truncated.
+    countless?: true,              // wave F: only on the WORKING round, only when nothing
+                                   // sized it (no parsed count and no counter target), so
+                                   // `count` is just the stitches tapped so far. Never
+                                   // `false`, never on any other round. Follow mode does not
+                                   // turn on it, and it holds the piece open (a countless
+                                   // round is always "full", which used to read as finished)
   } ],
   current: number,                 // index of the round being worked
   defaultColor: '#hex',
@@ -609,8 +797,13 @@ Diagram.mount(canvas, {
   palette: { ghost, ink, glow, alert, bg },
   reducedMotion, interactive: false,
   safeInsets: { top, right, bottom, left },   // CSS px the piece must stay out of
-  onStatus: function ({ webgl, status, message }) {}  // 'ok'|'unavailable'|'lost'|'blank'|'restored'
+  onStatus: function ({ webgl, status, message }) {},  // 'ok'|'unavailable'|'lost'|'blank'|'restored'
+  follow: false                     // wave F: the piece turns with the taps (see "Follow mode").
+                                    // Default OFF in the renderer (the gallery and the demo are
+                                    // unchanged); the app passes the setting, which is on
 }) → handle
+handle.setFollow(true|false); handle.getFollow()   // on: ease to the working stitch; off: a rows
+                                    // sheet slides home and auto-rotate resumes after the pause
 handle.setModel(model, { animate: 'stitch' | 'round' | 'none' })
 handle.setPalette(palette); handle.resize()
 handle.setSafeInsets({ top, right, bottom, left })
@@ -630,10 +823,27 @@ handle.getStats() → { webgl, status, lost, fps, frameMs, submitMs, buildMs, tr
                       lod: { tier, name, segs, rows, px, switches, budget },   // wave E
                       holes,                       // chain-space slices opened as holes
                       alert: { wedgeFrom, … },     // first over-count slice drawn, −1 = none
-                      bump: { …, relRelief, floor } }   // relief range at the tier actually built
+                      bump: { …, relRelief, floor },    // relief range at the tier actually built
+                      follow: { on, angle, front, target, animating, trophy, reason,   // wave F
+                                userTurned, pan, key } }
 Diagram._relief                     // test hook: the CPU relief builder, for the pure renderer tests
+Diagram.follow                      // wave F: follow mode's pure maths, used by the renderer and tests
+  .angle(index, count[, a0, aw])    // ring angle of the working point
+  .yawFor(angle)                    // the yaw that puts that angle in front (angle − FRONT)
+  .nearest(target, ref)             // target moved by whole turns nearest ref
+  .step(prevYaw, index, count[, a0, aw])   // the yaw follow mode lands on
+  .duration(deltaYaw)               // ms for a move (MS for one stitch, up to MAX_MS)
+  .ease(from, to, elapsedMs, durMs, reducedMotion)   // reduced motion snaps
+  .pan(xWork, xMin, xMax, halfVisible)    // rows: horizontal slide, 0 when the sheet fits
+  .rotation(yaw, pitch)             // the camera matrix buildView uses
+  .FRONT (π/2), .MS (150), .MAX_MS (420), .PAN_MS (180)
 ```
-The renderer's `version` string is `'1.4.0'` as of the wave E relief rewrite.
+The renderer's `version` string is `'1.5.0'` as of wave F's follow mode (`'1.4.0'` was the wave E
+relief rewrite). `js/diagram-geo.js` is unchanged at 1.4.0.
+- **`getStats().follow`**: `angle` is the working point on its ring (radians from stitch 0), `front`
+  the ring angle facing the camera now (yaw + π/2), `target` the unwrapped yaw it is easing to,
+  `pan` the rows slide in world units, `trophy` whether a finished piece is turning, `reason` `''` /
+  `'finished'` / `'no-count'`, and `key` the follow key (`'no-count'` on a countless round).
 - **`frameMs` is the real frame time** — the wall-clock gap between two rendered frames while
   something is animating, with gaps over 100 ms (a throttled or hidden tab) dropped.
   **`submitMs` is the old `frameMs`**: the JS submit loop, which never waits on the GPU and
@@ -735,7 +945,41 @@ every constant is re-exported on `DiagramGeo` so `test/diagram.test.html` prints
 - **Geometry, rounds mode**: ring i has radius `R_i = max(R_min, count_i * SW / 2π)` and sits at height `y_i = -Σ height_k * SH` (round 1 at the top; the piece grows downward). Between consecutive rings build a triangle strip. Each **ring position** occupies an angular slice — `n = min(max(count, records), 160)`, so a lace round's chain spaces and a compressed fan round each keep their own slices (wave E; it used to be `min(count, 160)`, which smeared Persian Tiles round 5's 80 positions into 20) and `done` maps onto slices by proportion. Each slice carries its stitch's relief (see "Stitch relief is geometry"). Vertex colour = stitch colour (or the round colour), per stitch, so colour work is crisp at stitch boundaries. Round 0/1 stitches (magic ring) = a small cap. The ring being worked: only `done` slices are solid; the remaining slices of that ring are drawn as a translucent wireframe **grid** in `palette.ghost` at alpha 0.72 (cells waiting to be filled), and every future round as a single bare **ring** at alpha 0.20 — a full grid on every planned round reads as a cage at button size. Close the top with a cap when round 1 is a magic ring; leave the bottom open (you see inside a tube slightly, which looks right).
   The stitch relief must be exactly zero on all four edges of its cell. Consecutive rounds have different stitch counts and different per-stitch amplitudes, so any relief left at the shared ring (or at a slice edge) makes neighbours disagree about the radius and hairline cracks of background show (the wave E builder's worst slice-to-slice gap is ~1e-15, asserted).
 - **Rows mode**: rows stacked bottom-up as a sheet in the XZ plane tilted toward the camera, width = count × SW, row height by `height`; each stitch is a bump; odd/even rows offset half a stitch; current row partial from left (odd) or right (even); ghost rows wireframe. Gentle curvature (cylinder radius ≈ 3× width) so rotation shows depth.
-- **Camera & motion**: perspective camera, slight downward pitch (~20°), auto-rotate around the vertical axis at ~12°/s (pauses for 1.5s after each model change or drag so the new stitch is seen, then resumes **from wherever the user left the yaw**), model auto-fit so the whole solid part (ghosts capped so they can't shrink the real piece below 45% of the view) fits with 8% margin; scale and camera distance ease over 200ms. `interactive`: pointer drag rotates (inertia), wheel/pinch zooms, double-tap resets. `reducedMotion`: no auto-rotate, no scale-in, no pitch return.
+- **Camera & motion**: perspective camera, slight downward pitch (~20°), and — with follow off ("Free spin") — auto-rotate around the vertical axis at ~12°/s (pauses for 1.5s after each model change or drag so the new stitch is seen, then resumes **from wherever the user left the yaw**), model auto-fit so the whole solid part (ghosts capped so they can't shrink the real piece below 45% of the view) fits with 8% margin; scale and camera distance ease over 200ms. `interactive`: pointer drag rotates (inertia), wheel/pinch zooms, double-tap resets. `reducedMotion`: no auto-rotate, no scale-in, no pitch return.
+- **Follow mode** (wave F; the owner's request, and the app's default). Each stitch tap turns the
+  piece so the stitch just made faces the viewer:
+  - **Angle.** The working point's ring angle is `angle = 2π·index/count` for equal stitches; with
+    the round's real slice layout (built bands carry `a0` / `aw`) it is walked through the slices,
+    so a wide stitch turns the piece further and polygons follow arc length. Stitch 0 is at θ = 0
+    and the point nearest the camera is at `yaw + π/2` at any pitch, so `yaw = angle − π/2`.
+    10° per tap on a 36-stitch round; 36 taps make exactly one turn; the next round carries on from
+    the seam with no spin back. Done stitches sit just right of the centre line, the unworked grid
+    to the left (the work travels right to left, as under a right-handed hook); the working-round
+    marker and the over-count wedge are band geometry, so they turn with the piece.
+  - **Absolute, never accumulated.** The angle comes from the absolute stitch index; only the choice
+    of turn (+2πk) uses history — the turn nearest the previous follow target, or nearest the
+    user's yaw after a swipe, never the lagging yaw on screen (7 fast taps on 12 must land at +210°,
+    not −150°). So Undo turns back one stitch, and un-tapping a row, finishing a row early, a jump
+    from the pattern sheet and any Undo all re-aim without drift.
+  - **Ease.** 150 ms (`MS`) for one stitch, up to 420 ms (`MAX_MS`) for a longer swing, sampled from
+    `performance.now()` so a skipped frame never stretches it; **snaps under `prefers-reduced-motion`**.
+  - **Swipe offset.** A swipe on the button or a drag in the viewer moves the piece freely; the angle
+    the user leaves is kept (`userTurned`) until the next tap, which blends back to the working stitch
+    the short way. Nothing snaps while a finger is down, and a recolour, a resize or opening the
+    viewer never pulls back a piece the user just spun.
+  - **No clock.** With follow on, auto-rotate is off in the button and the viewer; between taps
+    nothing moves and nothing is drawn (the loop stops). A tap is a camera change only: `setModel`
+    on the tap path costs one follow target and an ease, and **rebuilds no band** (0.14 ms per tap
+    on a 2,394-stitch piece).
+  - **Rows pan.** A rows-mode sheet faces the camera. When it is wider than the frame (the button's
+    `clamp: 'height'` sheets), it slides (`Diagram.follow.pan`, 180 ms) so the working stitch stays
+    centred, never showing empty space past the sheet's edge; a sheet that fits never moves.
+  - **Trophy turn.** A finished piece (`fitFinished` or the model's own `finished`) turns at the old
+    auto-rotate rate after the usual pause, still without the glow and the wedge; finishing starts
+    the turn from wherever the last tap left the yaw.
+  - **`countless`.** A working round that nothing sized does not turn (the work really does end at
+    the seam, 2π·n/n); `getStats().follow.key` and `reason` are `'no-count'`.
+  - The 2D fallback does not rotate.
 - **Rotation direction (never invert this)**: the model follows the finger like a physical ball. Drag right → the surface nearest the camera travels right (`yaw += dx·k`); drag down → the near surface travels down so more of the *top* comes into view (`userPitch += dy·k`). `k = π / canvas CSS width`, i.e. a full-width drag is half a revolution at any canvas size. Verify on screen with an identifiable feature (a colour panel, the unworked arc of the current round), never from the matrices. Flick inertia is real pointer velocity, capped at 3.5 rad/s. The user's yaw is kept; the user's pitch eases back to the default over ~1.7s once the 1.5s pause is over, so the piece never sits stuck at an awkward angle.
 - **Material**: a warm wrapped key light, a cool bounce fill, and a matte two-lobe sheen (broad `pow(N·H, 6)·0.10` plus a tight lobe at 0.008) tinted 65 % toward the yarn colour — wool scatters, so a white specular blob turns it to plastic, and with real relief every lobe of every V catches the key on its own (wave E lowered it from `pow(N·H, 7)·0.13`, tight 0.022, 50 %). At `high`/`full` and ≥ ~12 device px per stitch a ±4.5 % chevron striation follows the legs of the V (`uPly`, the twist of a plied yarn). A broad Fresnel in the **yarn's own** colour at 0.20 is the halo of stray fibres that says wool; the white Fresnel rim sits behind it at 0.18. Baked crevice AO at the slice edges (17%) and band edges (7%). Per stitch, seeded noise moves lightness ±7.5%, warm/cool ±4.5% and bump amplitude ±10%, which is the difference between "extruded plastic" and "crocheted". The **wrong side** of the fabric (`dot(N, V) < 0`, i.e. the inside of an open tube) is darkened to 42% and loses most of its rim — ramped, not stepped, or the silhouette speckles where interpolated normals cross zero.
 - **Tone mapping, then the real sRGB curve** (02 #3). The lighting is linear and unbounded: the default cream's key term alone reached 1.03 and clipped to a hue-less white, while a dark red crushed to near-black over half the piece. A Reinhard variant with a 0.8 white point — `c = c(1 + c/0.64)/(1 + c)` — runs **before** the encode, the key's constant term is 0.22 (was 0.17) so dark yarns lift, and the encode is the exact piecewise sRGB curve rather than `pow(c, 1/2.2)`, because the CPU-side decode is exact and a mid grey has to round-trip. One hash dither of ±0.5/255 after the encode kills the `mediump` banding on the three dark themes. Verified on cream, black, white and a saturated red across all six themes.
@@ -751,7 +995,7 @@ every constant is re-exported on `DiagramGeo` so `test/diagram.test.html` prints
 **3. App integration (`js/store.js`, `js/app.js`, `index.html`, `css/app.css`, `js/tour.js`)**
 - `Part.rowStitches: number[]` (index = row number, 1-based; value = stitch count when that row was completed). `tapRow` records `part.stitch` (or the target when auto-advanced) before resetting; `untapRow` pops; `resetPart` clears; normalised on load.
 - `Project.yarnColors: { [name]: '#hex' }` with reserved key `'*'` = main yarn colour (default warm cream `#f1e3c8`).
-- `Store.diagramModel(part, project) → Model`: rows 1..max(part.row + 1, pattern maxRow, rowStitches.length); per row: if a pattern line exists → `Patterns.expand` (state carried row to row), colours resolved as `yarnColors[name] || Patterns.colorHex(name) || yarnColors['*']`; else if `rowStitches[row]` → that many generic stitches in the main colour; else if it is the current row → `count = max(part.stitch, target || 0)`; `done` from rowStitches / part.stitch; `ghost = row > current`. Cache per part (key: patternText, sizeIndex, yarnColors, row, rowStitches.length, `partWorkMode`) and on the tap path only mutate the current round's `done`/`count`. It returns **Model v2**: per-stitch `h`/`w`, `inc`/`dec` positions, the round's own `row`, `shape` from `Patterns.startHint`/`stuffingHint`, a `window` of rounds anchored to the round being **worked** (not to the end of the pattern), and `deviation`.
+- `Store.diagramModel(part, project) → Model`: rows 1..max(part.row + 1, pattern maxRow, rowStitches.length); per row: if a pattern line exists → `Patterns.expand` (state carried row to row), colours resolved as `yarnColors[name] || Patterns.colorHex(name) || yarnColors['*']`; else if `rowStitches[row]` → that many generic stitches in the main colour; else if it is the current row → `count = max(part.stitch, target || 0)`, where `target` is the counter's own target for that row (`targetFor(part, patternRow)`, the number the readout shows, which also answers past the written rows from the repeat sentence; wave F), and with no target either the round carries `countless: true`; `done` from rowStitches / part.stitch; `ghost = row > current`. Cache per part (key: patternText, sizeIndex, yarnColors, row, rowStitches.length, `partWorkMode`) and on the tap path only mutate the current round's `done`/`count`. It returns **Model v2**: per-stitch `h`/`w`, `inc`/`dec` positions, the round's own `row`, `shape` from `Patterns.startHint`/`stuffingHint`, a `window` of rounds anchored to the round being **worked** (not to the end of the pattern), and `deviation`.
 - **Rounds vs rows is a property of the PIECE** (05 #2). `Part.workMode: 'auto' | 'rounds' | 'rows'` (default `'auto'`, set through `updatePart`). `Store.partWorkMode(part, project)` resolves it in order: the owner's explicit `workMode`, then what `Patterns.workMode(patternText)` says, then `Project.countMode` as the tie-break. Everything that labels one part's counter goes through it — the ROW/ROUND caption, the pattern-line tag, the viewer readout — and so does `Store.diagramModel`. The part editor carries a **"Worked in: Auto / Rounds / Rows"** segmented control whose Auto row says what it resolves to for the text in the box right now ("Auto — this pattern reads as rounds."), and the 3D viewer carries the same three chips. One project-level word used to decide the shape of seven different pieces, and an amigurumi imported as `'rows'` modelled a tail that begins `R1: MR4` as a flat sheet.
 - **The other two per-part resolvers, same pattern.** `Store.partShape(part)` builds the whole `Model.shape` — `Patterns.startHint` / `stuffingHint`, the corner prior (`sites` from measured increase positions, else `text`), the orientation verdict (`part` chip → the part's own text → null) and the dialect. `Store.partDialect(part)` resolves `Part.dialect`: the owner's explicit `'uk'`/`'us'`, else this piece's own text through `Patterns.dialectHints`, else whatever the imported document said. All of them are in the `diagramModel` cache key.
 - **Terms: Auto / UK / US** (wave E) sets `Part.dialect` by hand: a field in the part editor after Worked in and Orientation (saved with the sheet, one Undo; Auto's hint reads the text in the box through `Store.partDialect` — "Auto — US terms from the pattern" / "…does not say; read as US"), and a third chip row "Terms" in the 3D viewer that writes at once and re-renders. An Undo moves all three chip rows in the viewer.
@@ -762,6 +1006,6 @@ every constant is re-exported on `DiagramGeo` so `test/diagram.test.html` prints
 - App: `<canvas id="stitch-canvas">` inside `#stitch-btn` behind the caption/number (absolute, inset 0, `pointer-events:none`; number/caption get a soft text shadow), `Diagram.mount` when the project screen renders, `setModel(..., {animate:'stitch'})` on the tap fast path, `'round'` on row completion, `setPalette` on theme change, `destroy` when leaving. The canvas is `pointer-events: none`, so the stitch button's own pointer handlers drive rotation through `handle.dragStart/dragMove/dragEnd` once the pointer passes the 12px tolerance (see "UX rules"); the handle is also parked on the canvas element as `canvas.diagram` so `getStats()` can be read from a console.
 - **Long patterns do not mount the live canvas** (13 #5). `Store.diagramModel` rebuilds the whole piece whenever the row changes, and that build walks every row looking each one up, so its cost grows with the square of the pattern length: measured in the Browser pane, a completed row cost ~1,040 ms on a 1,500-row pattern (a sixth of a second was already visible at 500 rows) while a 60-row amigurumi stays under a millisecond. Stitch taps were always cheap — the model is cached — but a row tap froze the counter, which is the one interaction that must never stutter. So App will not ask for a live model past `DIAGRAM_MAX_LIVE_ROWS`, or for any build measured over 60 ms (remembered per part): the canvas inside the tap button is not mounted, `pushDiagram` is a no-op, and the piece is built only when the user opens the 3D viewer on purpose. **That real fix has landed** — `Store.diagramModel` builds a row → line index once instead of calling `lineForRow` inside the loop, and a 1,500-row pattern now builds in under 60 ms — so `DIAGRAM_MAX_LIVE_ROWS` is **2,000**. The measured-time guard and `partIsHeavy` stay as the safety valve for whatever the row count does not predict.
 - A **⤢ 3D view** button in the stitch actions row (never inside the tap surface — see Screens) opens the **3D viewer sheet**: full-height canvas with `interactive: true`, the part name, round/stitch readout, and a Yarn colours button. Above the stage it shows **the resolved shape class and its size in stitch units** from `DiagramGeo.classify` — "Sphere · 15 rounds · 48 around", "Capsule · 42 rounds · 15 around", "Flat panel · 46 rows · 405 wide" — beside the **Auto / Rounds / Rows** chips that write `Part.workMode`, the **Auto / Top-down / Bottom-up** chips that write `Part.orientation` and the **Terms Auto / UK / US** chips that write `Part.dialect` (each set has a hint saying what Auto resolved to and why; all three stay in step with the store, so an Undo or a chip tapped in the part editor moves them). The shape line is filled synchronously, not on the canvas's first frame. The readout names a finished piece by its last round — "Rnd 20 · done", not "Row 47 · 0 sts" at 46/46 — and a finished piece's stitch readout says "All 20 rounds done"; the group readout gives the last group its real size ("stitch 3 of 6" in a 36-stitch round grouped by 10).
-  **The shape names** (`shapeName` in `js/app.js`): rounds mode gives `Triangle motif` / `Square motif` / `Hexagon motif` / `Octagon motif` when anything knows the corner count (`shape.corners` or the geometry's own), then `Ruffle`, then by aspect and caps — `Bobble` / `Flat circle` under 0.38, **`Egg`** for a closed top over 1.2 (`Capsule` from 2.4), `Sphere` for a closed top from 0.9, `Sphere`/`Capsule` when both ends close, **`Dome`** for an open rim that shrank back in, `Cone` when it grew, `Tube` from 1.5, else `Bowl`. A dome is by definition squat, so "Dome" is left for the open-rimmed cups it describes and a 20-round closed-top piece is an egg (06 #12). Rows mode gives `Triangle` (a spine anchor), `Shaped panel` (a left/right anchor) or `Flat panel`. The detail line counts **the pattern's own rows and its widest real row**, not `model.rounds.length` and not `max(count)` — the working round the builder appends past the end used to turn "46 rows" into "47 rows · 406 wide" on completion (07 #7) — and appends "worked bottom-up" when the piece was actually drawn flipped. Opening the viewer **closes the button's GL context** and closing it rebuilds one, so the app never holds more than one context and repeated opens can never leave a blank canvas; if there is no piece on screen the stage carries a one-line footer ("Showing a simple outline — 3D isn't available right now") instead of a flat slab of `--primary`. Settings toggle **Live diagram** (default on; off removes the canvas). New sheet **Yarn colours** (project overflow menu + from the viewer): Main yarn plus every name from `Patterns.colors` across the project's parts, each with `<input type="color">` and the resolved swatch; edits update the model live.
+  **The shape names** (`shapeName` in `js/app.js`): rounds mode gives `Triangle motif` / `Square motif` / `Hexagon motif` / `Octagon motif` when anything knows the corner count (`shape.corners` or the geometry's own), then `Ruffle`, then by aspect and caps — `Bobble` / `Flat circle` under 0.38, **`Egg`** for a closed top over 1.2 (`Capsule` from 2.4), `Sphere` for a closed top from 0.9, `Sphere`/`Capsule` when both ends close, **`Dome`** for an open rim that shrank back in, `Cone` when it grew, `Tube` from 1.5, else `Bowl`. A dome is by definition squat, so "Dome" is left for the open-rimmed cups it describes and a 20-round closed-top piece is an egg (06 #12). Rows mode gives `Triangle` (a spine anchor), `Shaped panel` (a left/right anchor) or `Flat panel`. The detail line counts **the pattern's own rows and its widest real row**, not `model.rounds.length` and not `max(count)` — the working round the builder appends past the end used to turn "46 rows" into "47 rows · 406 wide" on completion (07 #7) — and appends "worked bottom-up" when the piece was actually drawn flipped. Opening the viewer **closes the button's GL context** and closing it rebuilds one, so the app never holds more than one context and repeated opens can never leave a blank canvas; if there is no piece on screen the stage carries a one-line footer ("Showing a simple outline — 3D isn't available right now") instead of a flat slab of `--primary`. Settings toggle **Live diagram** (default on; off removes the canvas), and directly under it (wave F) **"3D follows your stitches"** ("Each tap turns the piece so the stitch you just made faces you."), **default on**. It is stored as `settings.crafts.crochet.diagramFollow` through `Store.craftSettings('crochet')` / `Store.setCraftSetting('crochet', 'diagramFollow', bool)` — **absent means on**, only an explicit `false` turns it off — because `Store.setSetting` refuses keys `defaultState()` does not declare; in `js/app.js` everything goes through `diagramFollowOn()` / `setDiagramFollow(on)` (`DIAGRAM_FOLLOW_KEY`). It is a device preference, not part of the project, so it has no Undo. The ⤢ viewer's header has the same switch as one compact ↻ button between the readout and ✕ (`aria-label` / `title` "Turns with each stitch", `aria-pressed`, kept in step by `syncFollowButton()`); both move the live canvases at once. The app's `modelFinished` treats a `countless` round as not finished, like the renderer. New sheet **Yarn colours** (project overflow menu + from the viewer): Main yarn plus every name from `Patterns.colors` across the project's parts, each with `<input type="color">` and the resolved swatch; edits update the model live.
 - Tour: one counter-tour step for the diagram, targeting `#stitch-3d` ("The piece inside the big button grows as you count. Tap 3D view to open it full size and spin it around."). It trims itself out when the button is absent.
 - Bump `CACHE_VERSION`, precache `./js/diagram-geo.js` and `./js/diagram.js` (in that load order — `DiagramGeo` must be on `window` before `Diagram` reads it).

@@ -477,7 +477,7 @@
     }
 
     var id = str(t.id, '') || uid();
-    return {
+    var nt = {
       id: id,
       name: str(t.name, '').trim() || 'Untitled template',
       emoji: str(t.emoji, '') || '🧶',
@@ -496,6 +496,19 @@
       builtIn: !!builtInDef(id),
       updatedAt: clampInt(t.updatedAt, 0, 1e15, 0) || now()
     };
+    // Wave F (size-once): a template saved from a multi-size import keeps the
+    // leaflet's size names and the size that was picked, so a project made
+    // from it offers "XS/S M L …" (not "Size 1..N") and starts at that size.
+    // Present only when there are sizes, so older templates are unchanged.
+    if (Array.isArray(t.sizes)) {
+      var tsz = t.sizes.map(function (x) { return str(x, '').trim(); }).filter(Boolean);
+      if (tsz.length >= 2) {
+        nt.sizes = tsz;
+        var tsel = normalizeProjectSize(t.size);
+        if (tsel && tsel.index < tsz.length) nt.size = { index: tsel.index, label: tsz[tsel.index] };
+      }
+    }
+    return nt;
   }
 
   function seedTemplate(def) {
@@ -643,6 +656,10 @@
       checklist: ok.checklist,
       craft: tpl.craft || (existing ? existing.craft : DEFAULT_CRAFT),
       craftData: tpl.craftData !== undefined ? tpl.craftData : existing ? existing.craftData : null,
+      // wave F: size names + picked size (kept from the saved template when
+      // the caller does not say)
+      sizes: tpl.sizes !== undefined ? tpl.sizes : existing ? existing.sizes : undefined,
+      size: tpl.size !== undefined ? tpl.size : existing ? existing.size : undefined,
       updatedAt: now()
     });
     if (existing) list[list.indexOf(existing)] = next;
@@ -678,7 +695,7 @@
   function templateFromProject(projectId) {
     var proj = project(projectId);
     if (!proj) return null;
-    return {
+    var draft = {
       id: '',
       name: (proj.name + ' template').trim(),
       emoji: proj.emoji,
@@ -703,6 +720,12 @@
       builtIn: false,
       updatedAt: now()
     };
+    // wave F: the leaflet's size names and the picked size travel too
+    if (Array.isArray(proj.sizes) && proj.sizes.length >= 2) {
+      draft.sizes = proj.sizes.slice();
+      if (proj.size) draft.size = { index: proj.size.index, label: proj.size.label };
+    }
+    return draft;
   }
 
   /* ------------------------------------------------------------------ *
@@ -721,7 +744,7 @@
       row: 0,
       stitch: 0,
       targetRows: null,
-      repeat: { enabled: false, startRow: 1, endRow: 1, times: 1 },
+      repeat: { enabled: false, startRow: 1, endRow: 1, times: 1, mode: 'times', untilRows: null },
       alerts: [],
       placementNotes: '',
       patternText: '',
@@ -755,6 +778,46 @@
     return out;
   }
 
+  /**
+   * `Part.repeat`. Wave F (03 #6): `mode: 'times' | 'untilRows'`. A garment
+   * says "Repeat Rows 5-8 until there are a total of 25 (29, 33 …) Rows"; in
+   * 'untilRows' mode `times` is derived from `untilRows` (see repeatTimes), so
+   * the intent survives and a size change re-derives it. Old saves are 'times'.
+   */
+  function normalizeRepeat(rep) {
+    rep = rep && typeof rep === 'object' ? rep : {};
+    var out = {
+      enabled: !!rep.enabled,
+      startRow: clampInt(rep.startRow, 1, 999999, 1),
+      endRow: clampInt(rep.endRow, 1, 999999, 1),
+      times: clampInt(rep.times, 1, 9999, 1),
+      mode: rep.mode === 'untilRows' ? 'untilRows' : 'times',
+      untilRows: rep.untilRows === null || rep.untilRows === undefined || rep.untilRows === ''
+        ? null
+        : clampInt(rep.untilRows, 1, 999999, 0) || null
+    };
+    if (out.mode === 'untilRows' && !out.untilRows) out.mode = 'times';
+    // `times` is kept in step, so every reader of the plain field (the
+    // repeat readout, the diagram's row mapping) needs no second rule.
+    if (out.mode === 'untilRows') out.times = clampInt(repeatTimes(out), 1, 9999, 1);
+    return out;
+  }
+
+  /**
+   * How many times a repeat block runs. 'untilRows': as many whole blocks as
+   * fit between its first row and the row total ("rows 5-8 until 25 rows" is
+   * (25 - 5 + 1) / 4 = 5 blocks, rows 5-24; row 25 is the row after).
+   */
+  function repeatTimes(r) {
+    if (!r) return 0;
+    if (r.mode === 'untilRows' && r.untilRows > 0) {
+      var len = r.endRow - r.startRow + 1;
+      if (len <= 0) return 0;
+      return Math.max(1, Math.floor((r.untilRows - r.startRow + 1) / len));
+    }
+    return r.times;
+  }
+
   function normalizePart(p) {
     p = p && typeof p === 'object' ? p : {};
     var rep = p.repeat && typeof p.repeat === 'object' ? p.repeat : {};
@@ -766,7 +829,7 @@
       }
       alerts.sort(function (a, b) { return a - b; });
     }
-    return {
+    var np = {
       id: str(p.id, '') || uid(),
       name: safeName(p.name, 'Main'),
       makeCount: clampInt(p.makeCount, 1, 99, 1),
@@ -779,12 +842,7 @@
         p.targetRows === null || p.targetRows === undefined || p.targetRows === ''
           ? null
           : clampInt(p.targetRows, 1, 999999, 0) || null,
-      repeat: {
-        enabled: !!rep.enabled,
-        startRow: clampInt(rep.startRow, 1, 999999, 1),
-        endRow: clampInt(rep.endRow, 1, 999999, 1),
-        times: clampInt(rep.times, 1, 9999, 1)
-      },
+      repeat: normalizeRepeat(rep),
       alerts: alerts,
       placementNotes: str(p.placementNotes, ''),
       patternText: str(p.patternText, ''),
@@ -801,6 +859,11 @@
       // v3 (live diagram): saves from before it simply have nothing recorded.
       rowStitches: normalizeRowStitches(p.rowStitches, clampInt(p.row, 0, 999999, 0))
     };
+    // Wave F: the importer made this part twice because the assembly text
+    // attaches it in the plural (Patterns `makeCountInferred`). Present only
+    // when true, and dropped once the owner sets the count by hand.
+    if (p.makeCountInferred === true) np.makeCountInferred = true;
+    return np;
   }
 
   /** '#abc' / 'ABCDEF' / '#aabbcc' → '#aabbcc'. Anything else → null. */
@@ -829,6 +892,14 @@
     }
     if (!out[MAIN_YARN]) out[MAIN_YARN] = MAIN_YARN_DEFAULT;
     return out;
+  }
+
+  /** `Project.size`: { index, label } or null (wave F). */
+  function normalizeProjectSize(v) {
+    if (!v || typeof v !== 'object') return null;
+    var idx = clampInt(v.index, 0, 99, -1);
+    if (idx < 0) return null;
+    return { index: idx, label: str(v.label, '').trim() || 'Size ' + (idx + 1) };
   }
 
   function normalizeProject(p) {
@@ -904,6 +975,12 @@
       sizes: Array.isArray(p.sizes) && p.sizes.length
         ? p.sizes.map(function (x) { return str(x, ''); }).filter(Boolean)
         : null,
+      // Wave F (size-once, 03 #1): the size the maker picked, once, for the
+      // whole project. null = never asked (a single-size pattern, or a save
+      // from before). Every part's `sizeIndex` follows it unless that part was
+      // set on its own in the part editor. Additive with a default, so no
+      // backup migration is due.
+      size: normalizeProjectSize(p.size),
       // Crafts: 'crochet' | 'crossstitch' | 'sewing' | anything a module registers.
       craft: craft,
       // Opaque to the shell — owned by the craft module, repaired by its normalize.
@@ -1657,6 +1734,18 @@
     return prt && typeof prt.sizeIndex === 'number' && prt.sizeIndex > 0 ? Math.floor(prt.sizeIndex) : 0;
   }
 
+  /**
+   * How many sizes the document names, for `Patterns.parse({sizeCount})`: the
+   * project's `sizes` (a probe part may carry its own `sizeCount`). 0 when the
+   * names were never found, which keeps the old reading.
+   */
+  function partSizeCount(prt) {
+    if (!prt) return 0;
+    if (typeof prt.sizeCount === 'number') return prt.sizeCount >= 2 ? Math.floor(prt.sizeCount) : 0;
+    var proj = projectOfPart(prt);
+    return proj && Array.isArray(proj.sizes) && proj.sizes.length >= 2 ? proj.sizes.length : 0;
+  }
+
   var EMPTY_ENTRY = { text: '', length: 0, size: 0, lines: [], version: 0, index: null };
 
   /**
@@ -1678,15 +1767,20 @@
     var text = prt.patternText || '';
     var size = sizeIndexOf(prt);
     var cached = lineCache[prt.id];
-    if (cached && cached.size === size && cached.length === text.length && cached.text === text) {
+    if (cached && cached.size === size && cached.length === text.length && cached.text === text &&
+        (typeof prt.sizeCount !== 'number' || cached.sizeCount === (prt.sizeCount >= 2 ? Math.floor(prt.sizeCount) : 0))) {
       return cached;
     }
     var lines = [];
+    // Wave F: how many sizes the DOCUMENT names (`Project.sizes`), so a list
+    // of another length resolves to no count instead of the clamp's guess.
+    // Read on a miss only; setProjectSize / the importer drop the entries.
+    var sizeN = text ? partSizeCount(prt) : 0;
     if (/\S/.test(text)) {
       var api = patternsApi();
       if (api && typeof api.parse === 'function') {
         try {
-          var out = api.parse(text, { size: size });
+          var out = api.parse(text, { size: size, sizeCount: sizeN });
           if (Array.isArray(out)) lines = out;
         } catch (e) {
           lines = [];
@@ -1697,6 +1791,7 @@
       text: text,
       length: text.length,
       size: size,
+      sizeCount: sizeN,
       lines: lines,
       version: ++lineVersion,
       index: null
@@ -1873,7 +1968,7 @@
         var out = api.splitSections(String(text));
         if (Array.isArray(out)) {
           return out.map(function (s) {
-            return {
+            var sec = {
               name: str(s && s.name, ''),
               makeCount: clampInt(s && s.makeCount, 1, 99, 1),
               text: str(s && s.text, ''),
@@ -1882,6 +1977,10 @@
               // none.
               placement: str(s && s.placement, '')
             };
+            // Wave F: "made twice, from the assembly text" - the import
+            // preview and the part list say so (wave E left it unshown).
+            if (s && s.makeCountInferred) sec.makeCountInferred = true;
+            return sec;
           });
         }
       } catch (e) {
@@ -1893,12 +1992,12 @@
   }
 
   /** Parse a loose block of pattern text without touching any part's cache. */
-  function parseLoose(text) {
+  function parseLoose(text, opts) {
     var api = patternsApi();
     if (!api || typeof api.parse !== 'function') return [];
     if (!text || !String(text).replace(/\s/g, '')) return [];
     try {
-      var out = api.parse(String(text));
+      var out = opts ? api.parse(String(text), opts) : api.parse(String(text));
       return Array.isArray(out) ? out : [];
     } catch (e) {
       return [];
@@ -1911,10 +2010,14 @@
    * "Rnd 7-12" counts for every row it covers — and there are at least two.
    * A section whose numbering has holes (a page bleed, a finishing note that
    * parsed as a row) gets no target rather than a wrong one.
+   * Wave F: `size` / `sizeCount` read it at the maker's size — a garment's
+   * "until there are a total of 25 (29, 33 …) Rows" is 33 rows in size M.
    * @returns {number|null}
    */
-  function targetRowsFromText(text) {
-    var lines = parseLoose(text);
+  function targetRowsFromText(text, size, sizeCount) {
+    var sz = typeof size === 'number' && size > 0 ? Math.floor(size) : 0;
+    var n = typeof sizeCount === 'number' && sizeCount >= 2 ? Math.floor(sizeCount) : 0;
+    var lines = parseLoose(text, sz || n ? { size: sz, sizeCount: n } : null);
     if (!lines.length) return null;
     var seen = Object.create(null);
     var max = 0;
@@ -1930,7 +2033,23 @@
         if (r > max) max = r;
       }
     }
-    if (max < 2) return null;
+    // (one written row is enough when a repeat continues it - the Caron
+    // "1st row" + "Rep last row for pat 6 times more" block is 7 rows; the
+    // two-row floor is applied after the repeat below)
+    if (max < 1) return null;
+    // Wave F (03 #5): a repeat in the middle of a piece owns the rows between
+    // the ones written around it - "Repeat Rows 5-8 until there are a total of
+    // 36 Rows" then "Next Row:" (row 37) is rows 9-36, not a hole. Without it
+    // the Wheat Stitch Second Section never got a target at any size.
+    for (var h = 0; h < lines.length; h++) {
+      var hl = lines[h];
+      if (!hl || hl.kind !== 'repeat' || !hl.repeatOf) continue;
+      var hf = typeof hl.repeatFrom === 'number' ? Math.floor(hl.repeatFrom) : 0;
+      var ht = typeof hl.repeatTo === 'number' && isFinite(hl.repeatTo) ? Math.floor(hl.repeatTo) : 0;
+      if (hf >= 1 && ht >= hf && ht < max && ht - hf <= 9999) {
+        for (var hr = hf; hr <= ht; hr++) seen[hr] = true;
+      }
+    }
     for (var k = 1; k <= max; k++) if (!seen[k]) return null;
     // Wave E: a flat count of repeats past the last written row is the pattern
     // stating its own length. "Rep 3rd Rnd 3 times" on the Stylecraft hood
@@ -1947,6 +2066,7 @@
       var to = typeof rl.repeatRows === 'number' && isFinite(rl.repeatRows) ? Math.floor(rl.repeatRows) : 0;
       if (from === max + 1 && to >= from && to - max <= 9999) max = to;
     }
+    if (max < 2) return null;
     return max;
   }
 
@@ -2547,8 +2667,15 @@
     var keys = Object.keys(extra);
     for (var i = 0; i < keys.length; i++) seed[keys[i]] = extra[keys[i]];
 
+    // Wave F: a template saved from a multi-size import carries the leaflet's
+    // size names and the size picked then; the project starts there.
+    var tplSizes = Array.isArray(tpl.sizes) && tpl.sizes.length >= 2 ? tpl.sizes.slice() : null;
+    var tplSize = tplSizes && tpl.size ? normalizeProjectSize(tpl.size) : null;
+    var tplIdx = tplSize ? tplSize.index : 0;
     var proj = normalizeProject({
       id: uid(),
+      sizes: tplSizes,
+      size: tplSize,
       name: safeName(opts.name, '') || safeName(tpl.name, 'Untitled project'),
       emoji: opts.emoji || tpl.emoji,
       status: 'active',
@@ -2577,7 +2704,10 @@
         // no target on any part — no progress bar, no "Body complete", and a
         // project that could never finish on its own — while the project the
         // template was saved from had all of them.
-        if (made.patternText) made.targetRows = targetRowsFromText(made.patternText);
+        if (tplSize) made.sizeIndex = tplIdx;
+        if (made.patternText) {
+          made.targetRows = targetRowsFromText(made.patternText, tplIdx, tplSizes ? tplSizes.length : 0);
+        }
         return made;
       }),
       checklist: tpl.checklist.map(function (t) { return { id: uid(), text: t, done: false }; }),
@@ -2596,10 +2726,17 @@
    * merged into craftData or a function that mutates it in place.
    * @returns {object|null} the project's craftData
    */
-  function updateCraftData(projectId, patchOrFn) {
+  function updateCraftData(projectId, patchOrFn, opts) {
     var proj = project(projectId);
     if (!proj) return null;
-    snapshot(proj);
+    // Wave F (cross-stitch request): `{ undo: false }` (alias `undoable:
+    // false`) is for VIEW state - zoom, pan, tool, layer - that must persist
+    // but must never fill the undo stack, and is not "work" either, so it
+    // neither snapshots nor bumps updatedAt / the touch days. The write goes
+    // through the same save() as every other, so revision / writerId and the
+    // multi-tab rules are unchanged.
+    var silent = !!(opts && (opts.undo === false || opts.undoable === false));
+    if (!silent) snapshot(proj);
     if (!proj.craftData || typeof proj.craftData !== 'object' || Array.isArray(proj.craftData)) {
       proj.craftData = {};
     }
@@ -2614,7 +2751,8 @@
       var keys = Object.keys(patchOrFn);
       for (var i = 0; i < keys.length; i++) proj.craftData[keys[i]] = patchOrFn[keys[i]];
     }
-    touch(proj);
+    if (silent) save();
+    else touch(proj);
     return proj.craftData;
   }
 
@@ -2734,34 +2872,43 @@
     opts = opts || {};
     snapshot(proj);
     var prt = makePart(safeName(opts.name, '') || 'Part ' + (proj.parts.length + 1), opts.makeCount);
+    // wave F: a new part is read at the project's size like the others
+    if (proj.size) prt.sizeIndex = proj.size.index;
     proj.parts.push(prt);
     proj.activePartId = prt.id;
     touch(proj);
     return prt;
   }
 
-  function updatePart(projectId, partId, patch) {
+  function updatePart(projectId, partId, patch, internal) {
     var proj = project(projectId);
     var prt = part(proj, partId);
     if (!proj || !prt || !patch) return null;
-    snapshot(proj);
+    // (`internal` is Store-only: updatePartWithProjectSize took the snapshot)
+    if (!(internal && internal.noSnapshot)) snapshot(proj);
     if (typeof patch.name === 'string') prt.name = safeName(patch.name, prt.name);
     if (typeof patch.importKey === 'string') prt.importKey = patch.importKey;
     if (patch.makeCount !== undefined) {
+      var mcBefore = prt.makeCount;
       prt.makeCount = clampInt(patch.makeCount, 1, 99, prt.makeCount);
       if (prt.piecesDone > prt.makeCount) prt.piecesDone = prt.makeCount;
+      // the owner's own number is no longer the importer's inference
+      if (prt.makeCount !== mcBefore) delete prt.makeCountInferred;
     }
     if (patch.targetRows !== undefined) {
       prt.targetRows =
         patch.targetRows === null || patch.targetRows === '' ? null : clampInt(patch.targetRows, 1, 999999, 0) || null;
     }
     if (patch.repeat) {
-      prt.repeat = {
+      prt.repeat = normalizeRepeat({
         enabled: !!patch.repeat.enabled,
         startRow: clampInt(patch.repeat.startRow, 1, 999999, prt.repeat.startRow),
         endRow: clampInt(patch.repeat.endRow, 1, 999999, prt.repeat.endRow),
-        times: clampInt(patch.repeat.times, 1, 9999, prt.repeat.times)
-      };
+        times: clampInt(patch.repeat.times, 1, 9999, prt.repeat.times),
+        // wave F: "until N rows total" (03 #6); omitted = keep what it was
+        mode: patch.repeat.mode !== undefined ? patch.repeat.mode : prt.repeat.mode,
+        untilRows: patch.repeat.untilRows !== undefined ? patch.repeat.untilRows : prt.repeat.untilRows
+      });
     }
     if (patch.alerts !== undefined) {
       var alerts = [];
@@ -2805,6 +2952,7 @@
     proj.parts.splice(proj.parts.indexOf(prt), 1);
     if (proj.activePartId === partId) proj.activePartId = proj.parts[0].id;
     delete lineCache[partId];
+    delete colorPlanCache[partId];
     delete diagramCache[partId];
     touch(proj);
     return true;
@@ -2920,11 +3068,30 @@
     // Size names usually live on a different page than the instructions, so look for
     // them in the whole pasted text and remember them on the project.
     var fullText = opts && typeof opts.text === 'string' ? opts.text : '';
+    var sizesBefore = JSON.stringify(proj.sizes || null);
     if (fullText && window.Patterns && typeof window.Patterns.detectSizes === 'function') {
       try {
         var names = window.Patterns.detectSizes(fullText);
         if (Array.isArray(names) && names.length > 1) proj.sizes = names.map(String);
       } catch (e) { /* ignore parser errors */ }
+    }
+    // Wave F (size-once, 03 #1): the size picked in the import preview, for
+    // the whole project. Every part this import touches is read at it, and
+    // its target is that size's ("a total of 25 (29, 33 …) Rows").
+    var sizeIdx = opts && typeof opts.size === 'number' && opts.size >= 0 && isFinite(opts.size)
+      ? Math.min(99, Math.floor(opts.size)) : null;
+    var docSizeN = proj.sizes && proj.sizes.length >= 2 ? proj.sizes.length : 0;
+    if (sizeIdx !== null) {
+      proj.size = normalizeProjectSize({
+        index: sizeIdx,
+        label: (proj.sizes && proj.sizes[sizeIdx]) || (opts && typeof opts.sizeLabel === 'string' ? opts.sizeLabel : '')
+      });
+      out.sizeSet = proj.size.label;
+    }
+    var readSize = sizeIdx !== null ? sizeIdx : (proj.size ? proj.size.index : 0);
+    if (JSON.stringify(proj.sizes || null) !== sizesBefore) {
+      // every parse of this project's parts read the old size count
+      proj.parts.forEach(function (p0) { delete lineCache[p0.id]; });
     }
 
     // Read ONCE for the whole document, not once per section: `dialectHints`
@@ -2960,8 +3127,9 @@
         var merged = mergePlacement(prt.placementNotes, place);
         if (merged !== str(prt.placementNotes, '')) { prt.placementNotes = merged; out.placed = 1; }
       }
+      if (sizeIdx !== null || proj.size) prt.sizeIndex = readSize;
       if (!(opts && opts.noTargets) && !prt.targetRows) {
-        var activeTarget = targetRowsFromText(joined);
+        var activeTarget = targetRowsFromText(joined, readSize, docSizeN);
         if (activeTarget) { prt.targetRows = activeTarget; out.targeted = 1; }
       }
       lendDialect(prt, joined);
@@ -3000,11 +3168,14 @@
         }
       }
       // 01 #1 / 02 #1: without this every PDF project is un-finishable.
-      var target = noTargets ? null : targetRowsFromText(text);
+      var target = noTargets ? null : targetRowsFromText(text, readSize, docSizeN);
       var place = str(sec.placement, '');
       if (existing) {
         existing.patternText = text;
         existing.makeCount = makeCount;
+        if (sec.makeCountInferred) existing.makeCountInferred = true;
+        else delete existing.makeCountInferred;
+        if (sizeIdx !== null || proj.size) existing.sizeIndex = readSize;
         existing.importKey = key || existing.importKey;
         if (existing.piecesDone > existing.makeCount) existing.piecesDone = existing.makeCount;
         // A target the user set by hand is never overwritten.
@@ -3028,6 +3199,8 @@
         var added = makePart(name || 'Part ' + (proj.parts.length + 1), makeCount);
         added.patternText = text;
         added.importKey = key;
+        if (sec.makeCountInferred) added.makeCountInferred = true;
+        if (sizeIdx !== null || proj.size) added.sizeIndex = readSize;
         if (target) { added.targetRows = target; out.targeted++; }
         if (place) { added.placementNotes = place; out.placed++; }
         lendDialect(added, text);
@@ -3087,13 +3260,290 @@
           times = Math.floor((r.untilRows - startRow + 1) / len);
         }
         times = clampInt(times, 1, 9999, 1);
-        prt.repeat = { enabled: true, startRow: startRow, endRow: endRow, times: times };
-        applied.repeat = { enabled: true, startRow: startRow, endRow: endRow, times: times };
+        // Wave F (03 #6): "until there are a total of 25 Rows" keeps its
+        // intent - the part counts toward 25, and a size change moves it.
+        var until = typeof r.untilRows === 'number' && r.untilRows > 0 && !(typeof r.times === 'number' && r.times > 0)
+          ? Math.floor(r.untilRows) : null;
+        prt.repeat = normalizeRepeat({
+          enabled: true, startRow: startRow, endRow: endRow, times: times,
+          mode: until ? 'untilRows' : 'times', untilRows: until
+        });
+        applied.repeat = {
+          enabled: true, startRow: startRow, endRow: endRow, times: prt.repeat.times,
+          mode: prt.repeat.mode, untilRows: prt.repeat.untilRows
+        };
       }
     }
 
     touch(proj);
     return applied;
+  }
+
+  /* ------------------------------------------------------------------ *
+   * Size-once (wave F, 03 #1 / 11 #3)
+   *
+   * The maker picks the size ONCE — in the import preview, or later in the
+   * part editor — and every count, row target and "Next row" the counter
+   * shows is that size's. `Project.size` is the pick; each part's
+   * `sizeIndex` follows it (a part can still be set on its own, the rare
+   * "body in L, sleeves in M"). Changing the size never touches progress:
+   * rows, stitches and pieces stay; only the numbers they are measured
+   * against move.
+   * ------------------------------------------------------------------ */
+
+  /**
+   * The size names a project offers: the document's own (`Project.sizes`),
+   * else "Size 1".."Size N" up to the longest size list in its parts.
+   * @returns {string[]} [] when the pattern is single-size
+   */
+  function sizeNames(proj) {
+    if (!proj) return [];
+    if (Array.isArray(proj.sizes) && proj.sizes.length >= 2) return proj.sizes.slice();
+    // The longest size list on any line (cached parses; no summary pass, so
+    // this stays cheap on the tap path).
+    var n = 0;
+    for (var i = 0; i < proj.parts.length; i++) {
+      var ls = linesFor(proj.parts[i]);
+      for (var j = 0; j < ls.length; j++) {
+        var sz = ls[j] && ls[j].sizes;
+        if (Array.isArray(sz) && sz.length > n) n = sz.length;
+      }
+    }
+    var out = [];
+    if (n >= 2) for (var k = 0; k < n; k++) out.push('Size ' + (k + 1));
+    return out;
+  }
+
+  /**
+   * What size a part is read at, and why.
+   * @returns {{index:number, label:string|null, source:'project'|'part'|null,
+   *            names:string[]}} source null = a single-size pattern
+   */
+  function partSize(proj, prt) {
+    var names = sizeNames(proj);
+    var idx = sizeIndexOf(prt);
+    var out = { index: idx, label: null, source: null, names: names };
+    if (!names.length) return out;
+    out.label = names[Math.min(idx, names.length - 1)] || null;
+    if (proj && proj.size && proj.size.index !== idx) out.source = 'part';
+    else if (proj && proj.size) out.source = 'project';
+    return out;
+  }
+
+  /**
+   * Pick the project's size. Every part is moved to it, and a target that
+   * came from the pattern (the size's own "a total of N Rows") follows: a
+   * part whose `targetRows` was the old size's reading gets the new size's,
+   * and an 'untilRows' repeat that was the old suggestion takes the new one.
+   * A target typed by hand is left alone. Progress is never touched.
+   * Undoable (one snapshot).
+   * @returns {{index:number, label:string, retargeted:number}|null}
+   */
+  function setProjectSize(projectId, index, internal) {
+    var proj = project(projectId);
+    if (!proj) return null;
+    var names = sizeNames(proj);
+    var idx = clampInt(index, 0, 99, 0);
+    if (names.length && idx > names.length - 1) idx = names.length - 1;
+    if (!(internal && internal.noSnapshot)) snapshot(proj);
+    var docN = proj.sizes && proj.sizes.length >= 2 ? proj.sizes.length : 0;
+    var res = { index: idx, label: names[idx] || 'Size ' + (idx + 1), retargeted: 0 };
+    proj.size = normalizeProjectSize({ index: idx, label: res.label });
+    for (var i = 0; i < proj.parts.length; i++) {
+      var prt = proj.parts[i];
+      var old = sizeIndexOf(prt);
+      var text = str(prt.patternText, '');
+      if (text.replace(/\s/g, '') && old !== idx) {
+        var was = targetRowsFromText(text, old, docN);
+        var now = targetRowsFromText(text, idx, docN);
+        // only a target that IS the pattern's reading moves ("Don't set
+        // targets" and a hand-typed number both stay as they are)
+        if (now && was !== null && prt.targetRows === was) {
+          if (prt.targetRows !== now) res.retargeted++;
+          prt.targetRows = now;
+        }
+        var rep = prt.repeat;
+        if (rep && rep.mode === 'untilRows') {
+          var sugOld = untilSuggestion(text, old, docN);
+          var sugNew = untilSuggestion(text, idx, docN);
+          if (sugNew && rep.untilRows === sugOld) {
+            prt.repeat = normalizeRepeat({
+              enabled: rep.enabled, startRow: rep.startRow, endRow: rep.endRow,
+              times: rep.times, mode: 'untilRows', untilRows: sugNew
+            });
+          }
+        }
+      }
+      prt.sizeIndex = idx;
+      delete lineCache[prt.id];
+    }
+    touch(proj);
+    return res;
+  }
+
+  /**
+   * The part editor's Save when its Size select picks the PROJECT's size:
+   * the part's edits and the size change are ONE undo step. The box's
+   * pattern text goes in first (the size reads it), then the size moves every
+   * part and its pattern targets, then the rest of the sheet - so a target
+   * the owner typed still wins, and one left alone follows the size.
+   * @returns {{part:Object, size:Object}|null}
+   */
+  function updatePartWithProjectSize(projectId, partId, patch, index) {
+    var proj = project(projectId);
+    var prt = part(proj, partId);
+    if (!proj || !prt || !patch) return null;
+    snapshot(proj);
+    if (typeof patch.patternText === 'string' && patch.patternText !== prt.patternText) {
+      prt.patternText = patch.patternText;
+      delete lineCache[prt.id];
+    }
+    var res = setProjectSize(projectId, index, { noSnapshot: true });
+    var rest = {};
+    for (var k in patch) {
+      if (Object.prototype.hasOwnProperty.call(patch, k) && k !== 'sizeIndex') rest[k] = patch[k];
+    }
+    updatePart(projectId, partId, rest, { noSnapshot: true });
+    return { part: prt, size: res };
+  }
+
+  /** The parser's "until there are a total of N Rows" for a text at a size. */
+  function untilSuggestion(text, size, sizeCount) {
+    var api = patternsApi();
+    if (!api || typeof api.summary !== 'function') return null;
+    var lines = parseLoose(text, { size: size, sizeCount: sizeCount });
+    if (!lines.length) return null;
+    try {
+      var s = api.summary(lines);
+      var r = s && s.suggestions && s.suggestions.repeat;
+      return r && typeof r.untilRows === 'number' && r.untilRows > 0 ? Math.floor(r.untilRows) : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /**
+   * Wave F (03 #5): is this part's row target the pattern's own reading AND
+   * an estimate - rows read off a tape measure through a gauge ("until it
+   * measures 59""), or rows numbered after an unresolved length ("Cont even
+   * until work from beg measures 13"" then "Next 6 rows")? The counter then
+   * says "≈ 81". Cached per parse; a target typed by hand is never "≈".
+   */
+  function targetApprox(prt) {
+    if (!prt || !prt.targetRows) return false;
+    var entry = partLines(prt);
+    if (!entry.lines.length) return false;
+    if (entry.approxInfo === undefined) {
+      var any = false;
+      for (var i = 0; i < entry.lines.length; i++) {
+        var l = entry.lines[i];
+        if (l && (l.approxRow || (l.kind === 'repeat' && l.repeatFromLength && l.repeatTo >= 1))) { any = true; break; }
+      }
+      var s = any ? patternSummary(prt) : null;
+      entry.approxInfo = any ? { maxRow: s.maxRow } : null;
+    }
+    return !!(entry.approxInfo && entry.approxInfo.maxRow === prt.targetRows);
+  }
+
+  /* ------------------------------------------------------------------ *
+   * Count confidence (wave F, 06 #1 / #8): "71 rounds · 12 counts computed ·
+   * 1 count disagrees with the pattern"
+   * ------------------------------------------------------------------ */
+
+  /**
+   * `Patterns.countReport` for a part (its own size) or for loose text.
+   * @param {Object|string} partOrText
+   * @param {{size?:number, sizeCount?:number}} [opts] for loose text
+   */
+  function countReport(partOrText, opts) {
+    var empty = { rows: 0, printed: 0, computed: 0, missing: 0, unresolved: 0, disagree: [] };
+    var api = patternsApi();
+    if (!api || typeof api.countReport !== 'function') return empty;
+    var lines = typeof partOrText === 'string'
+      ? parseLoose(partOrText, opts && (opts.size || opts.sizeCount) ? { size: opts.size || 0, sizeCount: opts.sizeCount || 0 } : null)
+      : linesFor(partOrText);
+    try {
+      return api.countReport(lines) || empty;
+    } catch (e) {
+      return empty;
+    }
+  }
+
+  /* ------------------------------------------------------------------ *
+   * Colour changes on the counter (wave F, 02 #3 / 10 #1)
+   * ------------------------------------------------------------------ */
+
+  var colorPlanCache = Object.create(null);
+
+  /**
+   * The yarn every row is worked in, read the way the 3D piece reads it
+   * (`Patterns.expand`'s colour state, row by row), plus the change a row
+   * ENDS with ("join with Yarn B at end of final st", "changing to black in
+   * last 2 loops"). Cached per parse and repeat, so it costs one walk per
+   * pattern edit, never per tap.
+   * @returns {Array<{color:string|null, endTo:string|null}>} index = row (1-based)
+   */
+  function colorPlan(prt) {
+    var entry = partLines(prt);
+    var lines = entry.lines;
+    var api = patternsApi();
+    if (!lines.length || !api || typeof api.expand !== 'function') return [];
+    var rep = prt.repeat || {};
+    var key = entry.version + '|' + (rep.enabled ? rep.startRow + '-' + rep.endRow + 'x' + rep.times : '');
+    var hit = colorPlanCache[prt.id];
+    if (hit && hit.key === key) return hit.plan;
+    var sum = patternSummary(prt);
+    var last = Math.min(Math.max(sum.maxRow || 0, (prt.row || 0) + 1), ROW_INDEX_MAX);
+    var plan = [null];
+    var state = null;
+    var prev = null;
+    var any = false;
+    for (var row = 1; row <= last; row++) {
+      var ex = null;
+      try {
+        ex = api.expand(lines, patternRowForRow(prt, row), prev, state);
+      } catch (e) {
+        ex = null;
+      }
+      if (!ex || typeof ex !== 'object') { plan.push({ color: null, endTo: null }); continue; }
+      state = ex.state;
+      var n = 0;
+      if (Array.isArray(ex.stitches)) {
+        for (var s = 0; s < ex.stitches.length; s++) if (ex.stitches[s] && ex.stitches[s].t !== 'ch') n++;
+      }
+      if (n) prev = n;
+      var endTo = state && state.pendingColor && state.pendingFrom === patternRowForRow(prt, row) ? state.pendingColor : null;
+      if (ex.color || endTo) any = true;
+      plan.push({ color: ex.color || null, endTo: endTo });
+    }
+    if (!any) plan = [];
+    colorPlanCache[prt.id] = { key: key, plan: plan };
+    return plan;
+  }
+
+  /**
+   * What the counter says about yarn on the row being worked:
+   *   color   the yarn this row is worked in (null = the pattern never says)
+   *   change  { to, at: 'start'|'end' } when this row starts in a new yarn,
+   *           or ends by joining the next one; null otherwise
+   * @returns {{color:string|null, change:({to:string, at:string}|null)}}
+   */
+  function rowColorInfo(prt, rowNumber) {
+    var out = { color: null, change: null };
+    if (!prt) return out;
+    var plan = colorPlan(prt);
+    var r = typeof rowNumber === 'number' ? rowNumber : (prt.row || 0) + 1;
+    if (!plan.length || r < 1 || r >= plan.length) return out;
+    var cur = plan[r] || { color: null, endTo: null };
+    var before = r > 1 ? plan[r - 1] : null;
+    out.color = cur.color;
+    if (cur.endTo && cur.endTo !== cur.color) {
+      out.change = { to: cur.endTo, at: 'end' };
+    } else if (r > 1 && cur.color && before && before.color !== cur.color &&
+               !(before.endTo && before.endTo === cur.color)) {
+      out.change = { to: cur.color, at: 'start' };
+    }
+    return out;
   }
 
   function setActivePart(projectId, partId) {
@@ -3414,10 +3864,20 @@
   /**
    * What importing this file WOULD do (09 #3 / 12 #3). Writes nothing and
    * throws the same errors `importJSON` would, so the sheet can show them.
+   * @param {string} text
+   * @param {Array} [pages]  from readBackupFile: each project row then says
+   *        how many page images the file carries for it (`row.pages`)
    * @returns {{projects:Array, templates:Array, counts:object, version:number}}
    */
-  function previewImport(text) {
+  function previewImport(text, pages) {
     var raw = readBackup(text);
+    var pageCount = Object.create(null);
+    if (Array.isArray(pages)) {
+      for (var pc = 0; pc < pages.length; pc++) {
+        var pid = pages[pc] && pages[pc].projectId;
+        if (pid) pageCount[pid] = (pageCount[pid] || 0) + 1;
+      }
+    }
     var list = projects();
     var tlist = templateList();
     // `counts` is the whole sheet (projects AND templates); the two split
@@ -3433,6 +3893,7 @@
       if (!raw.projects[i] || typeof raw.projects[i] !== 'object') continue;
       var incoming = normalizeProject(raw.projects[i]);
       var row = previewRow(incoming, findProject(list, incoming.id));
+      row.pages = pageCount[incoming.id] || 0;
       counts[row.status]++;
       projectCounts[row.status]++;
       projRows.push(row);
@@ -3548,6 +4009,8 @@
 
     var list = projects();
     var count = 0;
+    // What happened to each project in the file, for importPages() (12 #4).
+    var plan = { applied: Object.create(null), idMap: Object.create(null) };
     for (i = 0; i < raw.projects.length; i++) {
       if (!raw.projects[i] || typeof raw.projects[i] !== 'object') continue;
       var incoming = normalizeProject(raw.projects[i]);
@@ -3555,18 +4018,27 @@
       if (how === 'skip') continue;
       var existing = findProject(list, incoming.id);
       if (existing && how === 'keepBoth') {
-        // The clone carries no BlobStore page images: those are keyed by the
-        // id it no longer has. The import sheet says so.
+        // The clone's page images are keyed by its NEW id (12 #4):
+        // importPages() writes the file's copies there, or copies the local
+        // original's, so the twins never share (or lose) each other's pages.
+        var fileId = incoming.id;
         incoming.name = fromBackupName(incoming.name);
         reidentify(incoming);
+        incoming.craftData = rekeyBlobs(incoming.craftData, fileId, incoming.id);
+        plan.applied[fileId] = 'keepBoth';
+        plan.idMap[fileId] = incoming.id;
         list.push(incoming);
         count++;
         continue;
       }
+      plan.applied[incoming.id] = 'replace';
       if (existing) list[list.indexOf(existing)] = incoming;
       else list.push(incoming);
       count++;
     }
+    lastImport = plan;
+    // A page snapshot from an earlier import must not be "undone" by this one.
+    queuePageWork(clearPageSnapshot);
 
     lineCache = Object.create(null);
     diagramCache = Object.create(null);
@@ -3604,9 +4076,533 @@
     diagramCache = Object.create(null);
     preimportText = null;
     lsRemove(KEY + PREIMPORT_KEY_SUFFIX);
+    lastImport = null;
     dirty = true;
     flush();
+    // The page images go back too (12 #4); Store.pagesIdle() says when.
+    queuePageWork(undoPageSnapshot);
     return true;
+  }
+
+  /* ---- .thready: one zip with the backup AND the page images ------------ *
+   *
+   * docs/brainstorm/12-interoperability.md #4 / #5. Layout:
+   *
+   *   backup.json              exactly exportJSON() (or a one-project file in
+   *                            the same format); importable on its own forever
+   *   manifest.json            { format:'thready', formatVersion, scope:
+   *                            'all'|'project', writtenAt, backupVersion,
+   *                            counts, entries:[{path, key, type, bytes}] }
+   *   README.txt               what this is, in plain words
+   *   pages/<projectId>/<n>.<ext>   BlobStore page images, original bytes;
+   *                            the manifest maps each path to its BlobStore key
+   *
+   * Reading rules: backup.json is the truth; the manifest only says where the
+   * images go; a missing pages/ folder, a missing manifest or a damaged image
+   * is never an error (that page is simply not restored); a zip with no
+   * backup.json is not a backup. Needs window.Zip (js/zip.js) and, for the
+   * images, window.BlobStore; without BlobStore it degrades to backup.json.
+   * --------------------------------------------------------------------- */
+
+  var THREADY_FORMAT_VERSION = 1;
+  var BACKUP_FILE_MAX_BYTES = 50 * 1024 * 1024;
+  /** Where importPages() parks the images it is about to replace. Not 'p:…',
+   *  so a project delete or a sweep never touches it. */
+  var PAGE_SNAPSHOT_PREFIX = 'preimport:';
+  var PAGE_SNAPSHOT_LIST = 'preimport:__list';
+  var EXT_BY_TYPE = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif' };
+  var TYPE_BY_EXT = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp', gif: 'image/gif' };
+  var THREADY_README =
+    'Thready or Not backup\r\n' +
+    '=====================\r\n\r\n' +
+    'This file is an ordinary zip. Inside it:\r\n\r\n' +
+    '  backup.json    every project, template and setting, as plain JSON. This is\r\n' +
+    '                 the real backup: on its own it is still a valid file to import.\r\n' +
+    '  manifest.json  what is in here, and which project each page image belongs to.\r\n' +
+    '  pages/         the chart and pattern page images, one folder per project,\r\n' +
+    '                 exactly as they were saved on the device.\r\n\r\n' +
+    'To restore: Thready or Not > Settings > Import backup, and pick this file\r\n' +
+    '(or the backup.json inside it).\r\n';
+
+  function noop() { /* swallow: a failed page step must not stop the queue */ }
+
+  /** The last importJSON's per-project outcome, read by importPages(). */
+  var lastImport = null;
+  /** Page writes, restores and undos run one at a time, in order. */
+  var pageWork = null;
+
+  function blobStore() {
+    var B = window.BlobStore;
+    try {
+      return B && typeof B.available === 'function' && B.available() &&
+        typeof B.putMany === 'function' ? B : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function zipLib() {
+    var Z = window.Zip;
+    return Z && typeof Z.write === 'function' && typeof Z.read === 'function' ? Z : null;
+  }
+
+  function queuePageWork(fn) {
+    if (typeof Promise !== 'function') return null;
+    var prev = pageWork || Promise.resolve();
+    var job = prev.then(function () { return fn(); });
+    pageWork = job.then(noop, noop);
+    return job;
+  }
+
+  /** Resolves once every queued page restore / undo has finished. */
+  function pagesIdle() {
+    return pageWork || Promise.resolve();
+  }
+
+  function blobText(b) {
+    if (!b) return Promise.resolve('');
+    if (typeof b.text === 'function') return b.text();
+    return new Promise(function (resolve) {
+      var fr = new FileReader();
+      fr.onload = function () { resolve(String(fr.result || '')); };
+      fr.onerror = function () { resolve(''); };
+      fr.readAsText(b);
+    });
+  }
+
+  function clearPageSnapshot() {
+    var B = blobStore();
+    return B ? B.deletePrefix(PAGE_SNAPSHOT_PREFIX) : null;
+  }
+
+  /** Put the images an import replaced back, and take away what it added. */
+  function undoPageSnapshot() {
+    var B = blobStore();
+    if (!B) return null;
+    return B.get(PAGE_SNAPSHOT_LIST).then(blobText).then(function (txt) {
+      var rec = null;
+      try { rec = JSON.parse(txt || 'null'); } catch (e) { rec = null; }
+      if (!rec || typeof rec !== 'object') return null;
+      var written = Array.isArray(rec.written) ? rec.written : [];
+      return B.deleteKeys(written).then(function () {
+        return B.entries(PAGE_SNAPSHOT_PREFIX);
+      }).then(function (list) {
+        var back = [];
+        for (var i = 0; i < list.length; i++) {
+          if (list[i].key === PAGE_SNAPSHOT_LIST) continue;
+          back.push({ key: list[i].key.slice(PAGE_SNAPSHOT_PREFIX.length), value: list[i].blob });
+        }
+        return B.putMany(back);
+      });
+    }).then(function () {
+      return B.deletePrefix(PAGE_SNAPSHOT_PREFIX);
+    });
+  }
+
+  /** A clone's craftData points its page keys at its own id. */
+  function rekeyBlobs(craftData, fromId, toId) {
+    if (!craftData || typeof craftData !== 'object' || !fromId || !toId) return craftData;
+    try {
+      var txt = JSON.stringify(craftData);
+      var needle = '"p:' + fromId + ':';
+      if (txt.indexOf(needle) < 0) return craftData;
+      return JSON.parse(txt.split(needle).join('"p:' + toId + ':'));
+    } catch (e) {
+      return craftData;
+    }
+  }
+
+  function sizeText(bytes) {
+    var n = Number(bytes) || 0;
+    if (n < 1024 * 1024) return Math.max(1, Math.round(n / 1024)) + ' KB';
+    return Math.round(n / (1024 * 1024)) + ' MB';
+  }
+
+  /** The size guard's message, or null when the file is a plausible size. */
+  function backupFileProblem(bytes) {
+    var n = Number(bytes) || 0;
+    if (n <= BACKUP_FILE_MAX_BYTES) return null;
+    return 'That file is ' + sizeText(n) + ' — a Thready or Not backup is never bigger than ' +
+      sizeText(BACKUP_FILE_MAX_BYTES) + ', so it is probably not one.';
+  }
+
+  /** One project, in the backup format, for "Send this project" (12 #5). */
+  function exportProjectJSON(projectId) {
+    var p = findProject(projects(), projectId);
+    if (!p) return null;
+    return JSON.stringify({ version: VERSION, projects: [deepCopy(p)], templates: [] }, null, 2);
+  }
+
+  function safeSeg(s) {
+    return String(s).replace(/[^A-Za-z0-9._-]/g, '_') || '_';
+  }
+
+  /** 'p:abc:chartpage:3' → 'pages/abc/3.jpg' (unique within `used`). */
+  function pagePath(pid, key, type, used) {
+    var bits = key.slice(('p:' + pid + ':').length).split(':');
+    var n = bits[bits.length - 1];
+    var ext = EXT_BY_TYPE[String(type || '').toLowerCase()] || 'bin';
+    var dir = 'pages/' + encodeURIComponent(pid) + '/';
+    var path = dir + (/^\d+$/.test(n) ? n : safeSeg(bits.join('-'))) + '.' + ext;
+    if (used[path]) path = dir + safeSeg(bits.join('-')) + '.' + ext;
+    var k = 2;
+    while (used[path]) path = dir + safeSeg(bits.join('-')) + '-' + (k++) + '.' + ext;
+    used[path] = true;
+    return path;
+  }
+
+  /**
+   * Build a `.thready` file.
+   * @param {{projectId?:string, appVersion?:string}} [opts]  projectId → a
+   *        one-project file (12 #5), which does NOT count as a backup
+   * @returns {Promise<{blob:Blob, scope:'all'|'project', projects:number,
+   *          images:number, bytes:number}>}
+   */
+  function exportThready(opts) {
+    opts = opts || {};
+    var Z = zipLib();
+    if (!Z || typeof Promise !== 'function') {
+      return Promise.reject(backupError('The backup file writer is not loaded.', 'noZip'));
+    }
+    var one = null;
+    if (opts.projectId) {
+      one = findProject(projects(), opts.projectId);
+      if (!one) return Promise.reject(backupError('That project is no longer here.', 'noProject'));
+    }
+    var text;
+    try {
+      text = one ? exportProjectJSON(one.id) : exportJSON();
+    } catch (e) {
+      return Promise.reject(e);
+    }
+    var ids = one ? [one.id] : projects().map(function (p) { return p.id; });
+    var B = blobStore();
+    var images = [];
+    var chain = Promise.resolve();
+    if (B) {
+      ids.forEach(function (pid) {
+        chain = chain.then(function () {
+          return B.entries('p:' + pid + ':').then(function (list) {
+            for (var i = 0; i < list.length; i++) {
+              if (list[i].blob && typeof list[i].blob.size === 'number') {
+                images.push({ pid: pid, key: list[i].key, blob: list[i].blob });
+              }
+            }
+          });
+        });
+      });
+    }
+    return chain.then(function () {
+      var written = new Date(now());
+      var json = Z.utf8(text);
+      var used = Object.create(null);
+      var listed = [{ path: 'backup.json', bytes: json.length }];
+      var pageEntries = [];
+      images.forEach(function (img) {
+        var type = String(img.blob.type || '');
+        var path = pagePath(img.pid, img.key, type, used);
+        listed.push({ path: path, key: img.key, type: type, bytes: img.blob.size });
+        pageEntries.push({ name: path, data: img.blob });
+      });
+      var manifest = {
+        format: 'thready',
+        formatVersion: THREADY_FORMAT_VERSION,
+        scope: one ? 'project' : 'all',
+        app: 'Thready or Not',
+        appVersion: str(opts.appVersion, ''),
+        writtenAt: written.toISOString(),
+        backup: 'backup.json',
+        backupVersion: VERSION,
+        counts: {
+          projects: ids.length,
+          templates: one ? 0 : templateList().length,
+          images: images.length
+        },
+        entries: listed
+      };
+      var entries = [
+        { name: 'backup.json', data: json },
+        { name: 'manifest.json', data: JSON.stringify(manifest, null, 2) },
+        { name: 'README.txt', data: THREADY_README }
+      ].concat(pageEntries);
+      return Z.write(entries, { date: written }).then(function (blob) {
+        return {
+          blob: blob,
+          scope: manifest.scope,
+          projects: ids.length,
+          images: images.length,
+          bytes: blob.size
+        };
+      });
+    });
+  }
+
+  function bytesFrom(input) {
+    if (typeof Uint8Array !== 'function') return Promise.reject(backupError('Could not read that file.', 'unreadable'));
+    if (input instanceof Uint8Array) return Promise.resolve(input);
+    if (typeof ArrayBuffer === 'function' && input instanceof ArrayBuffer) return Promise.resolve(new Uint8Array(input));
+    if (input && typeof input.arrayBuffer === 'function') {
+      return input.arrayBuffer().then(function (buf) { return new Uint8Array(buf); });
+    }
+    if (input && typeof Blob === 'function' && input instanceof Blob) {
+      return new Promise(function (resolve, reject) {
+        var fr = new FileReader();
+        fr.onload = function () { resolve(new Uint8Array(fr.result)); };
+        fr.onerror = function () { reject(backupError('Could not read that file.', 'unreadable')); };
+        fr.readAsArrayBuffer(input);
+      });
+    }
+    return Promise.reject(backupError('Could not read that file.', 'unreadable'));
+  }
+
+  function decodeText(u8) {
+    var Z = zipLib();
+    if (Z) return Z.fromUtf8(u8);
+    if (typeof TextDecoder === 'function') return new TextDecoder('utf-8').decode(u8);
+    var s = '';
+    for (var i = 0; i < u8.length; i++) s += String.fromCharCode(u8[i]);
+    return s;
+  }
+
+  function looksLikeZip(u8) {
+    return u8.length >= 4 && u8[0] === 0x50 && u8[1] === 0x4b &&
+      ((u8[2] === 3 && u8[3] === 4) || (u8[2] === 5 && u8[3] === 6));
+  }
+
+  function escapeRe(s) {
+    return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
+  /**
+   * A page with no manifest line: 'pages/<id>/3.jpg' → the key the project's
+   * own data uses for page 3 ('p:<id>:chartpage:3'), or null.
+   */
+  function guessPageKey(text, pid, file) {
+    var base = String(file).replace(/\.[A-Za-z0-9]+$/, '');
+    var m = /^(?:([A-Za-z]+)-)?(\d+)$/.exec(base);
+    if (!m) return null;
+    if (m[1]) return 'p:' + pid + ':' + m[1] + ':' + m[2];
+    var re = new RegExp('"p:' + escapeRe(pid) + ':([A-Za-z]+):' + m[2] + '"');
+    var hit = re.exec(text);
+    return hit ? 'p:' + pid + ':' + hit[1] + ':' + m[2] : null;
+  }
+
+  function readThreadyBytes(u8) {
+    var Z = zipLib();
+    if (!Z) return Promise.reject(backupError('This copy of the app cannot open .thready files.', 'noZip'));
+    return Z.read(u8).then(function (zip) {
+      var main = null;
+      var depth = function (n) { return n.split('/').length; };
+      zip.entries.forEach(function (e) {
+        if (e.dir || !/(^|\/)backup\.json$/.test(e.name)) return;
+        if (!main || depth(e.name) < depth(main.name)) main = e;
+      });
+      if (!main) {
+        throw backupError('That zip has no backup.json inside, so it is not a Thready or Not backup.', 'noBackupJson');
+      }
+      if (!main.data || main.crcOk !== true) {
+        throw backupError('The backup inside that file is damaged and cannot be read.', 'damaged');
+      }
+      var root = main.name.slice(0, main.name.length - 'backup.json'.length);
+      var text = decodeText(main.data).replace(/^﻿/, '');
+
+      var manifest = null;
+      var byName = Object.create(null);
+      zip.entries.forEach(function (e) { byName[e.name] = e; });
+      var mEntry = byName[root + 'manifest.json'];
+      if (mEntry && mEntry.data && mEntry.crcOk) {
+        try { manifest = JSON.parse(decodeText(mEntry.data)); } catch (e) { manifest = null; }
+        if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) manifest = null;
+      }
+      if (manifest && typeof manifest.formatVersion === 'number' && manifest.formatVersion > THREADY_FORMAT_VERSION) {
+        throw backupError(
+          'This backup was made by a newer version of Thready or Not. Update the app, then try again.',
+          'newerVersion'
+        );
+      }
+      var listed = Object.create(null);
+      if (manifest && Array.isArray(manifest.entries)) {
+        manifest.entries.forEach(function (m) {
+          if (m && typeof m.path === 'string' && typeof m.key === 'string') listed[m.path] = m;
+        });
+      }
+
+      var pages = [];
+      var skipped = 0;
+      zip.entries.forEach(function (e) {
+        if (e.dir || e.name.indexOf(root + 'pages/') !== 0) return;
+        var rel = e.name.slice(root.length);
+        var m = /^pages\/([^\/]+)\/([^\/]+)$/.exec(rel);
+        if (!m) { skipped++; return; }
+        var pid;
+        try { pid = decodeURIComponent(m[1]); } catch (x) { skipped++; return; }
+        if (!e.data || e.crcOk !== true) { skipped++; return; }
+        var line = listed[rel];
+        var key = line && line.key.indexOf('p:' + pid + ':') === 0 && line.key.length < 300 ? line.key : null;
+        if (!key) key = guessPageKey(text, pid, m[2]);
+        if (!key) { skipped++; return; }
+        var ext = ((/\.([A-Za-z0-9]+)$/.exec(m[2]) || [])[1] || '').toLowerCase();
+        var type = line && /^image\/[a-z0-9.+-]+$/i.test(String(line.type || '')) ? line.type : (TYPE_BY_EXT[ext] || 'application/octet-stream');
+        pages.push({ projectId: pid, key: key, path: rel, type: type, bytes: e.data });
+      });
+
+      return {
+        kind: 'thready',
+        scope: manifest && manifest.scope === 'project' ? 'project' : 'all',
+        text: text,
+        pages: pages,
+        skipped: skipped,
+        manifest: manifest
+      };
+    });
+  }
+
+  /**
+   * Read a chosen file: a `.thready` zip (sniffed by its magic bytes, never
+   * by name or MIME type, which iOS does not know) or a bare `.json` backup.
+   * Writes nothing; feed `text` (+ `pages`) to previewImport / importJSON /
+   * importPages.
+   * @param {File|Blob|ArrayBuffer|Uint8Array|string} input
+   * @returns {Promise<{kind:'json'|'thready', scope:'all'|'project',
+   *          text:string, pages:Array, skipped:number, manifest:?Object}>}
+   *          Rejects with `.code` 'tooBig' | 'noBackupJson' | 'damaged' |
+   *          'newerVersion' | 'noZip' | 'unreadable' or a Zip error code.
+   */
+  function readBackupFile(input) {
+    if (typeof Promise !== 'function') throw backupError('Could not read that file.', 'unreadable');
+    if (typeof input === 'string') {
+      return Promise.resolve({ kind: 'json', scope: 'all', text: input.replace(/^﻿/, ''), pages: [], skipped: 0, manifest: null });
+    }
+    var size = input && typeof input.size === 'number' ? input.size
+      : (input && typeof input.byteLength === 'number' ? input.byteLength : 0);
+    var big = backupFileProblem(size);
+    if (big) return Promise.reject(backupError(big, 'tooBig'));
+    return bytesFrom(input).then(function (u8) {
+      if (looksLikeZip(u8)) return readThreadyBytes(u8);
+      return { kind: 'json', scope: 'all', text: decodeText(u8).replace(/^﻿/, ''), pages: [], skipped: 0, manifest: null };
+    });
+  }
+
+  /** Move every image under `prefix` aside, recording the keys in `saved`. */
+  function parkImages(B, prefix, saved) {
+    return B.entries(prefix).then(function (list) {
+      if (!list.length) return null;
+      var aside = list.map(function (e) { return { key: PAGE_SNAPSHOT_PREFIX + e.key, value: e.blob }; });
+      return B.putMany(aside).then(function (n) {
+        // Only take the originals away once their copies are safe.
+        if (!n) return null;
+        var keys = list.map(function (e) { return e.key; });
+        return B.deleteKeys(keys).then(function () {
+          for (var i = 0; i < keys.length; i++) saved.push(keys[i]);
+        });
+      });
+    });
+  }
+
+  /**
+   * After importJSON: put the file's page images where the imported projects
+   * expect them, undoably (Store.undoImport takes them back out).
+   *  - a project the file replaced or added: its images in the file replace
+   *    the local ones; with none in the file the local ones stay (a restore
+   *    onto the same phone, or a file written before .thready existed)
+   *  - a "Keep both" copy: the file's images under its new id, or a copy of
+   *    the local original's when the file has none
+   *  - a skipped project: nothing
+   * @param {Array} pages  readBackupFile().pages (may be empty)
+   * @returns {Promise<{written:number, copied:number, skipped:number}>}
+   */
+  function importPages(pages) {
+    var result = { written: 0, copied: 0, skipped: 0 };
+    pages = Array.isArray(pages) ? pages : [];
+    var plan = lastImport;
+    var B = blobStore();
+    if (!plan || !B) {
+      result.skipped = pages.length;
+      return Promise.resolve(result);
+    }
+    return queuePageWork(function () {
+      var written = [];
+      var saved = [];
+      var record = function () {
+        return B.put(PAGE_SNAPSHOT_LIST, JSON.stringify({ written: written, saved: saved }));
+      };
+      var chain = Promise.resolve();
+      Object.keys(plan.applied).forEach(function (fileId) {
+        var how = plan.applied[fileId];
+        var target = how === 'keepBoth' ? plan.idMap[fileId] : fileId;
+        var from = 'p:' + fileId + ':';
+        var mine = pages.filter(function (pg) {
+          return pg && pg.projectId === fileId && typeof pg.key === 'string' && pg.key.indexOf(from) === 0 && pg.bytes;
+        });
+        chain = chain.then(function () {
+          if (mine.length) {
+            var put = mine.map(function (pg) {
+              return {
+                key: 'p:' + target + ':' + pg.key.slice(from.length),
+                value: new Blob([pg.bytes], { type: pg.type || 'application/octet-stream' })
+              };
+            });
+            var before = how === 'replace' ? parkImages(B, from, saved) : Promise.resolve();
+            return before.then(function () {
+              return B.putMany(put);
+            }).then(function (n) {
+              if (n) {
+                put.forEach(function (x) { written.push(x.key); });
+                result.written += put.length;
+              } else {
+                result.skipped += put.length;
+              }
+            }).then(record);
+          }
+          if (how !== 'keepBoth') return null;
+          return B.entries(from).then(function (list) {
+            if (!list.length) return null;
+            var copy = list.map(function (e) {
+              return { key: 'p:' + target + ':' + e.key.slice(from.length), value: e.blob };
+            });
+            return B.putMany(copy).then(function (n) {
+              if (!n) return null;
+              copy.forEach(function (x) { written.push(x.key); });
+              result.copied += copy.length;
+              return record();
+            });
+          });
+        });
+      });
+      pages.forEach(function (pg) {
+        if (!pg || !plan.applied[pg.projectId]) result.skipped++;
+      });
+      return chain.then(record).then(function () { return result; });
+    });
+  }
+
+  /**
+   * Project ids something still points at: the live list, every project the
+   * undo stack or the pre-import snapshot could bring back, and whatever is
+   * on disk right now (another tab may have created one). Used to sweep
+   * orphaned page images (09 #10).
+   */
+  function referencedProjectIds() {
+    var seen = Object.create(null);
+    var out = [];
+    var add = function (id) {
+      if (typeof id === 'string' && id && !seen[id]) {
+        seen[id] = true;
+        out.push(id);
+      }
+    };
+    var addAll = function (txt) {
+      if (typeof txt !== 'string' || !txt) return;
+      try {
+        var raw = JSON.parse(txt);
+        if (raw && Array.isArray(raw.projects)) raw.projects.forEach(function (p) { add(p && p.id); });
+      } catch (e) { /* unreadable: contributes nothing */ }
+    };
+    projects().forEach(function (p) { add(p.id); });
+    for (var i = 0; i < undoStack.length; i++) add(undoStack[i] && undoStack[i].id);
+    addAll(preimportSnapshot());
+    addAll(lsGet(KEY));
+    return out;
   }
 
   /* ------------------------------------------------------------------ *
@@ -4574,8 +5570,17 @@
         if (typeof lc === 'number' && lc > 0) count = Math.floor(lc);
       }
       if (!count && rs[row] > 0) count = rs[row];
+      /* Wave F (3D follow): the round being worked with no parsed count is
+         sized from the counter's own target for that row — the number the
+         readout shows, which also answers past the written rows from the
+         repeat sentence — so the piece can turn 360/target per tap. With no
+         target either, the ring is only as long as what has been tapped and
+         the round says so (`countless`): there is no honest size to turn by. */
+      var countless = false;
       if (!count && row === workingRow) {
-        count = Math.max(prt.stitch, (rowIndex ? usableCount(rowIndex.count[patternRow]) : null) || 0);
+        var tgt = (rowIndex ? usableCount(rowIndex.count[patternRow]) : null) || targetFor(prt, patternRow) || 0;
+        count = Math.max(prt.stitch, tgt);
+        countless = !tgt;
       }
 
       // The chain ring wins round 1 (D5). Round 2 then starts from the chain
@@ -4611,7 +5616,7 @@
         // A printed total that disagrees with its own instructions is kept as
         // printed (`count`); the pair is published for whoever wants to say so.
         var chkR = countCheck(line, ex);
-        rounds.push({
+        var roundRec = {
           printed: chkR ? chkR.printed : null,
           computed: chkR ? chkR.computed : null,
           count: count,
@@ -4630,7 +5635,12 @@
           // 1-based pattern row this round draws (= the work row; they differ
           // only inside a repeat, where the pattern row is reused).
           row: row
-        });
+        };
+        // Only on the working round, and only when nothing sized it (wave F):
+        // its `count` is just the stitches tapped so far, so the renderer's
+        // follow mode must not turn by it. Absent otherwise.
+        if (countless) roundRec.countless = true;
+        rounds.push(roundRec);
       }
       prevCount = count;
     }
@@ -4918,6 +5928,16 @@
     // The target the importer (and a project made from a template) sets, so
     // the import preview can say the same number instead of re-deriving it.
     targetRowsFromText: targetRowsFromText,
+    // wave F: size-once, count confidence, colour changes on the counter
+    sizeNames: sizeNames,
+    partSize: partSize,
+    setProjectSize: setProjectSize,
+    updatePartWithProjectSize: updatePartWithProjectSize,
+    countReport: countReport,
+    targetApprox: targetApprox,
+    colorPlan: colorPlan,
+    rowColorInfo: rowColorInfo,
+    repeatTimes: repeatTimes,
 
     // counting
     tapStitch: tapStitch,
@@ -4985,6 +6005,16 @@
     canUndoImport: canUndoImport,
     undoImport: undoImport,
     MIGRATIONS: MIGRATIONS,
+    // .thready container (12 #4 / #5)
+    exportThready: exportThready,
+    exportProjectJSON: exportProjectJSON,
+    readBackupFile: readBackupFile,
+    importPages: importPages,
+    pagesIdle: pagesIdle,
+    backupFileProblem: backupFileProblem,
+    referencedProjectIds: referencedProjectIds,
+    BACKUP_FILE_MAX_BYTES: BACKUP_FILE_MAX_BYTES,
+    THREADY_FORMAT_VERSION: THREADY_FORMAT_VERSION,
 
     // misc
     uid: uid,

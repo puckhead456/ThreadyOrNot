@@ -41,22 +41,36 @@
   cursor: crosshair;
 }
 
+/* The permanent position readout (wave F): line 1 from the top-left, line 2
+   from the centre arrows. It clears the 26-32 px left ruler. A system font,
+   not the theme's display face: Press Start 2P would make "22 right · 88 up
+   from centre" wider than a phone. */
 .xs-coord {
   position: absolute;
-  left: 8px;
+  left: 36px;
   bottom: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
   padding: 3px 9px;
   border-radius: var(--radius-sm);
   background: var(--surface);
-  color: var(--text-muted);
+  color: var(--text);
   border: 1px solid var(--border);
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
   font-size: 12px;
+  line-height: 1.25;
   font-variant-numeric: tabular-nums;
   pointer-events: none;
-  max-width: calc(100% - 16px);
+  max-width: calc(100% - 44px);
   white-space: nowrap;
   overflow: hidden;
+  opacity: 0.94;
 }
+.xs-coord-grid { font-weight: 700; }
+.xs-coord-centre { color: var(--text-muted); font-size: 11px; }
+.xs-coord-grid:empty, .xs-coord-centre:empty { display: none; }
+.xs-coord:has(.xs-coord-grid:empty) { display: none; }
 
 .xs-expand {
   position: absolute;
@@ -327,7 +341,59 @@
   gap: 8px;
   margin-top: 8px;
 }
-.xs-zoom .btn { flex: 1 1 0; min-height: 44px; }
+.xs-zoom .btn { flex: 1 1 0; min-height: 44px; min-width: 0; padding-left: 4px; padding-right: 4px; }
+.xs-zoom .xs-see-page,
+.xs-zoom .xs-find-next { font-size: 18px; }
+
+/* The full-screen page viewer (wave F, 04 #3 / #14). */
+.sheet-xs-page .sheet-body { display: flex; flex-direction: column; }
+.xs-pv-frame {
+  position: relative;
+  flex: 0 0 auto;
+  height: 50vh;
+  min-height: 240px;
+  overflow: hidden;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: grab;
+}
+.xs-pv-frame:focus-visible { outline: 3px solid var(--primary); outline-offset: 2px; }
+.xs-pv-stage {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform-origin: 0 0;
+  will-change: transform;
+}
+.xs-pv-img { display: block; width: 100%; height: 100%; pointer-events: none; }
+.xs-pv-mark {
+  position: absolute;
+  box-sizing: border-box;
+  border: 2.5px solid #e0245e;
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.12);
+  pointer-events: none;
+}
+.xs-pv-frame .xs-page-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.xs-pv-bar { border-top: none; padding: 6px 0 0; }
+.xs-pv-done { width: 100%; min-height: 44px; margin-top: 8px; }
+.xs-pv-note { margin-top: 6px; }
+.xs-thumb-region {
+  font-size: 11px;
+  text-align: center;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.xs-page-frame .xs-expand { z-index: 1; }
 .xs-hint { font-size: 12px; margin-top: 8px; }
 
 .xs-two {

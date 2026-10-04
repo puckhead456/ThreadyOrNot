@@ -207,10 +207,112 @@ Promise.all([get('bee.txt'), get('cardigan.txt'), get('bear.txt'), get('cato.txt
 }, function (err) {
   log(false, 'could not load the ../tmp-pdf text fixtures: ' + err);
   return runPdfs();
+}).then(function () {
+  try { runWaveF(); } catch (e) { log(false, 'wave F block threw: ' + (e && e.stack ? e.stack : e)); }
 }).then(finish, function (e) {
   log(false, 'pdf run threw: ' + (e && e.stack ? e.stack : e));
   finish();
 });
+
+// ------------------------------------------------- wave F (crochet-core)
+// Size-once, colour changes and the mid-piece length, against the PDFs the
+// run above already extracted (window.__pdfText). Ground truth: the PDFs.
+function runWaveF() {
+  var T = window.__pdfText || {};
+  h('h2', 'wave F: size-once, colour changes, lengths');
+  function sec(file, name) {
+    if (!T[file]) return null;
+    var s = P.splitSections(T[file]);
+    for (var i = 0; i < s.length; i++) if (s[i].name === name) return s[i];
+    return null;
+  }
+  function walkColours(text, n) {
+    var L = P.parse(text), st = null, prev = null, out = [];
+    for (var r = 1; r <= n; r++) {
+      var x = P.expand(L, r, prev, st);
+      st = x.state; prev = x.stitches.length || prev; out.push(x.color);
+    }
+    return out;
+  }
+
+  // --- size names (each PDF's own "Sizes" / "To Fit" line)
+  [['crochet-patons-mesh-cardigan.pdf', ['XS/S', 'M', 'L', 'XL', '2/3XL', '4/5XL']],
+   ['crochet-caron-cuff-cardigan.pdf', ['XS/S', 'M', 'L', 'XL', '2/3XL', '4/5XL']],
+   ['crochet-bernat-lace-cardigan.pdf', ['XS/S', 'M', 'L', 'XL', '2/3XL', '4/5XL']],
+   ['crochet-stylecraft-hex-socks.pdf', ['4-6yrs', '7-9yrs', '10-12yrs', 'Adult S', 'Adult L']],
+   ['crochet-lionbrand-logcabin-pullover.pdf', ['S', 'M', 'L', '1X', '2X', '3X']],
+   ['cardigan.pdf', ['XS', 'S', 'M', 'L', '1X', '2X', '3X', '4X', '5X']]
+  ].forEach(function (x) {
+    if (T[x[0]]) eq(P.detectSizes(T[x[0]]), x[1], x[0] + ': wave F - the size names the leaflet prints');
+  });
+
+  // --- Patons Body at size M (index 1): "Work 158 (176-194-212-242-260) sc"
+  var pb = sec('crochet-patons-mesh-cardigan.pdf', 'Body');
+  if (pb) {
+    var pl = P.parse(pb.text, { size: 1, sizeCount: 6 });
+    eq(rowOf(pl, 1) && rowOf(pl, 1).count, 176, 'patons: wave F - Body row 1 at size M is 176 sc (158 (176-194-212-242-260))');
+    var mk = P.sizeMarks(rowOf(pl, 1).text, 1, 6);
+    eq(mk.map(function (m) { return m.value; }), [176], 'patons: wave F - the pattern sheet marks 176 in that list');
+  }
+
+  // --- Wheat Stitch: 9 body sizes, the panels' stitch lists are 3 LENGTHS
+  var fs = sec('cardigan.pdf', 'First Section');
+  if (fs) {
+    var fl = P.parse(fs.text, { size: 3, sizeCount: 9 });
+    eq([rowOf(fl, 1).count, !!rowOf(fl, 1).sizeUnresolved, P.summary(fl).maxRow], [null, true, 37],
+      'cardigan.pdf: wave F - at L the "184 (208, 224)" lengths give no stitch target, the rows run to 37 (25 (29, 33, 37 ...))');
+  }
+  var ss2 = sec('cardigan.pdf', 'Second Section');
+  if (ss2) {
+    var sl2 = P.parse(ss2.text, { size: 3, sizeCount: 9 });
+    var nx = sl2.filter(function (l) { return /^Next Row/.test(l.text); })[0];
+    var rp2 = sl2.filter(function (l) { return l.kind === 'repeat' && l.repeatOf; })[0];
+    eq([nx && nx.row, rp2 && rp2.repeatFrom, rp2 && rp2.repeatTo], [37, 9, 36],
+      'cardigan.pdf: wave F - Second Section at L: rows 9-36 by the repeat, the "Next Row" is 37 (24 (28, 32, 36 ...) Rows)');
+  }
+  var sv = sec('cardigan.pdf', 'Sleeves');
+  if (sv) {
+    var svl = P.parse(sv.text, { size: 5, sizeCount: 9 });
+    eq([rowOf(svl, 1).count, rowOf(svl, 1).sizes && rowOf(svl, 1).sizes.length], [68, 9],
+      'cardigan.pdf: wave F - Sleeves Rnd 1 reads all nine sizes across the wrap, 2X = 68');
+    var sc = P.sizeScope('Size Large:', P.detectSizes(T['cardigan.pdf']));
+    eq(sc && sc.indices, [3], 'cardigan.pdf: wave F - "Size Large:" is the L block (dimmed for other sizes in the sheet)');
+  }
+
+  // --- colour changes (ground truth: the PDF text and photos)
+  var body = sec('crochet-panda.pdf', 'Body');
+  if (body) {
+    var pc = walkColours(body.text, 17);
+    eq([pc[0], pc[13], pc[14], pc[15], pc[16]], ['white', 'white', 'white', 'black', 'black'],
+      'panda: wave F - "Rnd 15: ... changing to black in last 2 loops" - Rnd 15 is white, Rnd 16 on black');
+  }
+  var tail = sec('crochet-baphomet.pdf', 'Tail');
+  if (tail) {
+    var tc = walkColours(tail.text, 13);
+    eq([tc[0], tc[11], tc[12]], ['secondary color', 'secondary color', 'main color'],
+      'baphomet: wave F - Tail "Starting in secondary color" ... "CC to main color in last stitch of R12" -> R13 main');
+  }
+  var kcs = T['crochet-kingcole-festival-uk.pdf'] ? P.splitSections(T['crochet-kingcole-festival-uk.pdf'])[0] : null;
+  if (kcs) {
+    var kc = walkColours(kcs.text, 13).map(function (c) { return String(c).split(' / ')[0]; });
+    // A; Row 2 ends "join with Yarn B"; Row 4 C; 5 D; 6 E; 7 F; Row 8 "Repeat
+    // Row 6 joining with Yarn C at end of row"; Row 10 G; Row 12 H.
+    eq(kc, ['Azure', 'Azure', 'Hot Pink', 'Hot Pink', 'Lime', 'Antique Gold', 'Violet', 'Red', 'Lime', 'Lime', 'Ecru', 'Ecru', 'Sky'],
+      'kingcole: wave F - every row 1-13 in the yarn the leaflet says, each change on the row AFTER "join with Yarn X at end of final st"');
+  }
+
+  // --- Caron: the tape sentence in the middle of the sleeve (03 #5)
+  var cs = sec('crochet-caron-cuff-cardigan.pdf', 'Shape Sleeve');
+  if (cs) {
+    var cl = P.parse(cs.text);
+    var cont = cl.filter(function (l) { return /^Cont even in pat until work from beg measures 13/.test(l.text); })[0];
+    eq(cont && cont.lengthEstimate && [cont.lengthEstimate.value, cont.lengthEstimate.unit, cont.lengthEstimate.fromStart], [13, 'in', true],
+      'caron: wave F - "Cont even in pat until work from" / "beg measures 13"" is read as one length sentence');
+    var n6c = cl.filter(function (l) { return /^Next 6 rows/.test(l.text); })[0];
+    eq(n6c && [n6c.row, !!n6c.approxRow], [25, true],
+      'caron: wave F - the "Next 6 rows" after it stay 25-30 and are marked approximate (13" is from the Cardigan block\'s foundation)');
+  }
+}
 
 // ------------------------------------------------- the real PDFs, in-app
 // Same path a user takes: PdfText.extract(file) -> Patterns.splitSections.

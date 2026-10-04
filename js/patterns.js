@@ -438,8 +438,21 @@
     return out;
   }
 
+  // Wave F (size-once): how many sizes the DOCUMENT names, set by parse() from
+  // `opts.sizeCount` for the length of one call. A list of another length is
+  // not one number per size - the Wheat Stitch cardigan's "184 (208, 224)" is
+  // three LENGTHS against nine body sizes - so it resolves to no number at
+  // all rather than to whichever entry the clamp lands on (size L read the
+  // 28" length's 224). 0 = unknown, the old clamping behaviour.
+  var SIZE_COUNT = 0;
+
+  function sizeListFits(sizes) {
+    return !(SIZE_COUNT >= 2 && sizes && sizes.length > 1 && sizes.length !== SIZE_COUNT);
+  }
+
   function pickSize(sizes, size) {
     if (!sizes || !sizes.length) return null;
+    if (!sizeListFits(sizes)) return null;
     var i = (typeof size === 'number' && size >= 0) ? size : 0;
     if (i > sizes.length - 1) i = sizes.length - 1;
     return sizes[i];
@@ -640,11 +653,124 @@
   var SIZE_TOKEN_RE = /^(?:x{0,3}s|s|m|l|x{0,3}l|\d+\s*x(?:l)?|\d+\s*x?s)$/i;
   var SIZE_LINE_RE = /^([a-z0-9]{1,4})\s*\(\s*([^()]+?)\s*\)(?:\s*\(\s*([^()]+?)\s*\))?\s*[:.]?\s*$/i;
 
+  // Wave F (size-once): the two other ways a leaflet names its sizes.
+  //  - Yarnspirations: "Sizes XS/S M L XL 2/3XL 4/5XL" - a label and the size
+  //    names separated by spaces, with paired sizes written "XS/S", "2/3XL".
+  //  - Stylecraft: "To Fit 4-6yrs 7-9yrs 10-12yrs Adult S Adult L" - ages,
+  //    and a word in front of a size letter ("Adult S").
+  // Each token is checked, so "Sizes U.S. E/4 (3.5 mm) ... crochet hooks" and
+  // "To fit chest measurement" are never size names.
+  var SIZE_LABEL_LINE_RE = /^(?:sizes?|to\s+fit)\s*:?\s+(.+?)\s*\.?$/i;
+  var SIZE_PAIR_TOKEN_RE = /^(?:x{0,3}[sml]|\d?x{0,3}l|\d+x)\/(?:x{0,3}[sml]|\d?x{0,3}l|\d+x)$|^\d+\/\d+\s*x{0,3}[sl]$/i;
+  var SIZE_AGE_TOKEN_RE = /^\d+(?:[½¼¾]|\s*[-–]\s*\d+[½¼¾]?)?\s*(?:yrs?|years?|mths?|months?)$/i;
+  var SIZE_WORD_RE = /^(?:adult|child|children|kids?|teen|baby|toddler|ladies|women'?s|men'?s|youth)$/i;
+
+  function sizeLabelLine(t) {
+    var m = SIZE_LABEL_LINE_RE.exec(t);
+    if (!m) return null;
+    var raw = m[1].split(/\s+/);
+    var out = [];
+    var hasSize = false;
+    for (var i = 0; i < raw.length; i++) {
+      var tk = raw[i].replace(/[,;]$/, '');
+      if (!tk) continue;
+      if (SIZE_WORD_RE.test(tk) && i + 1 < raw.length) {
+        var nx = raw[i + 1].replace(/[,;]$/, '');
+        if (SIZE_TOKEN_RE.test(nx) && /[a-z]/i.test(nx)) {
+          out.push(tk.charAt(0).toUpperCase() + tk.slice(1).toLowerCase() + ' ' + nx.toUpperCase());
+          hasSize = true;
+          i++;
+          continue;
+        }
+        return null;
+      }
+      if (SIZE_AGE_TOKEN_RE.test(tk)) { out.push(tk); hasSize = true; continue; }
+      if (SIZE_PAIR_TOKEN_RE.test(tk)) { out.push(tk.toUpperCase()); hasSize = true; continue; }
+      if (SIZE_TOKEN_RE.test(tk) && /[a-z]/i.test(tk)) { out.push(tk.toUpperCase().replace(/\s+/g, '')); hasSize = true; continue; }
+      return null;
+    }
+    return hasSize && out.length >= 2 ? out : null;
+  }
+
+  /**
+   * Where the chosen size's number sits in every size list of a line, so the
+   * pattern sheet and the counter can mark it (wave F, size-once):
+   * "184 (208, 224) sts" at size 1 -> [{ start: 5, end: 8, value: 208 }].
+   * A list whose length is not `sizeCount` (when given) is not one number per
+   * size, so nothing in it is marked. Square-bracket lists ("30[34:36:40:48]")
+   * count too.
+   * @returns {Array<{start:number,end:number,value:number}>}
+   */
+  var SIZE_LIST_G = /(\d+)\s*\(\s*(\d+(?:\s*[,\-]\s*\d+)+)\s*\)(?:\s*\(\s*(\d+(?:\s*[,\-]\s*\d+)+)\s*\))?|(\d+)\s*\[\s*(\d+(?:\s*:\s*\d+)+)\s*\]/g;
+
+  function sizeMarks(text, size, sizeCount) {
+    var out = [];
+    if (text === null || text === undefined) return out;
+    var s = String(text);
+    var want = (typeof size === 'number' && size >= 0) ? Math.floor(size) : 0;
+    var n = (typeof sizeCount === 'number' && sizeCount >= 2) ? Math.floor(sizeCount) : 0;
+    var m, tok, at;
+    SIZE_LIST_G.lastIndex = 0;
+    while ((m = SIZE_LIST_G.exec(s)) !== null) {
+      var toks = [];
+      var re = /\d+/g;
+      while ((tok = re.exec(m[0])) !== null) toks.push({ at: m.index + tok.index, len: tok[0].length, v: num(tok[0]) });
+      if (toks.length < 2) continue;
+      if (n && toks.length !== n) continue;
+      // (a measurement in sizes - "19 (21, 23) in." - is per size too)
+      at = Math.min(want, toks.length - 1);
+      out.push({ start: toks[at].at, end: toks[at].at + toks[at].len, value: toks[at].v });
+    }
+    return out;
+  }
+
+  /**
+   * Which sizes a line is written for, when it says so up front (wave F,
+   * 03 #14): "Size XS:", "Size Small:", "Sizes M, L, 2/3XL and 4/5XL only:
+   * 2nd row: ...", "For 2nd, 3rd, 4th and 5th sizes only", "All sizes:".
+   * @param {string} text
+   * @param {string[]} names  the document's size names (Project.sizes)
+   * @returns {{indices:number[]|null, label:boolean}|null} null = the line
+   *   names no sizes; indices null = all sizes; `label` = the line is only
+   *   the scope ("Size XS:"), so it covers the lines below it.
+   */
+  var SIZE_SCOPE_RE = /^(?:for\s+(?:the\s+)?)?(all\s+sizes?|sizes?\s+([^:]{1,60}?)(?:\s+only)?|((?:\d+(?:st|nd|rd|th)\s*(?:,|and|&)?\s*)+)sizes?(?:\s+only)?)\s*(?::|$)/i;
+  var SIZE_WORDS = { 'extra small': 'XS', small: 'S', medium: 'M', large: 'L', 'extra large': 'XL' };
+
+  function sizeScope(text, names) {
+    var t = trimLine(String(text == null ? '' : text));
+    var m = SIZE_SCOPE_RE.exec(t);
+    if (!m) return null;
+    var label = t.replace(/[:\s]+$/, '').length <= m[0].replace(/[:\s]+$/, '').length;
+    if (/^all\s+sizes?$/i.test(m[1])) return { indices: null, label: label };
+    var out = [];
+    if (m[3]) {
+      m[3].replace(/(\d+)(?:st|nd|rd|th)/gi, function (_, d) { out.push(parseInt(d, 10) - 1); return _; });
+      return out.length ? { indices: out, label: label } : null;
+    }
+    if (!names || !names.length) return null;
+    var want = m[2].split(/\s*(?:,|\band\b|&)\s*/);
+    for (var i = 0; i < want.length; i++) {
+      var w = want[i].replace(/\.$/, '').trim();
+      if (!w) continue;
+      var key = SIZE_WORDS[w.toLowerCase()] || w;
+      var hit = -1;
+      for (var k = 0; k < names.length; k++) {
+        if (String(names[k]).toLowerCase() === String(key).toLowerCase()) { hit = k; break; }
+      }
+      if (hit < 0) return null;       // not a size list at all ("Size 5.5 mm hook:")
+      out.push(hit);
+    }
+    return out.length ? { indices: out, label: label } : null;
+  }
+
   function detectSizes(text) {
     if (text == null) return null;
     var lines = String(text).split(/\r\n|\r|\n/);
     for (var i = 0; i < lines.length; i++) {
       var t = trimLine(lines[i]);
+      var lab = sizeLabelLine(t);
+      if (lab) return lab;
       var m = SIZE_LINE_RE.exec(t);
       if (!m) continue;
       var toks = [m[1]];
@@ -1189,7 +1315,7 @@
 
   function headKey(t) { return t.toLowerCase().replace(/\s+/g, ' '); }
 
-  var NOTE_KEY_RE = /^(?:colou?r\s+change|invisible\s+colou?r\s+change|change\b|switch\b|add\b|stuff\b|start\b|begin\b|tie\s+off|fasten\b|fo\b|sl\s*st|slst|join\b|place\b|insert\b|attach\b|sew\b|embroider\b|do\s*not\b|don'?t\b|put\b|with\b|cut\b|leave\b|leaving\b|finish\b|close\b|before\b|after\b|now\b|next\b|make\s+sure|mark\b|pinch\b|fold\b|work\b|continue\b|optional\b|using\b|in\s+colou?r\b|with\s+colou?r\b|in\s+(?:yellow|black|white|grey|gray|brown|pink|red|blue|green|mc|cc)\s*[.,]?\s*$|in\s+(?:colou?r\s+)?[a-z][a-z]*\s*[:.]?\s*$)/i;
+  var NOTE_KEY_RE = /^(?:colou?r\s+change|invisible\s+colou?r\s+change|change\b|cc\s+to\b|star(?:t|)ing\s+(?:in|with)\b|in\s+(?:main|secondary|contrast(?:ing)?|accent)\s+colou?r\b|switch\b|add\b|stuff\b|start\b|begin\b|tie\s+off|fasten\b|fo\b|sl\s*st|slst|join\b|place\b|insert\b|attach\b|sew\b|embroider\b|do\s*not\b|don'?t\b|put\b|with\b|cut\b|leave\b|leaving\b|finish\b|close\b|before\b|after\b|now\b|next\b|make\s+sure|mark\b|pinch\b|fold\b|work\b|continue\b|optional\b|using\b|in\s+colou?r\b|with\s+colou?r\b|in\s+(?:yellow|black|white|grey|gray|brown|pink|red|blue|green|mc|cc)\s*[.,]?\s*$|in\s+(?:colou?r\s+)?[a-z][a-z]*\s*[:.]?\s*$)/i;
 
   // Front-matter headings. A part name never sits above the materials list or
   // the abbreviation table, so one of these ends the cover page: a name the
@@ -1241,6 +1367,9 @@
     }
     return defs >= 2;
   }
+
+  // "...in last stitch of R12" / "...last st of Rnd 5" (wave F).
+  var NOTE_ROW_REF_RE = /\b(?:of|in|on)\s+(?:r|rnd|round|row)\s*\.?\s*(\d+)\b/i;
 
   // Lines that may sit between two headers without breaking the header group.
   var COLOUR_NOTE_RE = /^(?:in\s+(?:colou?r\s+)?[a-z][a-z0-9]*\s*[:.,]?|\(\s*[a-z]\s*=\s*[a-z]+\s*\))$/i;
@@ -2664,6 +2793,15 @@
         r0++;
         continue;
       }
+      // "Cont even in pat until work from" / "beg measures 13" [33 cm], ending
+      // on a WS row." - the length the piece runs to, broken over two printed
+      // lines, so neither half read as a repeat (wave F, Caron Shape Sleeve).
+      if (/^(?:then\s+)?(?:cont(?:inue)?|work)\b[^.;]*\buntil\b[^.;]*$/i.test(tl) && !UNTIL_LEN_RE.test(tl) &&
+          /^[a-z][^.;]{0,30}?\d+(?:[.,]\d+)?\s*(?:"|''|in\b|inch|cm\b)/.test(nx0)) {
+        repaired.push(tl + ' ' + nx0);
+        r0++;
+        continue;
+      }
       var nd = NAME_DASH_ROW_RE.exec(tl);
       if (nd && headerInfo(nd[1]) && headerInfo(nd[1]) !== 'note') {
         repaired.push(nd[1]);
@@ -2807,11 +2945,34 @@
       /\b(?:each|every|next|last|first|remaining|rem)\s+(?:\d+\s+)?sts?\b/i.test(t) ||
       // "...into the skipped st]" / "work across the remaining sts, turn." (wave
       // E, Wheat Stitch Center Back rows 5-6 lost their fill and read 12)
-      /^work\s+(?:across|to\s+end|even)\b/i.test(t);
+      /^work\s+(?:across|to\s+end|even)\b/i.test(t) ||
+      // "...1dc in next st)" / "to end, join with Yarn B at end of" / "final
+      // st, turn." and "...join with Yarn D at" / "end of final st, turn." -
+      // King Cole's 30-character column cuts every row (wave F: the colour
+      // each row ends with was left behind as a loose note).
+      /^(?:to\s+end|(?:at\s+(?:the\s+)?)?end\s+of\s+(?:the\s+)?(?:final|last|row|rnd|round))\b/i.test(t) ||
+      /^(?:final|last)\s+(?:st|stitch|sts|stitches)\b/i.test(t);
     return hasCount || hasStitch;
   }
 
+  /**
+   * opts.size      0-based size index (default 0)
+   * opts.sizeCount how many sizes the document names (Project.sizes.length);
+   *                a size list of any other length resolves to no count, and
+   *                the line says so with `sizeUnresolved: true` (wave F).
+   */
   function parse(text, opts) {
+    var saved = SIZE_COUNT;
+    var n = opts && typeof opts.sizeCount === 'number' && opts.sizeCount >= 2 ? Math.floor(opts.sizeCount) : 0;
+    SIZE_COUNT = n;
+    try {
+      return parseBody(text, opts);
+    } finally {
+      SIZE_COUNT = saved;
+    }
+  }
+
+  function parseBody(text, opts) {
     if (text === null || text === undefined) return [];
     var size = (opts && typeof opts.size === 'number') ? opts.size : 0;
     var raws = prepareLines(text);
@@ -3086,6 +3247,33 @@
                 rEnd = cur.lastRow + (rp.times - (rp.more ? 1 : 0)) * blk;
               }
               L.repeatAfter = cur.lastRow;
+              // Wave F (03 #5): "Cont even in pat until work from beg measures
+              // 13"" in the middle of a piece, after a repeat, with no tension
+              // line for the piece. The document's gauge (Caron: 10 rows = 4")
+              // puts 13" at ~32 rows FROM THE BEGINNING - and the beginning is
+              // the foundation of the Cardigan block, eight rows before this
+              // section's own "1st row", which a section cannot see. So the
+              // rows are not renumbered off a guess; the rows after the tape
+              // sentence keep their count from the last counted row and carry
+              // `approxRow` (the app shows "≈"), and the sentence carries the
+              // gauge's reading (`lengthEstimate`) for the "why" sheet.
+              if (rEnd === null && rp.untilLength && rp.lastCount !== null) {
+                var lenG = null;
+                try {
+                  var lenHints = dialectHints(String(text));
+                  if (!(lenHints && lenHints.craft === 'knit')) lenG = gauge(text, cur.name || undefined) || gauge(text);
+                } catch (eLen) { lenG = null; }
+                var lenRpu = lenG ? rowsPerUnit(lenG, rp.untilLength.unit) : null;
+                L.lengthEstimate = {
+                  value: rp.untilLength.value, unit: rp.untilLength.unit,
+                  rows: lenRpu > 0 ? Math.round(rp.untilLength.value * lenRpu) : null,
+                  gauge: lenG && lenG.source ? lenG.source : null,
+                  fromStart: /\bfrom\s+(?:the\s+)?beg(?:inning)?\b/i.test(rt)
+                };
+                cur.approxAfter = true;
+                // (when rows are written after it, it owns no rows of its own:
+                // see the repeat pass after the loop)
+              }
               if (rEnd !== null && rEnd > cur.lastRow && rEnd - cur.lastRow <= ROW_TARGET_MAX) {
                 cur.repeatEnd = rEnd;
               }
@@ -3095,6 +3283,8 @@
       } else if (cls.nextRow) {
         L.row = Math.max(cur.lastRow === null ? 0 : cur.lastRow, cur.repeatEnd || 0) + 1;
         L.rowEnd = L.row + (cls.nextRow.span || 1) - 1;
+        // after an unresolved "until it measures ..." the count is ours (≈)
+        if (cur.approxAfter) L.approxRow = true;
         L.kind = 'row';
         prefixLen = t.length - cls.nextRow.rest.length;
         isRow = true;
@@ -3155,6 +3345,19 @@
           if (!hanging && /\b(?:rows?|rnds?|rounds?)(?:\s*\d+\s*-)?\s*$/i.test(t) && /^\d/.test(ct)) {
             hanging = true;
           }
+          // "Row 8 Repeat Row 6 joining with" / "Yarn C at end of row." - the
+          // yarn the row changes to wrapped away from its verb (wave F).
+          if (!hanging && /\b(?:with|join(?:ing)?|using|change\s+to|changing\s+to)\s*$/i.test(t) &&
+              /^(?:yarn|colou?r)\s+[A-Z]\b/i.test(ct)) {
+            hanging = true;
+          }
+          // "... join and turn. | 58 (58, 62, 64, 66)" / "(68, 72, 72, 74) sts":
+          // a size list's second bracket group wrapped onto the next line, so
+          // the row read five sizes of nine (wave F, Wheat Stitch Sleeves).
+          if (!hanging && /\d+\s*\(\s*\d+(?:\s*[,-]\s*\d+)+\s*\)\s*$/.test(t) &&
+              /^\(\s*\d+(?:\s*[,-]\s*\d+)+\s*\)/.test(ct)) {
+            hanging = true;
+          }
           // "...ch 1, sc in same dc, ch" / "2, skip next 2 dc, ** (sc, ch 2,
           // sc) ...": the line broke between a chain and its length (wave E,
           // Persian Tiles Border Rnd 2 read "= 1" off its first line alone).
@@ -3186,6 +3389,7 @@
         L.sizes = expl.sizes.length > 1 ? expl.sizes : null;
         L.stitches = pickSize(expl.sizes, size);
         if (expl.sizes.length > 1) multiSize = true;
+        if (!sizeListFits(expl.sizes)) L.sizeUnresolved = true;
         if (expl.start > prefixLen) body = t.slice(0, expl.start);
         // text right after the count that is really a note on this row
         var after = TRAILING_NOTE_RE.exec(t.slice(expl.end));
@@ -3200,7 +3404,7 @@
       // Second Block (for a total of 30 (32, 34, 38, 40, 42) sc)." - the pick-up
       // counts come first and the row's own total last, a few lines down
       // (wave E, crochet-lionbrand-logcabin-pullover: every block read 20).
-      if ((isRow || isSetup) && (!SENTENCE_END_RE.test(t) || TOTAL_OF_RE.test(t))) {
+      if ((isRow || isSetup) && !L.sizeUnresolved && (!SENTENCE_END_RE.test(t) || TOTAL_OF_RE.test(t))) {
         var tot = totalOfAhead(raws, lastIdx, size, heads, t);
         if (tot) {
           for (var jt = lastIdx + 1; jt <= tot.line; jt++) {
@@ -3213,16 +3417,18 @@
           L.sizes = tot.sizes.length > 1 ? tot.sizes : null;
           L.stitches = pickSize(tot.sizes, size);
           if (tot.sizes.length > 1) multiSize = true;
+          if (!sizeListFits(tot.sizes)) L.sizeUnresolved = true;
         }
       }
 
-      if ((isRow || isSetup) && L.stitches === null) {
+      if ((isRow || isSetup) && L.stitches === null && !L.sizeUnresolved) {
         var cont = continuationCount(raws, lastIdx) ||
           strandedCount(raws, lastIdx, t, size, heads);
         if (cont) {
           L.sizes = cont.sizes.length > 1 ? cont.sizes : null;
           L.stitches = pickSize(cont.sizes, size);
           if (cont.sizes.length > 1) multiSize = true;
+          if (!sizeListFits(cont.sizes)) L.sizeUnresolved = true;
           // The lines between the row and its stranded total are the rest of
           // the row's instruction, so they join it rather than being left
           // behind as notes that the attachment pass then hangs on the NEXT
@@ -3263,10 +3469,11 @@
         L.sizes = fnd.length > 1 ? fnd : null;
         L.stitches = pickSize(fnd, size);
         if (fnd.length > 1) multiSize = true;
+        if (!sizeListFits(fnd)) L.sizeUnresolved = true;
       }
 
       // A counted line before row 1 of the section is a setup/foundation row.
-      if (!isRow && !isSetup && L.kind === 'note' && L.stitches !== null && !cur.hasRow) {
+      if (!isRow && !isSetup && L.kind === 'note' && (L.stitches !== null || L.sizeUnresolved) && !cur.hasRow) {
         L.kind = 'setup'; L.row = 0; L.rowEnd = 0; isSetup = true;
         if (cur.lastRow === null) cur.lastRow = 0;
       }
@@ -3286,6 +3493,10 @@
           L.counts = repeatCounts(lines, cur.index, refs, cur.prevCount,
             L.row, L.rowEnd, L.stitches);
           L.computed = L.counts ? L.counts[L.counts.length - 1] : null;
+        } else if (L.sizeUnresolved) {
+          // The printed list is not one number per size (see SIZE_COUNT), so
+          // there is nothing honest to work the row out from either.
+          L.computed = null;
         } else {
           L.computed = evaluate(instr, cur.prevCount);
         }
@@ -3321,6 +3532,8 @@
         L.count = (L.stitches !== null) ? L.stitches : L.computed;
         L.countSource = (L.stitches !== null) ? 'explicit' : (L.computed !== null ? 'computed' : null);
         if (L.count !== null) cur.prevCount = L.count;
+        // ...and the rows after it cannot be counted from a stale number.
+        else if (L.sizeUnresolved) cur.prevCount = null;
         if (isRow) {
           cur.hasRow = true;
           // a section needs real instructions, not just numbered lines
@@ -3386,6 +3599,12 @@
       var rl = lines[rq];
       if (rl.kind !== 'repeat' || !rl.repeatOf) continue;
       var rsec = sections[rl.section];
+      // Wave F: a tape-measure sentence in the MIDDLE of a piece (rows are
+      // written after it) is not resolved into rows - see `lengthEstimate`.
+      if (rl.lengthEstimate && rsec && rsec.lastRowLine !== null && rq < rsec.lastRowLine) {
+        rl.repeatOf = null;
+        continue;
+      }
       var from = (rsec && rsec.maxRow !== null && rsec.maxRow >= 1) ? rsec.maxRow + 1 : null;
       // ...unless rows were written AFTER it, in which case it covers the rows
       // between the one it follows and them (see repeatEnd above).
@@ -3427,6 +3646,8 @@
           if (n >= from && n <= ROW_TARGET_MAX) {
             rl.repeatUntil = n;
             fromLength = true;
+            // wave F: a row count read off a tape measure is an estimate (≈)
+            rl.repeatFromLength = true;
             rl.repeatEstimated = est || !!(useG && useG.estimated);
             rl.repeatGauge = est ? null : (useG ? useG.source : null);
             if (rl.repeatRec) {
@@ -3491,9 +3712,38 @@
         paras.push(para);
       }
     }
+    function attachAfter(line, text) {
+      line.notes.push(text);
+      (line.notesAfter || (line.notesAfter = [])).push(text);
+    }
     paras.forEach(function (p) {
-      if (!isAttachableNote(p.text)) return;
       var target = null, k;
+      // Wave F (02 #3): a colour change that names its round - "CC to main
+      // color in last stitch of R12" - belongs to THAT round, not the next row
+      // printed after it (the baphomet's notes sit under the last round).
+      var refM = NOTE_ROW_REF_RE.exec(p.text);
+      if (refM && p.text.length <= 220 && colorPhrases(p.text, null, true).length) {
+        var want = num(refM[1]);
+        for (k = 0; k < lines.length; k++) {
+          var lk = lines[k];
+          if (lk.section === p.section && lk.kind === 'row' && lk.row >= 1 &&
+              want >= lk.row && want <= lk.rowEnd) { target = lk; break; }
+        }
+        if (target) { attachAfter(target, p.text); return; }
+      }
+      // Wave F: a change made at the END of a row ("to end, join with Yarn B
+      // at end of" / "final st, turn." wrapped off King Cole's narrow column,
+      // "join with Yarn C at end of final st, turn.") is the tail of the row
+      // ABOVE it, not a note for the next one - which put every King Cole
+      // colour one row late, and lost the ones that start "to end, ...".
+      if (p.text.length <= 220 && colorPhrases(p.text, null, true).some(function (h) { return h.end; })) {
+        for (k = p.firstIdx - 1; k >= 0; k--) {
+          if (lines[k].section !== p.section) break;
+          if (lines[k].kind === 'row' || lines[k].kind === 'setup') { target = lines[k]; break; }
+        }
+        if (target) { attachAfter(target, p.text); return; }
+      }
+      if (!isAttachableNote(p.text)) return;
       for (k = p.lastIdx + 1; k < lines.length; k++) {
         if (lines[k].section !== p.section) break;
         if (lines[k].kind === 'row' || lines[k].kind === 'setup') { target = lines[k]; break; }
@@ -3591,6 +3841,7 @@
 
   function summary(lines) {
     var rows = 0, maxRow = null, hasTargets = false, anyExplicit = false, anyComputed = false;
+    var lengthRows = false;
     var meta = (lines && lines.meta) ? lines.meta : null;
     if (lines) {
       for (var i = 0; i < lines.length; i++) {
@@ -3607,6 +3858,7 @@
             (maxRow === null || l.repeatRows > maxRow)) {
           maxRow = l.repeatRows;
         }
+        if (l.kind === 'repeat' && l.repeatFromLength && l.repeatTo >= 1) lengthRows = true;
         if (l.count !== null && l.count !== undefined) hasTargets = true;
         if (l.stitches !== null && l.stitches !== undefined) anyExplicit = true;
         if (l.computed !== null && l.computed !== undefined) anyComputed = true;
@@ -3622,6 +3874,9 @@
       computedOnly: !anyExplicit && anyComputed,
       sizes: meta ? meta.sizes : null,
       multiSize: meta ? meta.multiSize : false,
+      // wave F: some of the rows the piece runs to were read off a length
+      // through a gauge ("until it measures 13"") - the app shows them as ≈
+      lengthRows: lengthRows,
       sections: secs,
       suggestions: {
         targetRows: sug ? sug.untilRows : null,
@@ -3632,6 +3887,42 @@
         estimated: !!(sug && sug.estimated)
       }
     };
+  }
+
+  /**
+   * How sure the count readout can be, per part (wave F, 06 #1 / 06 #8): the
+   * WRITTEN rows of a parse, counted per row (a "Rnd 7-13" line is 7 rows),
+   * split by where each row's count came from.
+   *   rows       written rows (as summary().rows)
+   *   printed    rows whose count is printed in the pattern
+   *   computed   rows whose count the parser worked out from the words ("≈")
+   *   missing    rows with no count at all
+   *   unresolved rows whose printed list is not one number per size
+   *   disagree   [{ row, rowEnd, printed, computed, text }] - a printed total
+   *              its own plain arithmetic contradicts (`deviation`)
+   * @returns {{rows:number, printed:number, computed:number, missing:number,
+   *            unresolved:number, disagree:Array}}
+   */
+  function countReport(lines) {
+    var out = { rows: 0, printed: 0, computed: 0, missing: 0, unresolved: 0, disagree: [] };
+    if (!lines || !lines.length) return out;
+    for (var i = 0; i < lines.length; i++) {
+      var l = lines[i];
+      if (!l || l.kind !== 'row' || !(l.row >= 1)) continue;
+      var end = (l.rowEnd === null || l.rowEnd === undefined) ? l.row : l.rowEnd;
+      var n = end - l.row + 1;
+      if (!(n >= 1)) continue;
+      out.rows += n;
+      if (l.sizeUnresolved) out.unresolved += n;
+      else if (l.countSource === 'explicit') out.printed += n;
+      else if (l.countSource === 'computed') out.computed += n;
+      else out.missing += n;
+      if (l.deviation) {
+        out.disagree.push({ row: l.row, rowEnd: end, printed: l.deviation.printed,
+          computed: l.deviation.computed, text: String(l.text || '') });
+      }
+    }
+    return out;
   }
 
   function splitSections(text) {
@@ -3992,6 +4283,11 @@
   // Does a legend value name a yarn colour, or an abbreviation-table term?
   function legendColour(raw) {
     var t = cleanName(raw);
+    // "Azure / Turquiose": one shade per yarn range (wave F, King Cole)
+    if (t.indexOf('/') > 0) {
+      var sides = t.split(/\s*\/\s*/);
+      return sides.length === 2 && legendColour(sides[0]) && legendColour(sides[1]);
+    }
     if (!t || t.length < 2 || t.length > 24) return false;
     var low = t.toLowerCase();
     if (TERM_STOP[low]) return false;
@@ -4007,6 +4303,15 @@
 
   function colorHex(name) {
     if (name === null || name === undefined) return null;
+    // "Hot Pink / Fuchsia" (a shade per yarn range): the first that is known
+    if (String(name).indexOf('/') > 0) {
+      var parts = String(name).split('/');
+      for (var pi = 0; pi < parts.length; pi++) {
+        var ph = colorHex(parts[pi]);
+        if (ph) return ph;
+      }
+      return null;
+    }
     var s = String(name).toLowerCase().replace(/[^a-z\s-]+/g, ' ').replace(/\s+/g, ' ').trim();
     s = s.replace(/\s+(?:yarn|wool|colou?r|thread)$/, '').trim();
     if (!s) return null;
@@ -4048,6 +4353,7 @@
     if (!t) return false;
     if (/^colou?r\s+[a-z]$/i.test(t)) return true;
     if (/^(?:mc|cc)$/i.test(t)) return true;
+    if (/^(?:main|secondary|contrast(?:ing)?|accent)\s+colou?r$/i.test(t)) return true;
     var low = t.toLowerCase();
     // a yarn code the key defines ("Using B", "Attach CB in ...") - written in
     // capitals, so "with a sl st" never reads as colour A
@@ -4062,12 +4368,24 @@
     return /^[A-Z][a-z]{2,15}$/.test(t);
   }
 
-  var LEGEND_RE = /(?:^|[(\[,;])\s*([A-Za-z]{1,3})\s*=\s*([A-Za-z][A-Za-z '\-]{1,23}?)\s*(?=[)\]]|,|;|$)/g;
+  var LEGEND_RE = /(?:^|[(\[,;])\s*([A-Za-z]{1,3})\s*=\s*([A-Za-z][A-Za-z '\-\/]{1,23}?)\s*(?=[)\]]|,|;|$)/g;
   // "In Twilight :", "With MC", and - the amigurumi idiom expand() never read -
   // the same phrase sitting straight after the row marker: "Rnd 1: With black,
   // ch 2, 6 sc" (04 H).
-  var C_IN = /^\s*(?:(?:rnds?|rounds?|rows?|r)?\.?\s*\d+(?:\s*[-&+]\s*\d+)?\s*(?:\([^)]{0,14}\))?\s*[:.)]\s*)?(?:in|with|using|w\/)\b\s*(?:the\s+)?(colou?r\s+[a-z]\b|[A-Za-z][A-Za-z'-]*)/i;
-  var C_CHANGE = /\b(?:colou?r\s*change|change|changing|switch|switching)\s+to\s+(?:the\s+)?(colou?r\s+[a-z]\b|[A-Za-z][A-Za-z'-]*)/ig;
+  // Wave F: "main color" / "secondary color" are the colour (the baphomet's
+  // "Starting in secondary color." / "CC to main color in last stitch of
+  // R12"), not the word "main" - generic roles are named as written.
+  var C_ROLE = '(?:main|secondary|contrast(?:ing)?|accent)\\s+colou?r\\b';
+  var C_IN = new RegExp('^\\s*(?:(?:rnds?|rounds?|rows?|r)?\\.?\\s*\\d+(?:\\s*[-&+]\\s*\\d+)?\\s*(?:\\([^)]{0,14}\\))?\\s*[:.)]\\s*)?(?:star(?:t|)ing\\s+)?(?:in|with|using|w\\/)\\b\\s*(?:the\\s+)?(' + C_ROLE + '|colou?r\\s+[a-z]\\b|[A-Za-z][A-Za-z\'-]*)', 'i');
+  var C_CHANGE = new RegExp('\\b(?:colou?r\\s*change|change|changing|switch|switching|cc)\\s+to\\s+(?:the\\s+)?(' + C_ROLE + '|colou?r\\s+[a-z]\\b|[A-Za-z][A-Za-z\'-]*)', 'ig');
+  // King Cole: "Using Yarn A make 147 ch", "join with Yarn B at end of final
+  // st", "Row 8 Repeat Row 6 joining with Yarn C at end of row", "re-join Yarn
+  // I", "pick up Yarn A", "continue with Yarn D". The letter is the key's code.
+  var C_YARN = /\b(?:[Uu]sing|[Ww]ith|[Jj]oin(?:ing)?(?:\s+with)?|[Rr]e-?join(?:ing)?(?:\s+with)?|[Pp]ick(?:ing)?\s+up|[Cc]ontinu(?:e|ing)\s+with|[Cc]hang(?:e|ing)\s+to)\s+(?:the\s+)?[Yy]arn\s+([A-Z])\b/g;
+  // A change made at the END of the row it is written in: "changing to black
+  // in last 2 loops", "join with Yarn B at end of final st", "CC to main color
+  // in last stitch of R12". The new colour is the NEXT row's (wave F).
+  var C_END_RE = /^(?:\s*(?:the\s+)?(?:last|final)\s+(?:st|stitch|loop)|[^.;]{0,48}?\b(?:in\s+(?:the\s+)?(?:last|final)\s+(?:\d+\s+|two\s+|2\s+)?(?:st|sts|stitch(?:es)?|loops?|lps?|yo|yarn\s+over)\b|at\s+(?:the\s+)?end\s+of\s+(?:the\s+)?(?:row|rnd|round|final|last)\b))/i;
   var C_ATTACH = /\b(?:[Aa]ttach|[Jj]oin|[Rr]e-?join)\s+(?:yarn\s+|colou?r\s+)?([A-Z]{1,2}|[A-Z][a-z]+)\b(?=\s+(?:in|into|to|at|with)\b)/g;
   var C_OFF = /\bfasten\s+off\s+(?:the\s+)?(colou?r\s+[a-z]\b|[A-Za-z][A-Za-z'-]*)/ig;
   var C_INCOLOR = /\bin\s+(colou?r\s+[a-z])\b/ig;
@@ -4081,12 +4399,23 @@
     var m;
     if (!s) return hits;
 
+    // Wave F: `end` marks a change made at the end of this row (C_END_RE).
+    function endsRow(m) {
+      return C_END_RE.test(s.slice(m.index + m[0].length));
+    }
+
     m = C_IN.exec(s);
     if (m && looksLikeColor(m[1], legendVals)) hits.push({ at: m.index, kind: 'base', name: cleanName(m[1]) });
 
     C_CHANGE.lastIndex = 0;
     while ((m = C_CHANGE.exec(s)) !== null) {
-      if (looksLikeColor(m[1], legendVals)) hits.push({ at: m.index, kind: 'base', name: cleanName(m[1]) });
+      if (looksLikeColor(m[1], legendVals)) {
+        hits.push({ at: m.index, kind: 'base', name: cleanName(m[1]), end: endsRow(m) });
+      }
+    }
+    C_YARN.lastIndex = 0;
+    while ((m = C_YARN.exec(s)) !== null) {
+      hits.push({ at: m.index, kind: 'base', name: 'Yarn ' + m[1], code: m[1], end: endsRow(m) });
     }
     // "Attach CB in the back lp of any dc", "Join C in any ch-3 sp" - how a
     // motif round changes colour (wave E)
@@ -4095,7 +4424,7 @@
       // a code the key defines, or a real colour word - never "Attach Arms"
       var an = cleanName(m[1]);
       if ((legendVals && legendVals[an.toLowerCase()]) || (an.length > 2 && colorHex(an))) {
-        hits.push({ at: m.index, kind: 'base', name: an });
+        hits.push({ at: m.index, kind: 'base', name: an, end: endsRow(m) });
       }
     }
     C_OFF.lastIndex = 0;
@@ -4129,6 +4458,7 @@
 
   var YARN_CODE_AFTER_RE = /\b\d{2,5}\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s+(C[A-Z]|MC)\b/g;
   var YARN_CODE_BEFORE_RE = /(?:^|[\s,;:])([A-J])\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s+\d{3,5}\b/g;
+  var YARN_TABLE_RE = /^([A-Z][A-Za-z']+(?:\s+[A-Z][A-Za-z']+)?)\s*\(\d{3,5}\)\s*(?:x\s*\d+\s+)?([A-J])(?:\s+([A-Z][A-Za-z']+(?:\s+[A-Z][A-Za-z']+)?)\s*\(\d{3,5}\)\s*(?:x\s*\d+)?)?\s*$/;
 
   function colors(text) {
     var raws = textLines(text);
@@ -4164,6 +4494,14 @@
         YARN_CODE_BEFORE_RE.lastIndex = 0;
         while ((lm = YARN_CODE_BEFORE_RE.exec(t)) !== null) lk.push([lm[1], lm[2]]);
       }
+      // King Cole's two-range table: "Azure (3366) x 2 A Turquiose (4044) x 3"
+      // - one shade per yarn range either side of the code (wave F).
+      var yt = YARN_TABLE_RE.exec(t);
+      if (yt) {
+        var y1 = yt[1].trim(), y2 = yt[3] ? yt[3].trim() : '';
+        // "Violet (717) x 1 E Violet (4038) x 2" is one shade, said once
+        lk.push([yt[2], y2 && y2.toLowerCase() !== y1.toLowerCase() ? y1 + ' / ' + y2 : y1]);
+      }
       lk.forEach(function (p) {
         var k0 = p[0].toUpperCase(), v0 = cleanName(p[1]);
         if (!v0 || stitchInfo(v0) || legend[k0]) return;
@@ -4193,7 +4531,10 @@
 
     // pass 2: colour phrases in reading order
     for (i = 0; i < raws.length; i++) {
-      colorPhrases(raws[i], legendVals, false).forEach(function (hit) { add(hit.name); });
+      colorPhrases(raws[i], legendVals, false).forEach(function (hit) {
+        // "with Yarn B" names the key's shade when the key gives one
+        add(hit.code && legend[hit.code] ? legend[hit.code] : hit.name);
+      });
     }
 
     return { legend: legend, names: names };
@@ -5948,14 +6289,25 @@
     }
     colorPhrases(text, codes, true).forEach(function (hit) {
       if (hit.kind === 'base') {
-        var resolved = st.names[hit.name.toLowerCase()] || hit.name;
-        if (/^[a-z]{1,2}$/i.test(resolved) && st.legend[resolved.toUpperCase()]) {
-          resolved = st.legend[resolved.toUpperCase()];
-        }
-        st.color = resolved;
+        var resolved = resolveHitName(hit, st);
+        // Wave F: "changing to black in last 2 loops" / "join with Yarn B at
+        // end of final st" - this row is still worked in the old colour; the
+        // new one is the next row's (expand() applies it there).
+        if (hit.end) { st.pendingColor = resolved; st.pendingFrom = st.curRow; }
+        else { st.color = resolved; st.pendingColor = null; }
       }
       // 'off' ends a secondary colour; the base colour is left alone.
     });
+  }
+
+  /** A colour phrase's name as the key spells it ("Yarn A" -> its shade, "CB" -> "Burgundy"). */
+  function resolveHitName(hit, st) {
+    if (hit.code && st.legend && st.legend[hit.code]) return st.legend[hit.code];
+    var resolved = (st.names && st.names[hit.name.toLowerCase()]) || hit.name;
+    if (/^[a-z]{1,2}$/i.test(resolved) && st.legend && st.legend[resolved.toUpperCase()]) {
+      resolved = st.legend[resolved.toUpperCase()];
+    }
+    return resolved;
   }
 
   // The dominant height of the row, ignoring chain spaces (height 0 by
@@ -6151,6 +6503,13 @@
       return { stitches: [], color: st.color || null, height: 1, width: 0, state: st, inc: [], dec: [] };
     }
 
+    // A change made at the end of an earlier row is this row's colour (wave F).
+    if (st.pendingColor && typeof rowNumber === 'number' &&
+        (typeof st.pendingFrom !== 'number' || rowNumber > st.pendingFrom)) {
+      st.color = st.pendingColor;
+      st.pendingColor = null;
+    }
+    st.curRow = rowNumber;
     var res = { stitches: [], color: st.color || null, height: 1, width: 0, state: st, inc: [], dec: [] };
 
     try {
@@ -6170,8 +6529,14 @@
           applyPhrases(l.kind === 'setup' ? String(l.text).replace(/^[A-Za-z][A-Za-z '&\/-]{1,38}:\s*/, '') : l.text, st);
         }
       }
+      // Notes printed BEFORE the row set its colour now; notes that are the
+      // row's own tail (`notesAfter`, wave F) are read after its words.
+      var after = line.notesAfter || null;
       if (line.notes && line.notes.length) {
-        for (var n = 0; n < line.notes.length; n++) applyPhrases(line.notes[n], st);
+        for (var n = 0; n < line.notes.length; n++) {
+          if (after && after.indexOf(line.notes[n]) >= 0) continue;
+          applyPhrases(line.notes[n], st);
+        }
       }
 
       var instr = joinRepeatTail(parsed, line, instrOf(line));
@@ -6207,6 +6572,9 @@
           var pk = st.legend && st.legend[pick.toUpperCase()] ? st.legend[pick.toUpperCase()] : pick;
           st.color = st.names[String(pk).toLowerCase()] || pk;
         }
+      }
+      if (after) {
+        for (var na = 0; na < after.length; na++) applyPhrases(after[na], st);
       }
 
       // "Rnds 4-15: rep Rnd 3": the row's own words say nothing, so the row it
@@ -6469,6 +6837,9 @@
     splitSections: splitSections,
     placement: placement,
     detectSizes: detectSizes,
+    sizeMarks: sizeMarks,
+    sizeScope: sizeScope,
+    countReport: countReport,
     dialectHints: dialectHints,
     gauge: gauge,
     evaluate: evaluate,

@@ -2670,6 +2670,259 @@ try { window.Store.__setKeyForTests('ZDGEO_test_store'); } catch (e) { /* ignore
     }());
     // /renderer ---------------------------------------------------------------
 
+    // follow ------------------------------------------------------------------
+    /* Follow mode (wave F, docs/wave-f/3d-follow.md): the piece turns with the
+       taps so the stitch just made faces the viewer. Owned by the js/diagram.js
+       agent. Pure (Diagram.follow + Diagram._relief.buildRound), plus one
+       hidden handle to prove a tap is a camera change and rebuilds nothing. */
+    (function followBlock() {
+      var FW = window.Diagram && window.Diagram.follow;
+      var RX = window.Diagram && window.Diagram._relief;
+      group('Renderer — follow mode: the piece turns with the taps (wave F)');
+      if (!FW || !RX) { ok('Diagram.follow is exposed', false, 'js/diagram.js did not load'); return; }
+      var TAU = 2 * Math.PI, DEG = Math.PI / 180, i, k;
+      function close(a, b, tol) { return isFinite(a) && isFinite(b) && Math.abs(a - b) <= (tol || 1e-9); }
+      function wrap(a) { a = a % TAU; return a < 0 ? a + TAU : a; }
+
+      // 1. the angle is absolute: 2π·index/count
+      ok('angle(index, count) = 2π·index/count: 36 around turns 10° a stitch, 9 is a quarter, 36 a full turn',
+        close(FW.angle(1, 36), 10 * DEG) && close(FW.angle(9, 36), Math.PI / 2) &&
+        close(FW.angle(36, 36), TAU) && close(FW.angle(0, 36), 0) &&
+        FW.angle(5, 0) === 0 && close(FW.angle(40, 36), TAU) && close(FW.angle(-3, 36), 0),
+        '1/36 → ' + n(FW.angle(1, 36) / DEG, 6) + '°, 9/36 → ' + n(FW.angle(9, 36) / DEG, 6) + '°, 36/36 → ' +
+        n(FW.angle(36, 36) / DEG, 6) + '°; count 0 → ' + FW.angle(5, 0) + '; past the count clamps (40/36 → ' +
+        n(FW.angle(40, 36) / DEG, 3) + '°)');
+
+      // 2. stitch k really is at the front: the builder's slices through the camera's own matrix
+      function ring(ws) {
+        var st = [];
+        for (var q = 0; q < ws.length; q++) st.push({ t: 'sc', c: null, h: 1, w: ws[q] });
+        return { count: st.length, done: st.length, stitches: st, color: '#f1e3c8', height: 1, ghost: false };
+      }
+      var band = { rTop: 5.5, rBot: 5.7, yTop: 0, yBot: -0.95, reach: 0.95, prof: null, radMax: 5.7 };
+      var F = RX.FLOATS;
+      function frontCheck(g, count, idxs, pitch) {
+        var vps = (g.segs + 1) * (g.rows + 1), bad = [], worst = 0;
+        var cen = [];
+        for (var j = 0; j < g.n; j++) {
+          var sx = 0, sy = 0, sz = 0;
+          for (var v = 0; v < vps; v++) {
+            var p = (j * vps + v) * F;
+            sx += g.verts[p] + g.verts[p + 3]; sy += g.verts[p + 1] + g.verts[p + 4]; sz += g.verts[p + 2] + g.verts[p + 5];
+          }
+          cen.push([sx / vps, sy / vps, sz / vps]);
+        }
+        for (var q = 0; q < idxs.length; q++) {
+          var kk = idxs[q];
+          var yaw = FW.step(0, kk, count, g.a0, g.aw);
+          var R = FW.rotation(yaw, pitch);
+          var best = -1, bestZ = -Infinity;
+          for (j = 0; j < g.n; j++) {
+            var z = R[6] * cen[j][0] + R[7] * cen[j][1] + R[8] * cen[j][2];
+            if (z > bestZ) { bestZ = z; best = j; }
+          }
+          var made = (kk - 1 + g.n) % g.n, next = kk % g.n;
+          var xMade = R[0] * cen[made][0] + R[1] * cen[made][1] + R[2] * cen[made][2];
+          var xNext = R[0] * cen[next][0] + R[1] * cen[next][1] + R[2] * cen[next][2];
+          // the front slice is the one just made or the one about to be; done to the right, to-do to the left
+          if ((best !== made && best !== next) || !(xMade > 0) || !(xNext < 0)) bad.push(kk + '→front ' + best);
+          // the working point (the boundary) itself sits on the camera's forward axis
+          var a = FW.angle(kk, count, g.a0, g.aw);
+          var bx = Math.cos(a), bz = Math.sin(a);
+          worst = Math.max(worst, Math.abs(R[0] * bx + R[2] * bz));
+        }
+        return { bad: bad, worst: worst };
+      }
+      var even = RX.buildRound('rounds', ring(rep(1, 36)), band, 0, 2);
+      var fe = frontCheck(even, 36, [1, 2, 9, 18, 27, 35, 36], 0);
+      var fp = frontCheck(even, 36, [1, 9, 20, 33], 20 * DEG);
+      ok('stitch k faces the viewer: stitch 0 of the builder sits at angle 0 and yaw = angle − π/2 brings angle to the front',
+        !!even.a0 && close(even.a0[0], 0) && close(FW.FRONT, Math.PI / 2) && fe.bad.length === 0 && fp.bad.length === 0 &&
+        fe.worst < 1e-9 && fp.worst < 1e-9,
+        '36-stitch ring: a0[0] = ' + (even.a0 ? n(even.a0[0], 6) : 'missing') + '; frontmost slice after k taps is the one just made or the next ' +
+        '(the done one to the right, the next to the left) at pitch 0 and 20°' + (fe.bad.length + fp.bad.length ? ' ✗ ' + fe.bad.concat(fp.bad).join(', ') : ' ✓') +
+        '; the working point is ' + fe.worst.toExponential(1) + ' off the forward axis');
+      var wsU = [];
+      for (i = 0; i < 24; i++) wsU.push(i % 3 === 0 ? 2.2 : 1);
+      var uneven = RX.buildRound('rounds', ring(wsU), band, 0, 2);
+      var fu = frontCheck(uneven, 24, [1, 3, 4, 10, 17, 23], 0);
+      var plainOff = 0;
+      for (k = 0; k <= 24; k++) plainOff = Math.max(plainOff, Math.abs(FW.angle(k, 24, uneven.a0, uneven.aw) - FW.angle(k, 24)));
+      ok('with uneven stitch widths the front follows the slices the builder really laid, not 2πk/n',
+        fu.bad.length === 0 && fu.worst < 1e-9 && plainOff > 0.05 && close(FW.angle(24, 24, uneven.a0, uneven.aw), TAU),
+        'every third stitch 2.2 wide: ' + (fu.bad.length ? '✗ ' + fu.bad.join(', ') : 'frontmost slice right after every tap ✓') +
+        '; the plain formula would be off by up to ' + n(plainOff / DEG, 1) + '°; a full round still ends at 360°');
+
+      // 3. accumulates across rounds: one turn per round, the next round carries on from the seam
+      var y0 = FW.step(0, 0, 36), y = y0, steps = [], evenSteps = true;
+      for (k = 1; k <= 36; k++) { var ny = FW.step(y, k, 36); steps.push(ny - y); y = ny; }
+      for (k = 0; k < steps.length; k++) if (!close(steps[k], TAU / 36, 1e-9)) evenSteps = false;
+      var afterRound = y;
+      var y48 = FW.step(y, 0, 48);
+      var y48b = y48;
+      for (k = 1; k <= 12; k++) y48b = FW.step(y48b, k, 48);
+      var y12 = FW.step(0, 0, 12), y12b = y12;
+      for (k = 1; k <= 12; k++) y12b = FW.step(y12b, k, 12);
+      ok('36 taps on 36 = exactly one turn (10° each); the next round starts where it ended; 12 of 48 = a quarter turn',
+        evenSteps && close(afterRound - y0, TAU, 1e-9) && close(y48, afterRound, 1e-12) &&
+        close(y48b - y48, Math.PI / 2, 1e-9) && close(y12b - y12, TAU, 1e-9),
+        'each step ' + n(steps[0] / DEG, 6) + '°, 36 taps → ' + n((afterRound - y0) / DEG, 6) + '°; round of 48 begins at +' +
+        n((y48 - afterRound) / DEG, 6) + '° (no spin back); 12 taps on 48 → ' + n((y48b - y48) / DEG, 6) +
+        '°; the owner\'s check, 12 taps on a 12-stitch round → ' + n((y12b - y12) / DEG, 6) + '°');
+
+      // 4. undo turns back
+      var yU = FW.step(y48b, 11, 48);
+      var yRowBack = FW.step(y48, 36, 36);   // untap the row: back to the end of the 36-stitch round
+      ok('undo turns back one stitch; un-tapping a row lands on the end of the round before, without a spin',
+        close(yU - y48b, -TAU / 48, 1e-9) && close(yRowBack, afterRound, 1e-9),
+        'undo on 48: ' + n((yU - y48b) / DEG, 6) + '°; row undo from round 48 st 0 → round 36 st 36: ' +
+        n((yRowBack - y48) / DEG, 6) + '°');
+
+      // 5. jumps and re-syncs are absolute, from the stitch index, never a drifting delta
+      var walk = 0.3, drift = 0, ops = [5, 6, 7, 6, 30, 2, 2, 35, 0, 18];
+      for (k = 0; k < ops.length; k++) {
+        walk = FW.step(walk + (k % 3 === 0 ? 0.41 : 0), ops[k], 36);   // a swipe offset on every third
+        drift = Math.max(drift, Math.abs(wrap(walk) - wrap(FW.yawFor(FW.angle(ops[k], 36)))));
+        drift = Math.min(drift, Math.abs(drift - TAU));
+      }
+      var jFrom = FW.step(0, 3, 48), jTo = FW.step(jFrom, 40, 48);
+      ok('a jump re-syncs from the absolute stitch index on the nearest turn; a long walk with swipes never drifts',
+        drift < 1e-9 && Math.abs(jTo - jFrom) <= Math.PI + 1e-9 && close(wrap(jTo), wrap(FW.yawFor(FW.angle(40, 48))), 1e-9),
+        'after 10 jumps, taps and swipe offsets the yaw is ' + drift.toExponential(1) + ' rad from angle(index) − π/2; jump 3 → 40 of 48 turns ' +
+        n((jTo - jFrom) / DEG, 3) + '° (the short way)');
+
+      // 6. a swipe is a temporary offset the next tap blends back from
+      var ySw = FW.step(0, 10, 36), offset = 1.2;
+      var back = FW.step(ySw + offset, 11, 36);
+      ok('a swipe leaves an offset; the next tap blends back to the stitch being worked (the short way)',
+        close(back - ySw, TAU / 36, 1e-9) && close(back - (ySw + offset), TAU / 36 - offset, 1e-9),
+        'swiped ' + n(offset / DEG, 1) + '° away, the next tap moves ' + n((back - ySw - offset) / DEG, 2) + '° and lands one stitch on');
+
+      // 7. eased, short, and reduced motion snaps
+      var a7 = 0, b7 = TAU / 36;
+      ok('the move is eased over ~150 ms (longer only for a big re-sync); reduced motion snaps',
+        FW.duration(b7) >= 120 && FW.duration(b7) <= 180 && FW.duration(Math.PI) > FW.duration(b7) && FW.duration(Math.PI) <= 450 &&
+        FW.ease(a7, b7, 0, 150, false) === a7 && FW.ease(a7, b7, 150, 150, false) === b7 &&
+        FW.ease(a7, b7, 75, 150, false) > b7 * 0.5 && FW.ease(a7, b7, 75, 150, false) < b7 &&
+        FW.ease(a7, b7, 0, 150, true) === b7 && FW.ease(a7, b7, 10, 150, true) === b7,
+        'one stitch ' + FW.duration(b7) + ' ms, half a turn ' + Math.round(FW.duration(Math.PI)) + ' ms; at 75 ms ' +
+        n(FW.ease(a7, b7, 75, 150, false) / b7 * 100, 1) + '% of the way (ease-out); reduced motion at 0 ms: ' +
+        (FW.ease(a7, b7, 0, 150, true) === b7 ? 'there' : 'NOT there'));
+
+      // 8. rows mode slides a wide sheet, leaves a narrow one alone
+      ok('rows mode: a sheet that fits never moves; a wider one keeps the working stitch centred, never past its own edge',
+        FW.pan(3, -5, 5, 6) === 0 && FW.pan(0, -20, 20, 6) === 0 && FW.pan(10, -20, 20, 6) === 10 &&
+        FW.pan(19, -20, 20, 6) === 14 && FW.pan(-19, -20, 20, 6) === -14,
+        'fits (10 wide in a 12 frame): ' + FW.pan(3, -5, 5, 6) + '; 40 wide, working at 0 / 10 / 19 / −19: ' +
+        [FW.pan(0, -20, 20, 6), FW.pan(10, -20, 20, 6), FW.pan(19, -20, 20, 6), FW.pan(-19, -20, 20, 6)].join(' / '));
+
+      // 9. a real handle: a tap is a camera change only, and a finished piece stays put
+      var cv = document.createElement('canvas');
+      cv.style.cssText = 'position:absolute;left:-9999px;top:0;width:240px;height:240px';
+      document.body.appendChild(cv);
+      var h = null;
+      try {
+        h = window.Diagram.mount(cv, { follow: true, fitPurpose: 'button', reducedMotion: true });
+        var counts = [6, 12, 18, 24, 30, 36, 36, 36];
+        var mm = model(counts, { done: function (q, c) { return q < 5 ? c : 0; } });
+        for (i = 6; i < mm.rounds.length; i++) mm.rounds[i].ghost = true;
+        mm.current = 5;
+        mm.rounds[5].done = 1;
+        h.setModel(mm, { animate: 'none' });
+        var s0 = h.getStats();
+        // the same round objects with only `done` moved — what Store hands back on a tap
+        var tapRebuilt = 0;
+        for (k = 2; k <= 10; k++) {
+          mm.rounds[5].done = k;
+          h.setModel(mm, { animate: 'stitch' });
+          tapRebuilt += h.getStats().rebuilt;
+        }
+        var turned = h.getStats().yaw - s0.yaw;
+        // a drag in flight is never snapped
+        h.dragStart(); h.dragMove(40, 0);
+        var yDrag = h.getStats().yaw;
+        mm.rounds[5].done = 11;
+        h.setModel(mm, { animate: 'stitch' });
+        var yDuring = h.getStats().yaw;
+        h.dragEnd();
+        mm.rounds[5].done = 12;
+        h.setModel(mm, { animate: 'stitch' });
+        var yBack = h.getStats().yaw;
+        // finished: every round worked; follow leaves the yaw alone
+        for (i = 0; i < mm.rounds.length; i++) { mm.rounds[i].ghost = false; mm.rounds[i].done = mm.rounds[i].count; }
+        mm.current = mm.rounds.length - 1;
+        var yBeforeDone = h.getStats().yaw;
+        var trophyWorking = h.getStats().follow.trophy;
+        h.setModel(mm, { animate: 'round', finished: true });
+        var yDone = h.getStats().yaw;
+        var doneStats = h.getStats();
+        h.setFollow(false);
+        var offStats = h.getStats();
+        ok('a live handle: 9 taps on a 36-stitch round turn it 90° with ZERO rebuilds; a drag in flight is not snapped; a finished piece is not yanked, it turns slowly as a trophy',
+          s0.follow.on && close(wrap(s0.yaw), wrap(FW.yawFor(FW.angle(1, 36))), 0.002) &&
+          close(turned, Math.PI / 2, 0.003) && tapRebuilt === 0 &&
+          close(yDuring, yDrag, 1e-6) && close(wrap(yBack), wrap(FW.yawFor(FW.angle(12, 36))), 0.002) &&
+          close(yDone, yBeforeDone, 1e-6) && trophyWorking === false && doneStats.follow.trophy === true &&
+          doneStats.follow.reason === 'finished' && doneStats.alert.wedgeFrom === -1 && offStats.follow.on === false,
+          'opened facing the working point (yaw ' + s0.yaw + ' = 10° − 90°); 9 taps → ' + n(turned / DEG, 2) + '° with ' + tapRebuilt +
+          ' chunks rebuilt (a tap is a camera change); a tap mid-drag left the yaw at ' + yDuring + ' (= ' + yDrag +
+          '); the tap after the drag lands on stitch 12 (' + n(wrap(yBack) / DEG, 2) + '° vs ' + n(wrap(FW.yawFor(FW.angle(12, 36))) / DEG, 2) +
+          '°); finishing the piece moved it ' + n(yDone - yBeforeDone, 4) + ' rad at once, trophy turn ' +
+          (trophyWorking ? 'on' : 'off') + ' while working → ' + (doneStats.follow.trophy ? 'on' : 'off') +
+          ' when finished (no wedge: ' + doneStats.alert.wedgeFrom + '); setFollow(false) → on ' + offStats.follow.on);
+      } catch (e) {
+        ok('a live handle follows the taps', false, 'threw: ' + (e && e.message));
+      }
+      if (h) { try { h.destroy({ release: true }); } catch (e2) { /* ignore */ } }
+      /* Taps faster than the frames (a busy phone, a throttled tab): no frame
+         runs between these seven pushes, so the yaw on screen lags 210° behind.
+         The turn must still be counted from where follow mode was going, or
+         the piece would swing 150° BACKWARD (found in the app at 375 × 812). */
+      var h2 = null;
+      var cv2 = document.createElement('canvas');   // a released canvas never gets a context back
+      cv2.style.cssText = cv.style.cssText;
+      document.body.appendChild(cv2);
+      try {
+        h2 = window.Diagram.mount(cv2, { follow: true, fitPurpose: 'button', reducedMotion: false });
+        var m2 = model([6, 12, 18], { done: function (q, c) { return q < 1 ? c : 0; } });
+        m2.rounds[2].ghost = true; m2.current = 1;
+        h2.setModel(m2, { animate: 'none' });
+        var t0y = h2.getStats().follow.target;
+        for (k = 1; k <= 7; k++) { m2.rounds[1].done = k; h2.setModel(m2, { animate: 'stitch' }); }
+        var lagT = h2.getStats().follow.target;
+        ok('taps that outrun the frames still turn forward (7 of 12 = +210°, not −150°)',
+          close(lagT - t0y, 7 * TAU / 12, 0.003),
+          'target moved ' + n((lagT - t0y) / DEG, 2) + '° while the yaw on screen stayed at ' + h2.getStats().yaw);
+        /* A working round nothing sized (Store's `countless`: no parsed count,
+           no counter target) is only as long as what was tapped; it must not
+           turn, and the stats say why. */
+        var m3 = model([6, 12, 3], { done: function (q, c) { return c; } });
+        m3.rounds[2].countless = true; m3.current = 2;
+        h2.setModel(m3, { animate: 'stitch' });
+        var nc0 = h2.getStats().follow;
+        var ncYaw = h2.getStats().yaw;
+        for (k = 4; k <= 6; k++) {
+          m3.rounds[2].count = k; m3.rounds[2].done = k;
+          m3.rounds[2].stitches = sts(k);
+          h2.setModel(m3, { animate: 'stitch' });
+        }
+        var nc1 = h2.getStats().follow;
+        ok('a working round with no count (Store: countless) does not turn, and follow.key says "no-count"',
+          nc0.key === 'no-count' && nc1.key === 'no-count' && nc1.reason === 'no-count' && nc1.trophy === false &&
+          h2.getStats().finished === false &&
+          close(h2.getStats().yaw, ncYaw, 1e-9),
+          'key ' + nc1.key + ', reason ' + nc1.reason + '; three taps moved the yaw by ' + n(h2.getStats().yaw - ncYaw, 4) +
+          ' rad; the always-"full" round is not taken for a finished piece (finished ' + h2.getStats().finished +
+          ', trophy ' + nc1.trophy + ')');
+      } catch (e3) {
+        ok('taps that outrun the frames still turn forward', false, 'threw: ' + (e3 && e3.message));
+      }
+      if (h2) { try { h2.destroy({ release: true }); } catch (e4) { /* ignore */ } }
+      if (cv2.parentNode) cv2.parentNode.removeChild(cv2);
+      if (cv.parentNode) cv.parentNode.removeChild(cv);
+    }());
+    // /follow -----------------------------------------------------------------
+
     render();
   }
 

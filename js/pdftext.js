@@ -2009,7 +2009,9 @@
       });
       var text = blocks.join('\n\n').replace(/\n{3,}/g, '\n\n').trim();
       var body = text.replace(/^=== PAGE \d+ ===$/gm, '').replace(/\s/g, '');
-      if (!body.length) {
+      // `allowEmpty`: a caller that also has the page IMAGES (a scanned
+      // cross-stitch chart) still wants the result, empty text and all.
+      if (!body.length && !opts.allowEmpty) {
         throw new Error('Couldn’t read that PDF (it may be scanned images).');
       }
       return {
@@ -2086,11 +2088,13 @@
    *                                   dropping as extract, for one page; no
    *                                   unicode folding: the craft modules match
    *                                   chart glyphs against it byte for byte)
-   *     extract({ onProgress, maxPages, signal })
+   *     extract({ onProgress, maxPages, signal, allowEmpty })
    *                                -> Promise<extract() result>  (the WHOLE
    *                                   extract pipeline on this document,
    *                                   including the cross-page running-head
-   *                                   pass, emptyPages and garbled)
+   *                                   pass, emptyPages and garbled;
+   *                                   `allowEmpty` resolves a text-free PDF
+   *                                   with text '' instead of rejecting)
    *     renderPage(pageNo, { scale | maxWidth, signal }) -> Promise<HTMLCanvasElement>
    *     destroy()                  // release it when the sheet closes
    *   }>
@@ -2200,6 +2204,7 @@
           return readDoc(doc, {
             onProgress: xopts.onProgress,
             maxPages: xopts.maxPages,
+            allowEmpty: !!xopts.allowEmpty,
             signal: both
           }).then(null, function (err) { throw friendlyError(err); });
         }
@@ -2212,7 +2217,13 @@
           if (!isFinite(n) || n < 1 || n > (doc.numPages || 0)) {
             return Promise.reject(new Error('No page ' + pageNo + ' in that PDF.'));
           }
+          var stopped = function () {
+            return isCancelled(signal) || isCancelled(ropts.signal) || destroyed;
+          };
           return doc.getPage(n).then(function (page) {
+            // Cancelled while pdf.js fetched the page: do not start drawing.
+            var mid = guard(ropts.signal);
+            if (mid) throw mid;
             var base = pageSize(page);
             var scale = 1;
             if (typeof ropts.scale === 'number' && ropts.scale > 0) {
@@ -2228,11 +2239,39 @@
             if (!ctx2d) return Promise.reject(new Error('This device cannot draw the page.'));
             var task = page.render({ canvasContext: ctx2d, viewport: vp });
             var done = task && task.promise ? task.promise : Promise.resolve();
-            return done.then(function () {
+            // A page can take seconds to draw (and never finishes while the
+            // tab is not painting frames), so Cancel is watched DURING the
+            // render: the pdf.js task is cancelled and this call rejects at
+            // once with AbortError instead of waiting for the page.
+            var watch = null;
+            var aborted = new Promise(function (resolve, reject) {
+              watch = setInterval(function () {
+                if (!stopped()) return;
+                clearInterval(watch);
+                watch = null;
+                if (task && typeof task.cancel === 'function') {
+                  try { task.cancel(); } catch (e) { /* already finished */ }
+                }
+                reject(guard(ropts.signal) || abortError());
+              }, 40);
+            });
+            var finish = function () {
+              if (watch) { clearInterval(watch); watch = null; }
+            };
+            return Promise.race([done, aborted]).then(function () {
+              finish();
               if (typeof page.cleanup === 'function') page.cleanup();
               var after = guard(ropts.signal);
               if (after) throw after;
               return canvas;
+            }, function (err) {
+              finish();
+              if (typeof page.cleanup === 'function') { try { page.cleanup(); } catch (e) { /* ignore */ } }
+              // pdf.js reports its own cancel as RenderingCancelledException.
+              if (stopped() || (err && err.name === 'RenderingCancelledException')) {
+                throw guard(ropts.signal) || abortError();
+              }
+              throw err;
             });
           });
         }

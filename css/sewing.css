@@ -689,6 +689,131 @@
 }
 
 /* --------------------------------------------------------------------------
+   11. Wave F: split / merge, the optional group, cut counters, shopping list
+   -------------------------------------------------------------------------- */
+
+/* The step card's own split link, under a long card's text. */
+.sw-card-split {
+  align-self: flex-start;
+  flex: 0 0 auto;
+  min-height: 36px;
+  font-size: 13px;
+}
+.sw-card-split[hidden] { display: none; }
+
+/* The step list: ✂ per row, and its panel. */
+.sw-step-row { align-items: center; }
+.sw-step-tool { min-height: 40px; min-width: 40px; margin-left: 2px; }
+.sw-step-tools-panel {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+  margin: 0 0 6px 8px;
+  padding: 4px 0 6px 10px;
+  border-left: 2px solid var(--accent-2);
+}
+.sw-step-tools-panel .sw-merge { margin-top: 6px; }
+.sw-merge-next { margin: 2px 0 0; word-break: break-word; }
+
+/* Optional extras: collapsed, after the construction, never counted. */
+.sw-optional {
+  margin-top: 14px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0 10px 6px;
+}
+.sw-optional-head {
+  cursor: pointer;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  font-weight: 800;
+  font-size: 14px;
+  color: var(--text-muted);
+}
+.sw-optional[open] .sw-optional-head { color: var(--text); }
+.sw-optional-hint { margin: 0 0 4px; }
+
+/* Cutting rows: − and the "2 of 4 cut" chip side by side. */
+.sw-cut-counter {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+.sw-cut-minus {
+  flex: 0 0 auto;
+  min-width: 36px;
+  min-height: 44px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 18px;
+  line-height: 1;
+}
+.sw-cut-minus:disabled { opacity: 0.35; }
+.sw-count-chip { min-width: 84px; white-space: nowrap; font-size: 13px; }
+.sw-count-big { border-style: dashed; }
+.sw-cut-hint {
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--text);
+  opacity: 0.85;
+}
+.sw-cut-row .sw-cut-text { min-width: 0; word-break: break-word; }
+
+.sw-cutcount-readout {
+  font-family: var(--font-display);
+  font-size: 30px;
+  margin: 0 0 8px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+.sw-cutcount-pad {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 6px;
+  margin-top: 12px;
+}
+.sw-cutcount-btn { min-height: 48px; font-size: 16px; font-weight: 800; }
+.sw-cutcount-ends { display: flex; gap: 6px; margin-top: 6px; }
+.sw-cutcount-ends .btn { flex: 1 1 0; min-height: 44px; }
+
+/* Cutting layout pages */
+.sw-layouts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 2px 0 6px;
+}
+.sw-layouts-label { font-size: 13px; font-weight: 800; color: var(--text-muted); }
+.sw-layouts-hint { margin-top: 0; }
+
+/* Shopping list toggles and preview */
+.sw-shop-toggles { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 10px; }
+.sw-shop-preview { margin-top: 4px; }
+.sw-shop-preview > summary {
+  cursor: pointer;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  font-weight: 700;
+  color: var(--text-muted);
+}
+.sw-shop-lines { margin: 0 0 8px; padding-left: 20px; font-size: 13px; line-height: 1.45; }
+.sw-shop-lines li { word-break: break-word; }
+
+/* Seam allowance at the point of use */
+.sw-step-meta { flex-wrap: wrap; }
+.sw-sa.sw-sa-alt { color: var(--text); text-decoration-color: var(--accent-2); text-decoration-thickness: 2px; }
+.sw-sa-reminder { padding: 10px 12px; margin-bottom: 10px; border-color: var(--accent-2); }
+.sw-sa-reminder p { margin: 4px 0 0; }
+
+/* --------------------------------------------------------------------------
    8. Wider screens and reduced motion
    -------------------------------------------------------------------------- */
 

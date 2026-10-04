@@ -2315,8 +2315,13 @@ var oc = [], ost = null, oprev = null;
 assertEqual(oc, [null, null, 'black', 'black'], '"Rnd 5: Colour change to black, ..." colours round 5 onward (04 H)');
 assertEqual(ex('With black, ch 2, 6 sc in second chain from hook (6)', null).color, 'black',
   '"With black, ch 2, 6 sc" sets the row colour');
-assertEqual(ex('sc in each st around, changing to black in last 2 loops (24)', 24).color, 'black',
-  '"changing to black in last 2 loops" sets the row colour');
+// Wave F: the change is made in the LAST stitch, so this round is still the
+// old colour and the next one is black (the panda's Rnd 15 is white; its
+// Rnd 16 onward black, as in the photo). See "wave F: colour changes" below.
+assertEqual(ex('sc in each st around, changing to black in last 2 loops (24)', 24).color, null,
+  '"changing to black in last 2 loops" leaves THIS round in the old colour (wave F)');
+assertEqual(ex('sc in each st around, changing to black in last 2 loops (24)', 24).state.pendingColor, 'black',
+  '...and carries black to the next round');
 assertEqual(ex('Using Mustard, sc in each st around (24)', 24).color, 'Mustard',
   '"Using Mustard, ..." on the row sets the row colour');
 assertEqual(ex('sc in next 2 sts, sc in each st around (24)', 24).color, null,
@@ -2931,6 +2936,138 @@ function anchorRow(rnd3, upTo) {
     'wave E: the Red Heart yarn list is the colour key ("313 Aran CA")');
   assertEqual(P.colors('Colour used A Black 1002, B Cream 1005').legend, { A: 'Black', B: 'Cream' },
     'wave E: the Stylecraft "Colour used" line is the colour key');
+})();
+
+// -----------------------------------------------------------------------
+group('wave F: size-once (detectSizes, sizeCount, sizeMarks)');
+// -----------------------------------------------------------------------
+(function () {
+  var P = window.Patterns;
+  assertEqual(P.detectSizes('Sizes XS/S M L XL 2/3XL 4/5XL\nSizes U.S. E/4 (3.5 mm)'),
+    ['XS/S', 'M', 'L', 'XL', '2/3XL', '4/5XL'], 'wave F: Yarnspirations "Sizes XS/S M L XL 2/3XL 4/5XL" names six sizes');
+  assertEqual(P.detectSizes('To Fit 4-6yrs 7-9yrs 10-12yrs Adult S Adult L'),
+    ['4-6yrs', '7-9yrs', '10-12yrs', 'Adult S', 'Adult L'], 'wave F: Stylecraft "To Fit 4-6yrs ... Adult S Adult L" names five sizes');
+  assertEqual(P.detectSizes('Sizes U.S. E/4 (3.5 mm) and U.S. F/5 (3.75 mm) crochet hooks'), null,
+    'wave F: a hook-size line is not a list of sizes');
+  assertEqual(P.detectSizes('To fit chest measurement Finished chest'), null,
+    'wave F: "To fit chest measurement" is not a list of sizes');
+  assertEqual(P.detectSizes('XS (S, M, L, 1X) (2X, 3X, 4X, 5X)'), ['XS', 'S', 'M', 'L', '1X', '2X', '3X', '4X', '5X'],
+    'wave F: the bracket form still reads as before');
+
+  var lenAxis = 'Row 1: Ch 1, blo sc across, turn. | 184 (208, 224) sts\nRow 2: Ch 1, blo sc in each st across, turn.';
+  var nine = P.parse(lenAxis, { size: 1, sizeCount: 9 });
+  assertEqual([nine[0].count, nine[0].sizeUnresolved, nine[1].count], [null, true, null],
+    'wave F: a 3-entry list in a 9-size pattern is not one count per size - no count, flagged, and nothing computed from it');
+  var three = P.parse(lenAxis, { size: 1, sizeCount: 3 });
+  assertEqual([three[0].count, !!three[0].sizeUnresolved, three[1].count], [208, false, 208],
+    'wave F: ...the same list in a 3-size pattern is size 2\'s 208, and row 2 follows it');
+  assertEqual(P.parse(lenAxis, { size: 1 })[0].count, 208, 'wave F: without sizeCount the old clamping reading is unchanged');
+
+  var wrapped = P.parse('Rnd 1: Ch 1 and work around, join and turn. | 58 (58, 62, 64, 66)\n(68, 72, 72, 74) sts', { size: 5, sizeCount: 9 });
+  assertEqual([wrapped[0].count, wrapped[0].sizes && wrapped[0].sizes.length], [68, 9],
+    'wave F: a size list whose second bracket wrapped onto the next line is read whole (Wheat Stitch Sleeves, 2X = 68)');
+
+  var marks = P.sizeMarks('Row 1: Ch 1, blo sc 88 (100, 108), Fsc 96 (108, 116), turn.', 1);
+  assertEqual(marks.map(function (m) { return m.value; }), [100, 108], 'wave F: sizeMarks finds size 2\'s number in every list');
+  var line = 'Row 1: Ch 1, blo sc 88 (100, 108), Fsc 96 (108, 116), turn.';
+  assertEqual(line.slice(marks[0].start, marks[0].end), '100', 'wave F: ...at its own offsets');
+  assertEqual(P.sizeMarks(line, 1, 9), [], 'wave F: a list that is not one number per size marks nothing');
+  var sq = P.sizeMarks('Rnd 1: 30[34:36:40:48] dc.', 2, 5);
+  assertEqual(sq.map(function (m) { return m.value; }), [36], 'wave F: Stylecraft square-bracket lists mark too');
+  assertEqual(P.sizeMarks('Rows 5-8 (the stitch pattern repeats)', 0), [], 'wave F: a row range is no size list');
+})();
+
+// -----------------------------------------------------------------------
+group('wave F: countReport (the import confidence line)');
+// -----------------------------------------------------------------------
+(function () {
+  var P = window.Patterns;
+  var rep = P.countReport(P.parse(
+    'Rnd 1: 6 sc in MR (6)\n' +
+    'Rnd 2: inc x6 (12)\n' +
+    'Rnd 3: (sc, inc) x6\n' +
+    'Rnd 4-6: sc around\n' +
+    'Rnd 7: (2sc, dec)x6 [36]\n' +
+    'Rnd 8: work the bobble panel'));
+  assertEqual([rep.rows, rep.printed, rep.computed, rep.missing], [8, 3, 4, 1],
+    'wave F: rows are counted per row (Rnd 4-6 is three), split printed / computed / missing');
+  assertEqual(rep.disagree.map(function (d) { return [d.row, d.printed, d.computed]; }), [[7, 36, 18]],
+    'wave F: a printed total its own arithmetic contradicts is listed with both numbers');
+  assertEqual(P.countReport(P.parse('Row 1: sc across. | 184 (208, 224) sts', { sizeCount: 9 })).unresolved, 1,
+    'wave F: a row whose list is not per size is counted as unresolved');
+})();
+
+// -----------------------------------------------------------------------
+group('wave F: colour changes (02 #3, 10 #1)');
+// -----------------------------------------------------------------------
+(function () {
+  var P = window.Patterns;
+  function walk(text, n) {
+    var L = P.parse(text), st = null, prev = null, out = [];
+    for (var r = 1; r <= n; r++) {
+      var x = P.expand(L, r, prev, st);
+      st = x.state; prev = x.stitches.length || prev; out.push(x.color);
+    }
+    return out;
+  }
+  assertEqual(walk('Rnd 1: With white, ch 2, 6 sc in second chain from hook (6)\nRnd 2: sc around (6)\n' +
+    'Rnd 3: Sc in each st around, changing to black in last 2 loops (6)\nRnd 4: sc around (6)', 4),
+    ['white', 'white', 'white', 'black'], 'wave F: "changing to black in last 2 loops" on Rnd 3 makes Rnd 4 black, not Rnd 3 (panda Rnd 15)');
+
+  var baph = P.parse('Arms\nStarting in secondary color.\nR1: 6 sc in MR (6)\nR2: inc x6 (12)\nR3: sc around (12)\n' +
+    'R4: sc around (12)\nCC to main color in last stitch of R2');
+  var r2 = P.lineFor(baph, 2);
+  assertTrue(r2 && r2.notesAfter && r2.notesAfter[0] === 'CC to main color in last stitch of R2',
+    'wave F: "CC to main color in last stitch of R2" printed after R4 is R2\'s note (its tail)');
+  assertEqual(walk('Arms\nStarting in secondary color.\nR1: 6 sc in MR (6)\nR2: inc x6 (12)\nR3: sc around (12)\n' +
+    'R4: sc around (12)\nCC to main color in last stitch of R2', 4),
+    ['secondary color', 'secondary color', 'main color', 'main color'],
+    'wave F: generic roles are the colour names, and the change lands on R3');
+
+  var kc = 'Colours: (A = Azure, B = Fuchsia, C = Lime)\nUsing Yarn A make 20 ch\n' +
+    'Row 1 1tr in 4th ch from hook, 1tr in each ch to end, turn. [18 sts]\n' +
+    'Row 2 1ch, (1dc in next st) to\nend, join with Yarn B at end of\nfinal st, turn.\n' +
+    'Row 3 3ch, 1tr in next st and each st to end, join with Yarn C at\nend of final st, turn.\n' +
+    'Row 4 Repeat Row 2 joining with\nYarn A at end of row.\n' +
+    'Row 5 3ch, 1tr in next st and each st to end, turn.';
+  assertEqual(walk(kc, 5), ['Azure', 'Azure', 'Fuchsia', 'Lime', 'Azure'],
+    'wave F: King Cole\'s "join with Yarn B at end of final st" wraps off a narrow column and still colours the NEXT row');
+  var kcL = P.parse(kc);
+  assertTrue(/joining with Yarn A at end of row/.test(P.lineFor(kcL, 4).text),
+    'wave F: "joining with" / "Yarn A at end of row." is one row');
+  assertEqual(P.colors('Azure (3366) x 2 A Turquiose (4044) x 3\nHot Pink (1848) x 2 B Fuchsia (4034) x 2').legend,
+    { A: 'Azure / Turquiose', B: 'Hot Pink / Fuchsia' }, 'wave F: King Cole\'s two-range yarn table is the colour key');
+  assertEqual(P.colorHex('Hot Pink / Fuchsia'), P.colorHex('Hot Pink'), 'wave F: a two-range shade takes the first known colour');
+  assertEqual(walk('Colour change to black\nRnd 1: 6 sc in MR (6)\nRnd 2: inc x6 (12)', 2), ['black', 'black'],
+    'wave F: a plain "Colour change to black" before a round still colours that round');
+})();
+
+// -----------------------------------------------------------------------
+group('wave F: a length in the middle of a piece (03 #5, Caron residual)');
+// -----------------------------------------------------------------------
+(function () {
+  var P = window.Patterns;
+  var SLEEVE = 'GAUGE: 12 hdc and 10 rows = 4" [10 cm] in pat.\nShape Sleeve:\n' +
+    '1st row: (RS). Ch 2. 2 hdc in first hdc, hdc in each hdc across. Turn.\n' +
+    '2nd row: Ch 2. 1 hdc in each hdc across. Turn.\n' +
+    'Rep last 2 rows 11 times more.\n' +
+    'Cont even in pat until work from\nbeg measures 13" [33 cm], ending\non a WS row.\n' +
+    'Next 6 rows: Ch 6. 1 hdc in each st across. Turn.\nNext row: Ch 2. 1 hdc in each hdc across. Turn.';
+  var L = P.parse(SLEEVE);
+  var cont = L.filter(function (l) { return /^Cont even/.test(l.text); })[0];
+  assertTrue(!!cont && cont.kind === 'repeat', 'wave F: "Cont even in pat until work from" / "beg measures 13"" is one repeat sentence');
+  assertEqual(cont && cont.lengthEstimate && [cont.lengthEstimate.value, cont.lengthEstimate.unit, cont.lengthEstimate.rows, cont.lengthEstimate.fromStart],
+    [13, 'in', 33, true], 'wave F: ...carrying what the gauge says (13" at 10 rows = 4" is ~33 rows from the beginning)');
+  var n6 = P.lineFor(L, 25);
+  assertEqual(n6 && [n6.row, n6.rowEnd, !!n6.approxRow], [25, 30, true],
+    'wave F: the rows after it keep counting from the last counted row and are marked approximate (the beginning may be another block\'s)');
+  assertEqual(cont && cont.repeatOf, null, 'wave F: ...and the tape sentence itself owns no guessed rows');
+  assertEqual(P.lineFor(L, 31).approxRow, true, 'wave F: every "Next row" after it is approximate too');
+  var THROW = 'GAUGE: 9 hdc and 6 rows = 4"\nRow 1: Ch 1, hdc across. (94)\nRow 2: Ch 1, hdc in each st across. (94)\nRep Row 2 until blanket measures approximately 59".';
+  var tl = P.parse(THROW);
+  assertEqual([P.summary(tl).maxRow, P.summary(tl).lengthRows], [89, true],
+    'wave F: a length at the END still resolves through the gauge, and summary() says the rows came from a length');
+  assertEqual(P.summary(P.parse('Rnd 1: 6 sc in MR (6)\nRnd 2: inc x6 (12)')).lengthRows, false, 'wave F: ...and says so only then');
 })();
 
 var summaryEl = document.getElementById('summary');

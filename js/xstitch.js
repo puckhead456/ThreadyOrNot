@@ -1709,6 +1709,177 @@
     return { w: w, h: h, cells: packed, part: part, back: back, knots: knots };
   }
 
+  /* ---- wave F: chart position, remembered views, page regions -------- */
+
+  /** The full chart's mark tools and layers (app-xstitch.js TOOLS / LAYER_DEFS). */
+  var CHART_TOOLS = { tap: 1, paint: 1, block: 1, page: 1 };
+  var CHART_LAYERS = { cross: 1, back: 1, knots: 1, part: 1 };
+
+  /** Most CSS px a stitch is ever drawn at (the chart view's zoom ceiling). */
+  var VIEW_MAX_Z = 64;
+
+  /**
+   * current.view = { z, x, y } | null — the full chart's zoom in CSS px per
+   * stitch and the stitch (fractional, chart space) at the middle of the
+   * canvas. Device independent: the app clamps z to "at least Fit" for the
+   * canvas it is restored into, so a rotate or another phone never restores
+   * an off-screen view (04 #2 risk note).
+   */
+  function normalizeView(v, chart) {
+    if (!isObj(v)) return null;
+    var z = num(v.z, NaN), x = num(v.x, NaN), y = num(v.y, NaN);
+    if (!(z > 0) || !isFinite(x) || !isFinite(y)) return null;
+    z = Math.min(VIEW_MAX_Z, z);
+    if (chart && chart.w && chart.h) {
+      x = Math.max(0, Math.min(chart.w, x));
+      y = Math.max(0, Math.min(chart.h, y));
+    }
+    return { z: Math.round(z * 1000) / 1000, x: Math.round(x * 100) / 100, y: Math.round(y * 100) / 100 };
+  }
+
+  /**
+   * pages[i].region = { x, y, w, h, fx, fy, fw, fh } | null
+   *   x, y, w, h      the stitches this page prints, in chart cells
+   *   fx, fy, fw, fh  where those stitches sit on the page, as fractions of
+   *                   the page's width and height (null when unknown)
+   */
+  function normalizeRegion(r) {
+    if (!isObj(r)) return null;
+    var x = clampInt(r.x, 0, 20000, -1), y = clampInt(r.y, 0, 20000, -1);
+    var w = clampInt(r.w, 1, 20000, 0), h = clampInt(r.h, 1, 20000, 0);
+    if (x < 0 || y < 0 || !w || !h) return null;
+    var out = { x: x, y: y, w: w, h: h, fx: null, fy: null, fw: null, fh: null };
+    var fx = num(r.fx, NaN), fy = num(r.fy, NaN), fw = num(r.fw, NaN), fh = num(r.fh, NaN);
+    if (isFinite(fx) && isFinite(fy) && fw > 0 && fh > 0 &&
+        fx > -0.05 && fy > -0.05 && fx + fw < 1.05 && fy + fh < 1.05) {
+      var r4 = function (v) { return Math.round(v * 10000) / 10000; };
+      out.fx = r4(fx); out.fy = r4(fy); out.fw = r4(fw); out.fh = r4(fh);
+    }
+    return out;
+  }
+
+  /**
+   * centreOffset(i, n) -> { k, side }
+   * How far stitch `i` (0-based) of `n` sits from the centre arrows, counted
+   * the way a printed chart is: the centre of an even count is the line
+   * between its two middle stitches, so the stitch either side is 1; the
+   * centre of an odd count is the middle stitch itself, which is 0.
+   * side is 'before' (left / above), 'after' (right / below) or 'centre'.
+   */
+  function centreOffset(i, n) {
+    i = clampInt(i, 0, Math.max(0, n - 1), 0);
+    n = clampInt(n, 1, 100000, 1);
+    if (n % 2 === 0) {
+      var half = n / 2;
+      return i >= half ? { k: i - half + 1, side: 'after' } : { k: half - i, side: 'before' };
+    }
+    var m = (n - 1) / 2;
+    if (i === m) return { k: 0, side: 'centre' };
+    return i > m ? { k: i - m, side: 'after' } : { k: m - i, side: 'before' };
+  }
+
+  /**
+   * positionLabel(x, y, w, h) -> { col, row, grid, centre, block, text }
+   * The readout under the chart: 'col 134 · row 57' counted from the
+   * top-left (1-based, as the rulers print it) and '22 right · 15 up' from
+   * the centre arrows.
+   */
+  function positionLabel(x, y, w, h) {
+    var col = clampInt(x, 0, Math.max(0, w - 1), 0) + 1;
+    var row = clampInt(y, 0, Math.max(0, h - 1), 0) + 1;
+    var ox = centreOffset(col - 1, w), oy = centreOffset(row - 1, h);
+    var cx = ox.side === 'centre' ? 'on the centre column'
+      : ox.k + (ox.side === 'after' ? ' right' : ' left');
+    var cy = oy.side === 'centre' ? 'on the centre row'
+      : oy.k + (oy.side === 'after' ? ' down' : ' up');
+    var centre = (ox.side === 'centre' && oy.side === 'centre')
+      ? 'the centre stitch'
+      : cx + ' · ' + cy + ' from centre';
+    var grid = 'col ' + col + ' · row ' + row;
+    var block = 'block ' + (Math.floor((col - 1) / 10) + 1) + ',' + (Math.floor((row - 1) / 10) + 1);
+    return { col: col, row: row, grid: grid, centre: centre, block: block, text: grid + ' · ' + centre };
+  }
+
+  /**
+   * rulerStep(z, minPx) -> stitches between ruler numbers: 10 when ten
+   * stitches are at least `minPx` wide on screen, else 20, 50, 100, ... so
+   * the numbers never collide at any zoom.
+   */
+  function rulerStep(z, minPx) {
+    minPx = num(minPx, 28);
+    var steps = [10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000];
+    for (var i = 0; i < steps.length; i++) if (steps[i] * z >= minPx) return steps[i];
+    return 20000;
+  }
+
+  /**
+   * pageForCell(pages, x, y) -> index into pages, or -1
+   * The page whose region holds stitch (x, y); when none does, the page whose
+   * region is nearest to it.
+   */
+  function pageForCell(pages, x, y) {
+    if (!Array.isArray(pages)) return -1;
+    var best = -1, bestD = Infinity;
+    for (var i = 0; i < pages.length; i++) {
+      var r = pages[i] && pages[i].region;
+      if (!r) continue;
+      var dx = x < r.x ? r.x - x : (x >= r.x + r.w ? x - (r.x + r.w - 1) : 0);
+      var dy = y < r.y ? r.y - y : (y >= r.y + r.h ? y - (r.y + r.h - 1) : 0);
+      var d = dx * dx + dy * dy;
+      if (d < bestD) { bestD = d; best = i; }
+      if (d === 0) return i;
+    }
+    return best;
+  }
+
+  /**
+   * nearestCellOf(cells, w, h, value, x, y, skip) -> cell index, or -1
+   * The stitch of palette entry `value` closest to (x, y) for which
+   * skip(i) is false — "the next stitch of this colour" near where the
+   * stitcher is. Ties go to reading order. One linear pass, so ~1 ms on a
+   * 50,000-stitch chart.
+   */
+  function nearestCellOf(cells, w, h, value, x, y, skip) {
+    var best = -1, bestD = Infinity, n = Math.min(cells.length, w * h);
+    for (var i = 0; i < n; i++) {
+      if (cells[i] !== value) continue;
+      if (skip && skip(i)) continue;
+      var cx = i % w, cy = (i / w) | 0;
+      var d = (cx - x) * (cx - x) + (cy - y) * (cy - y);
+      if (d < bestD) { bestD = d; best = i; if (!d) break; }
+    }
+    return best;
+  }
+
+  /**
+   * nextStitchNear(cells, w, h, value, x, y, done) -> cell index, or -1
+   * Where the tap button's next stitch of palette entry `value` goes
+   * (brainstorm 04 #15: count where the stitcher is, not from the top-left).
+   * Inside the 10×10 block holding (x, y), the first stitch still to do in
+   * reading order; when that block has none left, the block of the nearest
+   * stitch still to do, again from its first one in reading order. So taps
+   * fill a block the way a stitcher works it and then move to the next
+   * block with that colour, never back to row 1.
+   */
+  function nextStitchNear(cells, w, h, value, x, y, done) {
+    function firstInBlock(bx, by) {
+      for (var yy = by; yy < by + 10 && yy < h; yy++) {
+        for (var xx = bx; xx < bx + 10 && xx < w; xx++) {
+          var i = yy * w + xx;
+          if (cells[i] === value && !(done && done(i))) return i;
+        }
+      }
+      return -1;
+    }
+    x = clampInt(x, 0, Math.max(0, w - 1), 0);
+    y = clampInt(y, 0, Math.max(0, h - 1), 0);
+    var here = firstInBlock(Math.floor(x / 10) * 10, Math.floor(y / 10) * 10);
+    if (here >= 0) return here;
+    var near = nearestCellOf(cells, w, h, value, x, y, done);
+    if (near < 0) return -1;
+    return firstInBlock(Math.floor((near % w) / 10) * 10, Math.floor(((near / w) | 0) / 10) * 10);
+  }
+
   /**
    * normalize(raw, project) -> XSData
    * Never throws. Repairs or creates every field in the B2 data model.
@@ -1771,7 +1942,10 @@
           blobKey: str(q.blobKey, ''),
           w: clampInt(q.w, 0, 20000, 0),
           h: clampInt(q.h, 0, 20000, 0),
-          isChart: q.isChart === undefined ? true : !!q.isChart
+          isChart: q.isChart === undefined ? true : !!q.isChart,
+          /* Wave F (04 #3): the part of the cell chart this page prints, when
+             the grid reader placed it. */
+          region: normalizeRegion(q.region)
         });
       }
     }
@@ -1863,7 +2037,12 @@
       page: clampInt(cu.page, 0, 9999, 0),
       cx: clampInt(cu.cx, 0, 20000, 0),
       cy: clampInt(cu.cy, 0, 20000, 0),
-      zoom: num(cu.zoom, 1) > 0 ? num(cu.zoom, 1) : 1
+      zoom: num(cu.zoom, 1) > 0 ? num(cu.zoom, 1) : 1,
+      /* Wave F (04 #2): where the full chart was left, so reopening it lands
+         there. null = never moved (open at Fit). */
+      view: normalizeView(cu.view, out.chart),
+      tool: CHART_TOOLS[cu.tool] ? cu.tool : 'tap',
+      layer: CHART_LAYERS[cu.layer] ? cu.layer : 'cross'
     };
 
     /* parking */
@@ -3261,8 +3440,17 @@
     return { cells: out, lead: first > 0 ? line.slice(0, first).trim() : '' };
   }
 
+  /* Wave F: this repair is a FALLBACK. Since wave E the extractor hands a
+     newspaper-column key over column by column, one 'code (N ct)' per line,
+     and that order is the printed one, so it must never be reshuffled. A run
+     is only treated as "read across" when at least two of its lines, and at
+     least half of them, carry two or more cells; a lone glued line inside an
+     otherwise one-per-line key just has its cells split in the order given.
+     `expandCountColumns.repaired` says whether any run was re-ordered (it
+     becomes parseKey's `keyOrder`). */
   function expandCountColumns(lines) {
     var out = [], i = 0;
+    expandCountColumns.repaired = false;
     while (i < lines.length) {
       var c = countCells(lines[i]);
       if (c.cells.length < 2) { out.push(lines[i]); i++; continue; }
@@ -3278,8 +3466,21 @@
         run.push(cj);
         j++;
       }
-      var width = 0, r;
-      for (r = 0; r < run.length; r++) width = Math.max(width, run[r].cells.length);
+      var width = 0, r, multi = 0;
+      for (r = 0; r < run.length; r++) {
+        width = Math.max(width, run[r].cells.length);
+        if (run[r].cells.length >= 2) multi++;
+      }
+      if (multi < 2 || multi * 2 < run.length) {
+        /* the extractor's own order: keep it, one cell per line */
+        for (r = 0; r < run.length; r++) {
+          if (run[r].lead) out.push(run[r].lead);
+          out.push.apply(out, run[r].cells);
+        }
+        i = j;
+        continue;
+      }
+      expandCountColumns.repaired = true;
       var cols = [];
       for (r = 0; r < width; r++) cols.push([]);
       for (r = 0; r < run.length; r++) {
@@ -3357,6 +3558,8 @@
       kind: 'none',
       /** true when the file carries no text at all, only page images. */
       imageOnly: false,
+      /** Wave F: 'extractor' | 'repaired' — see expandCountColumns. */
+      keyOrder: 'extractor',
       warnings: warnings
     };
 
@@ -3377,6 +3580,9 @@
     }
 
     var rawLines = expandCountColumns(raw.split(/\r\n|\r|\n/));
+    /* 'extractor' when the key's order is the text's own; 'repaired' when a
+       newspaper-column key read across had to be put back (the fallback). */
+    result.keyOrder = expandCountColumns.repaired ? 'repaired' : 'extractor';
 
     /* document-level brand hint */
     var docBrand = '';
@@ -4953,6 +5159,36 @@
     return 1;
   }
 
+  /** A page's box in PDF space and its /Rotate, for tileRegion. */
+  function pageBoxOf(page) {
+    var v = page && page.view;
+    if (!v || v.length !== 4) return null;
+    return { view: [num(v[0], 0), num(v[1], 0), num(v[2], 0), num(v[3], 0)], rotate: clampInt(page.rotate, -720, 720, 0) };
+  }
+
+  /**
+   * tileRegion(tile) -> pages[i].region (see normalizeRegion)
+   * The stitches a placed tile covers and where they sit on its page. PDF y
+   * grows upwards, so the chart's top edge is the top sub-row's lower edge
+   * plus one sub-cell. A rotated page keeps its cell range but no fractions
+   * (the rendered image is turned, and the stitcher can still pan to it).
+   */
+  function tileRegion(t) {
+    if (!t || !t.place) return null;
+    var out = { x: t.place.col, y: t.place.row, w: t.gc, h: t.gr, fx: null, fy: null, fw: null, fh: null };
+    var b = t.pageBox;
+    if (b && !(b.rotate % 360) && t.fx && t.fy) {
+      var pw = b.view[2] - b.view[0], ph = b.view[3] - b.view[1];
+      if (pw > 0 && ph > 0) {
+        out.fx = (t.x0 - b.view[0]) / pw;
+        out.fw = t.cols * t.fx.pitch / pw;
+        out.fy = (b.view[3] - (t.y1 + t.fy.pitch)) / ph;
+        out.fh = t.rows * t.fy.pitch / ph;
+      }
+    }
+    return normalizeRegion(out);
+  }
+
   /**
    * One page -> { tile } when it reads as a chart page, or
    * { pending: marks, hint, nums } when it looks like one but was too narrow
@@ -4990,13 +5226,15 @@
         }
         if (page.cleanup) { try { page.cleanup(); } catch (e) { /* ignore */ } }
         var tile = lat ? mergeTile(lat, pickK(lat, g.nums)) : null;
+        var box = pageBoxOf(page);
         if (tile) {
           tile.source = source;
           tile.place = placeTile(tile, g.nums);
+          tile.pageBox = box;
           return { tile: tile };
         }
         if (keep && keep.length >= 40 && keep.length <= 20000 && hint > 0) {
-          return { pending: keep, hint: hint, nums: g.nums };
+          return { pending: keep, hint: hint, nums: g.nums, pageBox: box };
         }
         return null;
       });
@@ -5092,7 +5330,8 @@
    *
    * Result = { ok, w, h, originX, originY, cellW, cellH, cells: Int16Array,
    *            glyphs: string[], counts: number[], palette, colors, matched,
-   *            agree, confidence, ms, pages, tiles, warnings }
+   *            agree, confidence, ms, pages, tiles, warnings,
+   *            regions: [{ page (1-based), region }] }   // wave F, see tileRegion
    */
   /* How much of the budget may go on pages with no chart on them before the
      reader stops looking. */
@@ -5109,7 +5348,7 @@
         ok: false, w: 0, h: 0, originX: 0, originY: 0, cellW: 0, cellH: 0,
         cells: new Int16Array(0), glyphs: [], counts: [], palette: null,
         colors: 0, matched: 0, agree: 0, countable: 0, filled: 0, confidence: 0,
-        ms: Math.round(now()), pages: 0, tiles: 0, warnings: warnings
+        ms: Math.round(now()), pages: 0, tiles: 0, regions: [], warnings: warnings
       };
       if (extra) { for (var k in extra) if (extra.hasOwnProperty(k)) out[k] = extra[k]; }
       return out;
@@ -5185,6 +5424,7 @@
         if (!t) continue;
         t.source = 'edge';
         t.page = pending[p].page;
+        t.pageBox = pending[p].pageBox || null;
         t.place = placeTile(t, pending[p].nums);
         tiles.push(t);
       }
@@ -5232,6 +5472,14 @@
         return fail('the grid came out an impossible size (' + W + ' × ' + H + ')', { pages: scanned });
       }
 
+      /* Wave F (04 #3): which page printed which stitches, so the app can
+         flip from a stitch to its original page. `page` is 1-based. */
+      var regions = [];
+      for (i = 0; i < tiles.length; i++) {
+        var reg = tileRegion(tiles[i]);
+        if (reg) regions.push({ page: tiles[i].page, region: reg });
+      }
+
       /* ---- assemble ---- */
       var ids = [], idIndex = {}, counts = [];
       var raw = new Int32Array(W * H);
@@ -5275,7 +5523,7 @@
           cells: cells, glyphs: ids.slice(), counts: counts.slice(), palette: null,
           colors: ids.length, matched: 0, agree: 0, confidence: 0,
           ms: Math.round(now()), pages: scanned, tiles: tiles.length,
-          filled: filled, warnings: warnings
+          filled: filled, regions: regions, warnings: warnings
         };
       }
 
@@ -5336,7 +5584,7 @@
         cells: cells, glyphs: ids.slice(), counts: counts.slice(), palette: palette,
         colors: ids.length, matched: matched, agree: agree, countable: countable,
         confidence: confidence, ms: Math.round(now()), pages: scanned,
-        tiles: tiles.length, filled: filled, warnings: warnings
+        tiles: tiles.length, filled: filled, regions: regions, warnings: warnings
       };
     }, function (err) {
       return fail('that PDF could not be read (' + ((err && err.message) || 'unknown error') + ')');
@@ -5400,6 +5648,15 @@
     TAP_CAPTIONS: TAP_CAPTIONS,
     HIT_TOL: HIT_TOL,
 
+    /* chart position (wave F) */
+    centreOffset: centreOffset,
+    positionLabel: positionLabel,
+    rulerStep: rulerStep,
+    pageForCell: pageForCell,
+    nearestCellOf: nearestCellOf,
+    nextStitchNear: nextStitchNear,
+    VIEW_MAX_Z: VIEW_MAX_Z,
+
     /* storage guard (B9 risk #4) */
     dataSize: dataSize,
     toCountsMode: toCountsMode,
@@ -5428,7 +5685,8 @@
       zipNameColumn: zipNameColumn,
       trailingCodeRow: trailingCodeRow,
       tidyName: tidyName,
-      cleanKeyLine: cleanKeyLine
+      cleanKeyLine: cleanKeyLine,
+      expandCountColumns: expandCountColumns
     },
 
     _grid: {

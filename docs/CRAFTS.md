@@ -33,7 +33,8 @@ test/xstitch.test.html, test/sewing.test.html, test/blobstore.test.html
 ```
 
 Script order in `index.html` (after the existing tags, in this order):
-`blobstore.js`, `xstitch.js`, `xstitch-photo.js`, `sewing.js`, then `app.js`
+`blobstore.js`, `zip.js` (the shell's `.thready` backup container, wave F),
+`xstitch.js`, `xstitch-photo.js`, `sewing.js`, then `app.js`
 as today, then `app-xstitch.js`, `app-sewing.js`. Craft UI files register at
 script-evaluation time; `App.init` runs on `DOMContentLoaded`, after all of
 them, so registration order never matters. Every new file is precached in
@@ -92,6 +93,15 @@ Template.craftData: object|null                        // seed craftData for pro
   free. The hot path (a stitch tap on a 50k-cell chart) must stay under a few
   ms: keep chart grids as plain arrays of small integers and progress as a
   base64 bitmap string or plain array; do not store DOM or blobs here.
+- **View state goes through the same door, without undo** (wave F):
+  `Store.updateCraftData(projectId, patchOrFn, { undo: false })` (alias
+  `{ undoable: false }`) applies the change with **no undo snapshot and no
+  `updatedAt` / touch-day bump**, through the same `save()`, so revision,
+  writerId and the multi-tab rules are unchanged. Use it for anything that must
+  persist but is not work — zoom, pan, the chosen tool or layer, a crosshair —
+  so a pan never fills the undo stack and Undo never starts "undoing" zooms.
+  Never mutate `project.craftData` directly and call `Store.save()`. Debounce
+  view writes (cross-stitch uses 300 ms, flushed when the sheet closes).
 - `Store.summaryFor(project) → string` calls the craft's `summary(project)`
   (home card summary line); crochet keeps the existing `projectSummary`.
 - Per-craft **settings** (things shared across projects, e.g. the sewist's own
@@ -101,9 +111,18 @@ Template.craftData: object|null                        // seed craftData for pro
   `Store.setCraftSetting(craftId, key, value)`. Normalised on load as an opaque
   JSON object per craft; included in export/import.
 - Export/import JSON includes `craft`, `craftData`, `Template.craft`
-  unchanged. `BlobStore` contents (page images) are NOT in the backup file in
-  v1; the craft UI shows "chart images are stored on this device only" and can
-  re-import the PDF.
+  unchanged. Since wave F the backup is a `.thready` zip that also carries every
+  `BlobStore` page image under the `p:<projectId>:` convention (`pages/<projectId>/<n>.<ext>`,
+  see SPEC.md "Backup file"); a Keep-both import gets its own copies under the
+  clone's new id, with the craftData blob keys rewritten. Only an older `.json`
+  backup leaves the images out. Cross-stitch's copy says so ("saved with the
+  project; Back up now includes them"); sewing's page-image copy in
+  `js/app-sewing.js` (`STORED_HERE` and the "Keep the pages" hint) still says the
+  pages are not in the backup and needs the same change. A craft that stores page images must
+  keep to the `p:<projectId>:<kind>:<n>` key convention so the backup, the
+  Keep-both rekey and the boot-time orphan sweep can find them; the rekey
+  rewrites any craftData **string value** that starts with `p:<oldId>:`, so keep
+  whole keys as strings in craftData rather than assembling them from parts.
 
 ## BlobStore (`js/blobstore.js`, `window.BlobStore`)
 
@@ -124,6 +143,14 @@ BlobStore.usage() → Promise<{ count, bytes }|null>
 Key convention: `p:<projectId>:<kind>:<n>` (e.g. `p:abc:chartpage:3`). The
 shell calls `BlobStore.deletePrefix('p:<id>:')` from `deleteProjectFlow` after
 the 6-second undo window has passed (not before, so undo keeps the images).
+
+Wave F adds `entries(prefix) → Promise<[{key, blob}]>`, `putMany([{key, value}])
+→ Promise<count>` (one transaction, all or nothing), `deleteKeys(keys) →
+Promise<count>` and `sweep(liveIds, {prefix = 'p:'}) → Promise<{count, bytes}>`.
+The shell runs the sweep once per start (8 s in, on idle): `p:<id>:*` images whose
+id no live project, undo-stack entry, pre-import snapshot or on-disk state
+references are deleted. Keys outside `p:<id>:` and the shell's own `preimport:`
+snapshot are never touched.
 
 ## App (shell side)
 
@@ -247,18 +274,30 @@ ctx.pdfDropZone({
                              // gates, no read) and pass it on; used by the New project craft zone
   onError(err) {}
 }) → HTMLElement            // append it wherever the sheet wants it
+// wave F, on the returned node:
+wrap.cancel()               // stop the read in progress AND any page render on the handle given to
+                            // onPages (that handle is unusable afterwards)
+wrap.signal()               // the signal that handle honours, to pass on as { signal }
 ```
 
-`PdfText` gains `PdfText.open(file) → Promise<{ doc, numPages, textOf(pageNo), renderPage(pageNo, { scale|maxWidth }) → Promise<HTMLCanvasElement>, destroy() }>`
-so a craft can both read text and rasterise chart pages from a single load. The
-existing `PdfText.extract` is unchanged and used by crochet.
+`PdfText` gains `PdfText.open(file, { signal }) → Promise<{ doc, numPages, textOf(pageNo),
+extract({ onProgress, maxPages, signal, allowEmpty }), renderPage(pageNo, { scale|maxWidth, signal })
+→ Promise<HTMLCanvasElement>, destroy() }>` so a craft can both read text and rasterise chart pages
+from a single load. `handle.extract` is the whole `extract()` pipeline on the open document
+(running-head pass, unicode folding, `emptyPages`, `garbled`, `ocrNoise`, `columnsDetected`);
+`allowEmpty` makes a text-free PDF resolve with only its page markers instead of rejecting.
+`renderPage` honours its own `signal` and the one the document was opened with, and cancels
+mid-page through pdf.js's render task, rejecting with `AbortError`. The existing
+`PdfText.extract` is unchanged and used by crochet. See SPEC.md "PDF import" for the details.
 
-Caveat (as shipped): when `onPages` is given together with `onText`, the text
-is assembled per page from `textOf(n)`, which still untangles columns and
-drops per-page furniture but skips the cross-page repeated-running-head pass,
-and `columnsDetected` is reported as 0. `onText` alone runs the exact
-`extract()` pipeline. Crafts that need the running-head pass should call
-`PdfText.extract` themselves and `PdfText.open` separately for page images.
+The drop zone passes its signal into `PdfText.open`, so Cancel stops the read during the file
+read or the parse. With `onPages` + `onText`, `onText` receives the **full extract result**
+(`handle.extract({ signal, maxPages, onProgress, allowEmpty: true })`), including the 20-page
+cap from the big-file prompt; for a scanned PDF its `text` holds only page markers and
+`emptyPages` lists every page, so the craft's "this PDF is a scan" path must check for that
+rather than expect a rejection. A craft's own Stop button should pass `{ signal }` to every
+`renderPage` it starts (`wrap.signal()`, or its own `{ cancelled }` object) so Stop is immediate
+instead of waiting for the page in progress.
 
 `Tour.register(def)`: `def.steps` must be a **function** returning the step
 array (the built-in tours are declared that way so targets are resolved late),
@@ -309,6 +348,58 @@ What `XStitch.parseKey` now promises beyond the research spec:
   paths, so `applyPdf` always assigns the app's own symbol set; the app key and the
   paper chart can differ.
 
+## Cross-stitch chart rules (`js/xstitch.js`, `js/app-xstitch.js`, wave F)
+
+What the stitcher sees, the pane checks and what is left: `docs/wave-f/xstitch.md`
+(04 #1, #2, #3, #13 partly, #14, #15 and "next stitch of this colour").
+
+- **View state** (04 #2), all normalised on load and written only through
+  `Store.updateCraftData(id, fn, { undo: false })` (`saveViewState`, debounced
+  300 ms, flushed when the Chart sheet closes):
+  - `current.view: { z, x, y } | null` — `z` CSS px per stitch (capped at
+    `XStitch.VIEW_MAX_Z`, 64), `x`/`y` the fractional stitch at the middle of the
+    chart area, clamped to the chart; `null` opens at Fit (Fit, the Fit button and
+    a double-tap store `null`). On restore the zoom is clamped to at least Fit for
+    the current canvas, and a resize keeps a zoomed view's middle stitch.
+  - `current.tool: 'tap' | 'paint' | 'block' | 'page'` (default `'tap'`) and
+    `current.layer: 'cross' | 'back' | 'knots' | 'part'` (default `'cross'`; the
+    sheet falls back to Crosses when the chart has no such layer).
+  - The crosshair `current.cx` / `current.cy` (a strip tap, 🎯) and `current.page`.
+  - **Unmark is never remembered**: a chart reopened in erase mode would quietly undo
+    the next tap. `current.zoom` is unchanged and unused.
+- **Page records carry the stitch range they print** (04 #3). `pages[i].region:
+  { x, y, w, h, fx, fy, fw, fh } | null` — `x, y, w, h` the cell range in chart
+  stitches, `fx, fy, fw, fh` where that range sits on the page as fractions of its
+  width and height (all four null when unknown, e.g. a rotated page).
+  `XStitch.extractGrid` returns `regions: [{ page (1-based), region }]`, one per
+  placed tile (`[]` on failure). When the grid reader wins, every page is still
+  rendered and kept (the grid adds a chart; it does not replace the pages), a page's
+  `isChart` follows "has a region", and a re-import deletes `chartpage:` images the
+  new page list no longer uses. `XStitch.pageForCell(pages, x, y)` picks the page
+  that printed a stitch; 📄 in the Chart sheet opens the full-screen page viewer
+  there with the stitch outlined (falling back to the nearest kept page past the
+  40-page cap; an import made before wave F has no regions and says so).
+- **Rulers and position** (04 #1): screen-space rulers numbered from 1 at
+  `XStitch.rulerStep(z, minPx)` (10, 20, 50, 100…), centre marks at w/2 and h/2
+  (`centreOffset(i, n) → { k, side }`), and a readout from
+  `positionLabel(x, y, w, h) → { col, row, grid, centre, block, text }` that is
+  also the canvas's `aria-label`. Theme colours are read once per theme.
+- **`keyOrder`.** `parseKey` reports `keyOrder: 'extractor' | 'repaired'`.
+  `expandCountColumns` (exposed as `_key.expandCountColumns` for the tests) treats a
+  run as read across only when at least two of its lines, and at least half, hold two
+  or more `code (N ct)` cells; otherwise the extractor's order is kept. All four
+  Pokémon fixtures are `'extractor'`: the repair is a fallback.
+- **Block counting** (04 #15). In cells mode the big button marks the first stitch
+  still to do, in reading order, inside the crosshair's 10×10 block, then moves to
+  the block of the nearest stitch still to do (`XStitch.nextStitchNear(cells, w, h,
+  value, x, y, done)`); the readout is "block 15,25 · 4 left here · 3 / 12,711"
+  (counts mode keeps the group readout). −1 takes back the stitch the button marked
+  last (an in-memory `tapHistory`), falling back to reading order when that is
+  empty. 10×10 with a colour isolated (◉) marks only that colour in the block;
+  with none isolated it marks every colour. 🎯 jumps to the nearest stitch of the
+  current colour still to do (`nearestCellOf`, skipping the ones it has already
+  shown, so neighbours never ping-pong; a chart tap starts over).
+
 ## Sewing importer rules (`js/sewing.js`, wave E)
 
 Ground truth and residuals: `docs/wave-e/sewing-audit.md`.
@@ -349,6 +440,65 @@ Ground truth and residuals: `docs/wave-e/sewing-audit.md`.
   disclaimers) never become steps or sections; "sewing instructions - X" names the
   section; a short caption inside a running step does not end it.
 
+## Sewing rules (`js/sewing.js`, `js/app-sewing.js`, wave F)
+
+What the sewist sees, the pane checks and what is left: `docs/wave-f/sewing.md`
+(05 #1, #3, #5, #7, #10, #15).
+
+- **Split and merge keep the printed number.** `Sewing.splitStep(data, index, at)`
+  (`at` a sentence index, 1..n−1) and `Sewing.mergeSteps(data, index)` mutate the
+  data and return a boolean; the app makes each one a single `updateCraftData` call,
+  so ↶ Undo and the toast's Undo both put it back. Both halves of a split keep
+  `step.n`, so they read exactly like wave E's "(continued)" cards ("1 · 1/2", "card 1
+  of 2"). A merge keeps the first card's number, section and page, is done only when
+  both cards were, and never folds an optional extra into a construction card.
+  `Sewing.sentences` keeps a leading "(Figure 1)" with the sentence before it.
+  A split or merged card carries `StepRow.src` (a `Sewing.textKey` of the imported
+  card(s) it came from, `+`-joined for a merge; `/^[a-z0-9.+]{3,400}$/` or dropped), and a
+  re-import puts the sewist's cards back, ticks kept, wherever those imported texts
+  are unchanged. Saved step text is capped at 4,000 characters (`STEP_SAVED_CAP`);
+  the parser still makes cards of at most 800. ＋ Add step inserts after the last
+  construction card.
+- **Cutting chips count pieces, not rows.** A row reads "0 of 4 cut" with −; up to
+  6 pieces a tap adds one and stops at the total ("All 2 cut — use − to take one
+  off", no wrap to zero); above 6 the chip opens a counter (−10 / −1 / +1 / +10,
+  None cut, All N cut). `Sewing.cutTotals(data) → { cut, total, rows, rowsDone }`
+  feeds the sheet header ("7 of 112 pieces cut · 1 of 18 rows done"), the mini row,
+  the table's label and the home card (`Sewing.summary`). **"Cut 1 pair of pockets"
+  and "Pocket: cut 1 pair" are 2 pieces** with `grain: 'pair'`; `Sewing.cutHint(row)`
+  explains mirrored pairs, the fold, bias and crosswise. A re-import matches counts by
+  piece, fabric and note, by name only when the name is unique on both sides.
+- **Optional group.** With a real steps block, a heading-shaped line outside it that
+  names a hack, variation, "make it your own" or customise section (capitals, or Title
+  Case of six words or fewer) starts an optional run up to the next heading, page
+  break or block; it becomes `variations` cards (`step.optional`), "(OPTIONAL!)"
+  stripped. Care, washing and social pages are not taken from outside the
+  instructions. The step list shows construction first and the extras in a collapsed
+  **"Optional — N extras, not counted"** group that opens by itself on an extra; they
+  never count toward progress or finishing.
+- **Shopping list.** `Sewing.shoppingList(data, { fabric, notions, thread })` puts
+  fabric first (the chosen size's amount per bolt width, else every size range, a
+  grid row's groups), then the notions not ticked off (minus one that only names a
+  listed fabric), then "Thread to match" unless thread is listed; the pattern's
+  strings are kept verbatim. The toggles are `Settings.crafts.sewing.shopping`
+  (`{ fabric, notions, thread }`).
+- **Layout pages.** `Sewing.layoutPages(sourceText)` finds "CUTTING LAYOUTS"
+  (kerning-split too), "Cutting layout", "fabric layout", "lay plan" and Pattern
+  Runway's "Cutting layouts show approximate position…", skipping a heading in a
+  stack of side headings and a quilt's "Quilt Layout". The Cutting sheet offers them
+  as page chips that open the page viewer when the image is stored. With "Keep the
+  pages" ticked the render queue runs step pages, then layout pages, then optional
+  extras' pages, then the rest, so "Stop — keep the pages so far" keeps the diagrams.
+- **Seam-allowance reminder.** `Sewing.saPhrases` names the parts an exception covers;
+  `Sewing.saReminder(data, stepText) → { mm, inches, part, text }` turns the step
+  card's chip into "Seam allowance 6 mm (1/4") · neckline" on a step that mentions
+  one. It is a reminder, never a rule.
+- **Grouped fabric grids.** A "TOP SHORTS PANTS / METERS YARDS / widths / SIZES A-H …"
+  table is read into one row per garment and width with one amount per group;
+  `FabricRow.groupLabels` (e.g. `['A-H', 'I-P']`) is kept only when it lines up with
+  `rawAmounts`. Amounts are spread per size only when a size chart's labels tile the
+  groups; otherwise the Fabric sheet shows a chip per group as printed.
+
 ## Testing and verification (every craft)
 
 - `test/<craft>.test.html`: parser unit tests on committed synthetic snippets
@@ -360,7 +510,10 @@ Ground truth and residuals: `docs/wave-e/sewing-audit.md`.
 - Browser check at 375×812 in the Browser pane (on localhost the service worker
   is network-first, so a reload is enough; see `HANDOFF.md`), exercise create →
   import → count → undo → export/import round-trip → delete, then confirm a
-  crochet project still works.
+  crochet project still works. When other agents share the pane, run in-app checks
+  under a private key (`Store.__setKeyForTests('<own key>')`, test-only) and clean up
+  your `p:<id>:` images afterwards; page renders stall while the pane is hidden (see
+  `HANDOFF.md`).
 - Performance: a stitch tap or "mark done" must update the DOM in < 5 ms; chart
   pan/zoom must hold 60 fps on a 200×250 chart (canvas, not DOM cells).
 
