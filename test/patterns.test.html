@@ -433,7 +433,8 @@ assertTrue(beeSecs[1].text.indexOf('1. 6sc in mr') >= 0, 'splitSections slices t
 assertEqual(P.splitSections('Legs x4\n1. 6 sc in mr\n2. inc around (12)')[0].makeCount, 4, '"Legs x4" -> makeCount 4');
 assertEqual(P.splitSections('Ears - make 2\n1. 6 sc in mr\n2. inc around (12)')[0].makeCount, 2, '"Ears - make 2" -> makeCount 2');
 assertEqual(P.splitSections('Leg (x4)\n1. 6 sc in mr\n2. inc around (12)')[0].name, 'Leg', '"Leg (x4)" -> name Leg');
-assertEqual(P.splitSections('some notes with no headers at all'), [{ name: '', makeCount: 1, text: 'some notes with no headers at all', placement: '' }], 'splitSections with no headers -> one unnamed section');
+// (wave G: every section carries `group`, null when the document has no size groups)
+assertEqual(P.splitSections('some notes with no headers at all'), [{ name: '', makeCount: 1, text: 'some notes with no headers at all', placement: '', group: null }], 'splitSections with no headers -> one unnamed section');
 
 // EYES / ASSEMBLY blocks are notes, not sections
 var eyesText = 'BODY EYES\nIn yellow\n1. 6sc in mr\n2. Inc in each st\nASSEMBLY\nSew the wings on';
@@ -3068,6 +3069,113 @@ group('wave F: a length in the middle of a piece (03 #5, Caron residual)');
   assertEqual([P.summary(tl).maxRow, P.summary(tl).lengthRows], [89, true],
     'wave F: a length at the END still resolves through the gauge, and summary() says the rows came from a length');
   assertEqual(P.summary(P.parse('Rnd 1: 6 sc in MR (6)\nRnd 2: inc x6 (12)')).lengthRows, false, 'wave F: ...and says so only then');
+})();
+
+// -----------------------------------------------------------------------
+group('wave G: size groups (one booklet, several sizes of the same toy)');
+// -----------------------------------------------------------------------
+(function () {
+  var P = window.Patterns;
+  function shape(secs) {
+    return secs.map(function (s) {
+      return s.name + '/' + (s.group ? s.group.name + '#' + s.group.index : '-');
+    });
+  }
+  // (a) a running head whose suffix varies from page to page
+  var RUN = '=== PAGE 1 ===\nToy Bunny - Small\nHEAD\n1. 6 sc in mr (6)\n2. inc x6 (12)\n' +
+    'EARS (make 2)\n1. 4 sc in mr (4)\n2. inc x4 (8)\n' +
+    '=== PAGE 2 ===\nToy Bunny - Small\nASSEMBLY\nSew the ears to the top of the head.\n' +
+    '=== PAGE 3 ===\nToy Bunny - Large\nHEAD\n1. 6 sc in mr (6)\n2. inc x6 (12)\n3. (sc, inc) x6 (18)\n' +
+    'EARS (make 2)\n1. 6 sc in mr (6)\n2. inc x6 (12)\n' +
+    '=== PAGE 4 ===\nToy Bunny - Large\nASSEMBLY\nSew the ears onto rnd 2 of the head, 3 sts apart.\n';
+  var rs = P.splitSections(RUN);
+  assertEqual(shape(rs), ['Head/Small#0', 'Ears/Small#0', 'Head/Large#1', 'Ears/Large#1'],
+    'wave G: "Toy Bunny - Small" / "- Large" running heads group the parts; the repeated Head and Ears are never merged');
+  assertEqual(rs.map(function (s) { return P.summary(P.parse(s.text)).maxRow; }), [2, 2, 3, 2],
+    'wave G: each size keeps its own rounds');
+  assertTrue(rs.length === 4 && /top of the head/.test(rs[1].placement) && !/top of the head/.test(rs[3].placement) &&
+    /rnd 2 of the head/.test(rs[3].placement) && !/rnd 2 of the head/.test(rs[1].placement),
+    'wave G: each size\'s ASSEMBLY goes to that size\'s parts only');
+  assertTrue(!/Toy Bunny/.test(rs.map(function (s) { return s.text; }).join('\n')),
+    'wave G: the running head is never part of a part\'s text');
+
+  // (b) a size word or phrase standing over a run of part headers
+  var WORD = 'SMALL BEE\nBody\nRnd 1: 6 sc in MR (6)\nRnd 2: inc x6 (12)\nWings (make 2)\nRnd 1: 5 sc in MR (5)\n' +
+    'LARGE BEE\nBody\nRnd 1: 6 sc in MR (6)\nRnd 2: inc x6 (12)\nRnd 3: (sc, inc) x6 (18)\nWings (make 2)\nRnd 1: 6 sc in MR (6)\n';
+  assertEqual(shape(P.splitSections(WORD)), ['Body/Small Bee#0', 'Wings/Small Bee#0', 'Body/Large Bee#1', 'Wings/Large Bee#1'],
+    'wave G: "SMALL BEE" / "LARGE BEE" block headings are groups, the parts under them keep their own names');
+  var FORMS = [['Mini', 'Medium'], ['Size 1', 'Size 2'], ['Version A', 'Version B'], ['10 cm bee', '20 cm bee'],
+    ['Keyring:', 'Jumbo:'], ['Baby', 'Adult']];
+  FORMS.forEach(function (f) {
+    var txt = f[0] + '\nHead\nRnd 1: 6 sc in MR (6)\nRnd 2: inc x6 (12)\n' + f[1] + '\nHead\nRnd 1: 8 sc in MR (8)\nRnd 2: inc x8 (16)\n';
+    var got = P.splitSections(txt).map(function (s) { return s.group ? s.group.name : null; });
+    assertEqual(got, [f[0].replace(/:$/, ''), f[1].replace(/:$/, '')], 'wave G: "' + f[0] + '" / "' + f[1] + '" headings are size groups');
+  });
+
+  // ...but a size word over its OWN rounds is a part
+  var WING = 'Body\nRnd 1: 6 sc in MR (6)\nRnd 2: inc x6 (12)\nSmall Wing (make 2)\nRnd 1: 5 sc in MR (5)\nLarge Wing (make 2)\nRnd 1: 6 sc in MR (6)\n';
+  assertEqual(shape(P.splitSections(WING)), ['Body/-', 'Small Wing/-', 'Large Wing/-'],
+    'wave G: "Small Wing" / "Large Wing" with rounds under them are parts, not sizes');
+
+  // no groups: a repeated header behaves exactly as before
+  var LEGS = 'Head\nRnd 1: 6 sc in MR (6)\nRnd 2: inc x6 (12)\nLeg (Make 2):\nRnd 1: 6 sc in MR (6)\nRnd 2: inc x6 (12)\n' +
+    'Body\nRnd 1: 6 sc in MR (6)\nRnd 2: inc x6 (12)\nLeg (Make 2):\nRnd 1: 6 sc in MR (6)\nRnd 2: inc x6 (12)\nRnd 3: sc around (12)\n';
+  var ls = P.splitSections(LEGS);
+  assertEqual(shape(ls), ['Head/-', 'Leg/-', 'Body/-', 'Leg/-'], 'wave G: "Leg (Make 2)" printed twice with no group heading: no groups, four sections as before');
+  assertEqual(ls.map(function (s) { return s.makeCount; }), [1, 2, 1, 2], 'wave G: ...make-counts unchanged');
+  assertEqual(ls.map(function (s) { return s.placement; }), ['', '', '', ''], 'wave G: ...and no placement invented');
+  // a part header with NO colon, straight after a counted round, printed twice
+  // (it was "wordy" and repeated, so both copies were swallowed as running heads)
+  var mkLegs = function (h) {
+    return 'Head\nRnd 1: 6 sc in MR (6)\nRnd 2: inc x6 (12)\n' + h + '\nRnd 1: 6 sc in MR (6)\nRnd 2: inc x6 (12)\n' +
+      'Body\nRnd 1: 6 sc in MR (6)\nRnd 2: inc x6 (12)\nRnd 6: sc around (18)\n' + h +
+      '\nRnd 1: 6 sc in MR (6)\nRnd 2: inc x6 (12)\nRnd 3: sc around (12)\n';
+  };
+  var nm = function (t) { return P.splitSections(t).map(function (s) { return s.name + '/' + s.makeCount; }); };
+  assertEqual(nm(mkLegs('Leg (make 2)')), ['Head/1', 'Leg/2', 'Body/1', 'Leg/2'],
+    'wave G: "Leg (make 2)" with no colon after "Rnd 6: sc around (18)" starts a part (twice)');
+  assertEqual(nm(mkLegs('Leg (make 2):')), ['Head/1', 'Leg/2', 'Body/1', 'Leg/2'], 'wave G: ...and with the colon');
+  assertEqual(nm(mkLegs('Arms x2')), ['Head/1', 'Arms/2', 'Body/1', 'Arms/2'], 'wave G: ..."Arms x2" too');
+  var stuffed = P.splitSections(mkLegs('Stuff firmly'));
+  assertEqual(stuffed.map(function (s) { return s.name; }), ['Head', '', 'Body', ''],
+    'wave G: "Stuff firmly" printed the same way is never a part name');
+  assertTrue(stuffed.length === 4 && /Stuff firmly/.test(stuffed[0].text) && /Stuff firmly/.test(stuffed[2].text),
+    'wave G: ...it stays a note in the text of the part above it');
+  // a "Title - Part" running head names parts, not sizes (no part repeats)
+  var NAMED = '=== PAGE 1 ===\nBunny - Head\nHead\nRnd 1: 6 sc in MR (6)\n=== PAGE 2 ===\nBunny - Body\nBody\nRnd 1: 6 sc in MR (6)\n';
+  assertEqual(shape(P.splitSections(NAMED)), ['Head/-', 'Body/-'],
+    'wave G: "Bunny - Head" / "Bunny - Body" running heads with no repeated part are not groups');
+  // a size list in the materials is not a group either
+  var MAT = 'Materials\nSafety eyes - small 8mm\nSafety eyes - large 12mm\nHead\nRnd 1: 6 sc in MR (6)\nRnd 2: inc x6 (12)\n';
+  assertEqual(shape(P.splitSections(MAT)), ['Head/-'], 'wave G: "Safety eyes - small / - large" in the materials is no group');
+
+  // EYES prose naming a round and a spacing is the piece's placing note
+  var EYES = 'BODY\n1. 6 sc in mr\n2. Inc in each st\n3. Inc, sc, repeat around\nTie off\nEYES\n' +
+    'I try to place the eyes in the 2nd\nround, 4 stitches apart.\nSometimes it takes a bit of guess work.\n' +
+    'WINGS\n1. 6sc in mr\n2. Inc in each st\n';
+  var es = P.splitSections(EYES);
+  assertEqual(es.map(function (s) { return s.name; }), ['Body', 'Wings'], 'wave G: an EYES paragraph is no part');
+  assertTrue(es.length === 2 && /Eyes: I try to place the eyes in the 2nd round, 4 stitches apart\./.test(es[0].placement) &&
+    /Eyes: Sometimes it takes/.test(es[0].placement) && !/place the eyes/.test(es[0].text),
+    'wave G: ...it is the Body\'s placing note (every line of it, labelled "Eyes:"), not more of its rounds');
+  // an EYES heading with rounds under it is still a part
+  var EYEPART = 'Head\nRnd 1: 6 sc in MR (6)\nEyes (make 2)\nRnd 1: 6 sc in MR (6)\nRnd 2: inc x6 (12)\n';
+  assertEqual(P.splitSections(EYEPART).map(function (s) { return s.name + '/' + s.makeCount; }), ['Head/1', 'Eyes/2'],
+    'wave G: "Eyes (make 2)" over its rounds is a part');
+  // EYES prose that says nowhere stays where it was
+  var VAGUE = 'Body\nRnd 1: 6 sc in MR (6)\nRnd 2: inc x6 (12)\nEYES\nI like big shiny eyes on mine.\n';
+  assertEqual(P.splitSections(VAGUE)[0].placement, '', 'wave G: EYES prose that names no round or stitch is not a placing note');
+
+  // rounds, then rows: "instead of crocheting in the round ... rows" + "Ch1, turn"
+  var MIX = 'WINGS\n1. 6sc in mr\n2. Inc in each st\nNow instead of crocheting in the round, we are going to be\n' +
+    "crocheting in 'rows'.\n3. Ch1, turn (flip project), (Inc, sc) x5, inc\n4. Ch1, turn, (inc, 2sc) x5, inc, sc\n";
+  var ml = P.parse(MIX).filter(function (l) { return l.kind === 'row'; });
+  assertEqual(ml.map(function (l) { return l.row + ':' + (l.workedIn || 'round') + ':' + l.count; }),
+    ['1:round:6', '2:round:12', '3:rows:17', '4:rows:23'],
+    'wave G: a piece begun in the round goes on in rows from the first turned row after the switch sentence');
+  var HAT = 'Rnd 1: 6 sc in MR, join, ch 1, turn (6)\nRnd 2: inc around, join, ch 1, turn (12)\n';
+  assertEqual(P.parse(HAT).filter(function (l) { return l.workedIn; }).length, 0,
+    'wave G: a joined-and-turned round with no switch sentence stays a round');
 })();
 
 var summaryEl = document.getElementById('summary');

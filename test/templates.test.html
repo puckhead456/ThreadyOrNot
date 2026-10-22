@@ -662,6 +662,77 @@ assertEqual([Store.project(oneProj.id).size.index, oneBody.name, oneBody.sizeInd
   [0, 'Body', 0, 10, false], 'wave F: ...and ONE Undo puts both back');
 
 /* ---------------------------------------------------------------------- */
+group('wave G: size groups - import keeps every size, templates carry them');
+var SIZES = '=== PAGE 1 ===\nToy Bee - Keyring\nBODY\nRnd 1: 5 sc in mr (5)\nRnd 2: inc in each st (10)\nRnd 3: sc in each st (10)\n' +
+  'WINGS\nRnd 1: 6 sc in mr (6)\nRnd 2: inc in each st (12)\n' +
+  '=== PAGE 2 ===\nToy Bee - Medium\nBODY\nRnd 1: 6 sc in mr (6)\nRnd 2: inc in each st (12)\nRnd 3: (inc, sc) x6 (18)\nRnd 4: sc in each st (18)\n' +
+  'WINGS\nRnd 1: 6 sc in mr (6)\nRnd 2: inc in each st (12)\nRnd 3: sc in each st (12)\n' +
+  '=== PAGE 3 ===\nToy Bee - Big\nBODY\nRnd 1: 6 sc in mr (6)\nRnd 2: inc in each st (12)\nRnd 3: (inc, sc) x6 (18)\nRnd 4: (inc, 2 sc) x6 (24)\nRnd 5: sc in each st (24)\n' +
+  'WINGS\nRnd 1: 6 sc in mr (6)\nRnd 2: inc in each st (12)\nRnd 3: (inc, sc) x6 (18)\nRnd 4: sc in each st (18)\n';
+seed(null);
+var gSecs = Store.splitSections(SIZES);
+assertEqual(gSecs.map(function (s) { return s.name + '/' + s.group; }),
+  ['Body/Keyring', 'Wings/Keyring', 'Body/Medium', 'Wings/Medium', 'Body/Big', 'Wings/Big'],
+  'wave G: Store.splitSections carries each section\'s size group name');
+var gProj = Store.createProject({ name: 'Bee', templateId: 'blank' });
+var gRes = Store.importPatternSections(gProj.id, gSecs, { mode: 'parts', text: SIZES });
+gProj = Store.project(gProj.id);
+assertEqual([gRes.created, gRes.updated, gRes.groups], [6, 0, ['Keyring', 'Medium', 'Big']],
+  'wave G: six parts created - no Body or Wings is matched against another size\'s');
+assertEqual(gProj.parts.map(function (p) { return p.group + ' ' + p.name + ' ' + p.targetRows; }),
+  ['Keyring Body 3', 'Keyring Wings 2', 'Medium Body 4', 'Medium Wings 3', 'Big Body 5', 'Big Wings 4'],
+  'wave G: every size\'s parts kept, ordered by size then document order, each with its own target');
+assertEqual([gProj.groups, gProj.activeGroup, Store.activePart(gProj).name, Store.activePart(gProj).group],
+  [[{ name: 'Keyring' }, { name: 'Medium' }, { name: 'Big' }], 'Keyring', 'Body', 'Keyring'],
+  'wave G: Project.groups in document order, the first size open on its first part');
+// a re-import updates each size's own parts
+var gRes2 = Store.importPatternSections(gProj.id, gSecs, { mode: 'parts', text: SIZES });
+assertEqual([gRes2.created, gRes2.updated, Store.project(gProj.id).parts.length], [0, 6, 6],
+  'wave G: re-importing the same booklet updates the six parts in place');
+// only some sizes
+var oneSize = Store.createProject({ name: 'Medium only', templateId: 'blank' });
+Store.importPatternSections(oneSize.id, gSecs, { mode: 'parts', text: SIZES, groups: ['Medium'] });
+oneSize = Store.project(oneSize.id);
+assertEqual([oneSize.parts.map(function (p) { return p.group + ' ' + p.name; }), oneSize.groups, oneSize.activeGroup],
+  [['Medium Body', 'Medium Wings'], [{ name: 'Medium' }], 'Medium'],
+  'wave G: opts.groups imports only the ticked sizes');
+// templates carry every size
+var gDraft = Store.templateFromProject(gProj.id);
+assertEqual([gDraft.groups, gDraft.parts.map(function (p) { return p.group; })],
+  [[{ name: 'Keyring' }, { name: 'Medium' }, { name: 'Big' }], ['Keyring', 'Keyring', 'Medium', 'Medium', 'Big', 'Big']],
+  'wave G: templateFromProject drafts the groups and each part\'s group');
+var gTpl = Store.saveTemplate(gDraft);
+assertEqual([gTpl.groups.length, gTpl.parts[2].group, gTpl.parts[2].name], [3, 'Medium', 'Body'], 'wave G: saveTemplate keeps them');
+var gFrom = Store.createProject({ name: 'From the bee template', templateId: gTpl.id });
+assertEqual([gFrom.groups, gFrom.activeGroup, gFrom.parts.map(function (p) { return p.group + ' ' + p.name + ' ' + p.targetRows; })],
+  [[{ name: 'Keyring' }, { name: 'Medium' }, { name: 'Big' }], 'Keyring',
+   ['Keyring Body 3', 'Keyring Wings 2', 'Medium Body 4', 'Medium Wings 3', 'Big Body 5', 'Big Wings 4']],
+  'wave G: createProject from that template keeps every size, every part\'s group and target');
+// "Make this size a template": one plain size
+var medDraft = Store.templateFromProject(gProj.id, { group: 'Medium' });
+assertEqual([medDraft.name, medDraft.parts.map(function (p) { return p.name + '/' + ('group' in p); }), 'groups' in medDraft],
+  ['Bee (Medium) template', ['Body/false', 'Wings/false'], false],
+  'wave G: templateFromProject(id, {group}) drafts that size alone as a plain template');
+var plainG = Store.saveTemplate({ name: 'No groups', parts: [{ name: 'Body', makeCount: 1, patternText: BODY_TEXT }], checklist: [] });
+assertTrue(!('groups' in plainG) && !('group' in plainG.parts[0]), 'wave G: a one-size template gets no group fields');
+var renamedG = Store.saveTemplate({ id: gTpl.id, name: 'Renamed bee', parts: gTpl.parts, checklist: [] });
+assertEqual(renamedG.groups.map(function (g) { return g.name; }), ['Keyring', 'Medium', 'Big'],
+  'wave G: an edit that passes the parts keeps the groups');
+// a project with no groups: no tab strip data at all
+var noG = Store.createProject({ name: 'No groups', templateId: 'blank' });
+Store.importPatternSections(noG.id, Store.splitSections(GARMENT), { mode: 'parts', text: GARMENT, size: 0 });
+noG = Store.project(noG.id);
+assertEqual([noG.groups, noG.activeGroup, noG.parts.every(function (p) { return p.group === null; })], [[], null, true],
+  'wave G: a one-size pattern imports exactly as before - groups [], activeGroup null, every part.group null');
+// backup round trip
+var gBack = Store.exportJSON();
+seed(null);
+Store.importJSON(gBack);
+var gAfter = Store.project(gProj.id);
+assertEqual([gAfter.groups.length, gAfter.activeGroup, gAfter.parts[3].group, Store.template(gTpl.id).groups.length],
+  [3, 'Keyring', 'Medium', 3], 'wave G: groups survive a backup round trip (project and template)');
+
+/* ---------------------------------------------------------------------- */
 restore();
 
 var summaryEl = document.getElementById('summary');
