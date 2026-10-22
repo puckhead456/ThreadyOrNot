@@ -459,6 +459,9 @@
           // rides along, so the reading of the text must too.
           dialect: normalizeDialect(p.dialect, 'auto')
         });
+        // wave G: the size this part belongs to (present only when set)
+        var tg = normalizeGroupName(p.group);
+        if (tg) parts[parts.length - 1].group = tg;
       }
     }
     if (!parts.length) {
@@ -508,6 +511,11 @@
         if (tsel && tsel.index < tsz.length) nt.size = { index: tsel.index, label: tsz[tsel.index] };
       }
     }
+    // Wave G: a template saved from a multi-size booklet keeps every size, in
+    // order. Present only when a part names a group, so older templates and
+    // the built-ins are unchanged.
+    var tgroups = normalizeGroups(t.groups, parts);
+    if (tgroups.length) nt.groups = tgroups;
     return nt;
   }
 
@@ -630,6 +638,9 @@
         orientation: normalizeOrientation(p.orientation, 'auto'),
         dialect: normalizeDialect(p.dialect, 'auto')
       });
+      // wave G: the part's size group rides along
+      var vg = normalizeGroupName(p.group);
+      if (vg) parts[parts.length - 1].group = vg;
     }
     if (!parts.length) throw new Error('Add at least one part.');
     var checklist = [];
@@ -660,6 +671,8 @@
       // the caller does not say)
       sizes: tpl.sizes !== undefined ? tpl.sizes : existing ? existing.sizes : undefined,
       size: tpl.size !== undefined ? tpl.size : existing ? existing.size : undefined,
+      // wave G: the size groups' order (the parts say which exist)
+      groups: tpl.groups !== undefined ? tpl.groups : existing ? existing.groups : undefined,
       updatedAt: now()
     });
     if (existing) list[list.indexOf(existing)] = next;
@@ -692,17 +705,26 @@
   }
 
   /** An UNSAVED template drafted from a project (for "Save as template"). */
-  function templateFromProject(projectId) {
+  /**
+   * `opts.group` (wave G, "Make this size a template"): only that size's parts
+   * (and any part shared by every size), as a plain one-size template.
+   */
+  function templateFromProject(projectId, opts) {
     var proj = project(projectId);
     if (!proj) return null;
+    var only = opts && opts.group ? normalizeGroupName(opts.group) : null;
+    if (only && !(proj.groups || []).some(function (g) { return g.name === only; })) only = null;
+    var srcParts = only
+      ? proj.parts.filter(function (p) { return !p.group || p.group === only; })
+      : proj.parts;
     var draft = {
       id: '',
-      name: (proj.name + ' template').trim(),
+      name: (proj.name + (only ? ' (' + only + ')' : '') + ' template').trim(),
       emoji: proj.emoji,
       countMode: proj.countMode,
       groupSize: proj.groupSize,
-      parts: proj.parts.map(function (p) {
-        return {
+      parts: srcParts.map(function (p) {
+        var tp = {
           name: p.name,
           makeCount: p.makeCount,
           patternText: str(p.patternText, ''),
@@ -711,6 +733,9 @@
           orientation: normalizeOrientation(p.orientation, 'auto'),
           dialect: normalizeDialect(p.dialect, 'auto')
         };
+        // wave G: the size each part belongs to, unless one size was asked for
+        if (!only && p.group) tp.group = p.group;
+        return tp;
       }),
       checklist: proj.checklist
         .map(function (c) { return str(c.text, '').trim(); })
@@ -724,6 +749,10 @@
     if (Array.isArray(proj.sizes) && proj.sizes.length >= 2) {
       draft.sizes = proj.sizes.slice();
       if (proj.size) draft.size = { index: proj.size.index, label: proj.size.label };
+    }
+    // wave G: every size, in order
+    if (!only && proj.groups && proj.groups.length) {
+      draft.groups = proj.groups.map(function (g) { return { name: g.name }; });
     }
     return draft;
   }
@@ -863,7 +892,37 @@
     // attaches it in the plural (Patterns `makeCountInferred`). Present only
     // when true, and dropped once the owner sets the count by hand.
     if (p.makeCountInferred === true) np.makeCountInferred = true;
+    // Wave G (size groups): the size of a multi-size booklet this part belongs
+    // to ("Keyring" / "Medium" / "Big"), or null. Additive with a default, so
+    // no backup migration is due.
+    np.group = normalizeGroupName(p.group);
     return np;
+  }
+
+  /** A size group's name: trimmed, at most 60 characters, or null. */
+  function normalizeGroupName(v) {
+    if (v && typeof v === 'object') v = v.name;
+    var s = str(v, '').replace(/\s+/g, ' ').trim();
+    return s ? s.slice(0, 60) : null;
+  }
+
+  /**
+   * `Project.groups` (wave G): [{name}] in document order. Every group a part
+   * names is listed (a save that lost the list gets it back from its parts),
+   * and a group no part belongs to any more is dropped.
+   */
+  function normalizeGroups(raw, parts) {
+    var out = [], seen = {};
+    function push(n) {
+      if (!n || seen[n]) return;
+      seen[n] = true;
+      out.push({ name: n });
+    }
+    if (Array.isArray(raw)) raw.forEach(function (g) { push(normalizeGroupName(g)); });
+    (parts || []).forEach(function (p) { push(p && p.group); });
+    return out.filter(function (g) {
+      return (parts || []).some(function (p) { return p && p.group === g.name; });
+    });
   }
 
   /** '#abc' / 'ABCDEF' / '#aabbcc' → '#aabbcc'. Anything else → null. */
@@ -946,6 +1005,15 @@
     // Crafts: every save made before September 2026 is a crochet project.
     var craft = str(p.craft, '').trim() || DEFAULT_CRAFT;
 
+    // Wave G: the sizes of a multi-size booklet, and the one on screen.
+    var groups = normalizeGroups(p.groups, parts);
+    var activeGroup = normalizeGroupName(p.activeGroup);
+    if (!groups.some(function (g) { return g.name === activeGroup; })) {
+      var ap = null;
+      for (var q = 0; q < parts.length; q++) if (parts[q].id === activePartId) ap = parts[q];
+      activeGroup = ap && ap.group ? ap.group : (groups.length ? groups[0].name : null);
+    }
+
     return {
       id: str(p.id, '') || uid(),
       name: safeName(p.name, 'Untitled project'),
@@ -984,7 +1052,12 @@
       // Crafts: 'crochet' | 'crossstitch' | 'sewing' | anything a module registers.
       craft: craft,
       // Opaque to the shell — owned by the craft module, repaired by its normalize.
-      craftData: normalizeCraftData(craft, p.craftData, p)
+      craftData: normalizeCraftData(craft, p.craftData, p),
+      // Wave G (size groups): [{name}] in document order ([] when the pattern
+      // has one size), and the group whose tab is open (null without groups).
+      // Additive with a default, so no backup migration is due.
+      groups: groups,
+      activeGroup: activeGroup
     };
   }
 
@@ -1980,6 +2053,9 @@
             // Wave F: "made twice, from the assembly text" - the import
             // preview and the part list say so (wave E left it unshown).
             if (s && s.makeCountInferred) sec.makeCountInferred = true;
+            // Wave G: the size group's name ("Keyring" / "Medium" / "Big"),
+            // null when the document has one size
+            sec.group = normalizeGroupName(s && s.group);
             return sec;
           });
         }
@@ -2410,10 +2486,22 @@
    * HAS been worked on is still skipped: it is the open-ended scrap-yarn tail
    * the user chose not to bound, and "Finish anyway" covers the rest.
    */
-  function allPartsDone(proj) {
+  /**
+   * Wave G: does `prt` count for size group `group`? A part of that size, or
+   * a part no size claims (one shared by every size). `group` null/undefined
+   * = the whole project.
+   */
+  function inGroup(prt, group) {
+    if (!group) return true;
+    return !prt.group || prt.group === group;
+  }
+
+  /** `group` (wave G): only that size's parts (and the shared ones). */
+  function allPartsDone(proj, group) {
     var any = false;
     for (var i = 0; i < proj.parts.length; i++) {
       var p = proj.parts[i];
+      if (!inGroup(p, group)) continue;
       if (!p.targetRows) {
         if (!p.row && !p.stitch && !p.piecesDone) return false;
         continue;
@@ -2428,19 +2516,117 @@
    * The parts standing between this project and "done", by name.
    * @param {object|string} projectOrId
    */
-  function blockingParts(projectOrId) {
+  function blockingParts(projectOrId, group) {
     var out = [];
     var proj = projectOrId && typeof projectOrId === 'object' ? projectOrId : project(projectOrId);
     if (!proj || !Array.isArray(proj.parts)) return out;
+    // wave G: in a project of several sizes a part is named with its size
+    // ("Medium · Wings"), unless the question was about one size only
+    var label = function (p) { return p.group && !group && (proj.groups || []).length > 1 ? p.group + ' · ' + p.name : p.name; };
     for (var i = 0; i < proj.parts.length; i++) {
       var p = proj.parts[i];
+      if (!inGroup(p, group)) continue;
       if (!p.targetRows) {
-        if (!p.row && !p.stitch && !p.piecesDone) out.push(p.name);
+        if (!p.row && !p.stitch && !p.piecesDone) out.push(label(p));
         continue;
       }
-      if (p.piecesDone < p.makeCount) out.push(p.name);
+      if (p.piecesDone < p.makeCount) out.push(label(p));
     }
     return out;
+  }
+
+  /**
+   * Wave G: how far one size of a multi-size project is.
+   * @returns {{name:string, parts:number, partsDone:number, rows:number,
+   *            rowsDone:number, done:boolean, started:boolean}|null}
+   *   `rows` / `rowsDone` count every piece (a Wings made twice is two
+   *   pieces' rows); a part with no target counts its rows done only.
+   */
+  function groupProgress(projectId, name) {
+    var proj = projectId && typeof projectId === 'object' ? projectId : project(projectId);
+    var g = normalizeGroupName(name);
+    if (!proj || !g || !(proj.groups || []).some(function (x) { return x.name === g; })) return null;
+    var out = { name: g, parts: 0, partsDone: 0, rows: 0, rowsDone: 0, done: false, started: false };
+    proj.parts.forEach(function (p) {
+      if (p.group !== g) return;
+      out.parts++;
+      var t = p.targetRows || 0;
+      if (t && p.piecesDone >= p.makeCount) out.partsDone++;
+      out.rows += t * p.makeCount;
+      out.rowsDone += t ? Math.min(t * p.makeCount, p.piecesDone * t + Math.min(p.row, t)) : p.row;
+      if (p.row || p.stitch || p.piecesDone) out.started = true;
+    });
+    out.done = out.parts > 0 && allPartsDone(proj, g);
+    return out;
+  }
+
+  /** The size groups of a project, [] when it has one size (wave G). */
+  function projectGroups(projectOrId) {
+    var proj = projectOrId && typeof projectOrId === 'object' ? projectOrId : project(projectOrId);
+    return proj && Array.isArray(proj.groups) ? proj.groups : [];
+  }
+
+  /** The parts of one size, in order (wave G). Shared parts are included. */
+  function groupParts(projectOrId, name) {
+    var proj = projectOrId && typeof projectOrId === 'object' ? projectOrId : project(projectOrId);
+    if (!proj) return [];
+    var g = normalizeGroupName(name);
+    if (!g) return proj.parts.slice();
+    return proj.parts.filter(function (p) { return inGroup(p, g); });
+  }
+
+  /**
+   * Open a size's tab (wave G). View state, like setActivePart: no undo step.
+   * The active part moves into that size (its first unfinished part) unless it
+   * is already there.
+   */
+  function setActiveGroup(projectId, name) {
+    var proj = project(projectId);
+    var g = normalizeGroupName(name);
+    if (!proj || !g || !(proj.groups || []).some(function (x) { return x.name === g; })) return false;
+    proj.activeGroup = g;
+    var ap = activePart(proj);
+    if (!ap || ap.group !== g) {
+      var mine = proj.parts.filter(function (p) { return p.group === g; });
+      var pick = null;
+      for (var i = 0; i < mine.length && !pick; i++) if (!isPartTerminal(mine[i])) pick = mine[i];
+      pick = pick || mine[0];
+      if (pick) proj.activePartId = pick.id;
+    }
+    touch(proj);
+    return true;
+  }
+
+  /**
+   * "Remove this size" (wave G): every part of that size goes, in one undo
+   * step. The last size standing (with nothing shared) is refused - a project
+   * keeps at least one part.
+   * @returns {{removed:number, activeGroup:(string|null)}|null}
+   */
+  function removeGroup(projectId, name) {
+    var proj = project(projectId);
+    var g = normalizeGroupName(name);
+    if (!proj || !g || !(proj.groups || []).some(function (x) { return x.name === g; })) return null;
+    var keep = proj.parts.filter(function (p) { return p.group !== g; });
+    if (!keep.length) return null;
+    snapshot(proj);
+    proj.parts.forEach(function (p) {
+      if (p.group !== g) return;
+      delete lineCache[p.id];
+      delete colorPlanCache[p.id];
+      delete diagramCache[p.id];
+    });
+    var removed = proj.parts.length - keep.length;
+    proj.parts = keep;
+    proj.groups = proj.groups.filter(function (x) { return x.name !== g; });
+    if (!part(proj, proj.activePartId)) {
+      var first = proj.groups.length ? keep.filter(function (p) { return p.group === proj.groups[0].name; })[0] : null;
+      proj.activePartId = (first || keep[0]).id;
+    }
+    var ap = activePart(proj);
+    proj.activeGroup = ap && ap.group ? ap.group : (proj.groups.length ? proj.groups[0].name : null);
+    touch(proj);
+    return { removed: removed, activeGroup: proj.activeGroup };
   }
 
   /**
@@ -2502,6 +2688,11 @@
       }
       prt.piecesDone = prt.makeCount;
       if (allPartsDone(proj)) return { event: 'projectDone', partName: prt.name };
+      // wave G: one size of a multi-size booklet is finished - the maker may
+      // have wanted only that one ("finish the project?"), or go on to the next
+      if (prt.group && (proj.groups || []).length > 1 && allPartsDone(proj, prt.group)) {
+        return { event: 'groupDone', partName: prt.name, group: prt.group };
+      }
       return { event: 'partDone', partName: prt.name };
     }
     return { event: 'row', row: prt.row };
@@ -2708,12 +2899,16 @@
         if (made.patternText) {
           made.targetRows = targetRowsFromText(made.patternText, tplIdx, tplSizes ? tplSizes.length : 0);
         }
+        // wave G: the size this part belongs to
+        made.group = normalizeGroupName(p.group);
         return made;
       }),
       checklist: tpl.checklist.map(function (t) { return { id: uid(), text: t, done: false }; }),
       history: [],
       craft: craft,
-      craftData: seed
+      craftData: seed,
+      // wave G: every size the template carries, in order; the first is open
+      groups: Array.isArray(tpl.groups) ? deepCopy(tpl.groups) : []
     });
     projects().push(proj);
     save();
@@ -2874,6 +3069,10 @@
     var prt = makePart(safeName(opts.name, '') || 'Part ' + (proj.parts.length + 1), opts.makeCount);
     // wave F: a new part is read at the project's size like the others
     if (proj.size) prt.sizeIndex = proj.size.index;
+    // wave G: ...and joins the size whose tab is open (opts.group: null for a
+    // part shared by every size)
+    var ag = opts.group !== undefined ? normalizeGroupName(opts.group) : proj.activeGroup;
+    prt.group = ag && (proj.groups || []).some(function (g) { return g.name === ag; }) ? ag : null;
     proj.parts.push(prt);
     proj.activePartId = prt.id;
     touch(proj);
@@ -2950,7 +3149,15 @@
     if (!proj || !prt || proj.parts.length <= 1) return false;
     snapshot(proj);
     proj.parts.splice(proj.parts.indexOf(prt), 1);
-    if (proj.activePartId === partId) proj.activePartId = proj.parts[0].id;
+    if (proj.activePartId === partId) {
+      // wave G: stay in the same size when it has another part
+      var same = prt.group ? proj.parts.filter(function (p) { return p.group === prt.group; })[0] : null;
+      proj.activePartId = (same || proj.parts[0]).id;
+    }
+    // wave G: a size whose last part went is no longer a size
+    proj.groups = normalizeGroups(proj.groups, proj.parts);
+    var apd = activePart(proj);
+    proj.activeGroup = apd && apd.group ? apd.group : (proj.groups.length ? proj.groups[0].name : null);
     delete lineCache[partId];
     delete colorPlanCache[partId];
     delete diagramCache[partId];
@@ -3141,19 +3348,37 @@
 
     var noTargets = !!(opts && opts.noTargets);
 
+    // Wave G (size groups): `opts.groups` names the sizes to keep ("Import
+    // this size" in the preview); omitted = every size. A part only ever
+    // matches a part of its own size, so the three Bodies of a three-size
+    // booklet are three parts (the owner got the Big one only: each Body
+    // matched the one before it by name and the last one won).
+    var keepGroups = null;
+    if (opts && Array.isArray(opts.groups)) {
+      keepGroups = {};
+      opts.groups.forEach(function (g) { var n = normalizeGroupName(g); if (n) keepGroups[n] = true; });
+    }
+    var importedGroups = [];
+    out.groups = [];
+
     for (var i = 0; i < sections.length; i++) {
       var sec = sections[i] || {};
       var name = str(sec.name, '').trim();
       var text = str(sec.text, '');
       var makeCount = clampInt(sec.makeCount, 1, 99, 1);
       var key = sectionImportKey(name, text);
+      var secGroup = normalizeGroupName(sec.group);
+      if (secGroup && keepGroups && !keepGroups[secGroup]) continue;
+      if (secGroup && importedGroups.indexOf(secGroup) < 0) importedGroups.push(secGroup);
       var existing = null;
       var j;
       // Content key first (13 #7) — a section the parser could not name still
-      // matches itself on a re-import. Only then the name.
+      // matches itself on a re-import. Only then the name. (wave G: only
+      // within the section's own size)
       if (key) {
         for (j = 0; j < proj.parts.length; j++) {
-          if (proj.parts[j].importKey && proj.parts[j].importKey === key) {
+          if (proj.parts[j].importKey && proj.parts[j].importKey === key &&
+              (proj.parts[j].group || null) === secGroup) {
             existing = proj.parts[j];
             break;
           }
@@ -3161,7 +3386,8 @@
       }
       if (!existing && name) {
         for (j = 0; j < proj.parts.length; j++) {
-          if (proj.parts[j].name.toLowerCase() === name.toLowerCase()) {
+          if (proj.parts[j].name.toLowerCase() === name.toLowerCase() &&
+              (proj.parts[j].group || null) === secGroup) {
             existing = proj.parts[j];
             break;
           }
@@ -3199,6 +3425,7 @@
         var added = makePart(name || 'Part ' + (proj.parts.length + 1), makeCount);
         added.patternText = text;
         added.importKey = key;
+        added.group = secGroup;
         if (sec.makeCountInferred) added.makeCountInferred = true;
         if (sizeIdx !== null || proj.size) added.sizeIndex = readSize;
         if (target) { added.targetRows = target; out.targeted++; }
@@ -3228,6 +3455,32 @@
         proj.countMode = 'rounds';
         out.modeFlipped = true;
       }
+    }
+    // Wave G: the sizes, in document order after any the project had; the
+    // parts ordered by size (shared parts first), then as they were; the first
+    // imported size is the open tab when the open part is not in one.
+    if (importedGroups.length) {
+      var gl = (proj.groups || []).map(function (g) { return g.name; });
+      importedGroups.forEach(function (g) { if (gl.indexOf(g) < 0) gl.push(g); });
+      proj.groups = normalizeGroups(gl, proj.parts);
+      var order = {};
+      proj.groups.forEach(function (g, gi) { order[g.name] = gi + 1; });
+      proj.parts = proj.parts
+        .map(function (p, pi) { return { p: p, pi: pi }; })
+        .sort(function (a, b) {
+          return ((order[a.p.group] || 0) - (order[b.p.group] || 0)) || (a.pi - b.pi);
+        })
+        .map(function (x) { return x.p; });
+      var apg = activePart(proj);
+      var untouched = apg && !apg.row && !apg.stitch && !apg.piecesDone;
+      if (!apg || (!apg.group && untouched)) {
+        var firstG = importedGroups[0];
+        var firstP = proj.parts.filter(function (p) { return p.group === firstG; })[0];
+        if (firstP) proj.activePartId = firstP.id;
+      }
+      var apn = activePart(proj);
+      proj.activeGroup = apn && apn.group ? apn.group : (proj.groups.length ? proj.groups[0].name : null);
+      out.groups = importedGroups.slice();
     }
     touch(proj);
     return out;
@@ -3551,6 +3804,8 @@
     var prt = part(proj, partId);
     if (!proj || !prt) return false;
     proj.activePartId = partId;
+    // wave G: the size tab follows the part
+    if (prt.group) proj.activeGroup = prt.group;
     touch(proj);
     return true;
   }
@@ -4788,6 +5043,21 @@
     return proj && proj.countMode === 'rounds' ? 'rounds' : 'rows';
   }
 
+  /**
+   * Rounds or rows for ONE ROW of a piece (wave G): a piece begun in the
+   * round can go on in rows ("Now instead of crocheting in the round ... 3.
+   * Ch1, turn"), and the parser marks those lines `workedIn: 'rows'`. The
+   * owner's explicit chip still wins for the whole piece.
+   * @returns {'rounds'|'rows'}
+   */
+  function rowWorkMode(prt, rowNumber, proj) {
+    var whole = partWorkMode(prt, proj);
+    if (normalizeWorkMode(prt && prt.workMode, 'auto') !== 'auto') return whole;
+    if (whole !== 'rounds' || !(rowNumber >= 1)) return whole;
+    var l = lineForRow(prt, rowNumber);
+    return l && l.workedIn === 'rows' ? 'rows' : whole;
+  }
+
   /* ------------------------------------------------------------------ *
    * Which way up (01 §1.4.8)
    *
@@ -5913,6 +6183,16 @@
     setStatus: setStatus,
     finishProject: finishProject,
     blockingParts: blockingParts,
+    // wave G: size groups
+    groupProgress: groupProgress,
+    projectGroups: projectGroups,
+    groupParts: groupParts,
+    setActiveGroup: setActiveGroup,
+    removeGroup: removeGroup,
+    allPartsDone: function (projectOrId, group) {
+      var pr = projectOrId && typeof projectOrId === 'object' ? projectOrId : project(projectOrId);
+      return pr ? allPartsDone(pr, group) : false;
+    },
     deleteProject: deleteProject,
     setActiveProject: setActiveProject,
 
@@ -5965,6 +6245,7 @@
     // live 3D diagram
     diagramModel: diagramModel,
     partWorkMode: partWorkMode,
+    rowWorkMode: rowWorkMode,
     partDialect: partDialect,
     partShape: partShape,
     roundDeviation: roundDeviation,

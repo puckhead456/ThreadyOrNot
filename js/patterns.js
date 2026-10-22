@@ -1290,7 +1290,7 @@
   // A running head ("WHEAT STITCH CROCHET CARDIGAN" on every page) reads like
   // a section header, so collect the repeats up front and refuse to name a
   // section after one. Short repeated names (BODY, WINGS) are real parts.
-  function findRunningHeads(raws) {
+  function findRunningHeads(raws, pageTopOnly) {
     var counts = {}, firsts = {}, pageStart = true, i, t, key;
     for (i = 0; i < raws.length; i++) {
       t = trimLine(raws[i]);
@@ -1301,6 +1301,10 @@
       // pieces are shaped alike, not because it is page furniture (wave E,
       // crochet-patons-mesh-cardigan). Running titles carry no colon.
       if (/:\s*$/.test(t) && detectMarker(nextLine(raws, i))) { pageStart = false; continue; }
+      // ...and neither is a part header printed twice: "Leg (make 2)" with
+      // round 1 under it, once per leg or once per size (wave G - three words
+      // made it "wordy", so both legs were swallowed as running heads).
+      if (startsPart(t, raws, i)) { pageStart = false; continue; }
       key = t.toLowerCase().replace(/\s+/g, ' ');
       counts[key] = (counts[key] || 0) + 1;
       if (pageStart) { firsts[key] = (firsts[key] || 0) + 1; pageStart = false; }
@@ -1308,12 +1312,147 @@
     var heads = {};
     Object.keys(counts).forEach(function (k) {
       var wordy = k.split(' ').length >= 3 || k.length >= 18;
-      if ((firsts[k] || 0) >= 2 || (counts[k] >= 2 && wordy)) heads[k] = true;
+      if ((firsts[k] || 0) >= 2 || (counts[k] >= 2 && wordy && !pageTopOnly)) heads[k] = true;
     });
     return heads;
   }
 
   function headKey(t) { return t.toLowerCase().replace(/\s+/g, ' '); }
+
+  // Wave G: the pieces a part header names. A short line naming one of these,
+  // or carrying a make-count, with round 1 straight under it, starts a part.
+  var PART_NOUN_RE = /\b(?:heads?|body|bodies|arms?|legs?|ears?|eyes?|tails?|wings?|feet|foot|hands?|paws?|horns?|antlers?|antennae?|nose|snout|muzzle|beak|fins?|shell|hat|scarf|sleeves?|cuffs?|stalks?|leaf|leaves|petals?|spikes?|mane|cheeks?|hood|mitts?|mittens?|boots?|shoes?|base|motif|square|panel)\b/i;
+
+  /**
+   * "Leg (make 2)", "Arms x2", "Tail": at most four words, a part header by
+   * its shape, naming a piece or saying how many - and round 1 on the next line.
+   */
+  function startsPart(t, raws, i) {
+    if (!t || t.split(/\s+/).length > 4) return false;
+    var h = headerInfo(t);
+    if (!h || h === 'note') return false;
+    if (!(h.makeCount > 1 || PART_NOUN_RE.test(h.name))) return false;
+    var mk = detectMarker(nextLine(raws, i));
+    return !!(mk && mk.row === 1);
+  }
+
+  // --- size groups (wave G) ----------------------------------------------
+  // One booklet, several sizes of the same toy, each a full pattern: the bee
+  // prints "Amigurumi Bee - Keyring" / "- Medium" / "- Big" over its pages and
+  // BODY / WINGS under every one of them. Others put a "SMALL BEE" / "Size 2" /
+  // "10 cm bee" heading over a run of part headers. Each run of parts belongs
+  // to the group heading above it, and the import keeps every group (the owner
+  // got only the Big bee: the three Bodies were matched by name and the last
+  // one won).
+  //
+  // Two signals, both general:
+  //  (a) a line "<Title> - <Suffix>" whose Title is printed with two or more
+  //      different suffixes, at the top of a page (a running head) or right
+  //      above a part header;
+  //  (b) a size word or phrase on a line of its own ("Keyring", "Mini",
+  //      "Large bee", "Size 1", "Version A", "10 cm bee") with a part header
+  //      straight under it - so "Small Wing" over its own rounds is a part.
+  // And one condition that keeps every other pattern exactly as it was: the
+  // same part header has to be printed under two different groups. A doll
+  // with "Leg (make 2)" twice and no group headings is not grouped, and a
+  // "Bunny - Head" / "Bunny - Body" running head names parts, not sizes.
+  var GROUP_SUFFIX_RE = /^([A-Za-z0-9][^.!?:;]{2,48}?)\s+[-|:]\s+([A-Za-z0-9][A-Za-z0-9 '\/.()]{0,28}?)\s*:?\s*$/;
+  var GROUP_SIZE_WORD = '(?:key\\s*-?\\s*rings?|key\\s*chains?|mini|miniature|tiny|small|medium|large|big|jumbo|giant|huge|baby|toddler|child|children|kids?|adult|regular|standard|petite)';
+  var GROUP_SIZE_HEAD_RE = new RegExp('^(?:the\\s+)?(?:' + GROUP_SIZE_WORD +
+    '|(?:size|version|option|variant)\\s+[a-z0-9]{1,3}' +
+    '|\\d+(?:[.,]\\d+)?\\s*(?:cm|mm|in(?:ch(?:es)?)?|")' +
+    ')(?:\\s+(?:sized?|version))?(?:\\s+[a-z]+){0,2}\\s*:?$', 'i');
+
+  /** A part header (or a "Name: rows" line) within the next few lines. */
+  function partHeadAhead(raws, i, heads) {
+    var seen = 0;
+    for (var j = i + 1; j < raws.length && seen < 3; j++) {
+      var t = trimLine(raws[j]);
+      if (!t || PAGE_LINE_RE.test(t)) continue;
+      if (heads && heads[headKey(t)]) continue;
+      seen++;
+      if (detectMarker(t) || detectSetup(t) || detectNextRow(t)) return false;
+      var h = headerInfo(t);
+      if (h && h !== 'note') return true;
+      if (nameRowInfo(t)) return true;
+    }
+    return false;
+  }
+
+  function groupLabel(s) {
+    var t = String(s).replace(/\s*:\s*$/, '').replace(/\s+/g, ' ').trim();
+    return /[a-z]/.test(t) ? t.charAt(0).toUpperCase() + t.slice(1) : titleCase(t.toLowerCase());
+  }
+
+  /**
+   * @returns {{at:Object, names:string[]}} `at[lineIndex]` = the group name a
+   *   group heading on that line opens; `names` in document order. Empty when
+   *   the document has no groups.
+   */
+  function findGroups(raws, heads) {
+    var none = { at: {}, names: [] };
+    var cands = [], byPrefix = {}, pageTop = false, i, t, m;
+    for (i = 0; i < raws.length; i++) {
+      t = trimLine(raws[i]);
+      if (PAGE_LINE_RE.test(t)) { pageTop = true; continue; }
+      if (!t) continue;
+      var top = pageTop;
+      pageTop = false;
+      if (t.length > 70 || /[.!?,;]$/.test(t)) continue;
+      if (detectMarker(t) || detectSetup(t) || detectNextRow(t)) continue;
+      m = GROUP_SUFFIX_RE.exec(t);
+      if (m && (top || partHeadAhead(raws, i, heads))) {
+        var pk = headKey(m[1]);
+        (byPrefix[pk] || (byPrefix[pk] = [])).push({ line: i, name: m[2] });
+        continue;
+      }
+      if (t.length <= 32 && GROUP_SIZE_HEAD_RE.test(t) && partHeadAhead(raws, i, heads)) {
+        cands.push({ line: i, name: t });
+      }
+    }
+    Object.keys(byPrefix).forEach(function (pk) {
+      var list = byPrefix[pk], seen = {};
+      list.forEach(function (c) { seen[headKey(c.name)] = true; });
+      if (Object.keys(seen).length >= 2) cands = cands.concat(list);
+    });
+    if (cands.length < 2) return none;
+    cands.sort(function (a, b) { return a.line - b.line; });
+    var at = {}, names = [], keys = {};
+    cands.forEach(function (c) {
+      var nm = groupLabel(c.name), k = headKey(nm);
+      if (!keys[k]) { keys[k] = nm; names.push(nm); }
+      at[c.line] = keys[k];
+    });
+    if (names.length < 2) return none;
+    // the same part header under two different groups, or it is not grouping
+    var curG = null, under = {};
+    for (i = 0; i < raws.length; i++) {
+      if (at[i] !== undefined) { curG = at[i]; continue; }
+      if (curG === null) continue;
+      t = trimLine(raws[i]);
+      if (!t || PAGE_LINE_RE.test(t) || (heads && heads[headKey(t)])) continue;
+      var h = headerInfo(t);
+      if (!h || h === 'note') h = nameRowInfo(t);
+      if (!h) continue;
+      var hk = String(h.name).toLowerCase();
+      (under[hk] || (under[hk] = {}))[curG] = true;
+    }
+    var repeated = Object.keys(under).some(function (k) { return Object.keys(under[k]).length >= 2; });
+    if (!repeated) return none;
+    // a group whose heading is never followed by a part is not a group
+    var used = {};
+    curG = null;
+    for (i = 0; i < raws.length; i++) {
+      if (at[i] !== undefined) { curG = at[i]; continue; }
+      if (curG === null) continue;
+      t = trimLine(raws[i]);
+      if (t && (detectMarker(t) || nameRowInfo(t))) used[curG] = true;
+    }
+    names = names.filter(function (n) { return used[n]; });
+    if (names.length < 2) return none;
+    Object.keys(at).forEach(function (ln) { if (!used[at[ln]]) delete at[ln]; });
+    return { at: at, names: names };
+  }
 
   var NOTE_KEY_RE = /^(?:colou?r\s+change|invisible\s+colou?r\s+change|change\b|cc\s+to\b|star(?:t|)ing\s+(?:in|with)\b|in\s+(?:main|secondary|contrast(?:ing)?|accent)\s+colou?r\b|switch\b|add\b|stuff\b|start\b|begin\b|tie\s+off|fasten\b|fo\b|sl\s*st|slst|join\b|place\b|insert\b|attach\b|sew\b|embroider\b|do\s*not\b|don'?t\b|put\b|with\b|cut\b|leave\b|leaving\b|finish\b|close\b|before\b|after\b|now\b|next\b|make\s+sure|mark\b|pinch\b|fold\b|work\b|continue\b|optional\b|using\b|in\s+colou?r\b|with\s+colou?r\b|in\s+(?:yellow|black|white|grey|gray|brown|pink|red|blue|green|mc|cc)\s*[.,]?\s*$|in\s+(?:colou?r\s+)?[a-z][a-z]*\s*[:.]?\s*$)/i;
 
@@ -2203,13 +2342,16 @@
    * main loop can skip both.
    * @returns {{furniture:boolean[], assembly:boolean[], blocks:Array}}
    */
-  function findSpecial(raws, size, heads) {
+  function findSpecial(raws, size, heads, groups) {
     var furniture = [], assembly = [], blocks = [];
     var i, j, k, t, u, cls, prose;
     var titles = titleFurniture(raws);
+    var gAt = (groups && groups.at) || {};
     for (i = 0; i < raws.length; i++) {
       t = trimLine(raws[i]);
-      furniture[i] = isFurniture(t) || (!!t && !!titles[headKey(t)]);
+      // wave G: a group heading is page scaffolding to every part - it never
+      // becomes a line, a header or a note - and the loop reads it off `gAt`
+      furniture[i] = isFurniture(t) || (!!t && !!titles[headKey(t)]) || gAt[i] !== undefined;
     }
 
     // Back matter (03 #10b): from the first advert line that has no row
@@ -2238,11 +2380,13 @@
     for (i = 0; i < raws.length; i++) {
       if (furniture[i]) continue;
       t = trimLine(raws[i]);
-      if (!isAssemblyHead(t)) continue;
+      var feature = !isAssemblyHead(t) && FEATURE_HEAD_RE.test(t);
+      if (!feature && !isAssemblyHead(t)) continue;
       prose = 0;
       for (j = i + 1; j < raws.length; j++) {
         u = trimLine(raws[j]);
         if (furniture[j]) {
+          if (gAt[j] !== undefined) break;       // the next size starts (wave G)
           if (END_FURNITURE_RE.test(u)) break;   // the photo appendix ends it
           continue;                              // a page break does not
         }
@@ -2263,13 +2407,37 @@
       // A heading with rows straight under it is a part called "Finish", not
       // an assembly block.
       if (!prose) continue;
+      // An "EYES" heading over prose is the eye placement for the piece above
+      // it ("I try to place the eyes in the 2nd round, 4 stitches apart"), not
+      // a part and not more of that piece's rounds - but only when it really
+      // says where: a placing sentence that names a round, a row or a number
+      // of stitches (wave G, the bee).
+      if (feature) {
+        var said = [];
+        for (k = i + 1; k < j; k++) if (!furniture[k] && trimLine(raws[k])) said.push(trimLine(raws[k]));
+        var where = splitSentences(said.join(' ')).some(function (s) {
+          return isPlacementSentence(s) && FEATURE_WHERE_RE.test(s);
+        });
+        if (!where) continue;
+      }
       assembly[i] = true;
       for (k = i + 1; k < j; k++) if (!furniture[k]) assembly[k] = true;
-      blocks.push({ head: i, from: i + 1, to: j });
+      var blk = { head: i, from: i + 1, to: j };
+      if (feature) {
+        blk.feature = true;
+        blk.label = titleCase(t.replace(/\s*:\s*$/, '').toLowerCase());
+      }
+      blocks.push(blk);
       i = j - 1;
     }
     return { furniture: furniture, assembly: assembly, blocks: blocks };
   }
+
+  var ROWS_SWITCH_RE = /\binstead\s+of\s+(?:crocheting|working)\s+in\s+(?:the\s+)?(?:round|rounds|rnds?)\b|\b(?:crochet(?:ing)?|work(?:ing)?)\s+in\s+['"]?rows\b/i;
+
+  // wave G: a placed feature's own heading ("EYES", "Safety eyes:", "Nose")
+  var FEATURE_HEAD_RE = /^(?:safety\s+)?(?:eyes?|eye\s+placement|nose|mouth|cheeks?)\s*:?$/i;
+  var FEATURE_WHERE_RE = /\b(?:rnds?|rounds?|rows?|sts?|stitches?)\b|\bR\s?\d/i;
 
   // Inside a finishing block, a NUMBERED step is needlework ("2. Then you
   // insert the needle again below the eye...") and a link is an advert. Neither
@@ -2444,6 +2612,17 @@
     var blocks = (meta && meta.assemblyBlocks) || [];
     var heads = (meta && meta.heads) || null;
     blocks.forEach(function (blk) {
+      // wave G: an "EYES" paragraph is about the piece it is printed under -
+      // every line of it, the placing sentence and the advice around it
+      if (blk.feature) {
+        var above = -1;
+        secs.forEach(function (s, ix) { if (s.startLine < blk.head) above = ix; });
+        if (above < 0) above = mainIx;
+        assemblyItems(lines, blk, heads).forEach(function (item) {
+          add(above, (blk.label ? blk.label + ': ' : '') + item.text);
+        });
+        return;
+      }
       assemblyItems(lines, blk, heads).forEach(function (item) {
         if (!hasPlaceVerb(item.text)) return;    // "Your fish is ready!" is not
         var ix = item.label ? matchPart(item.label, keyMap, keys, blk.head, secs) : -1;
@@ -2977,7 +3156,12 @@
     var size = (opts && typeof opts.size === 'number') ? opts.size : 0;
     var raws = prepareLines(text);
     var heads = findRunningHeads(raws);
-    var special = findSpecial(raws, size, heads);
+    var groups = findGroups(raws, heads);
+    // wave G: in a booklet of sizes the same advice is printed once per size
+    // ("Sometimes it takes a bit of guess work..."), which is not a running
+    // head - only a line that tops two pages is.
+    if (groups.names.length) heads = findRunningHeads(raws, true);
+    var special = findSpecial(raws, size, heads, groups);
     // A bare-number run printed BEFORE the first front-matter heading is a
     // table of contents or a numbered supply list, never rounds (06 #2).
     // Only front matter that really is at the front counts, so a glossary
@@ -3098,7 +3282,17 @@
       // a new capitals heading (SLEEVES, FINISHING) ends the piece before it
       if (pieceParent && PIECE_CAPS_RE.test(t) && !special.furniture[i] &&
           !(heads && heads[headKey(t)])) pieceParent = null;
-      if (special.furniture[i]) { L.furniture = true; L.omit = true; continue; }
+      if (special.furniture[i]) {
+        L.furniture = true; L.omit = true;
+        // wave G: the next size starts - a header queued under the last one
+        // never names a part of this one
+        if (groups.at[i] !== undefined) {
+          L.groupHead = groups.at[i];
+          group = { entries: [], sawContent: false };
+          pieceParent = null;
+        }
+        continue;
+      }
       if (special.assembly[i]) { L.assembly = true; L.omit = true; continue; }
 
       // Front matter closes the cover page: whatever title the not-yet-started
@@ -3324,6 +3518,16 @@
 
       L.section = cur.index;
       if (!COLOUR_NOTE_RE.test(t)) group.sawContent = true;
+
+      // wave G: a piece begun in the round that goes on in rows - the bee's
+      // wings: "Now instead of crocheting in the round, we are going to be
+      // crocheting in 'rows'." then "3. Ch1, turn (flip project), ...". From
+      // the first turned row after that sentence every row is a row.
+      if (L.kind === 'note' && ROWS_SWITCH_RE.test(t)) cur.switchRows = true;
+      if (isRow && !cur.inRows && cur.switchRows && /\bturn\b/i.test(t) && !MODE_JOIN_RE.test(t)) {
+        cur.inRows = true;
+      }
+      if (isRow && cur.inRows) L.workedIn = 'rows';
 
       // --- wrapped rows: merge the continuation lines into this one -------
       var lastIdx = i;
@@ -3757,14 +3961,24 @@
       if (target) target.notes.push(p.text);
     });
 
+    // wave G: the group a line falls under - the last group heading above it
+    var gLines = Object.keys(groups.at).map(Number).sort(function (a, b) { return a - b; });
+    function groupAtLine(ln) {
+      var g = null;
+      for (var q = 0; q < gLines.length && gLines[q] <= ln; q++) g = groups.at[gLines[q]];
+      return g;
+    }
     lines.meta = {
       sections: sections.map(function (s) {
         return {
           index: s.index, name: s.name, makeCount: s.makeCount,
           startLine: s.startLine, endLine: s.endLine, rows: s.rows,
-          maxRow: s.maxRow, instrRows: s.instrRows
+          maxRow: s.maxRow, instrRows: s.instrRows,
+          group: gLines.length ? groupAtLine(s.startLine) : null
         };
       }),
+      groups: groups.names.slice(),
+      groupAtLine: groupAtLine,
       sizes: detectSizes(text),
       multiSize: multiSize,
       suggestion: (suggestionSection === 0 || suggestionSection === null) ? suggestion : null,
@@ -3946,7 +4160,7 @@
       }
       return {
         name: s.name, makeCount: s.makeCount, text: body.join('\n'),
-        placement: '', startLine: s.startLine, lines: own
+        placement: '', startLine: s.startLine, lines: own, group: s.group || null
       };
     });
     if (!out.length) {
@@ -3961,7 +4175,27 @@
         placement: '', startLine: 0, lines: all
       }];
     }
-    distributePlacement(out, lines, meta);
+    var gNames = (meta.groups || []).filter(function (g) {
+      return out.some(function (s) { return s.group === g; });
+    });
+    if (gNames.length >= 2) {
+      // wave G: assembly text is handed out inside its own size - the Big
+      // bee's "sew the wings onto the middle" is the Big Wings' note, never
+      // the Keyring's - and the EYES paragraph goes to that size's Body.
+      var groupOf = meta.groupAtLine;
+      [null].concat(gNames).forEach(function (g) {
+        var sub = out.filter(function (s) { return s.group === g; });
+        if (!sub.length) return;
+        var subMeta = {
+          heads: meta.heads,
+          assemblyBlocks: (meta.assemblyBlocks || []).filter(function (b) { return groupOf(b.head) === g; })
+        };
+        distributePlacement(sub, lines, subMeta);
+      });
+    } else {
+      out.forEach(function (s) { s.group = null; });
+      distributePlacement(out, lines, meta);
+    }
     carryGauge(out, lines, text);
     carryColourKey(out, text);
     inferPairs(out, text);
@@ -3969,6 +4203,9 @@
     return out.map(function (s) {
       var o = { name: s.name, makeCount: s.makeCount, text: s.text, placement: s.placement };
       if (s.makeCountInferred) o.makeCountInferred = true;
+      // wave G: {name, index} of the size this part belongs to; null when the
+      // document has no groups
+      o.group = s.group ? { name: s.group, index: gNames.indexOf(s.group) } : null;
       return o;
     });
   }
@@ -4053,6 +4290,8 @@
     var mine = String(out[k].name || '').toLowerCase();
     var lastWord = mine.split(/\s+/).pop();
     for (var j = k - 1; j >= 0; j--) {
+      // wave G: "same as the first" never reaches into another size
+      if ((out[j].group || null) !== (out[k].group || null)) continue;
       var nm = String(out[j].name || '').toLowerCase();
       if (!nm) continue;
       if (nm === w || nm === w.replace(/s$/, '')) return j;

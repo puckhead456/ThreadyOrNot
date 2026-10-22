@@ -1156,6 +1156,116 @@ group('wave F: updateCraftData(id, fn, { undo: false }) for view state');
   void res;
 })();
 
+/* ====================================================================== */
+group('wave G: size groups - progress, finish and "Remove this size" per group');
+/* ====================================================================== */
+(function () {
+  fresh();
+  var BOOK = '=== PAGE 1 ===\nToy Bee - Keyring\nBODY\nRnd 1: 5 sc in mr (5)\nRnd 2: inc in each st (10)\n' +
+    'WINGS\nRnd 1: 6 sc in mr (6)\nRnd 2: inc in each st (12)\n' +
+    '=== PAGE 2 ===\nToy Bee - Medium\nBODY\nRnd 1: 6 sc in mr (6)\nRnd 2: inc in each st (12)\nRnd 3: sc in each st (12)\n' +
+    'WINGS\nRnd 1: 6 sc in mr (6)\nRnd 2: inc in each st (12)\n' +
+    'Now instead of crocheting in the round, we are going to be crocheting in rows.\n' +
+    'Rnd 3: Ch1, turn, (inc, sc) x5, inc (17)\n';
+  var p = Store.createProject({ name: 'Two bees', templateId: 'blank' });
+  Store.importPatternSections(p.id, Store.splitSections(BOOK), { mode: 'parts', text: BOOK });
+  p = Store.project(p.id);
+  var byName = function (g, n) { return Store.project(p.id).parts.filter(function (x) { return x.group === g && x.name === n; })[0]; };
+  assertEqual(p.parts.map(function (x) { return x.group + '/' + x.name + '/' + x.makeCount + '/' + x.targetRows; }),
+    ['Keyring/Body/1/2', 'Keyring/Wings/1/2', 'Medium/Body/1/3', 'Medium/Wings/1/3'], 'wave G: two sizes, two parts each');
+  assertEqual(Store.groupProgress(p.id, 'Keyring'),
+    { name: 'Keyring', parts: 2, partsDone: 0, rows: 4, rowsDone: 0, done: false, started: false },
+    'wave G: groupProgress before anything is worked');
+  assertEqual(Store.groupProgress(p.id, 'Nope'), null, 'wave G: groupProgress of an unknown size is null');
+  assertEqual(Store.projectGroups(p.id).map(function (g) { return g.name; }), ['Keyring', 'Medium'], 'wave G: projectGroups');
+  assertEqual(Store.groupParts(p.id, 'Medium').map(function (x) { return x.name; }), ['Body', 'Wings'], 'wave G: groupParts');
+
+  // per-row mode on the mixed wings
+  var mw = byName('Medium', 'Wings');
+  assertEqual([Store.partWorkMode(mw), Store.rowWorkMode(mw, 2), Store.rowWorkMode(mw, 3)], ['rounds', 'rounds', 'rows'],
+    'wave G: rowWorkMode - the wings are rounds, then row 3 is a row');
+  Store.updatePart(p.id, mw.id, { workMode: 'rounds' });
+  assertEqual(Store.rowWorkMode(byName('Medium', 'Wings'), 3), 'rounds', 'wave G: ...the owner\'s explicit chip wins for the whole piece');
+  Store.undo();
+
+  // tabs: view state
+  Store.clearUndo();
+  var rev0 = Store.revision();
+  assertTrue(Store.setActiveGroup(p.id, 'Medium'), 'wave G: setActiveGroup');
+  var pm = Store.project(p.id);
+  assertEqual([pm.activeGroup, Store.activePart(pm).group, Store.activePart(pm).name], ['Medium', 'Medium', 'Body'],
+    'wave G: ...opens that size on its first unfinished part');
+  assertTrue(!Store.canUndo(), 'wave G: ...as view state, with no undo step');
+  Store.flush();
+  assertTrue(Store.revision() > rev0, 'wave G: ...and it is a write like any other (revision bumps)');
+  Store.setActivePart(p.id, byName('Keyring', 'Wings').id);
+  assertEqual(Store.project(p.id).activeGroup, 'Keyring', 'wave G: setActivePart moves the tab with the part');
+  var added = Store.addPart(p.id, { name: 'Antenna' });
+  assertEqual(added.group, 'Keyring', 'wave G: a part added by hand joins the open size');
+  Store.undo();
+
+  // finish one size: the event says so, the project is not done
+  var kb = byName('Keyring', 'Body'), kw = byName('Keyring', 'Wings');
+  Store.tapRow(p.id, kb.id); var r1 = Store.tapRow(p.id, kb.id);
+  assertEqual(r1 && r1.event, 'partDone', 'wave G: Keyring Body done is a part, the size is not done yet');
+  Store.tapRow(p.id, kw.id); var r2 = Store.tapRow(p.id, kw.id);
+  assertEqual([r2 && r2.event, r2 && r2.group], ['groupDone', 'Keyring'], 'wave G: the last Keyring part finishes the SIZE (groupDone)');
+  assertEqual(Store.groupProgress(p.id, 'Keyring'),
+    { name: 'Keyring', parts: 2, partsDone: 2, rows: 4, rowsDone: 4, done: true, started: true },
+    'wave G: groupProgress says the Keyring is done');
+  assertEqual([Store.allPartsDone(p.id, 'Keyring'), Store.allPartsDone(p.id), Store.allPartsDone(p.id, 'Medium')], [true, false, false],
+    'wave G: allPartsDone scoped to a size, and for the whole project');
+  assertEqual(Store.blockingParts(p.id), ['Medium · Body', 'Medium · Wings'], 'wave G: blockingParts names the size of each part');
+  assertEqual(Store.blockingParts(p.id, 'Medium'), ['Body', 'Wings'], 'wave G: ...and plainly when asked about one size');
+  assertEqual(Store.finishProject(p.id).ok, false, 'wave G: the project does not finish while another kept size is open');
+
+  // "Remove this size": one undo step
+  Store.clearUndo();
+  var rem = Store.removeGroup(p.id, 'Medium');
+  var pr = Store.project(p.id);
+  assertEqual([rem, pr.groups, pr.parts.length, pr.activeGroup], [{ removed: 2, activeGroup: 'Keyring' }, [{ name: 'Keyring' }], 2, 'Keyring'],
+    'wave G: removeGroup drops that size\'s parts and the size');
+  assertEqual([Store.blockingParts(p.id), Store.finishProject(p.id).ok], [[], true],
+    'wave G: with only the finished size kept, the project finishes');
+  Store.undo();
+  Store.undo();
+  pr = Store.project(p.id);
+  assertEqual([pr.status, pr.groups.length, pr.parts.length, byName('Medium', 'Body') ? 'back' : 'gone'], ['active', 2, 4, 'back'],
+    'wave G: Undo (twice) un-finishes and puts the Medium size back');
+  assertEqual(Store.removeGroup(p.id, 'Nope'), null, 'wave G: removing an unknown size does nothing');
+  Store.removeGroup(p.id, 'Medium');
+  assertEqual(Store.removeGroup(p.id, 'Keyring'), null, 'wave G: the last size standing is never removed');
+  assertEqual(Store.project(p.id).parts.length, 2, 'wave G: ...and its parts are still there');
+  Store.flush();
+  var raw = JSON.parse(window.localStorage.getItem(K));
+  var onDisk = raw.projects.filter(function (x) { return x.id === p.id; })[0];
+  assertEqual([onDisk.groups, onDisk.parts.map(function (x) { return x.group; }), raw.writerId],
+    [[{ name: 'Keyring' }], ['Keyring', 'Keyring'], Store.writerId()], 'wave G: groups persist, stamped by this tab');
+
+  // deleting a size's last part drops the size
+  fresh();
+  var q = Store.createProject({ name: 'Delete', templateId: 'blank' });
+  Store.importPatternSections(q.id, Store.splitSections(BOOK), { mode: 'parts', text: BOOK });
+  q = Store.project(q.id);
+  var mParts = q.parts.filter(function (x) { return x.group === 'Medium'; });
+  Store.setActivePart(q.id, mParts[0].id);
+  Store.deletePart(q.id, mParts[0].id);
+  assertEqual(Store.project(q.id).activeGroup, 'Medium', 'wave G: deleting the open part stays in its size');
+  Store.deletePart(q.id, mParts[1].id);
+  q = Store.project(q.id);
+  assertEqual([q.groups, q.activeGroup], [[{ name: 'Keyring' }], 'Keyring'], 'wave G: a size whose last part was deleted is gone');
+
+  // a save that lost its group list gets it back from its parts on load
+  Store.flush();
+  var raw2 = JSON.parse(window.localStorage.getItem(K));
+  raw2.projects.forEach(function (x) { if (x.id === q.id) { delete x.groups; x.activeGroup = 'Bogus'; } });
+  window.localStorage.setItem(K, JSON.stringify(raw2));
+  Store.load();
+  q = Store.project(q.id);
+  assertEqual([q.groups, q.activeGroup], [[{ name: 'Keyring' }], 'Keyring'],
+    'wave G: load rebuilds Project.groups from the parts and repairs an unknown activeGroup');
+})();
+
 /* ---------------------------------------------------------------------- */
 
 wipe();

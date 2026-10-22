@@ -2077,11 +2077,21 @@ var NEW_CORPUS = [
     file: 'crochet-kingcole-pumpkins.pdf',
     what: 'Three complete pumpkins (Small, Medium, Large) in one leaflet, ordinal rows, UK terminology stated in a note',
     verdict: 'exact - six parts, three bodies and three stalks, and no row counter runs across a design',
-    expect: ['Pumpkin Body/1/2', 'Stalk/1/2', 'Medium Pumpkin/1/2', 'Stalk/1/2',
-             'Large Pumpkin/1/2', 'Stalk/1/2'],
+    // wave G: "Medium Pumpkin" / "Large Pumpkin" stand over "Pumpkin Body" and
+    // "Stalk", so they are size groups, and the bodies keep their own header
+    // (they used to be named after the group heading above them)
+    expect: ['Pumpkin Body/1/2', 'Stalk/1/2', 'Pumpkin Body/1/2', 'Stalk/1/2',
+             'Pumpkin Body/1/2', 'Stalk/1/2'],
     dialect: 'uk', craft: 'crochet',
     check: function (res, secs) {
       eq(secs.length, 6, 'pumpkins: three designs x two parts = six sections');
+      eq(secs.map(function (s) { return s.group ? s.group.name + '#' + s.group.index : null; }),
+        ['Small Pumpkin#0', 'Small Pumpkin#0', 'Medium Pumpkin#1', 'Medium Pumpkin#1',
+         'Large Pumpkin#2', 'Large Pumpkin#2'],
+        'pumpkins (wave G): three size groups, Pumpkin Body + Stalk under each');
+      eq(secs.map(function (s) { return /Sew stalk to top centre/.test(s.placement); }),
+        [false, true, false, true, false, true],
+        'pumpkins (wave G): each Stalk keeps its own size\'s "Sew stalk to top centre" note');
       eq(secs.map(function (s) { return P.summary(P.parse(s.text)).rows; }),
         [2, 2, 2, 2, 2, 2],
         'pumpkins: every part writes two rows - the counter never runs into the next design');
@@ -2103,6 +2113,69 @@ var NEW_CORPUS = [
       eq(secs.map(function (s) { return P.summary(P.parse(s.text)).suggestions.repeat.times; }),
         [null, 3, null, 3, null, 3],
         'pumpkins: "Repeat 2nd Row 2 more times" on each Stalk -> three times in all');
+    }
+  },
+  {
+    // wave G (owner report: "only gave me the large pattern instructions")
+    file: 'crochet-bee-sizes.pdf',
+    what: 'One booklet, three sizes of the same bee: running heads "Amigurumi Bee - Keyring / - Medium / - Big", BODY + EYES + WINGS + ASSEMBLY under each',
+    verdict: 'exact - three size groups, Body + Wings in each; EYES is the Body\'s placing note; the Medium/Big wings go from rounds to rows at row 3',
+    expect: ['Body/1/10', 'Wings/2/2', 'Body/1/17', 'Wings/2/3', 'Body/1/29', 'Wings/2/6'],
+    dialect: 'us', craft: 'crochet',
+    check: function (res, secs) {
+      var g = function (s) { return s.group ? s.group.name + '#' + s.group.index : null; };
+      eq(secs.map(g), ['Keyring#0', 'Keyring#0', 'Medium#1', 'Medium#1', 'Big#2', 'Big#2'],
+        'bee-sizes: every section carries its size group {name, index}');
+      if (secs.length !== 6) return;
+      var counts = function (s, n) {
+        var ls = P.parse(s.text), out = [];
+        for (var r = 1; r <= n; r++) out.push(countOf(ls, r));
+        return out;
+      };
+      eq(counts(secs[0], 10), [5, 10, 15, 15, 15, 15, 15, 15, 10, 5],
+        'bee-sizes Keyring Body: 5, 10, 15 ... 10, closes on 5');
+      eq(counts(secs[2], 17), [6, 12, 18, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 18, 12, 6],
+        'bee-sizes Medium Body: 6, 12, 18, 24 x11 ("5-6.", "7-8." ranges), 18, 12, 6 - 17 rounds');
+      eq(counts(secs[4], 29), [6, 12, 18, 24, 30, 36, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
+        42, 42, 42, 42, 42, 42, 36, 30, 24, 18, 12, 6],
+        'bee-sizes Big Body: "6..Inc", "7.. Inc", "8-11..sc" read; 29 rounds ending on "Dec all around" = 6');
+      eq(P.summary(P.parse(secs[4].text)).maxRow, 29, 'bee-sizes Big Body runs to round 29');
+      // colour-change lines between rounds colour the round under them
+      var kb = walkRows(secs[0].text, 10).map(function (r) { return r.color; });
+      eq([kb[3], kb[4], kb[5], kb[6], kb[7]], ['yellow', 'black', 'yellow', 'black', 'yellow'],
+        'bee-sizes Keyring Body: "Colour change to black / yellow" stripes rounds 5-8');
+      var mb = walkRows(secs[2].text, 17).map(function (r) { return r.color; });
+      eq([mb[5], mb[6], mb[8], mb[10], mb[12]], ['yellow', 'black', 'yellow', 'black', 'yellow'],
+        'bee-sizes Medium Body: "Colour change to black yarn" colours rounds 7-8');
+      // the wings: rounds, then rows after "crocheting in 'rows'" + "Ch1, turn"
+      eq(counts(secs[1], 2), [6, 12], 'bee-sizes Keyring Wings: 6, 12 (rounds only)');
+      eq(counts(secs[3], 3), [6, 12, 17],
+        'bee-sizes Medium Wings: round 2 = 12; row 3 "(Inc, sc) x5, inc" = 17 (worked over 11 sts, the marked st skipped)');
+      eq(counts(secs[5], 6), [6, 12, 17, 23, 29, 35],
+        'bee-sizes Big Wings: 17, 23, 29, 35 - each row consumes the one before it exactly (17 = 5x3+1+1, 23 = 5x4+2+1 ...)');
+      var bigW = walkRows(secs[5].text, 6).map(function (r) { return r.stitches.length; });
+      eq(bigW, [6, 12, 17, 23, 29, 35], 'bee-sizes Big Wings: expand() walks the same counts');
+      var modes = function (s) {
+        return P.parse(s.text).filter(function (l) { return l.kind === 'row'; })
+          .map(function (l) { return l.row + (l.workedIn === 'rows' ? 'R' : ''); }).join(' ');
+      };
+      eq(modes(secs[1]), '1 2', 'bee-sizes Keyring Wings: no rows (never turns)');
+      eq(modes(secs[3]), '1 2 3R', 'bee-sizes Medium Wings: rounds 1-2, then row 3 (workedIn = rows)');
+      eq(modes(secs[5]), '1 2 3R 4R 5R 6R', 'bee-sizes Big Wings: rounds 1-2, rows 3-6');
+      eq(modes(secs[0]).indexOf('R'), -1, 'bee-sizes Keyring Body: every line a round');
+      // EYES is a placing note on that size's Body, never part of its rounds
+      ['2nd round, 4 stitches apart', '3rd round, 6 stitches appart', '6th round, 14 stitches appart']
+        .forEach(function (want, k) {
+          var b = secs[k * 2];
+          log(b.placement.indexOf(want) >= 0, 'bee-sizes ' + b.group.name + ' Body placement: "' + want + '"', b.placement.slice(0, 120));
+          log(!/I try to place the eyes/.test(b.text), 'bee-sizes ' + b.group.name + ' Body text has no EYES paragraph', b.text.slice(-120));
+        });
+      log(!/Amigurumi Bee -/.test(secs.map(function (s) { return s.text; }).join('\n')),
+        'bee-sizes: no running head left inside any part');
+      log(/middle yellow stripe/.test(secs[1].placement) && !/middle yellow stripe/.test(secs[5].placement),
+        'bee-sizes: Keyring ASSEMBLY stays on the Keyring Wings', secs[5].placement);
+      log(/3 stitches between them/.test(secs[5].placement) && !/3 stitches between them/.test(secs[1].placement),
+        'bee-sizes: Big ASSEMBLY stays on the Big Wings', secs[1].placement);
     }
   },
   {

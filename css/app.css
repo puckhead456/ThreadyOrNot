@@ -470,6 +470,85 @@ p { margin: 0 0 0.6em; }
 .tab-badge { opacity: 0.85; font-weight: 700; font-variant-numeric: tabular-nums; }
 .tab-add { border-style: dashed; color: var(--text-muted); }
 
+/* Wave G: the sizes of a multi-size booklet, one tab each, over the part
+   chips of the open size. An underline tab, so it reads as a different level
+   from the pill-shaped part chips under it; scrolls sideways on a phone. */
+.size-tabs {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+  border-bottom: 1px solid var(--border);
+  margin: 0 0 2px;
+}
+.size-tabs::-webkit-scrollbar { display: none; }
+.size-tabs[hidden] { display: none; }
+.size-tab {
+  flex: 0 0 auto;
+  min-height: 44px;
+  min-width: 44px;
+  padding: 0 12px;
+  background: none;
+  border: 0;
+  border-bottom: 3px solid transparent;
+  color: var(--text-muted);
+  font-weight: 700;
+  font-size: 15px;
+  white-space: nowrap;
+  max-width: 12em;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.size-tab-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.size-tab.active {
+  color: var(--text);
+  border-bottom-color: var(--primary);
+}
+.size-tab.off .size-tab-name { text-decoration: line-through; opacity: 0.7; }
+.size-tab-skip { font-weight: 400; font-size: 13px; }
+.size-tab-done { color: var(--primary); }
+.size-tab-more {
+  flex: 0 0 auto;
+  margin-left: auto;
+  min-width: 44px;
+  min-height: 44px;
+  background: none;
+  border: 0;
+  color: var(--text-muted);
+  font-size: 20px;
+  font-weight: 700;
+}
+.row-group-tag { text-transform: none; letter-spacing: 0; font-weight: 700; }
+.pc-sizes { font-weight: 700; }
+.parts-group-head {
+  margin: 12px 0 4px;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+.parts-group-head:first-child { margin-top: 0; }
+.size-menu-progress { margin: 0 0 10px; }
+.menu-item.danger-item:not(:disabled) { color: var(--danger, #c0392b); }
+.menu-item:disabled { opacity: 0.5; }
+.imp-size-tabs { margin-bottom: 6px; }
+.imp-size-tick { margin: 2px 0 6px; }
+.imp-size-panel.skipped .imp-item { opacity: 0.5; }
+.imp-place {
+  margin-top: 4px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+.imp-place-line {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .repeat-readout {
   margin: 0;
   padding: 8px 12px;
@@ -2078,6 +2157,16 @@ textarea.mono {
   .project-body .stitch-btn { min-height: max(20vh, 140px); }
   .setup-line-text { -webkit-line-clamp: 1; }
 }
+/* Wave G: a multi-size project spends one 44 px strip on its size tabs; the
+   part chips tuck up under it and the big button gives the rest back, so the
+   counter still fits a 375 x 812 screen. */
+.project-body .size-tabs:not([hidden]) + .tabs { margin-top: calc(8px - var(--gap)); }
+@media (max-height: 860px) {
+  .project-body.has-sizes .stitch-btn { min-height: max(calc(20vh - 44px), 112px); }
+}
+@media (max-height: 760px) {
+  .project-body.has-sizes .stitch-btn { min-height: 96px; }
+}
 @media (max-height: 760px) {
   .project-body { gap: 8px; padding-top: 8px; }
   .project-body .counter-card { padding: 4px var(--pad) 8px; }
@@ -2234,7 +2323,19 @@ mark.size-mark {
    instruction gives one up (the whole text is a tap away). */
 @media (max-height: 860px) {
   .yarn-line:not([hidden]) + .pattern-line .pattern-line-text { -webkit-line-clamp: 2; }
+  /* Wave G: the notes under an instruction clamp too (the whole text is in
+     the pattern sheet) - one line on a row whose strip is showing. */
+  .pattern-line-notes {
+    overflow: hidden;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+  }
+  .pattern-line-notes[hidden] { display: none; }
+  .yarn-line:not([hidden]) + .pattern-line .pattern-line-notes { -webkit-line-clamp: 1; }
 }
+/* Wave G: a colour change and the rounds -> rows turn share the one strip */
+.turn-change .turn-icon { font-size: 15px; line-height: 1; }
 @media (max-height: 760px) {
   .yarn-line { padding: 2px 8px; font-size: 12px; }
   .yarn-line:not([hidden]) + .pattern-line .pattern-line-text { -webkit-line-clamp: 1; }

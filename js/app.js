@@ -151,6 +151,41 @@
     return partMode(project, prt) === 'rounds' ? 'Rnd' : 'Row';
   }
 
+  /**
+   * Wave G: rounds or rows for ONE row of a piece - the bee's wings are
+   * worked in the round, then turned and worked in rows from row 3
+   * (`Store.rowWorkMode`). Falls back to the piece's own word.
+   */
+  function rowModeAt(project, prt, row) {
+    if (prt && row >= 1 && window.Store && typeof Store.rowWorkMode === 'function') {
+      try {
+        return Store.rowWorkMode(prt, row, project) === 'rows' ? 'rows' : 'rounds';
+      } catch (e) {
+        /* fall through */
+      }
+    }
+    return partMode(project, prt);
+  }
+
+  function rowWordAt(project, prt, row, caps) {
+    var w = rowModeAt(project, prt, row) === 'rounds' ? 'Round' : 'Row';
+    return caps ? w.toUpperCase() : w;
+  }
+
+  function shortRowWordAt(project, prt, row) {
+    return rowModeAt(project, prt, row) === 'rounds' ? 'Rnd' : 'Row';
+  }
+
+  /** Wave G: the size groups of a project ([] for a one-size pattern). */
+  function projectGroups(p) {
+    return p && Array.isArray(p.groups) ? p.groups : [];
+  }
+
+  /** Wave G: "Medium · " in front of a part's name when the project has sizes. */
+  function groupPrefix(p, prt) {
+    return prt && prt.group && projectGroups(p).length ? prt.group + ' · ' : '';
+  }
+
   /* ---- Which way up a piece was worked (3D wave C) ---- */
 
   var ORIENT_OPTIONS = [
@@ -1589,13 +1624,21 @@
    * piece has a target, "piece 2 of 4" for a make-count, "done ✓" when it is.
    */
   function crochetPartSummary(p, prt) {
-    var word = partShortRowWord(p, prt);
     var bits = [prt.name];
+    // Wave G: a multi-size booklet - the card speaks for the size whose tab
+    // is open ("Medium · Body · Rnd 3 of 17"), and its parts only
+    if (prt.group && projectGroups(p).length) bits.unshift(prt.group);
+    var mine = prt.group && projectGroups(p).length
+      ? p.parts.filter(function (q) { return !q.group || q.group === prt.group; })
+      : p.parts;
     if (partFinished(prt)) {
       bits.push(prt.makeCount > 1 ? 'all ' + prt.makeCount + ' done ✓' : 'done ✓');
       var left = 0;
-      p.parts.forEach(function (q) { if (!partFinished(q)) left++; });
-      if (p.parts.length > 1) bits.push(left ? plural(left, 'part') + ' to go' : 'every part done');
+      mine.forEach(function (q) { if (!partFinished(q)) left++; });
+      if (mine.length > 1) {
+        bits.push(left ? plural(left, 'part') + ' to go'
+          : (mine !== p.parts ? 'every ' + prt.group + ' part done' : 'every part done'));
+      }
       return bits.join(' · ');
     }
     if (!prt.row && !prt.stitch && !prt.piecesDone) {
@@ -1603,6 +1646,7 @@
       return bits.join(' · ');
     }
     var ri = Store.repeatInfo(prt);
+    var word = shortRowWordAt(p, prt, ri.workingRow);
     bits.push(word + ' ' + ri.workingRow + (prt.targetRows ? ' of ' + prt.targetRows : ''));
     if (prt.makeCount > 1) bits.push('piece ' + Math.min(prt.piecesDone + 1, prt.makeCount) + ' of ' + prt.makeCount);
     var target = Store.currentTarget(prt);
@@ -1632,6 +1676,12 @@
 
     var meta = el('span', 'pc-meta');
     meta.appendChild(document.createTextNode(ago(p.updatedAt)));
+    // Wave G: "3 sizes" - the booklet's sizes are all in here
+    var nSizes = isCraftProject(p) ? 0 : projectGroups(p).length;
+    if (nSizes > 1) {
+      meta.appendChild(document.createTextNode(' · '));
+      meta.appendChild(el('span', 'pc-sizes', nSizes + ' sizes'));
+    }
     // A timer that has never run has nothing to say — "0:00:00" on every card
     // just crowds the line.
     if (Store.elapsedMs(p) || (p.timer && p.timer.runningSince)) {
@@ -1695,9 +1745,176 @@
    * 13. Render — project
    * ================================================================== */
 
+  /* ---- Wave G: one tab per size of a multi-size booklet ------------------ */
+
+  function ensureSizeTabs() {
+    if (els.sizeTabs && document.contains(els.sizeTabs)) return els.sizeTabs;
+    var strip = el('div', 'size-tabs');
+    strip.id = 'size-tabs';
+    strip.setAttribute('role', 'tablist');
+    strip.setAttribute('aria-label', 'Sizes');
+    els.tabs.parentNode.insertBefore(strip, els.tabs);
+    els.sizeTabs = strip;
+    return strip;
+  }
+
+  function sizeTabLabel(p, name) {
+    var prog = Store.groupProgress(p.id, name);
+    var s = name + ' size';
+    if (prog && prog.done) s += ', done';
+    else if (prog && prog.started) s += ', ' + prog.partsDone + ' of ' + plural(prog.parts, 'part') + ' done';
+    return s;
+  }
+
+  function pickSizeTab(p, name, focus) {
+    Store.setActiveGroup(p.id, name);
+    render();
+    announce(name + ' size');
+    if (focus) {
+      var t = els.sizeTabs ? els.sizeTabs.querySelector('[data-focus-key="size-tab:' + name.replace(/"/g, '') + '"]') : null;
+      if (t) { try { t.focus({ preventScroll: true }); } catch (e) { t.focus(); } }
+    }
+  }
+
+  /**
+   * The size strip above the part chips: role=tablist, one tab per size, the
+   * open size's parts in the strip below it (its tabpanel). Arrow keys / Home /
+   * End move between sizes; the ⋯ at the end is the open size's menu. A
+   * project with one size gets no strip at all.
+   * @returns {string|null} the open size
+   */
+  function renderSizeTabs(p) {
+    var groups = projectGroups(p);
+    if (els.tabs.parentNode) els.tabs.parentNode.classList.toggle('has-sizes', groups.length > 0);
+    if (!groups.length) {
+      if (els.sizeTabs) { clear(els.sizeTabs); els.sizeTabs.hidden = true; }
+      els.tabs.setAttribute('role', 'group');
+      els.tabs.setAttribute('aria-label', 'Parts');
+      els.tabs.removeAttribute('aria-labelledby');
+      els.tabs.removeAttribute('tabindex');
+      return null;
+    }
+    var strip = ensureSizeTabs();
+    strip.hidden = false;
+    clear(strip);
+    var active = p.activeGroup || groups[0].name;
+    var tabs = [];
+    groups.forEach(function (g, gi) {
+      var sel = g.name === active;
+      var t = button('size-tab' + (sel ? ' active' : ''));
+      t.id = 'size-tab-' + gi;
+      t.setAttribute('role', 'tab');
+      t.setAttribute('aria-selected', sel ? 'true' : 'false');
+      t.setAttribute('aria-controls', 'part-tabs');
+      t.setAttribute('data-focus-key', 'size-tab:' + g.name.replace(/"/g, ''));
+      t.tabIndex = sel ? 0 : -1;
+      t.title = g.name;
+      t.appendChild(el('span', 'size-tab-name', g.name));
+      var prog = Store.groupProgress(p.id, g.name);
+      if (prog && prog.done) t.appendChild(el('span', 'size-tab-done', ' ✓'));
+      t.setAttribute('aria-label', sizeTabLabel(p, g.name));
+      on(t, 'click', function () {
+        if (!sel) pickSizeTab(p, g.name, false);
+      });
+      on(t, 'keydown', function (e) {
+        var to = -1;
+        if (e.key === 'ArrowRight') to = (gi + 1) % groups.length;
+        else if (e.key === 'ArrowLeft') to = (gi - 1 + groups.length) % groups.length;
+        else if (e.key === 'Home') to = 0;
+        else if (e.key === 'End') to = groups.length - 1;
+        if (to < 0 || to === gi) return;
+        e.preventDefault();
+        pickSizeTab(p, groups[to].name, true);
+      });
+      tabs.push(t);
+      strip.appendChild(t);
+    });
+    var more = button('size-tab-more', '⋯', active + ' size: options');
+    more.setAttribute('aria-haspopup', 'dialog');
+    more.setAttribute('data-focus-key', 'size-tab-more');
+    on(more, 'click', function () { openSizeMenu(p.id, active); });
+    strip.appendChild(more);
+    // the part chips are the open size's panel
+    var selTab = tabs[groups.map(function (g) { return g.name; }).indexOf(active)] || tabs[0];
+    els.tabs.setAttribute('role', 'tabpanel');
+    els.tabs.removeAttribute('aria-label');
+    els.tabs.setAttribute('aria-labelledby', selTab.id);
+    // keep the open tab in view on a 375 px screen (no vertical page scroll)
+    if (selTab && strip.scrollWidth > strip.clientWidth) {
+      var left = selTab.offsetLeft - strip.offsetLeft;
+      if (left < strip.scrollLeft || left + selTab.offsetWidth > strip.scrollLeft + strip.clientWidth) {
+        strip.scrollLeft = Math.max(0, left - 16);
+      }
+    }
+    return active;
+  }
+
+  /** A size tab's ⋯ menu: progress, "Make this size a template", "Remove this size". */
+  function openSizeMenu(projectId, name) {
+    var p = Store.project(projectId);
+    if (!p) return;
+    var prog = Store.groupProgress(p.id, name);
+    openSheet({
+      subject: projectId,
+      title: name + ' size',
+      build: function (body, api) {
+        if (prog) {
+          var line = prog.done ? 'Every part done ✓'
+            : prog.partsDone + ' of ' + plural(prog.parts, 'part') + ' done' +
+              (prog.rows ? ' · ' + prog.rowsDone + ' of ' + prog.rows + ' rows and rounds' : '');
+          body.appendChild(el('p', 'muted size-menu-progress', line));
+        }
+        var list = el('div', 'list');
+        var mk = button('menu-item');
+        mk.appendChild(el('span', 'menu-icon', '🧵'));
+        mk.appendChild(el('span', null, 'Make this size a template'));
+        on(mk, 'click', function () {
+          api.close();
+          var draft = Store.templateFromProject(p.id, { group: name });
+          if (draft) openTemplateEditor({ draft: draft });
+        });
+        list.appendChild(mk);
+        var rm = button('menu-item danger-item');
+        rm.appendChild(el('span', 'menu-icon', '✂️'));
+        rm.appendChild(el('span', null, 'Remove this size'));
+        var others = projectGroups(p).length > 1 || p.parts.some(function (q) { return !q.group; });
+        rm.disabled = !others;
+        if (!others) rm.setAttribute('title', 'The last size cannot be removed');
+        on(rm, 'click', function () {
+          if (!others) return;
+          api.close();
+          var n = p.parts.filter(function (q) { return q.group === name; }).length;
+          confirmSheet({
+            title: 'Remove the ' + name + ' size?',
+            message: 'Its ' + plural(n, 'part') + ' and their counts go from this project. Undo puts them back.',
+            confirmText: 'Remove',
+            danger: true
+          }).then(function (ok) {
+            if (!ok) return;
+            var res = Store.removeGroup(p.id, name);
+            if (!res) return;
+            render();
+            announce(name + ' size removed');
+            toast(name + ' size removed', {
+              ms: 6000,
+              actionText: 'Undo',
+              onAction: function () { Store.undo(); render(); announce(name + ' size back'); }
+            });
+          });
+        });
+        list.appendChild(rm);
+        body.appendChild(list);
+      }
+    });
+  }
+
   function renderTabs(p) {
     clear(els.tabs);
+    // Wave G: with sizes, the strip shows the open size's parts (and any part
+    // every size shares), under a tab strip of the sizes
+    var openSize = renderSizeTabs(p);
     p.parts.forEach(function (prt) {
+      if (openSize && prt.group && prt.group !== openSize) return;
       var isActive = prt.id === p.activePartId;
       var tab = button('tab' + (isActive ? ' active' : ''));
       // Its label changes when it becomes the current part; the key does not.
@@ -1895,7 +2112,10 @@
     if (!row) return null;
     var info = null;
     try { info = Store.rowColorInfo(prt, workingRow); } catch (e) { info = null; }
-    if (!info || (!info.color && !info.change) || partFinished(prt)) {
+    // Wave G: the row where a piece begun in the round turns and goes on in
+    // rows (the bee's wings, row 3) shares this one strip with a colour change
+    var turn = turnsToRows(p, prt, workingRow) && !partFinished(prt);
+    if ((!info || (!info.color && !info.change) || partFinished(prt)) && !turn) {
       row.hidden = true;
       clear(row);
       return null;
@@ -1904,25 +2124,44 @@
     // The yarn a row is worked in rides in the pattern line's tag as a
     // swatch (yarnTagSwatch); the strip itself only appears on the row where
     // the yarn changes, as one line, so the counter keeps its height.
-    if (!info.change) {
+    var said = [];
+    if (info && info.change && !partFinished(prt)) {
+      var ch = el('span', 'yarn-change');
+      if (info.change.at === 'end' && info.color) {
+        ch.appendChild(yarnSwatch(p, info.color));
+        ch.appendChild(el('span', 'yarn-arrow', '→'));
+      }
+      ch.appendChild(yarnSwatch(p, info.change.to));
+      ch.appendChild(el('span', 'yarn-text', yarnChangeText(info.change, p, prt)));
+      row.appendChild(ch);
+      said.push(yarnChangeText(info.change, p, prt) +
+        (info.change.at === 'end' && info.color ? ' (working in ' + yarnLabel(info.color) + ')' : ''));
+    }
+    if (turn) {
+      var tn = el('span', 'yarn-change turn-change');
+      tn.appendChild(el('span', 'turn-icon', '↻'));
+      tn.appendChild(el('span', 'yarn-text', 'Turn · rows from here'));
+      row.appendChild(tn);
+      said.push('Turn: worked in rows from this row on');
+    }
+    if (!said.length) {
       row.hidden = true;
       return info;
     }
-    var ch = el('span', 'yarn-change');
-    if (info.change.at === 'end' && info.color) {
-      ch.appendChild(yarnSwatch(p, info.color));
-      ch.appendChild(el('span', 'yarn-arrow', '→'));
-    }
-    ch.appendChild(yarnSwatch(p, info.change.to));
-    ch.appendChild(el('span', 'yarn-text', yarnChangeText(info.change, p, prt)));
-    row.appendChild(ch);
     row.setAttribute('role', 'note');
-    row.setAttribute('aria-label', yarnChangeText(info.change, p, prt) +
-      (info.change.at === 'end' && info.color ? ' (working in ' + yarnLabel(info.color) + ')' : ''));
+    row.setAttribute('aria-label', said.join('. '));
     row.classList.add('changing');
     row.hidden = false;
     return info;
   }
+
+  /** Wave G: this row is the first one worked in rows after rounds. */
+  function turnsToRows(p, prt, row) {
+    return row > 1 && rowModeAt(p, prt, row) === 'rows' && rowModeAt(p, prt, row - 1) === 'rounds';
+  }
+
+  // wave G: the sentence the turn strip already says
+  var ROWS_SWITCH_NOTE_RE = /\binstead\s+of\s+(?:crocheting|working)\s+in\s+(?:the\s+)?round|\b(?:crochet(?:ing)?|work(?:ing)?)\s+in\s+['"]?rows\b/i;
 
   /** The current yarn as a swatch in front of "RND 15" (wave F). */
   function yarnTagSwatch(p, info) {
@@ -2134,15 +2373,26 @@
   function updateCounters(p, prt) {
     if (!p || !prt) return;
 
-    els.rowLabel.textContent = partRowWord(p, prt, true);
+    // Wave G: the word for the row being WORKED - the bee's wings turn from
+    // rounds into rows at row 3 - and, in a multi-size project, whose part
+    // this is ("Medium · Body") in front of it.
+    var riHead = Store.repeatInfo(prt);
+    var headWord = rowWordAt(p, prt, riHead.workingRow);
+    els.rowLabel.textContent = '';
+    var gp = groupPrefix(p, prt);
+    if (gp) els.rowLabel.appendChild(el('span', 'row-group-tag', gp + prt.name + ' · '));
+    els.rowLabel.appendChild(document.createTextNode(headWord.toUpperCase()));
     // Wave F (size-once): whose numbers these are, beside the word.
     var sizeTag = sizeTagText(p, prt);
     if (sizeTag) els.rowLabel.appendChild(el('span', 'row-size-tag', ' · ' + sizeTag));
     els.rowNumber.textContent = String(prt.row);
     // 03 #6: the number is a control — tap (or Enter) to set it.
     bindRowNumber();
+    // (the number counts COMPLETED rows: their word, not the next row's)
+    var doneWord = rowWordAt(p, prt, Math.max(1, prt.row));
     els.rowNumber.setAttribute('aria-label',
-      partRowWord(p, prt) + 's done: ' + prt.row + '. Set the ' + partRowWord(p, prt).toLowerCase() + ' count');
+      (gp ? gp + prt.name + '. ' : '') +
+      doneWord + 's done: ' + prt.row + '. Set the ' + doneWord.toLowerCase() + ' count');
 
     if (prt.targetRows) {
       els.rowProgress.hidden = false;
@@ -2192,11 +2442,15 @@
     if (line && line.text) {
       els.patternLine.hidden = false;
       // "≈ Row 25": the parser numbered this row after an unresolved length
-      els.patternTag.textContent = (line.approxRow ? '≈ ' : '') + partShortRowWord(p, prt) + ' ' + ri.patternRow;
+      els.patternTag.textContent = (line.approxRow ? '≈ ' : '') + shortRowWordAt(p, prt, ri.patternRow) + ' ' + ri.patternRow;
       yarnTagSwatch(p, yarnInfo);
       // Wave F: the chosen size's number marked in every size list.
       fillSizeMarked(els.patternText, line.text, prt, p);
       var notes = Store.notesOf(line);
+      // wave G: on the turning row the strip above says "rows from here"
+      if (turnsToRows(p, prt, ri.patternRow)) {
+        notes = notes.filter(function (n) { return !ROWS_SWITCH_NOTE_RE.test(n); });
+      }
       if (els.patternNotes) {
         els.patternNotes.hidden = !notes.length;
         els.patternNotes.textContent = notes.join(' · ');
@@ -2467,6 +2721,53 @@
     });
   }
 
+  /**
+   * Wave G: every part of one size is done. The maker who wanted one bee is
+   * finished; the one making the set goes on to the next size. Nothing is
+   * removed either way, and Finish is undoable like everywhere else.
+   */
+  function showGroupDoneSheet(p, name) {
+    var next = null;
+    projectGroups(p).forEach(function (g) {
+      if (next || g.name === name) return;
+      var pr = Store.groupProgress(p.id, g.name);
+      if (pr && !pr.done) next = g.name;
+    });
+    openSheet({
+      subject: p.id,
+      title: name + ' size done! 🎉',
+      build: function (body, api) {
+        body.appendChild(el('p', null, 'Every ' + name + ' part is off the hook.' +
+          (next ? ' The other sizes are still in this project.' : '')));
+        var fin = button('btn primary block big', 'Finish the project');
+        on(fin, 'click', function () {
+          var res = Store.finishProject(p.id, { force: true });
+          api.close();
+          if (res && res.ok) {
+            celebrate('project');
+            render();
+            announce('Project complete');
+            toast(p.name + ' is finished ✓', {
+              ms: 6000, actionText: 'Undo', onAction: function () { Store.undo(); render(); }
+            });
+          }
+        });
+        body.appendChild(fin);
+        if (next) {
+          var go = button('btn block', 'Go on to ' + next);
+          on(go, 'click', function () {
+            api.close();
+            pickSizeTab(p, next, false);
+          });
+          body.appendChild(go);
+        }
+        var later = button('btn ghost block', 'Not now');
+        on(later, 'click', function () { api.close(); });
+        body.appendChild(later);
+      }
+    });
+  }
+
   /** Once per part per session — the guard is a nudge, not a nag. */
   var alreadyDoneSaid = Object.create(null);
 
@@ -2523,7 +2824,7 @@
         pushDiagram('round');
         // "Round 5 done" — the piece's own word, and what the number means
         // (`row` counts COMPLETED rows; "Round 5" alone read as "on round 5").
-        announce(partRowWord(p, prt) + ' ' + prt.row + ' done');
+        announce(rowWordAt(p, prt, prt.row) + ' ' + prt.row + ' done');
         // Wave F (02 #3): a colour change is a milestone too (the one
         // announcement policy) — said once, on the row it belongs to.
         var yc = null;
@@ -2549,6 +2850,16 @@
         render();
         announce(res.partName + ' complete');
         toast(res.partName + ' complete ✓', { ms: 3600 });
+        break;
+
+      case 'groupDone':
+        // Wave G: one size of a multi-size booklet is finished. The project is
+        // not - the other sizes are still in it - so ask: finish here, or go on.
+        fb('done');
+        celebrate('part');
+        render();
+        announce(res.group + ' size complete');
+        showGroupDoneSheet(p, res.group);
         break;
 
       case 'projectDone':
@@ -3744,9 +4055,25 @@
   var PDF_TEMPLATE_ID = '__pdf__';
 
   function templatePreview(tpl) {
-    return tpl.parts
-      .map(function (p) { return p.name + (p.makeCount > 1 ? ' ×' + p.makeCount : ''); })
-      .join(', ');
+    return sectionsPreview(tpl.parts);
+  }
+
+  /**
+   * "Body, Wings ×2" - and, wave G, for a booklet of sizes every size by name:
+   * "Keyring: Body, Wings ×2 · Medium: Body, Wings ×2 · Big: …".
+   */
+  function sectionsPreview(parts) {
+    var label = function (s) { return (s.name || 'Part') + (s.makeCount > 1 ? ' ×' + s.makeCount : ''); };
+    var order = [], by = {}, shared = [];
+    (parts || []).forEach(function (s) {
+      if (!s.group) { shared.push(label(s)); return; }
+      if (!by[s.group]) { by[s.group] = []; order.push(s.group); }
+      by[s.group].push(label(s));
+    });
+    if (!order.length) return shared.join(', ');
+    var out = order.map(function (g) { return g + ': ' + by[g].join(', '); });
+    if (shared.length) out.unshift(shared.join(', '));
+    return out.join(' · ');
   }
 
   function openProjectEditor(projectId) {
@@ -3909,17 +4236,7 @@
               pdfCard.appendChild(el('span', 'tpl-emoji', '📄'));
               var pdfMain = el('div', 'tpl-main');
               pdfMain.appendChild(el('div', 'tpl-name', pdf.sourceLabel()));
-              pdfMain.appendChild(
-                el(
-                  'div',
-                  'tpl-parts',
-                  pdfSecs
-                    .map(function (s) {
-                      return (s.name || 'Part') + (s.makeCount > 1 ? ' ×' + s.makeCount : '');
-                    })
-                    .join(', ')
-                )
-              );
+              pdfMain.appendChild(el('div', 'tpl-parts', sectionsPreview(pdfSecs)));
               pdfCard.appendChild(pdfMain);
               on(pdfCard, 'click', function () {
                 chosenTemplate = PDF_TEMPLATE_ID;
@@ -4131,7 +4448,7 @@
                     craft: 'crochet',
                     parts: secs.map(function (s) {
                       var made = madeFor(s);
-                      return {
+                      var tp = {
                         name: s.name || 'Part',
                         makeCount: s.makeCount,
                         patternText: s.text,
@@ -4140,7 +4457,11 @@
                         orientation: made ? made.orientation : 'auto',
                         dialect: made ? made.dialect : 'auto'
                       };
+                      // wave G: every size the import kept, each part in its own
+                      if (s.group) tp.group = s.group;
+                      return tp;
                     }),
+                    groups: fresh && fresh.groups && fresh.groups.length ? fresh.groups : undefined,
                     checklist: pdf.checkedChecklist(),
                     // wave F: the leaflet's size names + the size picked here
                     sizes: fresh && fresh.sizes ? fresh.sizes : undefined,
@@ -4864,7 +5185,15 @@
       build: function (body, api) {
         var list = el('div', 'list');
         if (!p.parts.length) list.appendChild(el('p', 'muted', 'No parts yet. Add the first piece below.'));
+        // Wave G: a heading per size, the parts of that size under it
+        var lastGroup = null;
+        var sized = projectGroups(p).length > 0;
         p.parts.forEach(function (prt) {
+          if (sized && prt.group && prt.group !== lastGroup) {
+            lastGroup = prt.group;
+            var gpr = Store.groupProgress(p.id, prt.group);
+            list.appendChild(el('h3', 'parts-group-head', prt.group + (gpr && gpr.done ? ' ✓' : '')));
+          }
           var item = button('menu-item');
           var main = el('div');
           main.appendChild(el('div', null, prt.name + (prt.makeCount > 1 ? ' ×' + prt.makeCount : '')));
@@ -5031,7 +5360,9 @@
           placementNotes: typeof p.placementNotes === 'string' ? p.placementNotes : '',
           workMode: p.workMode || 'auto',
           orientation: p.orientation || 'auto',
-          dialect: p.dialect || 'auto'
+          dialect: p.dialect || 'auto',
+          // wave G: the size a part belongs to rides along too
+          group: p.group || null
         };
       }),
       checklist: (source.checklist || []).slice()
@@ -5098,6 +5429,12 @@
 
         row.appendChild(top);
         row.appendChild(bot);
+        // wave G: which size of the booklet this part is
+        if (p.group) {
+          var sizeTagRow = el('div', 'tpl-part-attach');
+          sizeTagRow.appendChild(el('span', 'tpl-tag tpl-size-tag', p.group));
+          row.appendChild(sizeTagRow);
+        }
 
         // A part saved from a PDF import carries the instructions with it.
         if (p.patternText) {
@@ -5266,7 +5603,9 @@
                 craft: templateCraft,
                 // wave F: the leaflet's size names and the picked size survive an edit
                 sizes: source && source.sizes ? source.sizes : undefined,
-                size: source && source.size ? source.size : undefined
+                size: source && source.size ? source.size : undefined,
+                // wave G: the sizes' order (each part keeps its own size)
+                groups: source && source.groups ? source.groups : undefined
               });
             } catch (e) {
               toast(e && e.message ? e.message : 'That template is not valid');
@@ -5836,6 +6175,14 @@
     var sizeNames = [];
     var sizeDocCount = 0;
     var sizeChoice = typeof opts.initialSize === 'number' && opts.initialSize >= 0 ? opts.initialSize : null;
+    /**
+     * Wave G (size groups): a booklet of several sizes of the same toy. The
+     * sizes are tabs, each with "Import this size" (all on by default), and
+     * the parts and placing notes of the open one below.
+     */
+    var groupNames = [];
+    var groupTicks = {};
+    var openGroup = null;
 
     var node = el('div', 'imp-picker');
 
@@ -5923,6 +6270,8 @@
           parserName: sec.name,
           name: keep ? old.name : sec.name,
           checked: keep ? old.checked : info.rows > 0,
+          // wave G: the size group this section belongs to (null: one size)
+          group: sec.group || null,
           makeCount: sec.makeCount,
           makeCountInferred: !!sec.makeCountInferred,
           text: sec.text,
@@ -5940,6 +6289,15 @@
       if (window.Patterns && typeof window.Patterns.dialectHints === 'function') {
         try { dialect = window.Patterns.dialectHints(text); } catch (e) { dialect = null; }
       }
+      // wave G: the sizes, in document order; every one ticked by default,
+      // a tick the maker took off survives a re-read of the same document
+      var names = [];
+      rows.forEach(function (r) { if (r.group && r.rows > 0 && names.indexOf(r.group) < 0) names.push(r.group); });
+      var was = groupTicks;
+      groupTicks = {};
+      names.forEach(function (n) { groupTicks[n] = was[n] === undefined ? true : was[n]; });
+      groupNames = names.length >= 2 ? names : [];
+      if (groupNames.indexOf(openGroup) < 0) openGroup = groupNames.length ? groupNames[0] : null;
     }
 
     function renderChips() {
@@ -6005,7 +6363,10 @@
       listField.hidden = false;
       // Only worth offering when at least one section would get a target.
       targetsRow.hidden = !rows.some(function (r) { return r.rows > 0 && r.target; });
+      var panel = list;
+      if (groupNames.length) panel = renderGroupTabs();
       rows.forEach(function (r, i) {
+        if (groupNames.length && r.group && r.group !== openGroup) return;
         var item = el('div', 'imp-item');
         var chk = button('check', '✓', 'Import ' + (r.name || 'section ' + (i + 1)));
         chk.setAttribute('role', 'checkbox');
@@ -6039,7 +6400,19 @@
         // The parser found assembly prose for this piece - it lands in the
         // part's Placing button, not in its rounds.
         if (r.placement) meta.push('placing notes');
+        // wave G: a piece that turns from rounds into rows says where
+        var rowsFrom = rowsFromOf(r);
+        if (rowsFrom) meta.push('in rows from row ' + rowsFrom);
         main.appendChild(el('div', 'imp-meta', meta.join(' · ')));
+        // wave G: under a size's tab, the placing notes themselves (the eyes
+        // "in the 2nd round, 4 stitches apart" differ from size to size)
+        if (groupNames.length && r.placement) {
+          var pl = el('div', 'imp-place');
+          r.placement.split('\n').slice(0, 3).forEach(function (ln) {
+            pl.appendChild(el('div', 'imp-place-line', ln));
+          });
+          main.appendChild(pl);
+        }
         // Wave F (06 #1 / #8): one confidence line per part - what the
         // counts rest on. A disagreement is the line people need to see.
         var rep = r.report;
@@ -6054,8 +6427,92 @@
 
         item.appendChild(chk);
         item.appendChild(main);
-        list.appendChild(item);
+        panel.appendChild(item);
       });
+    }
+
+    /** Wave G: the first row a piece works in rows after starting in the round. */
+    function rowsFromOf(r) {
+      if (r.rowsFrom !== undefined) return r.rowsFrom;
+      r.rowsFrom = null;
+      if (r.mode !== 'rounds' || !window.Patterns || typeof window.Patterns.parse !== 'function') return null;
+      try {
+        var ls = window.Patterns.parse(r.text);
+        for (var k = 0; k < ls.length; k++) {
+          if (ls[k].kind === 'row' && ls[k].workedIn === 'rows') { r.rowsFrom = ls[k].row; break; }
+        }
+      } catch (e) { r.rowsFrom = null; }
+      return r.rowsFrom;
+    }
+
+    /**
+     * Wave G: the size tabs above the section list - role=tablist, arrow keys
+     * between sizes, and "Import this size" for the open one. Returns the
+     * panel the open size's sections go into.
+     */
+    function renderGroupTabs() {
+      var strip = el('div', 'size-tabs imp-size-tabs');
+      strip.setAttribute('role', 'tablist');
+      strip.setAttribute('aria-label', 'Sizes in this pattern');
+      var uid0 = 'imp-size-' + Math.random().toString(36).slice(2, 8);
+      var selId = '';
+      groupNames.forEach(function (g, gi) {
+        var sel = g === openGroup;
+        var t = button('size-tab' + (sel ? ' active' : '') + (groupTicks[g] ? '' : ' off'));
+        t.id = uid0 + '-' + gi;
+        if (sel) selId = t.id;
+        t.setAttribute('role', 'tab');
+        t.setAttribute('aria-selected', sel ? 'true' : 'false');
+        t.setAttribute('aria-controls', uid0 + '-panel');
+        t.setAttribute('data-focus-key', 'imp-size-tab:' + g.replace(/"/g, ''));
+        t.tabIndex = sel ? 0 : -1;
+        t.appendChild(el('span', 'size-tab-name', g));
+        if (!groupTicks[g]) t.appendChild(el('span', 'size-tab-skip', ' · skipped'));
+        t.setAttribute('aria-label', g + ' size' + (groupTicks[g] ? '' : ', not imported'));
+        var go = function (to, focus) {
+          openGroup = groupNames[to];
+          renderList();
+          if (focus) {
+            var nt = list.querySelector('[data-focus-key="imp-size-tab:' + openGroup.replace(/"/g, '') + '"]');
+            if (nt) { try { nt.focus({ preventScroll: true }); } catch (e) { nt.focus(); } }
+          }
+        };
+        on(t, 'click', function () { if (!sel) go(gi, false); });
+        on(t, 'keydown', function (e) {
+          var to = -1;
+          if (e.key === 'ArrowRight') to = (gi + 1) % groupNames.length;
+          else if (e.key === 'ArrowLeft') to = (gi - 1 + groupNames.length) % groupNames.length;
+          else if (e.key === 'Home') to = 0;
+          else if (e.key === 'End') to = groupNames.length - 1;
+          if (to < 0 || to === gi) return;
+          e.preventDefault();
+          go(to, true);
+        });
+        strip.appendChild(t);
+      });
+      list.appendChild(strip);
+      var panel = el('div', 'imp-size-panel');
+      panel.id = uid0 + '-panel';
+      panel.setAttribute('role', 'tabpanel');
+      panel.setAttribute('aria-labelledby', selId);
+      var tickRow = el('div', 'imp-targets imp-size-tick');
+      var tick = button('check', '✓', 'Import the ' + openGroup + ' size');
+      tick.setAttribute('role', 'checkbox');
+      tick.setAttribute('aria-checked', groupTicks[openGroup] ? 'true' : 'false');
+      tick.setAttribute('data-focus-key', 'imp-size-tick');
+      on(tick, 'click', function () {
+        groupTicks[openGroup] = !groupTicks[openGroup];
+        preserveFocus(renderList);
+        changed();
+      });
+      var tickLabel = el('span', 'imp-targets-label', 'Import this size');
+      on(tickLabel, 'click', function () { tick.click(); });
+      tickRow.appendChild(tick);
+      tickRow.appendChild(tickLabel);
+      panel.appendChild(tickRow);
+      panel.classList.toggle('skipped', !groupTicks[openGroup]);
+      list.appendChild(panel);
+      return panel;
     }
 
     /* ---------------- checklist suggestions ---------------- */
@@ -6119,6 +6576,8 @@
     function checkedSections() {
       var out = [];
       rows.forEach(function (r) {
+        // wave G: a size left out with "Import this size" brings none of its parts
+        if (r.checked && groupNames.length && r.group && !groupTicks[r.group]) return;
         if (r.checked) {
           var sec = {
             name: (r.name || '').trim(),
@@ -6127,6 +6586,7 @@
             placement: r.placement || ''
           };
           if (r.makeCountInferred) sec.makeCountInferred = true;
+          if (r.group) sec.group = r.group;
           out.push(sec);
         }
       });
