@@ -2,7 +2,7 @@
 
 (App was called "Stitchkeeper" during the initial build; the localStorage key `stitchkeeper.v1` and cache names keep that name on purpose so existing saved projects survive the rename.)
 
-A crochet row/round + stitch counter PWA. Plain HTML/CSS/JS, **no build step, no ES modules, no frameworks**.
+A crochet row/round + stitch counter PWA (since wave H the same counter also counts knitting, through its own parser; see "Knitting"). Plain HTML/CSS/JS, **no build step, no ES modules, no frameworks**.
 Hosted on GitHub Pages at `https://puckhead456.github.io/ThreadyOrNot/` (repo github.com/puckhead456/ThreadyOrNot; local folder is still C:\Users\mitch\CrochetBs) (so all paths must be **relative**: `./css/app.css`, never `/css/app.css`).
 Works on iPhone Safari, Android Chrome, and desktop. Installable as a PWA ("Add to Home Screen"). Works offline.
 
@@ -17,7 +17,11 @@ sw.js                       # service worker, cache-first for app shell + fonts
 css/app.css                 # layout + components, uses ONLY the CSS variables below
 css/themes.css              # the 6 themes: each sets the CSS variables on html[data-theme="..."]
 js/themes.js                # window.Themes = metadata list (id, name, group, tagline, swatches, emoji, fonts)
-js/patterns.js              # window.Patterns = pattern text parser (pure functions)
+js/patterns.js              # window.Patterns = pattern text parser (pure functions); since wave H the
+                            #   craft-profile engine too (Patterns.createParser(profile))
+js/knits.js                 # window.Knits = the knitting reader: createParser(knitting profile) (wave H)
+js/knit-chart.js            # window.KnitChart = knitting charts read off a PDF page (wave H, no DOM)
+js/app-knitting.js          # window.AppKnitting = knitting's registration as a counter craft (wave H)
 js/celebrate.js             # window.Celebrate = themed finish animations
 js/audio.js                 # window.Feedback = haptics + synthesized tap sounds
 js/store.js                 # window.Store = state, persistence (localStorage), undo, export/import
@@ -46,7 +50,9 @@ State = {
     touchDays: string[],            // 'YYYY-MM-DD' per day work happened, newest last, cap 60
     persistGranted: boolean,        // navigator.storage.persist() said yes
     crafts: { [craftId]: object },  // opaque per-craft settings. Crochet's bag holds
-                                    // `diagramFollow` (wave F: absent = on, see "Live 3D diagram")
+                                    // `diagramFollow` (wave F: absent = on, see "Live 3D diagram");
+                                    // knitting's is { unit: 'cm'|'in', needleSystem: 'metric'|'us'|'uk' }
+                                    // (wave H, see "Knitting")
   },
   templates: Template[],
   projects: Project[],
@@ -71,6 +77,10 @@ Project = {
   sizes: string[]|null,             // the document's size names (['XS','S','M',…]), shared by all parts
   size: { index: number, label: string }|null,   // wave F: the size the maker picked ONCE for the
                                     // whole project (see "Size once"). null = never asked
+  gauge?: { sts, rows, over, unit: 'cm'|'in', needle, swatch: { sts, rows } },
+                                    // wave H, knitting: the pattern's gauge as printed + the knitter's
+                                    // swatch (see "Knitting"). Every knitting project has one; any
+                                    // other craft carries it only when it is not empty
 }
 
 Part = {
@@ -122,6 +132,16 @@ Part = {
                                     // Stylecraft hood motif came out 33 % too tall).
                                     // Set by hand with the "Terms: Auto / UK / US"
                                     // chips in the part editor and the 3D viewer.
+                                    // (Hidden for knitting, wave H: dialect is crochet's.)
+
+  // --- knitting only (wave H; see "Knitting"). Normalised on load for a knitting
+  // project (defaults null, [], null, null, null); any other craft carries one only
+  // when it is set, and nothing on the crochet path reads them. -------------------
+  side?: 'rs'|'ws'|null,            // the knitter's own word on the row being worked; null = follow the pattern
+  markers?: [{ id, name, at }],     // `at` = stitches from the row start, ≤ 40, one 'BOR' forced to 0
+  markerTotal?: number|null,        // the row total the markers were placed on
+  linked?: string|null,             // partId worked two at a time with this one (always mutual)
+  shortRows?: { active, n, of, row, base, numbered }|null,   // the short-row sub-counter
 }
 ```
 
@@ -381,9 +401,130 @@ Patterns.countReport(lines) → { rows, printed, computed, missing, unresolved,
 - **Repeats between written rows** fill the hole for the target ("Repeat Rows 5-8 until … 36 Rows"
   then "Next Row" = 37), and one written row continued by a repeat is a target too.
 
+### The `Line` contract (every counter-craft parser, wave H)
+
+A counter craft's parser (crochet's `window.Patterns`, knitting's `window.Knits`, anything that
+registers through `Store.registerCraftParser`) returns these from `parse(text, { size, sizeCount })`.
+The store, the counter, the pattern sheet and the 3D model read nothing else, so a new craft's
+parser is done when it fills them honestly: a field it cannot vouch for is `null` (or absent where
+marked `?`), never a guess.
+
+```js
+Line = {
+  // --- every craft (the crochet contract, waves A–G) -----------------------
+  index, text,                       // source line (wrapped lines joined into `text`)
+  kind: 'row'|'setup'|'header'|'repeat'|'note',
+  row: number|null, rowEnd: number|null,   // setup = row 0
+  section: number,
+  stitches: number|null,             // EXPLICIT count, size-resolved
+  sizes: number[]|null,              // the whole multi-size list it came from
+  computed: number|null,             // what the instruction makes from the row below
+  count: number|null,                // stitches ?? computed
+  countSource: 'explicit'|'computed'|null,
+  notes: string[], notesAfter?: string[],
+  deviation?: { printed, computed }, // printed total kept, its own arithmetic disagrees
+  sizeUnresolved?: true, approxRow?: true,
+  lengthEstimate?: { value, unit, rows, gauge, fromStart }, repeatFromLength?: true,
+  workedIn?: 'rows'|'rounds',        // wave G (crochet: the row where a part switches to rows);
+                                     // knitting sets it on every row
+  // back-references: a 'repeat' line or a "Rnds 4-15: rep Rnd 3" row
+  prevCount, repeatOf: number[]|null, repeatFrom, repeatTo, repeatTimes, repeatUntil,
+  counts: number[]|null,             // one count per row of the range, where it can be worked out
+  rowList?: number[],                // wave H, engine-level: an enumerated row set ("Rows 2, 4, 6
+                                     // and 8", "2nd and alt rows"); rows are NOT contiguous, and
+                                     // `counts` is indexed by row − line.row with holes. Honoured
+                                     // by `inRange`, `refLineAt`, `summary().rows`, `countReport`
+                                     // and the store's row index
+  countsFrom?: number,               // wave H: the row `counts[0]` belongs to on a repeat line
+
+  // --- knitting additions (wave H; absent or null from crochet) -------------
+  side: 'rs'|'ws'|null,              // ONLY from a printed tag ("(RS)", "Row 1: RS (Set-up row)",
+                                     // "(Wrong side facing)"), or by parity strictly between two
+                                     // tags that agree; null in the round and when unsure.
+                                     // "(dec rnd)", "(turning ridge)", "(dec)" in the slot are not sides
+  delta: number|null,                // a stated change: "— 8 sts inc" (never a total)
+  until: { kind: 'length'|'rows', value, unit, endOn: 'rs'|'ws'|null, relative? }|null,
+                                     // "until piece measures 32 cm, ending with a WS row";
+                                     // unit 'cm'|'in', or 'rows'|'rnds' for kind 'rows';
+                                     // `relative` for "a further 2""
+  markers: [{ name, at }]|null,      // placed on this row; `at` = stitch index from the row start;
+                                     // 'BOR' reserved at 0; "pm for end of instep" keeps its name, else m1…
+  shortRow: boolean,                 // the row turns before the end (turn / w&t / wrap … turn /
+                                     // "turn so WS is facing"); "do not turn", magic loop's "Turn
+                                     // work, position needle point" and a turn after every stitch are not
+  chart: { name, row, rowEnd? }|null,   // "work row 7 of Chart A", "Rows 1–12 of Leg chart"
+  cable: { every, name }|null,       // a stated cable cadence
+  net?: number,                      // what one working of the row does to the count
+  sizeSkip?: true,                   // "Sizes XL only:" on a line read at another size: a note
+  startFrom?: number                 // internal: the count a part carried in from the part before
+}
+```
+`repeatTimes` for "a further N" / "N more" is N + 1 with `repeatMore: true` (the engine counts the
+written working), so `summary().maxRow` and `Store.applySuggestions` agree.
+`expand(lines, row, prevCount, state)` keeps the crochet signature and shape (below, "Live 3D
+diagram"); a craft adds its own record types and may add per-record fields (knitting: `side`,
+`cross`, `span`, `at`).
+
+### Wave H: the craft-profile engine and `window.Knits`
+
+Rules, fixtures, the twelve acceptance lines and the 23 known lines: `docs/wave-h/knits-parser.md`.
+Ground truth: `docs/research/knitting.md`.
+
+```js
+Patterns.createParser(profile) → api   // the whole reader over a profile; keys a profile leaves
+                                       // out fall back to crochet's
+Patterns.profile                       // CROCHET: { id, vocab, zeroRes, mrRe1, mrRe2, mrOnlyRe,
+                                       //   prefixRe, imperativeRe, partNounRe, placeNounRe,
+                                       //   stitchH, slWidth, glossary }
+window.Patterns = createParser(CROCHET)      // version '2.8/crochet'
+window.Knits    = createParser(KNIT_PROFILE) // version '2.8/knitting-1', craft 'knitting'
+api.glossary(text) → [{ abbr, meaning, fromPattern }]   // both crafts: the pattern's own
+                                       // abbreviation block first, then the profile table entries it uses
+api.craft, api.version                 // the store keys its line cache on the craft and the parser
+Knits.readInstruction(text, prev, opts) → { count, net, markers, shortRow, gap }
+Knits.until(text, size) → Line.until
+Knits.profile
+```
+`Knits` exposes every `Patterns` name with the same arity: `parse`, `targetFor`, `lineFor`,
+`summary`, `splitSections`, `placement`, `detectSizes`, `sizeMarks`, `sizeScope`, `countReport`,
+`dialectHints`, `gauge`, `evaluate`, `colors`, `colorHex`, `expand`, `LOOP_CHAIN_W`, `startHint`,
+`workMode`, `stuffingHint`. (CONTRACT §2's `parseSections` and `looksLikeGlossary` never existed on
+either; the names are `splitSections` and `glossary`.)
+
+- **Profile hooks.** A profile may replace or wrap `detectMarker`, `detectNextRow`, `detectSetup`,
+  `findExplicit`, `sizeScope`, `detectSizes`, `evaluate`, `detectRepeat`, `refDelta`, `findGroups`;
+  hook into the loop with `parseOpts`, `classify`, `lineCount`, `afterLine`, `postParse`,
+  `continues`, `hangs`, `setupFromNote`, `carryCount`, `carryIntoParts`; and flip `rowHeights`,
+  `wrapLimit`, `headerStartsPart`, `joinRepeatWraps`, `repeatsAddRows`, `groupStartsSection`.
+  `init(E, api)` hands it the engine's own helpers (`E`), so a craft reads counts, sizes and
+  colours exactly as crochet does. Every hook is a no-op for crochet; each is documented in
+  `js/patterns.js` where it is read. `VOCAB` entries may be functions of the match.
+- **Crochet is unchanged.** patterns 1037 and patterns.fixtures 829 / 844 are the gate, plus a
+  one-off differential page over all 67 crochet / knit / other / sewing fixtures that found 0
+  mismatches (it was deleted afterwards). `expand` costs the same as before.
+- **Knitting reading.** `CO 60 (66, 72) sts` reads in-segment sizes; "Cast On", "Bind Off" and
+  "Picot Bind-Off" never become part headers; numeric size lines `34 (38, 42, 46)` are sizes;
+  gauge and needle lines are never a setup row. A wrapped Yarnspirations row ("1st row:(RS). K1.
+  PM. K2. PM. …", up to 8 printed lines) is joined before counting. A shaping repeat with or
+  without a range label ("Rep Rows 3-4 60 more times. (255 sts)", "Rows 5-124: Rep Rows 3-4")
+  grows row by row, and a flat one carries its count. An ebook of several patterns is one
+  size-group per pattern (`findGroups` reads the contents page), and a group starts its own parts;
+  a part that continues the one before it carries `Sizes: …` and `Start with N (…) sts.` lines,
+  only when that count's size list is known. "Sizes S (M, L) only:" lines are rows for those
+  sizes and `sizeSkip` notes for the rest. Printed errors stay as printed (`deviation` on
+  Bernat's XL divide; Genome Rnd 4 gives no count).
+- **`expand` records for knitting**: `{ stitches: [{ t, c, h, w, side, cross?, span?, at? }],
+  color, height, width, state, inc, dec, shortRow, live, side }` with `t` in `k p yo k2tog ssk
+  k3tog cdd m1 kfb sl cable co bo`; `h` 0.75 (stockinette, rib, lace, cable), 0.5 for garter (a
+  knit row after a knit row flat, or alternating pure rounds); `w` 1, rib 0.8, a crossed cable
+  stitch 0.85; a cable is one record per stitch with `span` / `at` and `cross: 'f'|'b'`; `bo`
+  records are stitches bound off in the row (`live` = the rest = the count); a short row has
+  records only for the stitches it works.
+- Wave H2 polish (see `docs/wave-h/knit-parser-polish.md`): `PROFILE.reflow` (paragraph reflow before line splitting), `RUN.opts`, `PROFILE.rowOffset`, `setupOwnsRows`; a bare FINISHING / MAKING UP / ASSEMBLY / EDGING heading ends the current part in every profile; `Knits.isTunisian(text)` and `Knits.tunisian` are exposed for the Tunisian vocabulary pack on the crochet profile (tss/tks/tps/tfs/tdc/tes; forward + return pass = one row; `Patterns.version` is `'2.8/crochet+tunisian-1'`).
+
 ### App/Store integration (v2)
-- `Part.sizeIndex: number` (default 0). `Store.linesFor(part)` calls `Patterns.parse(part.patternText, { size: part.sizeIndex, sizeCount })` (wave F: `sizeCount` = `Project.sizes.length`, so the honesty rule applies); cache key includes sizeIndex.
-- **Size groups (wave G).** `Patterns.parseSections` tags each section with `group: {name, index}` when the document repeats part headers under size headings (running head with a varying suffix such as "Amigurumi Bee - Keyring / Medium / Big", a size-word or "version N" heading before a run of part headers, an explicit "SMALL BEE" block); `null` when the document has no groups, and a document with a legitimately repeated header ("Leg (make 2)" twice) stays ungrouped. `Part.group: string|null`, `Project.groups: [{name}]` in document order, `Project.activeGroup`, `Template.groups` + `Template.parts[].group` (present only when there are sizes). `importPatternSections` matches a section to an existing part only within the same group; `removeGroup(projectId, name)` is undoable; a group is done when its parts are done and the project when every kept group is. `line.workedIn: 'rows'` marks the row where a part switches from rounds to rows (`Store.rowWorkMode`). See `docs/wave-g/size-groups.md`.
+- `Part.sizeIndex: number` (default 0). `Store.linesFor(part)` calls `Patterns.parse(part.patternText, { size: part.sizeIndex, sizeCount })` (wave F: `sizeCount` = `Project.sizes.length`, so the honesty rule applies); cache key includes sizeIndex. Since wave H every such call goes to **the part's craft's parser** (`Store.parserFor(part)`, see "Crafts" → "Counter crafts and the parser slot"), and the cache key also holds the craft and the parser object.
+- **Size groups (wave G).** `Patterns.splitSections` tags each section with `group: {name, index}` when the document repeats part headers under size headings (running head with a varying suffix such as "Amigurumi Bee - Keyring / Medium / Big", a size-word or "version N" heading before a run of part headers, an explicit "SMALL BEE" block); `null` when the document has no groups, and a document with a legitimately repeated header ("Leg (make 2)" twice) stays ungrouped. `Part.group: string|null`, `Project.groups: [{name}]` in document order, `Project.activeGroup`, `Template.groups` + `Template.parts[].group` (present only when there are sizes). `importPatternSections` matches a section to an existing part only within the same group; `removeGroup(projectId, name)` is undoable; a group is done when its parts are done and the project when every kept group is. `line.workedIn: 'rows'` marks the row where a part switches from rounds to rows (`Store.rowWorkMode`). See `docs/wave-g/size-groups.md`.
 - **Size once** (wave F, brainstorm 4 / 03 #1, #13, #14). The size is a property of the PROJECT, picked once: `Project.size = { index, label }`. The contract:
   - A multi-size import (the New project drop zone or ⋯ → Import pattern) shows a **"Your size"** chip row (`role=radiogroup`, roving tabindex, arrow keys) with the document's own names. Until a size is picked each section says "pick your size for targets" and Save / Create parts refuses with "Pick your size first" and moves focus to the chips (`importPicker({initialSize})` → `size()`, `needsSize()`, `focusSize()`), so a nine-size pattern is never made silently in the first size. `importPatternSections(…, {size})` sets `Project.size`, every touched part's `sizeIndex`, reads each target at that size, and returns `sizeSet`; the toast adds "· size L".
   - `Store.setProjectSize(id, index)` → `{index, label, retargeted}`: one undo snapshot, every part's `sizeIndex` moves, rows / stitches / pieces are untouched, a target that was the pattern's reading (and an `untilRows` repeat that was the old suggestion) follows the size, a target typed by hand never moves. `Store.partSize(proj, part)` → `{index, label, source: 'project'|'part'|null, names}`; `Store.sizeNames(proj)` gives the document's names, else "Size 1..N". `Part.sizeIndex` keeps its meaning: a part set on its own ("Only this part" in the part editor, for body-in-L-sleeves-in-M) simply differs from `Project.size.index`. `addPart` inherits the project size; `targetRowsFromText(text, size, sizeCount)`.
@@ -422,6 +563,8 @@ Shipped defaults (seeded into `state.templates` on first load, and any missing b
 
 Store API: `Store.templates()` → array (built-ins first, then user templates by name); `Store.template(id)`; `Store.saveTemplate(tpl)` (create when no id / unknown id, else update; validates: name required, ≥ 1 part, part names non-empty, makeCount 1–99); `Store.deleteTemplate(id)` (user templates only; built-ins cannot be deleted, only reset); `Store.resetTemplate(id)` (built-in → restore shipped values); `Store.templateFromProject(projectId)` → an unsaved Template drafted from the project's parts (name + makeCount + patternText), checklist texts, countMode, groupSize, emoji, name "<project name> template". `Store.createProject` reads the template from state and copies each template part's `patternText` onto the part it makes (fresh part ids, so there is no line cache to clear). Export/import JSON includes templates with their part pattern text (import merges by id, imported wins). Undo not required for template edits.
 
+Knitting templates (wave H) are declared by `js/app-knitting.js` through `Store.registerCraft({ id: 'knitting', templates })` and re-seed like every craft's built-ins: `knit-blank` Single piece, `knit-sweater` Sweater (Back, Front, Sleeves ×2), `knit-socks` Socks (Sock ×2), `knit-hat` Hat, `knit-shawl` Shawl, `knit-blanket` Blanket, each with a checklist and pattern text whose every bracketed count was worked by hand. A knitting template may carry `Template.gauge` (the printed half only, never the swatch) and, per part, `markers: [{name, at}]` and `linked` (the **index** of the partner part in the template); `createProject` gives the markers fresh ids, links the parts by their new ids and takes `createProject({ gauge })` (a gauge read off a PDF) over the template's.
+
 UI:
 - New-project sheet: template picker reads `Store.templates()`; each card shows emoji, name, and the part list preview; a small "Edit templates" link under the picker opens the Templates sheet.
 - New-project sheet, **crochet only** (hidden for other crafts, destroyed on close): under the template picker sits the shared `pdfDropZone` (`data-tour="new-pdf"`) with a collapsed "or paste pattern text" disclosure, and below it the shared **import picker** — the same "Sections detected" (tick / rename / row counts) and "Checklist items found" lists the Import pattern sheet uses, hidden until there is something to show. Once a PDF has been read: a synthetic **"From this PDF"** card (📄, preview = the ticked section names) goes to the front of the template picker and is selected; picking a real template instead keeps the sections, which are then added on top of that template's parts. An empty Name field takes the PDF file name (without extension) as its placeholder. An **"Also save as a template"** toggle with a name input (default `<project or PDF name> template`) appears under the sections. On Save: `createProject` (template `blank` when "From this PDF" is chosen), then `importPatternSections(created.id, ticked, {mode:'parts', text})`, then the ticked checklist items, then optionally `saveTemplate` with the ticked sections as parts carrying their `patternText`; one toast, e.g. "Created Panda · 7 parts · saved as template". Creating a project is not undoable, so Undo afterwards steps back the import only.
@@ -446,9 +589,9 @@ helpers, `#screen-craft`, the ⋯ menu rules, `BlobStore`, `PdfText.open`,
 half of it is:
 
 ```js
-Project.craft: 'crochet' | 'crossstitch' | 'sewing'   // default 'crochet'; every old save migrates to it
+Project.craft: 'crochet' | 'knitting' | 'crossstitch' | 'sewing'   // default 'crochet'; every old save migrates to it
 Project.craftData: object                              // opaque to the shell, owned by the craft module
-Template.craft: 'crochet' | 'crossstitch' | 'sewing'   // default 'crochet'
+Template.craft: 'crochet' | 'knitting' | 'crossstitch' | 'sewing'   // default 'crochet'
 Template.craftData: object | null                      // seed craftData for projects made from it (deep-copied)
 Settings.crafts: { [craftId]: object }                 // per-craft settings shared across projects
 ```
@@ -478,6 +621,214 @@ in the New project sheet. The shell's `ctx` also gains `preserveFocus(fn)` (see 
 Wave F gives the node `ctx.pdfDropZone` returns `wrap.cancel()` and `wrap.signal()` (see "PDF
 import"), and the cross-stitch and sewing enhancements are listed in `docs/CRAFTS.md`.
 
+### Counter crafts and the parser slot (wave H)
+
+Knitting is the first **counter craft**: a craft that renders the crochet counter
+(`#screen-project`) with every crochet feature, reading its pattern text through its own parser.
+The craft-side contract is `docs/CRAFTS.md` → "Counter crafts"; the shell half is:
+
+```js
+App.registerCraft({ id, name|label, emoji, tagline,
+  usesCounter: true,                 // isCraftProject(p) is false → #screen-project, not #screen-craft
+  parser: 'Knits' | api,             // handed to Store.registerCraftParser
+  parserExtras: { checklistStart: RegExp, checklistSections: RegExp },
+  settingsFields(body, ctx),         // renders [data-craft-settings="<id>"] under Settings → Crafts
+  menuItems(p, ctx) → [{ icon, label, run }],   // above the file items in the crochet ⋯ menu
+  tourId,                            // ⋯ → Show me around starts this tour (else the craft id, else 'counter')
+  faq: [{ q, a }],                   // through ctx.addFaq
+  sectionNames, onInit(ctx) })
+App.craftUsesCounter(id) → boolean   // crochet, or a craft registered with usesCounter
+App.parserOf(projectOrPartOrCraft) → the parser that project reads with
+
+Store.registerCraftParser(craftId, api, extras?) → boolean
+    // api: the parser object or the NAME of its window global, resolved on every call (script
+    // order never matters); null unregisters. 'crochet' and '' are refused (crochet IS
+    // window.Patterns). Registering clears the line and diagram caches.
+Store.parserFor(projectOrPartOrProbeOrCraftId) → api | null
+    // the craft's registered parser; crochet, null and a craft with none → window.Patterns;
+    // a registered parser whose global is missing → null (no parse at all, a plain counter)
+Store.craftOf(x) → craftId           // a part's craft is its project's; a probe part may carry `craft`
+```
+- **Every former `window.Patterns` caller dispatches through `parserFor`**: `partLines` (the cache
+  key gains the craft and the resolved parser), `patternSummary`, `lineForRow`, `targetFor`
+  (and so `currentTargetInfo` / `repeatInfo`), `colorPlan`, the colour resolvers, `partWorkMode` /
+  `rowWorkMode`, `partDialect`, `partShape`, `diagramModel` / `roundDeviation`,
+  `importPatternSections`, `setProjectSize`, `createProject`'s template targets. A part with no
+  `craft` of its own is bound to the project a caller hands in (`diagramModel(part, project)` →
+  `bindPartProject`), so it is parsed, indexed and expanded by one parser.
+- Text-only entry points take a trailing optional craft (default crochet, so every old call is
+  unchanged): `splitSections(text, craft)`, `targetRowsFromText(text, size, sizeCount, craft)`,
+  `suggestChecklist(text, craft)` (with the craft's `parserExtras`), `countReport(text, { size,
+  sizeCount, craft })`.
+- **Gauge on import.** For a non-crochet craft only, `importPatternSections` reads the document's
+  gauge (`api.gauge(text)`) and needle lines into `Project.gauge` as printed — the unit printed
+  first, else `Settings.crafts.knitting.unit`; the largest needle listed when the gauge line says
+  "with larger needles", the smallest for "smaller", else the first — written with
+  `setGauge(id, g, { undo: false })` inside the import's snapshot, and returns `gauge: true`. A
+  gauge with any number on it is never overwritten (a missing needle is filled).
+- The New project sheet shows Count / group size and the crochet PDF block for counter crafts
+  (`newProjectPdfBlock(…, craftFn)`, `pdf.recraft()` re-reads a PDF when the craft changes);
+  `importPicker({ craft })` reads sizes, sections, dialect and checklist with the craft's parser.
+  `syncCraftNotice(p)` fills `#craft-notice` under the part tabs when a counter craft's parser is
+  not loaded. `js/tour.js`'s counter tour accepts a counter-craft project.
+
+## Knitting (wave H)
+
+Knitting is a counter craft (above): `js/app-knitting.js` registers it, `window.Knits` reads its
+text (Patterns API v2 → "Wave H"), and everything below is knitting-only — every entry point
+returns at once for any other craft, and a crochet save is byte-for-byte what it was. The binding
+names are `docs/wave-h/CONTRACT.md`; what the knitter sees, the pane checks and the residuals are
+`docs/wave-h/knit-counter.md` (state + widgets) and `docs/wave-h/knit-chart.md` (charts).
+
+### Knitting state
+
+```js
+Project.gauge = { sts, rows, over, unit: 'cm'|'in', needle: string, swatch: { sts, rows } }
+    // sts / rows over `over` units of `unit` AS PRINTED; numbers 2 dp or null. `swatch` is what
+    // the knitter measured over the same span. Default: empty, unit from Settings.crafts.knitting,
+    // over 10 cm / 4 in. The importer fills the printed half (Crafts → "Gauge on import")
+Part.side / markers / markerTotal / linked / shortRows        // see the Part block in "Data model"
+Part.shortRows = { active, n, of, row, base, numbered }
+    // n = the short row being worked (1-based); of = how many the pattern says (null for "until
+    // all sts are worked"); row = Part.row while they are worked (it does not advance); base =
+    // the row before the first; numbered = the pattern numbers them as rows of the part (a heel
+    // turn's Rows 89-102), so leaving the run lands on the row after them; active: false = done
+craftData.chartPages = [{ page, name, key, scale }]   // key default 'p:<id>:chartpage:<page>'
+craftData.charts = [{ page, name, rows, cols, cells|null, legend, repeats, rowNos, rowStep,
+                      bbox, pageBox, turned, … }]     // KnitChart results as plain JSON
+```
+All normalised on load (`knitNormalizeProject`, called from `normalizeProject`): markers sorted,
+≤ 40, one `BOR` forced to 0; `linked` repaired to be mutual (one-sided made mutual, self or
+missing dropped). Templates carry `Template.gauge` and per part `markers` / `linked` (see
+"Templates v2"); backups carry everything.
+
+### Store API (`installKnitApi`)
+
+Writers — each one snapshot + touch, so one Undo: `setGauge(projectId, patch, { undo: false }?)`
+(`''` / null clears a field; `undo: false` for a write inside another snapshot, as the importer
+and the part editor do), `setSide`, `flipSide`, `addMarker(projectId, partId, { name?, at? })`,
+`renameMarker`, `removeMarker`, `setMarkers(projectId, partId, list, total?)`, `linkParts`,
+`unlinkPart`, `splitTwoAtATime`, `endShortRows`, `setChartPages(projectId, [{ page, name, key?,
+chart?, noImage? }], opts)`.
+
+Readers: `gaugeOf`, `normalizeGauge`, `lengthToRows(projOrGauge, value, unit,
+'swatch'|'pattern')`, `gaugeCompare`, `sideInfo(part)` → `{ side, source: 'you'|'pattern'|
+'parity'|'round'|null, pattern, inRound, row }`, `patternSideAt(part, row)`, `markerInfo(part)`,
+`linkedPart(proj, part)`, `linkedLabel(proj, part)`, `shortRowInfo(part)`, `cableInfo(part)`,
+`untilInfo(part)`, `glossary(projOrPartOrText)` (the parser's `glossary`, else a 55-entry
+table with `used` from the text), `chartInfo(part)`, `chartPages(proj)`, `KNIT_CRAFT`.
+
+Counter hooks (no-ops for every other craft): `tapRow` → `knitTapRow` (a short-row step; a linked
+pair moves under one snapshot), `untapRow` → `knitUntapRow`, `completeRow` / `untapRow` /
+`jumpToRow` → `knitRowMoved` (the side turns with the work; a stated tag clears the knitter's
+override), a new piece or reset → `knitNewPiece`, `currentTarget` is null in short rows, and
+`tapStitch`'s auto-advance → `knitAfterAutoRow`. Results gain `shortRow`, `shortRowsDone`,
+`linked` and `switchedTo`. One shared fix: `buildRowIndex` honours `Line.rowList`.
+
+### Counter widgets (`js/app.js` "14b. Knitting on the counter", `css/app.css` "Wave H — knitting on the counter")
+
+- **RS / WS chip** (`data-tour="knit-side"`) beside ROW: `Line.side`, else parity from the last
+  stated tag at or before the row (a setup row counts as row 0); a dashed "RS?" before any tag;
+  a tap flips `Part.side` and is outlined until the next row whose line states a side. Hidden in
+  the round, except on a row that states its side (a heel flap) and in short rows. Announced with
+  the row ("Row 5 done. Next: wrong side").
+- **Short rows**: on a `Line.shortRow` row a strip "↩ Short row 3 of 8" (or "Short row 5"), the
+  row number does not move, the stitch readout has no target, + reads "Short row done (turn)",
+  "Done" ends the run; − steps back a short row.
+- **Markers** (`data-tour="knit-markers"`): "● m1 · ● heel · ▲ BOR", the next one ringed, and "7 →
+  m2 · 3 | 12 | 30 | 12 | 3" (the current segment underlined; "Slip marker m2" on one; "2 → end"
+  after the last). From the pattern's `Line.markers` until the knitter edits them; "+ marker",
+  tap to rename, hold or Delete to remove (Undo toast). On a row whose total differs from
+  `markerTotal`: "Markers set on a 60-st row · this row makes 62", and no counts.
+- **Two at a time**: linked parts share one tab ("Sock 1 | +2"), the label reads "Sock 1+2 · ROW",
+  one + advances both (one Undo), stitches go to the active piece, "⇄ Sock 2 · Rnd 4" switches.
+  Part editor → 🧣 Knitting → "Work with…", "Knit both at once (Sock 1+2)" (splits a part made
+  twice), "Stop working them together". Exactly two parts.
+- **Cable ring** in the row label: "cable in 3", "cable row" on the crossing; read by walking the
+  rows ahead through the repeat and the pattern's back-references for a crossing record, else
+  from `Line.cable.every`.
+- **Length chip** on a work-even-until stretch: "📏 32 cm ≈ 118 rows, not 110 · ≈ row 126" from
+  the measured row gauge, else the printed one, else "add your gauge"; counted from the start of
+  the piece unless the line says "from underarm / marker …"; "ending with a WS row" moves the ≈ row
+  onto a WS row. **Never a target**: `targetRows` is untouched.
+- **Chart chip** "▦ Chart A · row 7 of 16" (followed through a "Rows 3-16: work rows 3-16 of Chart
+  A" range and an unnumbered "Work Rows 1-61 of Lace chart" sentence between written rows,
+  `chartGapLine`); "of N" is the last charted row number. It opens the chart page image from
+  BlobStore cropped to `chart.bbox` (`pageBox` on a sideways chart; "Whole page" toggle, zoom),
+  the row from `KnitChart.rowText(chart, row, side, { repeat })` — side `null` in the round,
+  `'rs'`/`'ws'` flat, left out when unknown; never called on `cells: null` or an image chart; a
+  null result writes nothing — and "Row 15 is not drawn on the chart: work it as the pattern
+  says" when `rowNos` lacks the row. With several repeat boxes `opts.repeat` is picked by the
+  row's stitch total (`repeats[n].sizeSts`), then the size name in the box label, then the size
+  index.
+- **Chart capture**: a knitting drop zone remembers the open PDF handle (`knitZoneOpts` →
+  `onPages`); once the import has landed, `knitAttachCharts` runs `KnitChart.scan(handle,
+  { signal })` once in the background, draws each chart page at 2 px per PDF point to BlobStore and
+  writes `craftData.charts` / `chartPages` (at most 12 chart pages; the scan waits up to 30 minutes
+  for the import). The import never waits for it and the counter never reopens the PDF.
+- **Part editor → 🧣 Knitting card**: the project's printed gauge (sts, rows, over, cm/in, needle)
+  and "Your swatch"; live "Rows: 7% tight" and, per until-length line in the part, "32 cm ≈ 118
+  rows, not 110" with the line quoted; saved with the part's Save in the same Undo. The Terms
+  row is hidden for knitting here and in the 3D viewer.
+- **⋯ → 📖 Glossary** (`App.openGlossarySheet(projectId)`; the menu item is added by
+  `js/app-knitting.js` when `Knits.glossary` exists): "In this pattern" first, the rest folded,
+  a search box.
+- Wave H2 polish (see `docs/wave-h/knit-qa.md`): a knitting part gets no row target when its count is unknown; a pattern book imports one pattern by default with that pattern's own sizes, gauge and charts; duplicate section names become "Foot" / "Foot 2"; `partLines` passes `opts.sizes` and keys the cache on the parser's `version`; an unnamed knitting section is named from its garment noun, else "Part N"; the length chip counts "for a further N" from where the stretch began; the Glossary ⋯ item shows for every knitting project.
+
+### Chart reader (`js/knit-chart.js`, `window.KnitChart`, no DOM)
+
+Every knitting fixture's chart is a vector drawing (`docs/research/knitting.md`), so the reader
+works from `page.getOperatorList()`: rules merged into lattices (a cell exists when its four edges
+are drawn, or it has a fill, or three edges and a symbol); each cell's ink reduced to a descriptor
+(lines, rings, dots, filled polygons and their colour, background, glyphs inside the cell; ink
+wider than a cell is a span, i.e. a cable; of two same-colour fills only the last painted counts,
+which tells C4F from C4B); the key's samples, drawn with the same paths on the same page, matched
+by nearest descriptor (line angle penalised, Hausdorff distance for polygons); clip paths, white
+overpaint and text hidden under a clip are dropped. A glyph-font reader is the fallback, tried only
+with no drawn grid and ≥ 9 glyphs on a regular ≥ 3×3 grid. A raster picture that looks like a
+chart on a page that talks about one is `{ source: 'image', image: true, cells: null, mentions }`.
+
+```js
+KnitChart.fromHandle(handle, pageNo, { cells? }) → Promise<Chart[]>   // [] when no chart
+KnitChart.scan(handle, { pages?, maxPages?, signal?, cells? }) → Promise<[{ page, charts }]>
+    // a chart with no key borrows the nearest page's within 3 (`legendFromPage`)
+KnitChart.rowText(chart, rowNo, side, { repeat?, partial? }) → string | null
+KnitChart.rowCells(chart, rowNo, side) → [{ sym, c0, c1, stitch, text, run, color, consumes,
+                                            produces, skip, unknown }]
+KnitChart.rowInfo(chart, rowNo, side) → { text, consumes, produces, unknown }   // null counts
+                                       // when any stitch's count is unknown
+KnitChart.rowNumbers(chart), KnitChart.find(charts, 'Chart A' | 'A' | 'Leg'), KnitChart.parseMeaning(text)
+KnitChart.fromPageData(data, opts), KnitChart.readPage(pdfPage), KnitChart.settle(charts, opts)
+KnitChart.version                      // 1
+
+Chart = { name, cols, rows, cells: [[sym|null]] | null, legend, noStitch, readRS: 'rtl', startRow,
+          repeatBox, page, source: 'vector'|'glyph'|'image', drawn, image, bbox, pitch, spans,
+          rowStep, rowNos, rowNumbersGuessed, labelSide, repeats: [{ c0, c1, r0, r1, label, only,
+          byRow?, sizeSts? }], marks, unknown: [{ sym, count, at }], turned, legendFromPage,
+          unread, mentions }
+```
+- **Orientation**: `cells[0]` is the **bottom** drawn row, `cells[r][0]` the **leftmost** column;
+  `null` = no cell drawn there (a stepped edge). `rowStep: 2` when only right-side rows are
+  charted; `rowNos` holds the row number of each drawn row.
+- **Legend entries**: `sym, meaning, stitch, text, kind ('stitch'|'nostitch'|'repeat'|'setup'|
+  'marker'|'note'|'unknown'), consumes, produces, color, w, count`, plus `rs` / `ws` on
+  side-dependent keys and `cross` on cables. `stitch` is one of `k p yo k2tog ssk k3tog sk2p cdd
+  m1 kfb sl ktbl ptbl mb cable nostitch`, or null for wordings like "p1, k2, ppso".
+- **No guessing.** A cell that matches no key entry is `?n` (in `unknown`), and any row holding one
+  writes `null` (`opts.partial` writes `[?]` instead). `settle` turns a drawn chart into `cells:
+  null, drawn: true, unread` when the page has no key (`'no key'`), more than 25 % of its cells are
+  not in the key (`'symbols not in the key'`), or the caller passed `cells: false` (`'not asked'`);
+  it keeps its name, rows, row numbers, width, key and repeats.
+- **`rowText` rules**: `side` `'rs'` reads right to left, `'ws'` left to right, `null` (in the
+  round) right to left with side-dependent keys read as RS; left out, the side comes from where
+  the row number is printed (right = RS, left = WS), else parity. Runs are compressed ("k5"),
+  repeated decreases written "ssk twice" / "k2tog 3 times" (a yo is never folded: "yo twice" means
+  something else), a repeat box folded into "*…; rep from * to last N sts, …" with N from the
+  key's stitch counts (copies drawn outside the box fold in), a size-only box (`only`) writes just
+  its own stitches ("*…; rep from * around"), plain cables are `C4F` / `C4B`, complex ones the
+  key's own words in brackets. `opts.repeat: false` ignores the boxes, `n` uses `repeats[n]`.
+- Half charts (the Icelandic shawl's B / D / F) are written for the half that is printed.
+
 ## Guided help (tours)
 
 New file `js/tour.js` → `window.Tour`. A spotlight walkthrough engine plus declarative tour definitions. No dependencies.
@@ -494,6 +845,7 @@ Tours (write the copy warmly, short sentences, second person; every step teaches
 - `home` "Around the home screen": New project button → project cards (what the summary line shows) → settings gear (themes live here) → finished shelf (mention statuses).
 - `counter` "Counting a project" (requires a project open; if none exists, `before` creates a sample project "Tour sheep" from the Sheep template with a short amigurumi pattern on Body, e.g. `Rnd 1: 6 sc in MR (6)\nRnd 2: inc x6 (12)\nRnd 3: (sc, inc) x6 (18)\nRnd 4: (sc 2, inc) x6 (24)\nRnd 5-8: sc around (24)\nRnd 9: (sc 2, dec) x6 (18)`, opens it, and the final step offers "Delete the sample project" / "Keep it"): part tabs (tap to switch, tap again to edit; make-2 shows 0/2) → row counter and ± (rows vs rounds) → stitch button (`tryIt`: tap it three times; `advanceOn` not used, Next) → group readout and target (what `13 / 24` and `≈` mean, group size 0 = off) → pattern line (tap for the whole pattern, jump to a row) → Undo → Awake (keep screen on) → Alerts (buzz at stitch N) → Placing (placement notes) → timer chip → overflow menu (Import pattern, Checklist, Notes, History, Status, Save as template).
 - `import` "Importing a pattern": `before` opens the Import pattern sheet for the open project (or the sample): textarea (paste straight from the PDF, mess is fine) → sections list (each becomes a part; edit names; make counts detected) → Create parts vs Put it all in → then closes the sheet; final step says where the pattern shows up and that ≈ means computed.
+- `knitting` "Knitting with the counter" (wave H; registered by `js/app-knitting.js` through `Tour.register`, started by ⋯ → Show me around on a knitting project through the registration's `tourId`): one tab per piece → rows and rounds → the RS/WS chip (`[data-tour="knit-side"]`) → the marker strip (`[data-tour="knit-markers"]`) → stitches on the needle → the 3D piece → the pattern line → everything else; it opens the active or first unfinished knitting project, and makes a "Practice socks" project from `knit-socks` when there is none. The `counter` tour also accepts a knitting project.
 - `templates` "Templates and checklists": `before` opens Settings → Templates section (edit built-ins, reset, create your own) → then the project checklist (rename, reorder, reload from template) if a project is open.
 
 Entry points (App): a **Help** item in the Settings sheet ("Help & tours" section: list from `Tour.list()` with ✓ for seen and a Replay/Start button each, plus 6 short FAQ answers: importing a pattern, what ≈ means, repeats, stitch alerts, group size 0, backups) and a **?** item in the project overflow menu that starts `counter`. First run: when the home screen is empty on first ever load (settings flag `welcomed` false), show a small welcome card in the empty state: "New here? Take the 2-minute tour" → starts `home` then chains into `counter` (sample project) then offers `import`. Set `welcomed` true regardless of choice. `Store.settings()` gains `toursSeen: string[]` and `welcomed: boolean` (migrate on load).
@@ -545,6 +897,8 @@ Extraction rules (this is what makes the parser's life easy):
 - Join fragments like `fi nished` / `stuf fi ng` (pdf ligature splits: a lone `fi`/`fl` token with spaces around it) back into the word.
 - Insert `=== PAGE n ===` markers between pages (the parser treats them as notes).
 - Drop lines that are only page furniture: pure page numbers (`3 of 6`, `Page 3`), `©`/`@ 20xx ... All Rights Reserved` lines, lines that are only single capital letters (photo labels).
+- Wave H's knitting fixtures found three-column pages read line by line across the columns (socks p15 and p20, lace p31), a duplicate overlay text layer (socks p4, p8–9) and an advert inside a row (socks p5); see `docs/wave-h/knit-research.md`.
+- Wave H2 polish (see `docs/wave-h/pdftext-knit.md`): columns are chosen per band of rows; clipped or painted-over text is dropped; an advert inside a row is moved after the page text; chart labels are not folios; `test/pdftext.dump.html?f=…&hidden=1` lists hidden text per page.
 
 Store: `Store.suggestChecklist(text) → [{ text, confidence: 'strong'|'weak' }]` (the objects are `String` wrappers, so old callers that treat them as strings keep working) — from the pasted/extracted text, collect imperative assembly steps: lines (or note paragraphs) in sections whose header is Assembly / Finishing / Construction / Sewing, plus any line anywhere that starts with `Sew`, `Attach`, `Stuff`, `Embroider`, `Weave in`, `Block`, `Insert (safety) eyes`, `Glue`, `Fasten off and sew`, `Join`, trimmed to ≤ 90 chars, de-duplicated, max 20. Uses `Patterns.parse` kinds/notes where helpful.
 
@@ -840,7 +1194,8 @@ Diagram.follow                      // wave F: follow mode's pure maths, used by
   .FRONT (π/2), .MS (150), .MAX_MS (420), .PAN_MS (180)
 ```
 The renderer's `version` string is `'1.5.0'` as of wave F's follow mode (`'1.4.0'` was the wave E
-relief rewrite). `js/diagram-geo.js` is unchanged at 1.4.0.
+relief rewrite); wave H's knitted fabric makes it **`'1.6.0'`** and `js/diagram-geo.js` **1.5.0**
+(see "2c. Knitting" below; crochet's output is unchanged by both).
 - **`getStats().follow`**: `angle` is the working point on its ring (radians from stitch 0), `front`
   the ring angle facing the camera now (yaw + π/2), `target` the unwrapped yaw it is easing to,
   `pan` the rows slide in world units, `trophy` whether a finished piece is turning, `reason` `''` /
@@ -893,7 +1248,7 @@ DiagramGeo.fit({ rad, ymin, ymax, halfW, halfH, cp, sp, curY, mode,
 DiagramGeo.arcSlices(prof, wt, n, a0Out, awOut)   // stitch width follows ARC LENGTH
 DiagramGeo.classify(model, { terrace: false })    // wave E: terrace smoothing off, for comparison
 DiagramGeo.loopSag, sitePositions, cornerGroups, LOOP, TERRACE, OPEN_TURN_IN   // wave E exports
-DiagramGeo.version                                // '1.4.0'
+DiagramGeo.version                                // '1.5.0' since wave H ('1.4.0' in wave E)
 ```
 Wave E adds, per round from `classify`: `radiusCount` (Σw/2π), `fan` / `fanShift`, `loop`, `kf`,
 `terrace`; per piece: `terrace { applied, alpha, runs, rings, maxShift }` and `fans`. A round's
@@ -992,6 +1347,64 @@ every constant is re-exported on `DiagramGeo` so `test/diagram.test.html` prints
 - **Grounding**: a soft elliptical contact shadow (a vertex-weighted disc, black premultiplied, drawn after the solids with `depthMask(false)`) sits on the plane where the finished piece will rest — the bottom of the whole model, which the ghost cage reaches down to — with the radius of the widest fabric that actually exists, clamped to the fitted radius so it can never be clipped. It fades in as the work grows down to that plane (`smoothstep(0.45, 0.92, grown)`) and fades out as the camera comes level with the piece, so it never appears when looking from below. Plain black, so it never clashes with a theme's `--primary`.
 - **Animation**: `animate:'stitch'` → the newest bump scales in from 0 over 140ms with slight overshoot; `'round'` → the finished ring flashes once with `palette.glow`. Redraw only via requestAnimationFrame while something changes or auto-rotating; must stay ≤ 4ms/frame for 60 rounds × 60 stitches on a mid phone (cap 160 slices per ring; subsample beyond; the per-purpose `LOD_BUDGET` is the knob). A tap rebuilds nothing (per-band hash). Not yet measured on a phone GPU: wave E's desktop bursts gave `frameMs` 7.0 (420 px button, `high`) / 12.1 (60 × 60 viewer, `mid`) and CPU builds of 7–21 ms. DPR-aware, transparent clear colour so the button colour shows through.
 - Deliver `test/diagram.test.html`: canvas + buttons for sample models (sphere 6→48→6, cone/horn, striped tube, bear head with a belly-panel colour run, a 30-row blanket), a "tap" button that advances `done` with animation, a "complete round" button, an interactive toggle, and a theme switcher for the background colour. Plus a **Gesture** panel: "Drag right/down" buttons that drive `dragStart/dragMove/dragEnd` in controlled steps and print yaw/pitch, a "Finish piece" button (the contact shadow only appears once the work reaches the ground plane) and a quadrant-coloured model whose four colour panels make the rotation direction unmistakable.
+
+**2c. Knitting (wave H; `js/diagram-geo.js` 1.5.0 section "7c. knitting", `js/diagram.js` 1.6.0)**
+
+What it draws, the synthetic and fixture references, the gallery verdicts and what is left:
+`docs/wave-h/knit-3d.md`. Nothing about crochet changed (the reference set is 242 byte for byte).
+
+- **Model.** `Store.diagramModel` builds a knitting part through `Knits.expand` and, for a
+  knitting project only (`craftKeyOf(proj || part) === 'knitting'`; a crochet model keeps exactly
+  the keys it had), adds: `Model.craft: 'knitting'` (DiagramGeo and the renderer take their
+  knitting path), `shape.graft` (the text says Kitchener / graft: a closed toe), `shape.closedStart`
+  (Turkish / Judy's / figure-8 / pinhole / circular cast-on: a closed toe or crown start), and per
+  round `side` ('rs'|'ws', from `Line.side`, else `expand().side`), `shortRow`, `markers` (≤ 24,
+  copied from `Line.markers`) and `delta`; stitch records keep `side`, `cross`, `n`, `span`, `at`.
+  Count rules: a cable counts as its stitches whether it is one record per stitch (as `Knits`
+  writes it) or one record over several (`n`, else `round(w / 0.85)`); a `bo` record is in the
+  row's fabric but not on the needle (a row that binds off everything is drawn, and the next starts
+  from 0); row 1 starts from the cast-on (the first setup line seeds `prevCount`); a count with no
+  records is filled with plain `k` at 0.75; yo / m1* / kfb / pfb are increase sites and k2tog / ssk
+  / p2tog / ssp / k3tog / p3tog / sssk / sssp / cdd / s2kp / sk2p / skp decrease sites.
+- **Geometry** (`isKnit`, `knitPartials`, `knitSpan`, `warpPoint`, `KNIT`; `classify` sends a
+  knitting model to `classifyKnitRounds` / `classifyKnitRows`, which reuse the crochet walk on
+  rounds converted to their own height, then add): **partial rows → bend** — a round with `side`
+  or `shortRow` on ≤ 85 % of the ring is closed by its held stitches (with no side information, the
+  heel count signature: ≥ 4 rows at ≤ 0.6 of the ring that come back to ≥ 0.9), and the run's
+  height becomes a bend about the held side, `angle = height / radius` capped at 90°, so a sock is
+  an L; a toe-up piece (`closedTop`) is turned so its leg stands with the cuff on top. **Yoke** — an
+  increase run of ≥ 3 rounds growing ≥ 1.3×, a one-round drop to ≤ 80 %, then ≥ 2 rounds: the yoke
+  takes a stadium profile ending at the body radius, the divide rises one row, the sleeve tops
+  fall at 40° (`warp.yoke`, cosmetic). **Knit walk rules** — widths eased by a 1-2-1 filter (never
+  across partial rows, outliers or > 20 % jumps), so "+8 every other round" is a slope; a round
+  with no more stitches than the one before never frills, an increase round only past 2× the flat
+  rate or 25 % of the round before; a piece open at both ends has slack 0; a piece that closes at
+  its last round and starts open (a brim-up hat) is flipped crown up; a graft closes the toe;
+  `closedTop` from `closedStart`, or from a cast-on of ≤ 32 stitches (≤ 45 % of the widest round)
+  that increases at once. **Short rows in rows mode** — a `shortRow` row under 90 % of the last
+  full row is anchored at the edge it ended at and tapers to nothing over 2 stitches at its turn;
+  every row lies on a per-column height field (`band.field`). **Chevron** — edge plus spine
+  increases (or decreases toward the apex) on ≥ 40 % of the shaping rows and ≥ 4× growth make each
+  half a linear map at the half-angle fitted from the rows (45° garter, 33.7° stockinette): a
+  triangle shawl. Rows-mode outliers in a knitting piece are judged against the row before, not
+  the running median. `layout` gives warped knitting bands `ext {rad, ymin, ymax}`, `warpSig` and
+  (rows) `field`; `cls.warp` is null or `{ bends, disp, chevron, field, yoke }` and `cls.knit`
+  reports `{ partials, bends, yoke, toeUp }` in rounds mode and `{ shortRows, chevron }` in rows
+  mode.
+- **Renderer.** `normalizeModel` → `prepKnitRound`: a cable becomes one slice per stitch, held
+  slices of a partial row come first and are always solid, `mir` gives the on-screen direction.
+  `knitDescOf` / `reliefKnit` / `reliefCable` build the relief with zero on the cell edges like
+  crochet: a knit V with two legs and no top bar, a purl bump, a WS row drawn as seen from the RS,
+  rib texture when faced knits and purls are each ≥ 15 % of the round, k2tog right and ssk left on
+  the face, cdd's centre up, m1 / kfb narrow V's, eyelets through the hole mechanism with their own
+  window (`holeLo` / `holeHi` / `holeU`), cable strands crossing over `CABLE_TW` = 2 rows either
+  side (`knitTwists`, front strand on top), a cast-on cord and a bind-off chain, and no quarter-
+  stitch stagger between knit rows. `warpGeo` moves every vertex, normal and cap of a band through
+  `DiagramGeo.warpPoint`; hashes fold in `warpSig`; `bandExtent` uses `b.ext`. Test hooks on
+  `Diagram._relief`: `knitDescOf`, `knitSpan`, `buildKnitRound`, `warp`, `normalize`.
+- **Not yet**: follow mode turns a bent piece about the leg's axis (the foot's rounds do not come
+  to the front); each part is drawn alone (no garment assembly); heights are 0.7496, not 0.75
+  (`roundMetrics` keys to 3 decimals in sc units).
 
 **3. App integration (`js/store.js`, `js/app.js`, `index.html`, `css/app.css`, `js/tour.js`)**
 - `Part.rowStitches: number[]` (index = row number, 1-based; value = stitch count when that row was completed). `tapRow` records `part.stitch` (or the target when auto-advanced) before resetting; `untapRow` pops; `resetPart` clears; normalised on load.

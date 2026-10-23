@@ -2401,3 +2401,210 @@ mark.size-mark {
      instead of flashing it. */
   .stitch-btn.flash { animation: none !important; background: var(--danger); }
 }
+
+/* --------------------------------------------------------------------------
+   Wave H — knitting on the counter (knit-counter). Only a knitting project
+   ever gets these elements; colours come from the theme tokens so all six
+   themes keep their contrast.
+   -------------------------------------------------------------------------- */
+
+/* RS / WS chip in the row label */
+.knit-side-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  min-width: 40px;
+  justify-content: center;
+  margin-left: 4px;
+  padding: 0 9px;
+  border-radius: 999px;
+  border: 2px solid var(--primary);
+  background: var(--primary);
+  color: var(--primary-text);
+  font-family: var(--font-display);
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: 1px;
+  vertical-align: middle;
+}
+.knit-side-chip.ws { background: var(--surface); color: var(--text); }
+.knit-side-chip.unknown { background: var(--surface); color: var(--text-muted); border-style: dashed; border-color: var(--border); }
+.knit-side-chip.mine { box-shadow: 0 0 0 2px var(--accent); }
+.knit-short-tag { letter-spacing: 1px; }
+/* the UK / US Terms rows are hidden on a knitting project */
+.viewer-bar-row[hidden], .field[hidden] { display: none; }
+
+/* cable ring: fills as the crossing row comes, flashes on it */
+.knit-cable {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 6px;
+  vertical-align: middle;
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 12px;
+  font-weight: 800;
+  color: var(--text-muted);
+}
+.knit-cable-ring {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: conic-gradient(var(--primary) var(--knit-fill, 0deg), var(--border) 0);
+  -webkit-mask: radial-gradient(circle, transparent 4px, #000 4.5px);
+  mask: radial-gradient(circle, transparent 4px, #000 4.5px);
+}
+.knit-cable.now { color: var(--text); }
+.knit-cable.now .knit-cable-ring { animation: knit-cable-pulse 1.2s ease-in-out 3; }
+@keyframes knit-cable-pulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.35); }
+}
+
+/* short rows: one line under the row counter */
+.knit-short {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  margin: 6px 0 0;
+  padding: 6px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--accent);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 14px;
+}
+.knit-short[hidden] { display: none; }
+.knit-short-icon { font-weight: 800; color: var(--text); }
+.knit-short-text { font-weight: 800; }
+.knit-short-sub { flex: 1 1 auto; min-width: 0; color: var(--text-muted); font-size: 12px; font-weight: 700; }
+.knit-short-end { margin-left: auto; min-height: 32px; }
+
+/* chart / length / partner chips under the pattern line */
+.knit-extra {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 6px 0 0;
+}
+.knit-extra[hidden] { display: none; }
+.knit-chip {
+  min-height: 36px;
+  max-width: 100%;
+  padding: 4px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* the marker strip under the stitch readout */
+.knit-markers {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 0;
+  font-size: 13px;
+}
+.knit-markers[hidden] { display: none; }
+.knit-marker-row {
+  display: flex;
+  gap: 6px;
+  max-width: 100%;
+  overflow-x: auto;
+  scrollbar-width: none;
+  padding: 2px;
+}
+.knit-marker-row::-webkit-scrollbar { display: none; }
+.knit-marker {
+  flex: 0 0 auto;
+  min-height: 32px;
+  min-width: 44px;
+  padding: 2px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+.knit-marker.next { border: 2px solid var(--primary); }
+.knit-marker.here { background: var(--primary); color: var(--primary-text); border-color: var(--primary); }
+.knit-marker-info { text-align: center; line-height: 1.3; }
+.knit-seg-dot { color: var(--text-muted); }
+.knit-marker-next { font-weight: 800; color: var(--text); font-variant-numeric: tabular-nums; }
+.knit-segments { color: var(--text-muted); font-weight: 700; font-variant-numeric: tabular-nums; }
+.knit-seg-bar { margin: 0 5px; opacity: 0.6; }
+.knit-seg.on { color: var(--text); text-decoration: underline; text-underline-offset: 3px; }
+.knit-add-marker { min-height: 44px; padding: 6px 12px; font-size: 14px; }
+.knit-add-marker[hidden] { display: none; }
+
+/* two at a time: one tab, two halves */
+.tab-pair {
+  flex: 0 0 auto;
+  display: inline-flex;
+  max-width: 15em;
+}
+.tab-pair .tab-half { max-width: 9em; }
+.tab-pair .tab-half:first-child { border-radius: 999px 0 0 999px; padding-right: 8px; }
+.tab-pair .tab-half:last-child { border-radius: 0 999px 999px 0; border-left: 0; padding-left: 8px; }
+
+/* the part editor's Knitting card */
+.knit-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+}
+.knit-card-title { font-family: var(--font-display); font-weight: 700; font-size: 15px; }
+.knit-gauge-row input { min-width: 0; }
+.knit-gauge-result { display: flex; flex-direction: column; gap: 6px; }
+.knit-until-item { display: flex; flex-direction: column; gap: 1px; }
+.knit-until-say { font-weight: 800; font-variant-numeric: tabular-nums; }
+.knit-until-line { font-size: 12px; color: var(--text-muted); }
+
+/* glossary */
+.knit-glossary { display: flex; flex-direction: column; gap: 2px; }
+.knit-gloss-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 10px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+}
+.knit-gloss-abbr { flex: 0 0 6.5em; font-weight: 800; }
+.knit-gloss-meaning { flex: 1 1 12em; min-width: 0; }
+.knit-gloss-src { font-size: 11px; font-weight: 800; color: var(--text-muted); text-transform: uppercase; letter-spacing: 1px; }
+.knit-gloss-more > summary { cursor: pointer; padding: 8px 0; font-weight: 700; color: var(--text-muted); }
+
+/* chart page */
+.knit-chart-row { display: flex; flex-direction: column; gap: 2px; }
+.knit-chart-text { font-weight: 700; line-height: 1.4; }
+.knit-chart-stage { overflow: auto; max-height: 60vh; border-radius: var(--radius-sm); background: var(--surface); }
+.knit-chart-img { display: block; width: 100%; height: auto; }
+.knit-chart-tools { justify-content: flex-end; }
+.knit-chart-tools .btn { flex: 0 0 auto; min-width: 48px; min-height: 44px; }
+
+@media (max-height: 760px) {
+  .knit-short { margin-top: 4px; padding: 4px 10px; }
+  .knit-extra { margin-top: 4px; }
+  .knit-chip { min-height: 32px; }
+}

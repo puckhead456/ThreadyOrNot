@@ -239,6 +239,7 @@
 }());
 </script>
 <script src="../js/patterns.js?v=dev"></script>
+<script src="../js/knits.js?v=dev"></script>
 <script src="../js/vendor/pdf.min.js"></script>
 <script src="../js/pdftext.js?v=dev"></script>
 <script src="../js/store.js?v=dev"></script>
@@ -260,6 +261,8 @@
 }());
 /* Never touch the app's real state. */
 try { window.Store.__setKeyForTests('ZDGEO_test_store'); } catch (e) { /* ignore */ }
+/* wave H: knitting parts read through Knits (the app registers it via App.registerCraft) */
+try { if (window.Knits && window.Store.registerCraftParser) window.Store.registerCraftParser('knitting', 'Knits'); } catch (e) { /* ignore */ }
 </script>
 <script>
 (function () {
@@ -2923,6 +2926,583 @@ try { window.Store.__setKeyForTests('ZDGEO_test_store'); } catch (e) { /* ignore
     }());
     // /follow -----------------------------------------------------------------
 
+    // knit --------------------------------------------------------------------
+    /* Wave H (docs/wave-h/knit-3d.md): knitted fabric and garment shapes.
+       Synthetic Model v2 knitting records first (contract §2 types), then the
+       same shapes read end to end through Knits.parse / Knits.expand ->
+       Store.diagramModel when js/knits.js is loaded. Pure: DiagramGeo and
+       Diagram._relief, no GL context. */
+    (function knitBlock() {
+      var RX = window.Diagram && window.Diagram._relief;
+      var TAU = Math.PI * 2;
+      group('Knitting — geometry: heights, the sock\'s heel, the yoke, the shawl, short rows (wave H)');
+      if (!G.isKnit || !G.warpPoint) { ok('DiagramGeo 1.5.0 knitting exports', false, 'missing'); return; }
+
+      function kst(t, side, h, w, extra) {
+        var o = { t: t, c: null, h: h || 0.75, w: w == null ? 1 : w };
+        if (side) o.side = side;
+        if (extra) for (var k in extra) if (extra.hasOwnProperty(k)) o[k] = extra[k];
+        return o;
+      }
+      function kline(n, t, side, h, w) { var a = []; for (var i = 0; i < n; i++) a.push(kst(t, side, h, w)); return a; }
+      function ribl(n, k, p, side) {
+        var a = [];
+        while (a.length < n) {
+          for (var i = 0; i < k && a.length < n; i++) a.push(kst('k', side, 0.75, 0.8));
+          for (i = 0; i < p && a.length < n; i++) a.push(kst('p', side, 0.75, 0.8));
+        }
+        return a;
+      }
+      function kr(list, opt) {
+        opt = opt || {};
+        var cnt = 0;
+        list.forEach(function (s) { if (s.t !== 'bo') cnt++; });
+        var r = { count: cnt, done: cnt, stitches: list, color: '#c8d8f0', height: opt.h || list[0].h || 0.75,
+          ghost: false, inc: opt.inc || null, dec: opt.dec || null };
+        if (opt.side) r.side = opt.side;
+        if (opt.shortRow) r.shortRow = true;
+        return r;
+      }
+      function km(rs, mode, shape, craft) {
+        rs.forEach(function (r, i) { r.row = i + 1; });
+        var m = { mode: mode || 'rounds', rounds: rs, current: rs.length - 1, defaultColor: '#c8d8f0',
+          shape: shape || { start: 'unknown' }, window: { first: 1, total: rs.length },
+          deviation: { expected: null, actual: 0 } };
+        if (craft !== false) m.craft = 'knitting';
+        return m;
+      }
+      function side(i) { return i % 2 ? 'ws' : 'rs'; }
+      // Speed Bump Socks (docs/research/knitting.md §2b), size S: CO 56, rib,
+      // leg, a 32-row heel flap on 28, 10 short rows to 18, pick up to 80,
+      // gussets back to 56 over 24 rnds, foot, a 17-round toe to 20, Kitchener.
+      function sockTopDown(noSide) {
+        var rs = [], i, c;
+        for (i = 0; i < 16; i++) rs.push(kr(ribl(56, 1, 1)));
+        for (i = 0; i < 50; i++) rs.push(kr(kline(56, 'k')));
+        for (i = 0; i < 32; i++) rs.push(kr(kline(28, i % 2 ? 'p' : 'k', noSide ? null : side(i)), noSide ? {} : { side: side(i) }));
+        c = 27;
+        for (i = 0; i < 10; i++) { rs.push(kr(kline(c, i % 2 ? 'p' : 'k', noSide ? null : side(i)), noSide ? {} : { side: side(i), shortRow: true })); c--; }
+        c = 80;
+        for (i = 0; i < 24; i++) { if (i % 2 === 0) c -= 2; rs.push(kr(kline(c, 'k'))); }
+        for (i = 0; i < 40; i++) rs.push(kr(kline(56, 'k')));
+        c = 56;
+        for (i = 0; i < 17; i++) { if (i % 2 === 0) c -= 2; rs.push(kr(kline(c, 'k'))); }
+        return km(rs, 'rounds', { start: 'unknown', graft: true });
+      }
+      function sockToeUp() {
+        var rs = [], i, c = 24;
+        rs.push(kr(kline(24, 'k')));
+        for (i = 0; i < 16; i++) { if (i % 2 === 0) c += 4; rs.push(kr(kline(c, 'k'))); }
+        for (i = 0; i < 40; i++) rs.push(kr(kline(c, 'k')));
+        for (i = 0; i < 20; i++) { if (i % 2 === 0) c += 2; rs.push(kr(kline(c, 'k'))); }
+        var k = 32;
+        for (i = 0; i < 12; i++) { k -= (i < 6 ? 2 : -2); rs.push(kr(kline(k, i % 2 ? 'p' : 'k', side(i)), { side: side(i), shortRow: true })); }
+        for (i = 0; i < 24; i++) rs.push(kr(kline(32, i % 2 ? 'p' : 'k', side(i)), { side: side(i) }));
+        for (i = 0; i < 40; i++) rs.push(kr(kline(64, 'k')));
+        for (i = 0; i < 14; i++) rs.push(kr(ribl(64, 2, 2)));
+        return km(rs, 'rounds', { start: 'unknown', closedStart: true });
+      }
+      // Bernat Top Down Pullover XS/S (research §1): 76 after the neck, +8
+      // every other round to 204, divide to 120, body, rib.
+      function raglan() {
+        var rs = [], i, c = 76;
+        for (i = 0; i < 6; i++) rs.push(kr(ribl(76, 1, 1)));
+        for (i = 0; i < 32; i++) { if (i % 2 === 1) c += 8; rs.push(kr(kline(c, 'k'))); }
+        for (i = 0; i < 50; i++) rs.push(kr(kline(120, 'k')));
+        for (i = 0; i < 8; i++) rs.push(kr(ribl(120, 1, 1)));
+        return km(rs, 'rounds', { start: 'unknown' });
+      }
+      function hat() {
+        var rs = [], i, c = 96;
+        for (i = 0; i < 12; i++) rs.push(kr(ribl(96, 2, 2)));
+        for (i = 0; i < 40; i++) rs.push(kr(kline(96, 'k')));
+        for (i = 0; i < 24; i++) { if (i % 2 === 0 && c > 8) c -= 8; rs.push(kr(kline(c, 'k'))); }
+        return km(rs, 'rounds', { start: 'unknown' });
+      }
+      // a garter triangle grown from the centre: k2, yo, k to centre, yo, k1,
+      // yo, k to last 2, yo, k2 — four increases every RS row
+      function shawl() {
+        var rs = [], i, c = 7;
+        for (i = 0; i < 60; i++) {
+          var sd = side(i);
+          if (sd === 'rs' && i > 0) c += 4;
+          var st = kline(c, 'k', sd, 0.5), inc = null;
+          if (sd === 'rs' && i > 0) {
+            var mid = Math.floor(c / 2);
+            inc = [2, mid - 1, mid + 1, c - 3];
+            inc.forEach(function (q) { st[q] = kst('yo', sd, 0.5); });
+          }
+          rs.push(kr(st, { side: sd, inc: inc, h: 0.5 }));
+        }
+        return km(rs, 'rows');
+      }
+      function lace() {
+        var rs = [], i, W = 41;
+        for (i = 0; i < 24; i++) {
+          var sd = side(i), st;
+          if (sd === 'ws') st = kline(W, 'p', 'ws');
+          else {
+            st = [kst('k', 'rs'), kst('k', 'rs')];
+            for (var g = 0; g < 6; g++) ['k', 'k', 'k', 'yo', 'ssk', 'k'].forEach(function (t) { st.push(kst(t, 'rs')); });
+            while (st.length < W) st.push(kst('k', 'rs'));
+          }
+          rs.push(kr(st, { side: sd }));
+        }
+        return km(rs, 'rows');
+      }
+      function wedge() {
+        var rs = [], i;
+        for (i = 0; i < 10; i++) rs.push(kr(kline(40, 'k', side(i)), { side: side(i) }));
+        for (i = 0; i < 10; i++) rs.push(kr(kline(35 - i * 2, 'k', side(i)), { side: side(i), shortRow: true }));
+        for (i = 0; i < 16; i++) rs.push(kr(kline(40, 'k', side(i)), { side: side(i) }));
+        return km(rs, 'rows');
+      }
+
+      /* -- detection and heights -- */
+      var tube = km((function () { var a = []; for (var i = 0; i < 20; i++) a.push(kr(kline(40, 'k'))); return a; }()), 'rounds');
+      var tubeNoCraft = km(tube.rounds, 'rounds', null, false);
+      var croc = model([6, 12, 18, 18]);
+      ok('a knitting Model is read as knitting — from `craft`, or from its records; a crochet one never is',
+        G.isKnit(tube) && G.isKnit(tubeNoCraft) && !G.isKnit(croc) &&
+        !G.isKnit({ craft: 'crochet', rounds: tube.rounds }),
+        'craft ' + G.isKnit(tube) + ' · records ' + G.isKnit(tubeNoCraft) + ' · crochet sphere ' + G.isKnit(croc));
+      var ct = G.classify(tube);
+      var garter = G.classify(km((function () { var a = []; for (var i = 0; i < 10; i++) a.push(kr(kline(30, 'k', side(i), 0.5), { side: side(i), h: 0.5 })); return a; }()), 'rows'));
+      var ribRows = G.classify(km((function () { var a = []; for (var i = 0; i < 6; i++) a.push(kr(ribl(40, 2, 2, side(i)), { side: side(i) })); return a; }()), 'rows'));
+      ok('row heights in stitch widths: stockinette 0.75 a round, garter 0.5 a row, rib 0.75 at 0.8 a stitch',
+        near(ct.height, 20 * 0.75, 1e-3) && near(garter.height, 10 * 0.5, 1e-3) &&
+        near(ribRows.height, 6 * 0.75, 1e-3) && near(ribRows.width, 40 * 0.8, 1e-9) &&
+        near(ct.maxRadius, 40 / TAU, 1e-9) && ct.slack === 0,
+        'tube of 20 × 40: H ' + n(ct.height, 4) + ' (15), r ' + n(ct.maxRadius, 3) + ' slack ' + ct.slack +
+        ' · garter 10 rows: H ' + n(garter.height, 3) + ' · k2p2 6 rows: H ' + n(ribRows.height, 3) + ' W ' + n(ribRows.width, 2));
+
+      /* -- the sock -- */
+      var sk = G.layout(sockTopDown()), kb = sk.knit, box = kb.box;
+      var legR = sk.rounds[30].radius, dia = 2 * legR;
+      var pts = [0, 0, 0];
+      // the last ring's centre: where the toe is
+      var lastB = sk.bands[sk.bands.length - 1];
+      G.warpPoint(sk.warp, null, 0, lastB.yBot, 0, pts);
+      var toeY = pts[1], toeH = Math.sqrt(pts[0] * pts[0] + pts[2] * pts[2]);
+      ok('a top-down sock reads as a sock: an L — leg down, a right-angle heel, the foot out level',
+        kb.bends.length === 1 && near(kb.bends[0].phi, Math.PI / 2, 1e-9) && kb.partials === 42 &&
+        box.y1 - box.y0 > 2.5 * dia && box.z1 - box.z0 > 2.5 * dia &&
+        toeH > 3 * dia && Math.abs(toeY - (kb.bends[0].y1 + kb.bends[0].y0) / 2) < 3 * dia &&
+        !kb.toeUp && sk.closedBottom === true && sk.ruffles === 0,
+        'bend ' + n(kb.bends[0].phi * 180 / Math.PI, 1) + '° over the ' + kb.partials + ' heel rows (flap 32 + turn 10, ' +
+        n(kb.bends[0].length, 2) + ' of fabric) · box: tall ' + n(box.y1 - box.y0, 1) + ', foot reach ' +
+        n(box.z1 - box.z0, 1) + ' vs leg Ø ' + n(dia, 2) + ' · toe centre ' + n(toeH, 1) + ' out at y ' + n(toeY, 1) +
+        ' · grafted toe closed ' + sk.closedBottom + ' · ruffles ' + sk.ruffles);
+      // the heel side grows, the instep side does not
+      var bnd = kb.bends[0], a = [0, 0, 0], b = [0, 0, 0];
+      var backX = -bnd.px * 2, backZ = -bnd.pz * 2;     // the back of the ring, opposite the pivot
+      G.warpPoint(sk.warp, null, bnd.px + backX, bnd.y0, bnd.pz + backZ, a);
+      G.warpPoint(sk.warp, null, bnd.px + backX, bnd.y1, bnd.pz + backZ, b);
+      var backArc = Math.sqrt(Math.pow(a[0] - b[0], 2) + Math.pow(a[1] - b[1], 2) + Math.pow(a[2] - b[2], 2));
+      G.warpPoint(sk.warp, null, bnd.px, bnd.y0, bnd.pz, a);
+      G.warpPoint(sk.warp, null, bnd.px, bnd.y1, bnd.pz, b);
+      var frontArc = Math.sqrt(Math.pow(a[0] - b[0], 2) + Math.pow(a[1] - b[1], 2) + Math.pow(a[2] - b[2], 2));
+      ok('the heel rows lengthen the back of the tube and leave the instep: a bend about the held side, not a pinch',
+        frontArc < 1e-6 && backArc > 1.2 * dia && sk.rounds[70].radius > 0.95 * legR,
+        'instep edge moves ' + n(frontArc, 6) + ' · back of the heel chord ' + n(backArc, 2) +
+        ' · a heel-flap row is drawn at ring r ' + n(sk.rounds[70].radius, 2) + ' (leg ' + n(legR, 2) +
+        ', the flap alone would be ' + n(28 / TAU, 2) + ')');
+      var pads = G.knitPartials(sockTopDown().rounds);
+      ok('the held stitches close each heel row to a ring that walks from the leg (56) to the gusset pick-up (80)',
+        pads && pads[66] && pads[66].count === 28 && pads[66].ring >= 56 && pads[107].ring <= 80 &&
+        pads[107].ring > pads[66].ring && !pads[65] && !pads[108],
+        pads ? 'first flap row ring ' + pads[66].ring + ' (28 worked) · last short row ring ' + pads[107].ring +
+        ' (' + pads[107].count + ' worked) · leg / gusset rows not partial' : 'no partial rows');
+      var skNo = G.layout(sockTopDown(true));
+      ok('a model with no side or short-row flags still finds the heel by its counts (>= 4 rows at <= 0.6 of the ring that come back)',
+        skNo.knit.bends.length === 1 && skNo.knit.partials === 42,
+        'bends ' + skNo.knit.bends.length + ', partial rows ' + skNo.knit.partials);
+      var tu = G.layout(sockToeUp()), tb = tu.knit.box;
+      var cuff = tu.bands[tu.bands.length - 1];
+      G.warpPoint(tu.warp, null, 0, cuff.yBot, 0, pts);
+      var cuffTopOk = Math.abs(pts[0]) < 1e-6 && Math.abs(pts[2]) < 1e-6 && cuff.ext.ymax > -1e-6;
+      G.warpPoint(tu.warp, null, 0, tu.bands[0].yTop, 0, a);
+      ok('a toe-up sock is turned so its LEG stands up, cuff on top, and the toe points out level',
+        tu.knit.toeUp && tu.closedTop && cuffTopOk && tb.z1 - tb.z0 > 2.5 * 2 * tu.rounds[60].radius &&
+        Math.abs(a[1] - tb.y0) < 0.35 * (tb.y1 - tb.y0),
+        'toeUp ' + tu.knit.toeUp + ' · closed toe ' + tu.closedTop + ' · cuff centre (' + n(pts[0], 3) + ', ' +
+        n(pts[2], 3) + ') top ' + n(cuff.ext.ymax, 3) + ' · foot reach ' + n(tb.z1 - tb.z0, 1) + ' · toe at y ' +
+        n(a[1], 1) + ' of ' + n(tb.y0, 1) + '…' + n(tb.y1, 1));
+      ok('a crown, a toe and a yoke divide are not heels: no bend without a flat row or the heel\'s count signature',
+        !G.layout(hat()).warp && G.layout(raglan()).knit.bends.length === 0 && G.knitPartials(hat().rounds) === null,
+        'hat warp ' + !!G.layout(hat()).warp + ' · raglan bends ' + G.layout(raglan()).knit.bends.length);
+
+      /* -- the raglan yoke, the hat -- */
+      var rg = G.layout(raglan()), yk = rg.knit.yoke;
+      var dv = yk ? rg.rounds[yk.divide] : null, before = yk ? rg.rounds[yk.divide - 1] : null;
+      var frontR = before && before.prof ? before.radius * before.prof(Math.PI / 2, 1) : 0;
+      var sideR = before && before.prof ? before.radius * before.prof(0, 1) : 0;
+      var bodyStraight = true, ri;
+      for (ri = yk ? yk.divide : 0; yk && ri < yk.divide + 45; ri++) if (Math.abs(rg.rounds[ri].radius - dv.radius) > 1e-9) bodyStraight = false;
+      ok('a top-down raglan reads as a yoke widening to the underarm, then a body tube',
+        yk && yk.divide === 38 && before.kind === 'yoke' && near(frontR, dv.radius, 0.02) && sideR > 1.8 * dv.radius &&
+        bodyStraight && rg.ruffles === 0 && rg.slack === 0 && rg.rounds[10].radius < rg.rounds[30].radius,
+        yk ? 'divide at round ' + (yk.divide + 1) + ' (204 → 120) · last yoke round: front/back reach ' + n(frontR, 2) +
+          ' = body r ' + n(dv.radius, 2) + ', sleeve tops ' + n(sideR, 2) + ' · body straight ' + bodyStraight +
+          ' · ruffles ' + rg.ruffles + ' (the +8 rounds were frills) · slack ' + rg.slack : 'no yoke found');
+      var drop = [0, 0, 0], ydv = rg.rounds[yk ? yk.divide : 0].y;
+      G.warpPoint(rg.warp, null, (yk ? yk.bodyRadius : 0) + 10, ydv + 1, 0, drop);
+      ok('the yoke\'s sleeve tops hang off the shoulders instead of standing out as a brim',
+        rg.warp && rg.warp.yoke && near(ydv + 1 - drop[1], 10 * Math.tan(40 * Math.PI / 180), 1e-9),
+        'a point 10 past the body radius falls ' + n(ydv + 1 - drop[1], 3) + ' (tan 40° × 10 = 8.391)');
+      var ht = G.classify(hat());
+      ok('a hat worked brim-up is shown crown up, its rib brim pulled in, a dome without frills',
+        ht.upsideDown === true && ht.closedTop === true && ht.closedBottom === false && ht.ruffles === 0 &&
+        ht.rounds[0].radius < 0.9 * ht.rounds[30].radius && ht.aspect > 0.8,
+        'flipped ' + ht.upsideDown + ' · crown capped ' + ht.closedTop + ' · brim r ' + n(ht.rounds[0].radius, 2) +
+        ' vs body ' + n(ht.rounds[30].radius, 2) + ' · ruffles ' + ht.ruffles + ' · aspect ' + n(ht.aspect, 3));
+
+      /* -- flat pieces -- */
+      var sh = G.layout(shawl()), ch = sh.knit.chevron, sb = sh.knit.box;
+      var lastRow = sh.bands[sh.bands.length - 1];
+      var tip = [0, 0, 0], corner = [0, 0, 0];
+      G.warpPoint(sh.warp, lastRow, 0, lastRow.yTop, 0, tip);
+      G.warpPoint(sh.warp, lastRow, lastRow.x0 + lastRow.width, lastRow.yTop, 0, corner);
+      ok('a garter triangle grown from the centre reads as a triangle: a straight top edge, the point below',
+        ch && Math.abs(ch.a * 180 / Math.PI - 45) < 6 && near((sb.y1 - sb.y0) / (sb.x1 - sb.x0), 0.5, 0.15) &&
+        Math.abs(tip[0]) < 1e-6 && tip[1] < -0.9 * (sb.y1 - sb.y0) && Math.abs(corner[1]) < 0.12 * (sb.y1 - sb.y0),
+        ch ? 'half-angle ' + n(ch.a * 180 / Math.PI, 1) + '° (garter: 45°) · box ' + n(sb.x1 - sb.x0, 1) + ' × ' +
+          n(sb.y1 - sb.y0, 1) + ' (depth/width ' + n((sb.y1 - sb.y0) / (sb.x1 - sb.x0), 3) + ', want 0.5) · spine tip (' +
+          n(tip[0], 2) + ', ' + n(tip[1], 1) + ') · last row\'s end at y ' + n(corner[1], 2) : 'no chevron');
+      // Rico "Triangular shawl" (research §5): side to side, CO 6, +1 before the
+      // last st every RS row to the middle, then -1 the same way back to 6
+      var rico = (function () {
+        var rs = [], i, c = 6;
+        for (i = 0; i < 108; i++) {
+          var sd = side(i);
+          if (sd === 'rs' && i > 1) c += i < 54 ? 1 : -1;
+          var st = kline(c, sd === 'rs' ? 'k' : 'p', sd), inc = null, dec = null;
+          if (sd === 'rs' && i > 1) { if (i < 54) { st[c - 2] = kst('m1', sd); inc = [c - 2]; } else { st[c - 3] = kst('k2tog', sd); dec = [c - 3]; } }
+          rs.push(kr(st, { side: sd, inc: inc, dec: dec }));
+        }
+        return G.layout(km(rs, 'rows'));
+      }());
+      var edgeL = {}, edgeR = {}, widest = 0, wAt = -1;
+      rico.bands.forEach(function (bb, q) {
+        if (!bb) return;
+        edgeL[Math.round(bb.x0 * 100)] = 1; edgeR[Math.round((bb.x0 + bb.width) * 100)] = 1;
+        if (bb.width > widest) { widest = bb.width; wAt = q; }
+      });
+      var oneStraight = Object.keys(edgeL).length === 1 || Object.keys(edgeR).length === 1;
+      ok('the Rico shawl, side to side: a triangle with one straight edge, widest at its middle row',
+        oneStraight && (rico.anchor === 'left' || rico.anchor === 'right') && Math.abs(wAt - 54) <= 3 &&
+        near(rico.height / widest, 108 * 0.75 / 32, 0.08) && !rico.warp,
+        'anchor ' + rico.anchor + ' · straight edge ' + oneStraight + ' · widest ' + widest + ' at row ' + (wAt + 1) +
+        ' · long edge / height ' + n(rico.height, 1) + ' / ' + widest + ' (170 × 65 cm in the photo: the long edge is the straight one)');
+      // Icelandic "Thórdís" (research §4d): CO along the two lower edges, -4 a RS
+      // row (each end and a double decrease at centre back) up to the neck point
+      var thordis = (function () {
+        var rs = [], i, c = 100;
+        for (i = 0; i < 48; i++) {
+          var sd = side(i);
+          if (sd === 'rs' && i > 0 && c > 4) c -= 4;
+          var st = kline(c, sd === 'rs' ? 'k' : 'p', sd), dec = null;
+          if (sd === 'rs' && i > 0) { var mid = Math.floor(c / 2); dec = [0, mid, c - 1]; st[0] = kst('ssk', sd); st[mid] = kst('cdd', sd); st[c - 1] = kst('k2tog', sd); }
+          rs.push(kr(st, { side: sd, dec: dec }));
+        }
+        return G.layout(km(rs, 'rows'));
+      }());
+      var tch = thordis.knit.chevron, tbx = thordis.knit.box;
+      var neck = [0, 0, 0], low = [0, 0, 0], b0 = thordis.bands[0], bN = thordis.bands[thordis.bands.length - 1];
+      G.warpPoint(thordis.warp, bN, 0, bN.yTop, 0, neck);
+      G.warpPoint(thordis.warp, b0, 0, b0.yBot, 0, low);
+      ok('a lace triangle worked from its lower edges up to the neck point is the same triangle, rows walked the other way',
+        tch && tch.rev && near(tch.a * 180 / Math.PI, Math.atan(2 / 3) * 180 / Math.PI, 0.12) &&
+        Math.abs(neck[0]) < 1e-6 && neck[1] > tbx.y1 - 0.1 * (tbx.y1 - tbx.y0) && low[1] < tbx.y0 + 0.1 * (tbx.y1 - tbx.y0),
+        tch ? 'reversed chevron, half-angle ' + n(tch.a * 180 / Math.PI, 1) + '° (stockinette rows: atan(2/3) = 33.7°, the wings droop until blocked) · neck point (' +
+          n(neck[0], 2) + ', ' + n(neck[1], 1) + ') at the top of ' + n(tbx.y0, 1) + '…' + n(tbx.y1, 1) + ' · centre of the cast-on at ' + n(low[1], 1) : 'no chevron');
+      var lc = G.layout(lace());
+      ok('a lace rectangle stays a flat rectangle (no warp, no chevron)',
+        !lc.warp && near(lc.width, 41, 1e-9) && near(lc.height, 24 * 0.75, 1e-3),
+        'W ' + lc.width + ' H ' + n(lc.height, 3) + ' warp ' + !!lc.warp);
+      var wd = G.layout(wedge()), wr = wd.rounds;
+      var topRow = wd.bands[wd.bands.length - 1];
+      var fL = [0, 0, 0], fR = [0, 0, 0];
+      G.warpPoint(wd.warp, topRow, topRow.x0 + 0.5, topRow.yTop, 0, fL);
+      G.warpPoint(wd.warp, topRow, topRow.x0 + topRow.width - 0.5, topRow.yTop, 0, fR);
+      var anyGap = 0;
+      for (ri = 1; ri < wr.length; ri++) {
+        var f0 = wr[ri - 1].field, f1 = wr[ri].field;
+        if (!f0 || !f1) continue;
+        // each row sits exactly on the one below it where they overlap
+        for (var q = 0; q < f1.bot.length; q++) {
+          var x = f1.x0 + q * f1.dx, j = Math.round((x - f0.x0) / f0.dx);
+          if (j >= 0 && j < f0.top.length && f1.bot[q] < f0.top[j] - 1e-9) anyGap++;
+        }
+      }
+      ok('short rows in a flat piece thicken one side: the rows above sit on the wedge, nothing tears',
+        wd.knit.shortRows === 10 && anyGap === 0 && near(fL[1] - fR[1], 10 * 0.75, 0.02),
+        wd.knit.shortRows + ' short rows (anchored at the edge the last full row ended at) · top edge ' + n(fL[1], 2) + ' over the wedge, ' +
+        n(fR[1], 2) + ' past its turns (10 × 0.75 = 7.5 apart) · rows lying below the one under them ' + anyGap);
+      ok('crochet never reaches the knitting path: same classify for the same counts with sc records',
+        !G.layout(model([6, 12, 18, 24, 24, 24])).warp && !G.classify(model([6, 12, 18])).knit,
+        'a crochet sphere has no `knit`, no `warp`');
+
+      /* ================================================ the relief */
+      group('Knitting — stitch relief: V, bump, rib, eyelet, decreases, cables, edges (wave H)');
+      if (!RX || !RX.knitDescOf) { ok('Diagram._relief knitting hooks', false, 'js/diagram.js 1.6.0 not loaded'); return; }
+      function D(t, sd, extra, tw, tex, mir, mode) {
+        var st = kst(t, sd, 0.75, 1, extra);
+        return RX.knitDescOf(st, tw || null, !!tex, mir == null ? 1 : mir, 0.75, mode || 'rows');
+      }
+      function R(Dd, u, s) { return RX.relief(u, s, Dd); }
+      function peakOf(Dd) {
+        var m = -Infinity;
+        for (var a1 = 1; a1 < 40; a1++) for (var b1 = 1; b1 < 40; b1++) m = Math.max(m, R(Dd, a1 / 40, b1 / 40));
+        return m;
+      }
+      var kV = D('k'), pB = D('p'), kWs = D('k', 'ws'), pWs = D('p', 'ws');
+      var cSc = RX.descOf({ t: 'sc', h: 1, w: 1 }, 1, false);
+      ok('a knit stitch is a V — two legs from a point at its base to its top corners, no top bar, flatter than crochet',
+        kV.k !== pB.k && R(kV, 0.25, 0.8) > 1.3 * R(kV, 0.5, 0.8) && R(kV, 0.75, 0.8) > 1.3 * R(kV, 0.5, 0.8) &&
+        R(kV, 0.5, 0.2) > R(kV, 0.25, 0.2) && R(kV, 0.5, 0.93) < 0.6 * R(cSc, 0.5, 0.93) && peakOf(kV) < peakOf(cSc),
+        'legs at s 0.8: ' + n(R(kV, 0.25, 0.8), 2) + ' / ' + n(R(kV, 0.75, 0.8), 2) + ' vs between ' + n(R(kV, 0.5, 0.8), 2) +
+        ' · base point ' + n(R(kV, 0.5, 0.2), 2) + ' vs beside ' + n(R(kV, 0.25, 0.2), 2) +
+        ' · top bar ' + n(R(kV, 0.5, 0.93), 2) + ' (crochet sc ' + n(R(cSc, 0.5, 0.93), 2) + ') · peak ' + n(peakOf(kV), 2) +
+        ' vs sc ' + n(peakOf(cSc), 2));
+      ok('a purl is a bump: a loop lying across the cell; a WS row faces the other way (garter\'s ridges)',
+        R(pB, 0.3, 0.5) > 2 * R(pB, 0.3, 0.92) && R(pB, 0.2, 0.55) > 0.3 && kWs.k === pB.k && pWs.k === kV.k,
+        'bump across u 0.3: s 0.5 ' + n(R(pB, 0.3, 0.5), 2) + ' vs s 0.92 ' + n(R(pB, 0.3, 0.92), 2) +
+        ' · k on a WS row draws as a ' + (kWs.k === pB.k ? 'bump' : 'V') + ', p on a WS row as a ' + (pWs.k === kV.k ? 'V' : 'bump'));
+      var gRows = km((function () { var a = []; for (var i = 0; i < 4; i++) a.push(kr(kline(10, 'k', side(i), 0.5), { side: side(i), h: 0.5 })); return a; }()), 'rows');
+      var gN = RX.normalize(gRows);
+      var gK = gN.rounds.map(function (r) { return r.descs[r.keys[3]].k; });
+      ok('garter (knit every row) alternates V rows and ridge rows on the face',
+        gK[0] === kV.k && gK[1] === pB.k && gK[2] === kV.k && gK[3] === pB.k,
+        'row kinds ' + gK.join(', ') + ' (V ' + kV.k + ', bump ' + pB.k + ')');
+      var ribR = RX.buildKnitRound('rows', kr(ribl(16, 2, 2, 'rs'), { side: 'rs' }), { rTop: 48, rBot: 48, yTop: 0.75, yBot: 0, reach: 0.75, Rc: 48, x0: -6.4, width: 12.8 }, 0, 2);
+      var rk = ribR.prep.descs[ribR.prep.keys[0]], rp = ribR.prep.descs[ribR.prep.keys[2]];
+      ok('rib: knit columns stand proud, purl columns sink (k2p2 at 0.8 a stitch pulls in)',
+        rk.rib === 1 && rp.rib === -1 && R(rk, 0.5, 0.5) > R(kV, 0.5, 0.5) + 0.15 && R(rp, 0.5, 0.5) < 0 &&
+        near(ribR.prep.wt[0], 0.8, 1e-6),
+        'column centre: rib knit ' + n(R(rk, 0.5, 0.5), 2) + ' vs plain V ' + n(R(kV, 0.5, 0.5), 2) + ', rib purl ' +
+        n(R(rp, 0.5, 0.5), 2) + ' · slice width ' + n(ribR.prep.wt[0], 2));
+      var yo = D('yo');
+      var yoS = RX.stamp(yo, 2, 5, -1), yoBand = RX.buildKnitRound('rows', kr([kst('k', 'rs'), kst('yo', 'rs'), kst('k2tog', 'rs'), kst('k', 'rs')], { side: 'rs' }),
+        { rTop: 24, rBot: 24, yTop: 0.75, yBot: 0, reach: 0.75, Rc: 24, x0: -2, width: 4 }, 0, 2);
+      var plainBand = RX.buildKnitRound('rows', kr(kline(4, 'k', 'rs'), { side: 'rs' }),
+        { rTop: 24, rBot: 24, yTop: 0.75, yBot: 0, reach: 0.75, Rc: 24, x0: -2, width: 4 }, 0, 2);
+      ok('a yarn-over is an eyelet: an open hole ringed by its strand (degenerate quads, index count unchanged)',
+        yo.hole && yoS.nholes > 0 && yoBand.holes === 1 && yoBand.tri.length === plainBand.tri.length &&
+        R(yo, 0.15, 0.5) > R(yo, 0.5, 0.5) + 0.3,
+        'hole quads at high ' + yoS.nholes + ' · band holes ' + yoBand.holes + ' · indices ' + yoBand.tri.length + ' = ' +
+        plainBand.tri.length + ' · strand ' + n(R(yo, 0.15, 0.5), 2) + ' vs centre ' + n(R(yo, 0.5, 0.5), 2));
+      function lean(Dd) {   // relief-weighted u of the top half
+        var su = 0, sw = 0;
+        for (var a1 = 1; a1 < 40; a1++) for (var b1 = 22; b1 < 38; b1++) { var v = Math.max(0, R(Dd, a1 / 40, b1 / 40)); su += v * a1 / 40; sw += v; }
+        return su / sw - 0.5;
+      }
+      var k2t = D('k2tog'), ssk = D('ssk'), k2tM = D('k2tog', 'rs', null, null, false, -1), cdd = D('cdd');
+      ok('k2tog leans right and ssk leans left as seen on the face, whichever way the row ran; cdd stands its centre up',
+        lean(k2t) > 0.02 && lean(ssk) < -0.02 && lean(k2tM) < -0.02 && Math.abs(lean(kV)) < 1e-6 &&
+        R(cdd, 0.5, 0.6) > R(kV, 0.5, 0.6) + 0.3,
+        'top-half centroid: k2tog ' + n(lean(k2t), 3) + ', ssk ' + n(lean(ssk), 3) + ', k (' + n(lean(kV), 3) +
+        ') · k2tog on a right-to-left row (slice u mirrored) ' + n(lean(k2tM), 3) + ' · cdd spine ' + n(R(cdd, 0.5, 0.6), 2));
+
+      // cables: a C6F and a C6B on reverse stockinette, crossed on row 3 of 9
+      function cableRows(cross) {
+        var rs = [], i;
+        for (i = 0; i < 9; i++) {
+          var sd = side(i), st = [];
+          st.push(kst(sd === 'rs' ? 'p' : 'k', sd), kst(sd === 'rs' ? 'p' : 'k', sd));
+          for (var q = 0; q < 6; q++) {
+            if (i === 4) st.push(kst('cable', sd, 0.75, 0.85, { cross: cross, span: 6, at: q }));
+            else st.push(kst(sd === 'rs' ? 'k' : 'p', sd));
+          }
+          st.push(kst(sd === 'rs' ? 'p' : 'k', sd), kst(sd === 'rs' ? 'p' : 'k', sd));
+          rs.push(kr(st, { side: sd }));
+        }
+        return km(rs, 'rows');
+      }
+      var cf = RX.normalize(cableRows('f')), cbk = RX.normalize(cableRows('b'));
+      function strandAt(N, row, U) {     // relief of row `row` at cable-relative U (0..1), mid-row
+        var r = N.rounds[row], best = null;
+        for (var q = 0; q < r.n; q++) {
+          var d0 = r.descs[r.keys[q]];
+          if (d0.k !== 8) continue;
+          var u0 = d0.sub / d0.subN, u1 = (d0.sub + 1) / d0.subN;
+          if (U >= u0 && U < u1) { var uu = (U - u0) * d0.subN; best = R(d0, d0.uflip ? 1 - uu : uu, 0.5); }
+        }
+        return best;
+      }
+      var twistRows = cf.rounds.map(function (r) { var c = 0; for (var q = 0; q < r.n; q++) if (r.descs[r.keys[q]].k === 8) c++; return c; });
+      // two rows after the crossing, the front strand of a C6F has travelled left (low U), a C6B's right
+      var fL6 = strandAt(cf, 6, 0.3), fR6 = strandAt(cf, 6, 0.7), bL6 = strandAt(cbk, 6, 0.3), bR6 = strandAt(cbk, 6, 0.7);
+      ok('a cable is a visible crossing: its twist spans 2 rows either side, the front strand on top — C6F leans left, C6B right',
+        twistRows.join(',') === '0,0,6,6,6,6,6,0,0' && fL6 > fR6 + 0.15 && bR6 > bL6 + 0.15,
+        'cable slices per row ' + twistRows.join(',') + ' · two rows after the cross, U 0.3 / 0.7: C6F ' + n(fL6, 2) + ' / ' +
+        n(fR6, 2) + ', C6B ' + n(bL6, 2) + ' / ' + n(bR6, 2));
+      var cr = cf.rounds[4], seam = 0, inner = 0;
+      for (var q2 = 0; q2 < cr.n - 1; q2++) {
+        var dA = cr.descs[cr.keys[q2]], dB = cr.descs[cr.keys[q2 + 1]];
+        if (dA.k !== 8 || dB.k !== 8) continue;
+        inner++;
+        for (var s2 = 1; s2 < 10; s2++) seam = Math.max(seam, Math.abs(R(dA, 1, s2 / 10) - R(dB, 0, s2 / 10)));
+      }
+      ok('the slices of one cable join into one surface (no groove at every stitch)',
+        inner === 5 && seam < 1e-9, inner + ' inner joins, worst step ' + seam);
+      var kinds = [kV, pB, kWs, k2t, ssk, cdd, D('m1'), D('kfb'), D('sl'), yo, D('co'), D('bo'), rk, rp], edge = 0, kk, e2;
+      for (kk = 0; kk < kinds.length; kk++) {
+        for (e2 = 0; e2 <= 20; e2++) {
+          edge = Math.max(edge, Math.abs(R(kinds[kk], 0, e2 / 20)), Math.abs(R(kinds[kk], 1, e2 / 20)),
+            Math.abs(R(kinds[kk], e2 / 20, 0)), Math.abs(R(kinds[kk], e2 / 20, 1)));
+        }
+      }
+      var cabEdge = 0, c0 = cr.descs[cr.keys[2]], c5 = cr.descs[cr.keys[7]];
+      for (e2 = 0; e2 <= 20; e2++) cabEdge = Math.max(cabEdge, Math.abs(R(c0, c0.uflip ? 1 : 0, e2 / 20)), Math.abs(R(c5, c5.uflip ? 0 : 1, e2 / 20)), Math.abs(R(c0, e2 / 20, 0)), Math.abs(R(c0, e2 / 20, 1)));
+      ok('every knitted relief is zero on its cell\'s edges (a cable on the cable\'s outer edges)',
+        edge === 0 && cabEdge === 0, kinds.length + ' kinds, max on the edges ' + edge + ' · cable outer edges ' + cabEdge);
+      var co = D('co'), bo = D('bo');
+      ok('cast-on and bind-off edges have their own relief: a cord, a sideways chain',
+        peakOf(co) > 0.3 && peakOf(bo) > 0.3 && co.k !== bo.k && co.k !== kV.k,
+        'peaks: cast-on ' + n(peakOf(co), 2) + ', bind-off ' + n(peakOf(bo), 2));
+      // a heel-flap row: the held stitches first, always solid
+      var skM = sockTopDown(), skN = RX.normalize(skM), flap = skN.rounds[70];
+      ok('a heel-flap row in a round piece is closed by its held stitches, drawn first and solid',
+        flap.heldSlices > 0 && flap.workSlices > 0 && flap.heldSlices + flap.workSlices === flap.n &&
+        flap.doneSlices === flap.n && skN.rounds[30].heldSlices === 0,
+        'row 71: ' + flap.heldSlices + ' held + ' + flap.workSlices + ' worked slices, done ' + flap.doneSlices + ' of ' + flap.n);
+      var bandIdx = 145, tub = sk.bands[bandIdx];
+      var foot = RX.buildKnitRound('rounds', skM.rounds[bandIdx], tub, bandIdx, 1);
+      var raw = foot.verts.slice();
+      RX.warp(foot, sk.warp, tub);
+      var minR = Infinity;
+      for (q2 = 0; q2 < foot.verts.length; q2 += RX.FLOATS) {
+        var px = foot.verts[q2] + foot.verts[q2 + 3], pz = foot.verts[q2 + 2] + foot.verts[q2 + 5];
+        minR = Math.min(minR, Math.sqrt(px * px + pz * pz));
+      }
+      ok('the renderer moves a foot round through the warp: it lies out along the foot, not on the leg\'s axis',
+        foot.warped === true && minR > 2 * legR && raw.length === foot.verts.length,
+        'nearest vertex of foot round ' + (bandIdx + 1) + ' to the leg axis: ' + n(minR, 2) + ' (leg r ' + n(legR, 2) + ')');
+      var crN = RX.normalize(model([6, 12, 18]));
+      ok('crochet rounds are prepared exactly as before (no knitting fields, crochet relief)',
+        !crN.rounds[0].knit && !crN.rounds[2].knit && !crN.rounds[1].descs[crN.rounds[1].keys[0]].knit,
+        'prepared crochet round: knit ' + !!crN.rounds[1].knit);
+      var gN2 = RX.normalize(gRows);
+      gRows.rounds[3].done = 4;
+      var gN3 = RX.normalize(gRows);
+      ok('a knitting round prepares the same way every time, and `done` maps onto its slices',
+        gN2.rounds[2].hash === gN3.rounds[2].hash && gN3.rounds[3].doneSlices === 4,
+        'hash kept ' + (gN2.rounds[2].hash === gN3.rounds[2].hash) + ' · done slices ' + gN3.rounds[3].doneSlices);
+
+      /* ================================================ through the parser */
+      group('Knitting — end to end: Knits.parse / Knits.expand → Store.diagramModel → DiagramGeo (wave H)');
+      if (!window.Knits || typeof window.Knits.expand !== 'function' || !window.Store.registerCraftParser) {
+        skip('js/knits.js is not loaded', 'the synthetic records above stand in for Knits.expand');
+        return;
+      }
+      function knitModel(text, mode, id) {
+        var part = { id: 'ZDGEO_k' + id, name: 'k' + id, patternText: text, row: 0, stitch: 0, rowStitches: [],
+          sizeIndex: 0, piecesDone: 0, repeat: null, workMode: mode, craft: 'knitting' };
+        var proj = { id: 'ZDGEO_kproj' + id, craft: 'knitting', countMode: mode, yarnColors: {}, parts: [part] };
+        var src = window.Store.diagramModel(part, proj);
+        var rs = src.rounds.map(function (r) {
+          var c = {}, k;
+          for (k in r) if (r.hasOwnProperty(k)) c[k] = r[k];
+          c.done = c.count; c.ghost = false;
+          return c;
+        });
+        return { mode: src.mode, craft: src.craft, rounds: rs, current: rs.length - 1, defaultColor: src.defaultColor,
+          shape: src.shape, window: src.window, deviation: src.deviation };
+      }
+      var sockText = [
+        'CO 56 sts. Join in the rnd.',
+        'Rnds 1-12: *K2, p2; rep from * to end.',
+        'Rnds 13-60: Knit.',
+        'Row 61 (RS): *Sl 1, k1; rep from * 13 more times, turn. (28 sts)',
+        'Row 62 (WS): Sl 1, p27, turn.',
+        'Rows 63-92: Rep Rows 61 and 62.',
+        'Row 93 (RS): Sl 1, k15, ssk, k1, turn.',
+        'Row 94 (WS): Sl 1, p5, p2tog, p1, turn.',
+        'Row 95 (RS): Sl 1, k6, ssk, k1, turn.',
+        'Row 96 (WS): Sl 1, p7, p2tog, p1, turn.',
+        'Rnd 97: K10, pick up and knit 16 sts along side of flap, k28, pick up and knit 16 sts. (70 sts)',
+        'Rnd 98: K1, ssk, knit to last 3 sts, k2tog, k1. (68 sts)',
+        'Rnd 99: Knit.',
+        'Rnds 100-111: Rep Rnds 98 and 99. (56 sts)',
+        'Rnds 112-150: Knit.',
+        'Graft the remaining sts with Kitchener st.'
+      ].join('\n');
+      var ks = knitModel(sockText, 'rounds', 1), ksL = G.layout(ks);
+      var flapRow = ks.rounds[64] || {};
+      ok('Knits: a top-down sock pattern read by the parser is an L, its heel flap rows flat (side) on 28 of 56',
+        ks.craft === 'knitting' && ks.shape.graft === true && flapRow.side && flapRow.count === 28 &&
+        ksL.knit && ksL.knit.bends.length === 1 && ksL.knit.box.z1 - ksL.knit.box.z0 > 2 * 2 * ksL.rounds[30].radius,
+        'rounds ' + ks.rounds.length + ' · row 65 ' + flapRow.count + ' sts side ' + flapRow.side +
+        (flapRow.shortRow ? ' (turn)' : '') + ' · graft ' + ks.shape.graft + ' · bends ' + (ksL.knit ? ksL.knit.bends.length : '-') +
+        ' · partial rows ' + (ksL.knit ? ksL.knit.partials : '-') + (ksL.knit && ksL.knit.box ? ' · foot reach ' + n(ksL.knit.box.z1 - ksL.knit.box.z0, 1) : ''));
+      var recSide = (ks.rounds[64] && ks.rounds[64].stitches[1]) || {};
+      ok('Knits records reach the model with their side, and the rib brim at 0.8 a stitch',
+        recSide.side === flapRow.side && near(ks.rounds[0].stitches[0].w, 0.8, 1e-9) && ks.rounds[0].stitches[2].t === 'p',
+        'flap record ' + JSON.stringify(recSide) + ' · cuff record ' + JSON.stringify(ks.rounds[0].stitches[0]));
+      var cabText = [
+        'CO 20 sts.',
+        'Row 1 (WS): K2, p6, k4, p6, k2.',
+        'Row 2 (RS): P2, k6, p4, k6, p2.',
+        'Row 3: K2, p6, k4, p6, k2.',
+        'Row 4: P2, C6F, p4, C6B, p2.',
+        'Rows 5-12: Rep Rows 1-4 twice.',
+        'BO all sts.'
+      ].join('\n');
+      var kc = knitModel(cabText, 'rows', 2), kcN = RX.normalize(kc);
+      var cabRow = -1, nCab = 0;
+      kc.rounds.forEach(function (r, i) { var c = 0; r.stitches.forEach(function (st) { if (st.t === 'cable') c++; }); if (c && cabRow < 0) { cabRow = i; nCab = c; } });
+      var twisted = 0;
+      kcN.rounds.forEach(function (r) { for (var q = 0; q < r.n; q++) if (r.descs[r.keys[q]].k === 8) { twisted++; } });
+      var cabSt = cabRow >= 0 ? kc.rounds[cabRow].stitches.filter(function (st) { return st.t === 'cable'; }) : [];
+      ok('Knits: C6F / C6B rows reach the renderer as two crossings, each drawn over its 5-row twist',
+        cabRow >= 0 && nCab === 12 && cabSt[0].cross === 'f' && cabSt[6].cross === 'b' && kc.rounds[cabRow].count === 20 &&
+        twisted >= 12 * 3,
+        cabRow >= 0 ? 'first crossing on model row ' + (cabRow + 1) + ': ' + nCab + ' cable stitch records, count ' +
+          kc.rounds[cabRow].count + ' · crosses ' + (cabSt[0] && cabSt[0].cross) + '/' + (cabSt[6] && cabSt[6].cross) +
+          ' · twisted slices in the piece ' + twisted : 'no cable records: ' + kc.rounds.map(function (r) { return r.count; }).join(','));
+      var hatText = [
+        'CO 96 sts. Join in the rnd.',
+        'Rnds 1-12: *K2, p2; rep from * to end.',
+        'Rnds 13-52: Knit.',
+        'Rnd 53: *K10, k2tog; rep from * to end. (88 sts)',
+        'Rnd 54: Knit.',
+        'Rnd 55: *K9, k2tog; rep from * to end. (80 sts)',
+        'Rnd 56: Knit.',
+        'Rnd 57: *K8, k2tog; rep from * to end. (72 sts)',
+        'Rnd 58: Knit.',
+        'Rnd 59: *K7, k2tog; rep from * to end. (64 sts)',
+        'Rnd 60: Knit.',
+        'Rnd 61: *K6, k2tog; rep from * to end. (56 sts)',
+        'Rnd 62: Knit.',
+        'Rnd 63: *K5, k2tog; rep from * to end. (48 sts)',
+        'Rnd 64: *K4, k2tog; rep from * to end. (40 sts)',
+        'Rnd 65: *K3, k2tog; rep from * to end. (32 sts)',
+        'Rnd 66: *K2, k2tog; rep from * to end. (24 sts)',
+        'Rnd 67: *K1, k2tog; rep from * to end. (16 sts)',
+        'Rnd 68: *K2tog; rep from * to end. (8 sts)',
+        'Break yarn, draw through rem sts and pull tight.'
+      ].join('\n');
+      var kh = knitModel(hatText, 'rounds', 3), khC = G.classify(kh);
+      ok('Knits: a hat (ribbed brim, body, crown decreases) is a dome, crown up',
+        kh.rounds.length === 68 && kh.rounds[67].count === 8 && khC.upsideDown && khC.closedTop && khC.ruffles === 0 &&
+        khC.rounds[0].radius < khC.rounds[20].radius,
+        'rounds ' + kh.rounds.length + ' [' + kh.rounds.slice(50, 68).map(function (r) { return r.count; }).join(',') +
+        '] · crown up ' + khC.upsideDown + ' capped ' + khC.closedTop + ' · ruffles ' + khC.ruffles + ' · aspect ' + n(khC.aspect, 3));
+      var mkText = ['CO 60 sts. Join in the rnd.', 'Rnd 1: K10, pm, k20, pm, k10, pm, k20.',
+        'Rnd 2: *K to 1 st before m, m1, k1, sm, m1; rep from * 3 more times — 8 sts inc.', 'Rnd 3: Knit.', 'Rnd 4: BO all sts.'].join('\n');
+      var km4 = knitModel(mkText, 'rounds', 4), kmN = RX.normalize(km4), last4 = km4.rounds[3] || { stitches: [] };
+      var mk = km4.rounds[0].markers || [];
+      ok('Store carries the parse line\'s markers and stated delta onto the round; a bind-off row is drawn as its bound-off edge',
+        km4.rounds[0].count === 60 && mk.length === 3 && mk[0].at === 10 && mk[2].at === 40 && km4.rounds[1].delta === 8 &&
+        km4.rounds[1].count === 68 && last4.count === 68 && last4.stitches[0].t === 'bo' &&
+        kmN.rounds[3].descs[kmN.rounds[3].keys[0]].k === RX.knitDescOf({ t: 'bo' }, null, false, 1, 0.75, 'rounds').k &&
+        kmN.rounds[3].n === 68,
+        'round 1 from the cast-on: ' + km4.rounds[0].count + ' · markers ' + JSON.stringify(mk) + ' · round 2 delta ' + km4.rounds[1].delta +
+        ' → ' + km4.rounds[1].count + ' · BO round: ' + last4.count + ' ' + (last4.stitches[0] || {}).t + ' records, ' + kmN.rounds[3].n + ' slices');
+    }());
+    // /knit -------------------------------------------------------------------
+
     render();
   }
 
@@ -3074,6 +3654,7 @@ try { window.Store.__setKeyForTests('ZDGEO_test_store'); } catch (e) { /* ignore
     sumEl.className = 'busy';
     var files = {}, i;
     for (i = 0; i < REF.length; i++) files[REF[i][0]] = 1;
+    for (i = 0; i < KREF_FILES.length; i++) files[KREF_FILES[i]] = 1;
     var names = Object.keys(files);
     var chain = Promise.resolve();
     var texts = {};
@@ -3089,9 +3670,153 @@ try { window.Store.__setKeyForTests('ZDGEO_test_store'); } catch (e) { /* ignore
       for (var r = 0; r < REF.length; r++) checkRef(REF[r], texts);
       checkPersianRounds(texts);
       checkCatoTerraces(texts);
+      checkKnitFixtures(texts);
       render();
       btn.disabled = false; btn.textContent = 'Reload reference fixtures';
     });
+  }
+
+  /* ===================================== 2b. knitting fixtures (wave H) */
+  /* Read through Knits (Store.splitSections(text, 'knitting') → a knitting
+     part → Store.diagramModel → DiagramGeo). The parser was still landing its
+     fixture page when these were written, so the rows assert the GEOMETRY of
+     what it reads today and print the counts; the garment shapes themselves
+     (sock L, raglan yoke, centre-out and lower-edge triangles, the Rico
+     side-to-side triangle, lace, the hat) are asserted on synthetic models
+     built from docs/research/knitting.md's counts in the unit block. */
+  var KREF_FILES = ['knit-bernat-topdown-pullover.pdf', 'knit-interweave-8-socks.pdf',
+    'knit-fromtheheart-magicloop-socks.pdf', 'knit-interweave-lace.pdf', 'knit-rico-triangular-shawl.pdf'];
+
+  function knitFixtureModel(section, mode) {
+    partSeq++;
+    var part = {
+      id: 'ZDGEO_kp' + partSeq, name: section.name || '(unnamed)', craft: 'knitting',
+      patternText: section.text || '', row: 0, stitch: 0, rowStitches: [],
+      sizeIndex: 0, piecesDone: 0, repeat: null
+    };
+    if (mode) part.workMode = mode;
+    var proj = { id: 'ZDGEO_kproj', craft: 'knitting', countMode: 'rounds', yarnColors: {}, parts: [part] };
+    var src = window.Store.diagramModel(part, proj);
+    var rounds = src.rounds.map(function (r) {
+      var c = {}, k;
+      for (k in r) if (r.hasOwnProperty(k)) c[k] = r[k];
+      c.done = c.count; c.ghost = false;
+      return c;
+    });
+    while (rounds.length && rounds[rounds.length - 1].count <= 0) rounds.pop();
+    return { mode: src.mode, craft: src.craft, rounds: rounds, current: Math.max(0, rounds.length - 1),
+      defaultColor: src.defaultColor, shape: src.shape, window: src.window, deviation: src.deviation };
+  }
+
+  /* Frills the geometry drew on rounds that grow by no more than a quarter:
+     a frill on a one-round jump of +36 or +18 is the parser's misread count
+     (printed in the detail), not the geometry's. */
+  function shapingFrills(m, cls) {
+    var k = 0;
+    for (var i = 1; i < cls.rounds.length; i++) {
+      var e = cls.rounds[i], c = m.rounds[i].count, p = m.rounds[i - 1].count;
+      if (e && e.ruffle && c - p <= 0.25 * p) k++;
+    }
+    return k;
+  }
+
+  function checkKnitFixtures(texts) {
+    group('Knitting fixtures (wave H) — read by Knits, drawn by DiagramGeo');
+    if (!window.Knits) { skip('js/knits.js is not loaded', ''); return; }
+    function secsOf(file) {
+      var t = texts[file];
+      if (!t || typeof t !== 'string') return null;
+      try { return window.Store.splitSections(t, 'knitting') || []; } catch (e) { return null; }
+    }
+    // 1. every section of every fixture lays out as knitting, finite and honest
+    var nSec = 0, nDrawn = 0, bad = [], heights = {}, f, i;
+    for (f = 0; f < KREF_FILES.length; f++) {
+      var ss = secsOf(KREF_FILES[f]);
+      if (!ss) { bad.push(KREF_FILES[f] + ' unavailable'); continue; }
+      for (i = 0; i < ss.length; i++) {
+        nSec++;
+        try {
+          var m = knitFixtureModel(ss[i]);
+          if (!m.rounds.length) continue;
+          var L = G.layout(m);
+          nDrawn++;
+          if (m.craft !== 'knitting' || !G.isKnit(m)) bad.push(ss[i].name + ': not knitting');
+          if (!(isFinite(L.height) && L.height >= 0 && isFinite(L.width || 2 * L.maxRadius))) bad.push(ss[i].name + ': H/W ' + L.height);
+          L.bands.forEach(function (b) {
+            if (b && b.ext && !(isFinite(b.ext.rad) && isFinite(b.ext.ymin) && isFinite(b.ext.ymax))) bad.push(ss[i].name + ': ext');
+          });
+          L.rounds.forEach(function (e) { if (e && e.h > 0) heights[n(e.h, 2)] = 1; });
+        } catch (e) { bad.push(KREF_FILES[f].replace(/^knit-|\.pdf$/g, '') + ' · ' + ss[i].name + ' threw ' + e.message); }
+      }
+    }
+    var hk = Object.keys(heights);
+    ok('every section of every knitting fixture lays out as knitting: finite, row heights 0.5 / 0.75 (cast-on rows 0.35)',
+      bad.length === 0 && nDrawn > 10 && hk.every(function (h) { return +h === 0.75 || +h === 0.5 || +h === 0.35; }),
+      nDrawn + ' of ' + nSec + ' sections drew rows · row heights seen ' + hk.join(', ') + (bad.length ? ' · ' + bad.slice(0, 6).join(' | ') : ''));
+
+    // 2. Bernat top-down pullover (research §1)
+    var bs = secsOf('knit-bernat-topdown-pullover.pdf') || [];
+    function sec(re) { var hit = null; bs.forEach(function (s) { if (!hit && re.test(s.name || '')) hit = s; }); return hit; }
+    var yokeSec = null;
+    // The parser now prefixes each book part with its "Sizes:" line and a "Start with N sts." line (wave H2); skip those.
+    bs.forEach(function (s) { if (!yokeSec && /^1st rnd/i.test(String(s.text || '').replace(/^(?:\s*(?:Sizes?\s*:|Start with\b)[^\n]*\n)+/i, '').trim())) yokeSec = s; });
+    var name = 'bernat-topdown-pullover · yoke rounds — a cone widening from the neck, no frills, nothing bent';
+    if (!yokeSec) ok(name, false, 'section starting "1st rnd" not found: ' + bs.map(function (s) { return s.name || '(unnamed)'; }).join(', '));
+    else {
+      var ym = knitFixtureModel(yokeSec), yc = G.layout(ym);
+      var counts = ym.rounds.map(function (r) { return r.count; });
+      var rr = yc.rounds.filter(function (e) { return e && !e.outlier && !e.empty; });
+      // The yoke's widest ring is the round before the sleeve divide (204 → 120): measure the widest ring, not the last.
+      var widest = rr.reduce(function (m, e) { return e.radius > m ? e.radius : m; }, 0);
+      var grows = rr.length >= 20 && widest > 1.8 * rr[1].radius;
+      ok(name,
+        ym.mode === 'rounds' && grows && shapingFrills(ym, yc) === 0 && yc.slack === 0 && !(yc.knit && yc.knit.bends.length),
+        'rounds ' + counts.length + ' [' + counts.slice(0, 6).join(',') + ',…,' + counts[counts.length - 1] +
+        '] (research: 76 → 84 … 204, then the divide to 120 — ' +
+        (counts.indexOf(204, 1) > 0 && counts[counts.indexOf(204, 1) + 1] === 120 ? 'divide read' :
+          'round 1 reads 204, 84 → 120 in one round, and no divide yet: parser') + ') · ring ' +
+        n(rr.length > 1 ? rr[1].radius : 0, 2) + ' → ' + n(rr.length ? rr[rr.length - 1].radius : 0, 2) +
+        ' · frills ' + yc.ruffles + ' (on shaping rounds ' + shapingFrills(ym, yc) + ') · slack ' + yc.slack + ' · aspect ' + n(yc.aspect, 3) +
+        (yc.knit && yc.knit.yoke ? ' · yoke stadium from round ' + (yc.knit.yoke.from + 1) : ''));
+    }
+    var slv = sec(/sleeve/i);
+    name = 'bernat-topdown-pullover · Sleeves — a tube tapering to the cuff (46 → 28, research §1)';
+    if (!slv) ok(name, false, 'no Sleeves section');
+    else {
+      var sm = knitFixtureModel(slv, 'rounds'), sl = G.classify(sm);
+      var sc = sm.rounds.map(function (r) { return r.count; });
+      ok(name, sc.length >= 20 && Math.min.apply(null, sc) < 0.75 * sc[0] && shapingFrills(sm, sl) === 0 && sl.aspect > 0.8 && !sl.warp,
+        'rounds ' + sc.length + ' [' + sc.slice(0, 8).join(',') + ',…,' + sc[sc.length - 1] + '] · aspect ' + n(sl.aspect, 3) +
+        ' · frills ' + sl.ruffles + ' (on shaping rounds ' + shapingFrills(sm, sl) + '; the sleeve ends on a 46 the parser reads from the L+ block)');
+    }
+    var nb = sec(/neckband/i);
+    name = 'bernat-topdown-pullover · Neckband — 7 rounds of 68 in K1tbl, P1 rib: a short ribbed collar';
+    if (!nb) ok(name, false, 'no Neckband section');
+    else {
+      var nm = knitFixtureModel(nb, 'rounds'), nc = G.classify(nm);
+      var ncs = nm.rounds.map(function (r) { return r.count; });
+      ok(name, ncs.length === 7 && ncs.every(function (c) { return c === 68; }) && nc.ruffles === 0 && nc.aspect < 0.5,
+        'rounds ' + ncs.length + ' [' + ncs.join(',') + '] · ring ' + n(nc.maxRadius, 2) + ' (68 at 1.0: ' + n(68 / (2 * Math.PI), 2) +
+        ', at the 0.8 of a rib: ' + n(68 * 0.8 / (2 * Math.PI), 2) + ') · aspect ' + n(nc.aspect, 3));
+    }
+    // 3. Rico triangular shawl (research §5): side to side, +1 before the last st every RS row
+    var rs5 = secsOf('knit-rico-triangular-shawl.pdf') || [];
+    name = 'rico-triangular-shawl · rows 1–16 — one straight edge, growing at the other (6 → 13)';
+    var rsec = null;
+    rs5.forEach(function (s) { if (!rsec && /Row 3\.\s*P5, m1p, p1/i.test(s.text || '')) rsec = s; });
+    if (!rsec) ok(name, false, 'section with "Row 3. P5, m1p, p1" not found');
+    else {
+      var rm = knitFixtureModel(rsec), rl = G.layout(rm);
+      var rc = rm.rounds.map(function (r) { return r.count; }).slice(0, 16);
+      var lefts = {}, rights = {};
+      rl.bands.slice(0, 16).forEach(function (b) {
+        if (b) { lefts[Math.round(b.x0 * 100)] = 1; rights[Math.round((b.x0 + b.width) * 100)] = 1; }
+      });
+      var straight = Object.keys(lefts).length === 1 || Object.keys(rights).length === 1;
+      ok(name, rm.mode === 'rows' && rc.length >= 14 && rc[0] === 6 && rc[rc.length - 1] >= 12 && straight && !rl.warp,
+        'mode ' + rm.mode + ' · rows [' + rc.join(',') + '] · anchor ' + rl.anchor + ' · one straight edge ' + straight +
+        ' (the pattern section after row 16 restarts its numbering and grows "until half the yarn" — no count to draw)');
+    }
   }
 
   function sectionOf(texts, file, re) {

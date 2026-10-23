@@ -751,7 +751,7 @@
    *     closing is exactly what every amigurumi does.
    * @returns {boolean[]} one per round, true = bridge it
    */
-  function outlierFlags(rounds, mode) {
+  function outlierFlags(rounds, mode, stepOnly) {
     var list = arr(rounds) || [];
     var n = list.length, i, r, c;
     var flags = new Array(n);
@@ -763,7 +763,10 @@
       flags[i] = false;
       if (c <= 0) continue;                       // a zero is `empty`, not this
       if (mode === 'rows' && normal.length >= OUTLIER_MIN_BEFORE) {
-        var med = median(normal);
+        /* Knitting (wave H) judges a row against the row before it, not the
+           running median: a triangle knitted down to its point narrows row by
+           row to a handful of stitches, which the median would bridge. */
+        var med = stepOnly ? normal[normal.length - 1] : median(normal);
         if (med >= OUTLIER_MIN_MED && c < OUTLIER_FRAC * med) { flags[i] = true; continue; }
       }
       normal.push(c);
@@ -1205,6 +1208,9 @@
     var o = opts || {};
     var mode = m.mode === 'rows' ? 'rows' : 'rounds';
     var rounds = arr(m.rounds) || [];
+    /* Wave H: a knitted piece takes the knitting path (7c); nothing below it
+       changes for crochet. */
+    if (isKnit(m)) return mode === 'rows' ? classifyKnitRows(m, rounds) : classifyKnitRounds(m, rounds, o);
     var shape = shapeOf({ mode: mode, rounds: rounds, shape: m.shape });
     /* An explicit `opts.upsideDown` wins over the model's own flag, so a host
        can preview either way up without editing the store's shape. */
@@ -2394,13 +2400,13 @@
     return 'center';
   }
 
-  function classifyRows(rounds, shape) {
+  function classifyRows(rounds, shape, knit) {
     var n = rounds.length, i;
     var anchor = rowsAnchor(rounds);
     /* 07 D4: a row of 2 or 5 among rows of 405 is a line the parser misread,
        and laying it out at full width ratio tore the sheet into detached
        pieces. It is not fabric, so it is not in the width either. */
-    var bridged = outlierFlags(rounds, 'rows');
+    var bridged = outlierFlags(rounds, 'rows', !!knit);
     var met = [], maxW = 0;
     for (i = 0; i < n; i++) {
       var mt = roundMetrics(rounds[i]);
@@ -2476,6 +2482,726 @@
     };
   }
 
+  /* ======================================================= 7c. knitting (1.5.0)
+
+     Wave H (docs/wave-h/knit-3d.md). A knitted piece is the same fabric
+     physics with a different stitch — a row 0.75 of a stitch width tall
+     (stockinette, rib, lace, cables), 0.5 in garter — plus three shapes a
+     crochet piece never has. Everything here is gated on `isKnit(model)`
+     (`model.craft === 'knitting'`, or a round of unambiguous knitting
+     records), so no crochet model reaches a line of it.
+
+     HEIGHTS. `Knits.expand` gives `h` in STITCH WIDTHS (contract §2). The
+     rounds/rows walk measures in sc units and multiplies by SH_SC, so a knit
+     record is handed to it as h / SH_SC and comes out at exactly its own
+     height: 0.75 per stockinette round, 0.5 per garter row.
+
+     (13) A FLAT ROW INSIDE A ROUND IS A BEND, NOT A RING. A heel flap is
+     rows worked back and forth on half a sock's stitches while the instep
+     waits; a short-row heel turns on a few. Drawn as rings they pinched the
+     tube to half its width. The row is kept at the ring's own width (the
+     held stitches close it, `knitPartials`) and its height is spent as a
+     BEND of the tube about the side that was not worked: the worked side
+     grows by the rows' height and the held side by nothing, which is what
+     turns a leg into a foot. The bend angle is the rows' height over the
+     tube radius, never more than a right angle (`KNIT_BEND_MAX`). The
+     mapping is a warp of the finished mesh (`warpPoint`), so the band
+     builder and every crochet band are untouched. A toe-up sock (a closed
+     toe cast-on) is turned so its LEG stands up; a top-down one already
+     does. A row needs `side` or `shortRow` on the Model round to be read
+     as flat; a model with none of either falls back to the heel's count
+     signature (a run of >= 4 rows at <= 0.6 of the ring that comes back to
+     >= 0.9 of it).
+
+     (14) A RAGLAN YOKE IS NOT A CONE. Top-down, a yoke widens to the
+     underarm, the sleeve stitches leave, and the body goes on narrower. The
+     yoke's rings take a stadium cross-section whose round ends are the
+     body's own radius, so the front and back run straight down into the
+     body and only the sleeve tops step in — shoulders, not a shelf all the
+     way round. The divide round rises by its own row height.
+
+     (15) A SHORT ROW IN A FLAT PIECE THICKENS ONE SIDE. Rows mode lays rows
+     at a uniform height; a row worked on part of the width (`shortRow`, and
+     narrower than the full row before it) only raises the part it covers,
+     so the next full row sits on a slope (a height field per column,
+     `field`). It is anchored at the edge the last full row ended at.
+
+     (16) A TRIANGLE GROWN FROM THE CENTRE. Increases at both edges and a
+     centre spine make every row a chevron, not a straight line: the two
+     halves are laid at the half-angle the rows' own width/height ratio
+     gives (45° in garter, where the top edge is straight) and the shawl
+     hangs from its start point (`chevron`).
+
+     Knitted hats and other pieces that close at their LAST round and start
+     open (brim-up) are shown with the crown up.
+     ===================================================================== */
+
+  var KNIT_DETECT = {
+    k: 1, k2tog: 1, ssk: 1, p2tog: 1, ssp: 1, kfb: 1, pfb: 1, m1: 1, m1l: 1, m1r: 1, m1p: 1,
+    cable: 1, cdd: 1, k3tog: 1, p3tog: 1, sssk: 1, s2kp: 1, sk2p: 1, ktbl: 1, ptbl: 1
+  };
+  /* Default heights in STITCH WIDTHS for a knit record that carries none. */
+  var KNIT_H = { co: 0.35, bo: 0.5 };
+  var KNIT_ROW_H = 0.75;
+  var KNIT_PARTIAL = 0.85;      // a flat row on <= 85% of the ring is a partial row
+  var KNIT_FB_DROP = 0.6;       // fallback heel signature (no side info at all)
+  var KNIT_FB_RUN = 4;
+  var KNIT_FB_BACK = 0.9;
+  var KNIT_BEND_MAX = Math.PI / 2;
+  var KNIT_CLOSED_START = 32;   // a toe / crown cast on with this few stitches...
+  var KNIT_CLOSED_FRAC = 0.45;  // ...and under this share of the widest round
+  var KNIT_GRAFT_FRAC = 0.5;    // grafted shut, when it ends this far in
+  var YOKE_MIN_INC = 3;         // increasing rounds before a divide
+  var YOKE_GROWTH = 1.3;        // ...growing the ring by this much
+  var YOKE_DIVIDE = 0.8;        // the divide drops to <= 80% in one round
+  var YOKE_DROOP = 40 * Math.PI / 180;   // the sleeve tops' fall past the body
+  var SHORT_ROW_FRAC = 0.9;     // rows mode: a short row is under 90% of the full one
+  var FIELD_DX = 0.5;           // height-field column, SW
+  var SHORT_ROW_TAPER = 2;      // SW over which a short row thins to its turn
+  var SPINE_FRAC = 0.4;         // share of increasing rows that must be edge + spine
+  var CHEVRON_MIN = 15 * Math.PI / 180, CHEVRON_MAX = 65 * Math.PI / 180;
+
+  /** True for a knitting Model: the craft says so, or a round holds knitting records. */
+  function isKnit(model) {
+    var m = model || {};
+    if (m.craft === 'knitting') return true;
+    if (m.craft) return false;
+    var rs = arr(m.rounds) || [], i, j;
+    for (i = 0; i < rs.length && i < 16; i++) {
+      var l = arr(rs[i] && rs[i].stitches);
+      if (!l) continue;
+      for (j = 0; j < l.length && j < 48; j++) if (l[j] && KNIT_DETECT[l[j].t] === 1) return true;
+    }
+    return false;
+  }
+
+  function knitRecH(st) {
+    // the store's generic `x` (a count with no records) is a plain knit row here
+    if (st && st.t === 'x') return KNIT_ROW_H;
+    if (st && isNum(st.h) && st.h > 0) return st.h;
+    var t = st && st.t;
+    return KNIT_H[t] != null ? KNIT_H[t] : KNIT_ROW_H;
+  }
+  function knitRecW(st) {
+    /* a bound-off stitch is fabric in the row that binds it off (Knits gives
+       it w 0: it is gone from the needle, not from the row) */
+    if (st && st.t === 'bo') return 1;
+    if (st && isNum(st.w) && st.w >= 0) return st.w;
+    var span = knitSpan(st);
+    return span > 1 ? span * 0.85 : 1;
+  }
+  /** Stitches one knit record stands for: a cable crosses several (`n`, else
+      its width at 0.85 per stitch, contract §2). Everything else is one. */
+  function knitSpan(st) {
+    // Knits.expand writes a cable as one record PER STITCH (`span`, `at`)
+    if (!st || st.t !== 'cable' || isNum(st.at)) return 1;
+    if (isNum(st.n) && st.n >= 1) return Math.min(24, Math.floor(st.n));
+    var w = isNum(st.w) && st.w > 0 ? st.w : 4 * 0.85;
+    return clamp(Math.round(w / 0.85), 2, 24);
+  }
+  function knitPerimeter(r) {
+    var l = arr(r && r.stitches), p = 0, i;
+    if (!l || !l.length) return Math.max(0, (r && r.count) | 0) * SW;
+    for (i = 0; i < l.length; i++) p += knitRecW(l[i]) * SW;
+    return p;
+  }
+  function isFlatRound(r) {
+    return !!r && (r.side === 'rs' || r.side === 'ws' || r.shortRow === true);
+  }
+
+  /**
+   * Rows worked flat on part of a round's stitches (a heel flap, a short-row
+   * heel), per round: `{ring, ringP, count, P}` — the ring they belong to,
+   * its width, and the row's own count and width — or null. Null overall when
+   * the piece has none. Rounds mode only; the renderer calls this too, so the
+   * held stitches that close the ring are drawn where the geometry put them.
+   */
+  function knitPartials(rounds) {
+    var list = arr(rounds) || [];
+    var n = list.length, out = new Array(n), any = false, anySide = false, i, r, c;
+    for (i = 0; i < n; i++) if (isFlatRound(list[i])) { anySide = true; break; }
+    var ring = 0, ringP = 0;
+    for (i = 0; i < n; i++) {
+      out[i] = null;
+      r = list[i] || {};
+      c = Math.max(0, r.count | 0);
+      if (c <= 0 || r.outlier === true) continue;
+      if (anySide && isFlatRound(r) && ring > 0 && c <= KNIT_PARTIAL * ring) {
+        out[i] = { ring: ring, ringP: ringP, count: c, P: knitPerimeter(r) };
+        any = true;
+        continue;
+      }
+      ring = c; ringP = knitPerimeter(r);
+    }
+    if (!anySide) {
+      /* No row in the piece says it was worked flat: read the heel off the
+         counts — a run of rows on a small share of the ring that comes back. */
+      ring = 0; ringP = 0;
+      i = 0;
+      while (i < n) {
+        r = list[i] || {};
+        c = Math.max(0, r.count | 0);
+        if (c <= 0 || r.outlier === true) { i++; continue; }
+        if (ring > 0 && c <= KNIT_FB_DROP * ring) {
+          var j = i;
+          while (j < n && (Math.max(0, (list[j] || {}).count | 0)) > 0 &&
+                 (list[j].count | 0) <= KNIT_FB_DROP * ring) j++;
+          if (j - i >= KNIT_FB_RUN && j < n && (list[j].count | 0) >= KNIT_FB_BACK * ring) {
+            for (var q = i; q < j; q++) {
+              out[q] = { ring: ring, ringP: ringP, count: list[q].count | 0, P: knitPerimeter(list[q]) };
+            }
+            any = true;
+          }
+          i = j;
+          continue;
+        }
+        ring = c; ringP = knitPerimeter(r);
+        i++;
+      }
+    }
+    if (!any) return null;
+    /* The ring a run of partial rows is closed to walks from the round before
+       it to the round after it: the stitches a gusset picks up along a heel
+       flap's edges are fabric the flap's selvedges were making all along, so
+       the tube widens over the heel instead of jumping (and frilling) at the
+       pick-up round. A toe-up heel narrows back to the leg the same way. */
+    i = 0;
+    while (i < n) {
+      if (!out[i]) { i++; continue; }
+      var a = i;
+      while (i < n && out[i]) i++;
+      var g = i;
+      while (g < n && !(Math.max(0, (list[g] || {}).count | 0) > 0 && list[g].outlier !== true)) g++;
+      if (g >= n) continue;
+      var L = i - a, cG = list[g].count | 0, pG = knitPerimeter(list[g]);
+      var r0 = out[a].ring, p0 = out[a].ringP;
+      for (var k = 0; k < L; k++) {
+        var f = (k + 1) / (L + 1), e = out[a + k];
+        e.ring = Math.max(e.count, Math.round(r0 + (cG - r0) * f));
+        e.ringP = Math.max(e.P, p0 + (pG - p0) * f);
+      }
+    }
+    return out;
+  }
+
+  /** A knit round as the walk wants it: heights in sc units, a partial row
+      closed to its ring by its held stitches. */
+  function knitGeoRound(r, part) {
+    var src = r || {}, c = {}, k;
+    for (k in src) if (Object.prototype.hasOwnProperty.call(src, k)) c[k] = src[k];
+    var l = arr(src.stitches) || [], st2 = [], i, rowH = 0;
+    for (i = 0; i < l.length; i++) {
+      var h = knitRecH(l[i]);
+      if (h > rowH) rowH = h;
+      /* a cable is one record over several stitches: spread its width over
+         them, or the walk pads the round's count with phantom stitches */
+      var span = knitSpan(l[i]), w = knitRecW(l[i]);
+      for (var q = 0; q < span; q++) st2.push({ t: (l[i] && l[i].t) || 'k', h: h / SH_SC, w: w / span });
+    }
+    if (!(rowH > 0)) rowH = isNum(src.height) && src.height > 0 ? src.height : KNIT_ROW_H;
+    if (part && part.ring > part.count) {
+      var nHeld = part.ring - part.count;
+      var wHeld = Math.max(0, part.ringP - part.P) / nHeld;
+      for (i = 0; i < nHeld; i++) st2.push({ t: 'k', h: rowH / SH_SC, w: wHeld });
+      c.count = part.ring;
+      c.knitPartial = true;
+    }
+    c.stitches = st2;
+    c.height = (isNum(src.height) && src.height > 0 ? src.height : rowH) / SH_SC;
+    return c;
+  }
+
+  /**
+   * Knitting shapes by "increase every other round" (a raglan's +8, 0, +8),
+   * and a rib at 0.8 a stitch runs into stockinette at 1.0: as steps, the
+   * walk reads every increase round as a frill and every plain one as a wall,
+   * a staircase the fabric does not have. The ring a round is DRAWN at (its
+   * record widths, scaled) is eased with its neighbours, two passes of a
+   * 1-2-1 filter; the stitch counts are untouched. Never across a partial
+   * row, an outlier, a jump of more than KNIT_EASE_JUMP (a yoke's divide, a
+   * gusset's pick-up), or at the first and last rounds.
+   */
+  var KNIT_EASE_JUMP = 0.2;
+  var KNIT_RUFFLE_RATE = 2;     // an increase round frills past 2x the flat rate...
+  var KNIT_RUFFLE_FRAC = 0.25;  // ...or past a quarter of the round before it
+  function knitEase(kr, parts) {
+    var n = kr.length, i, pass, P = new Array(n);
+    for (i = 0; i < n; i++) P[i] = knitPerimeter(kr[i]);
+    function ok(j) {
+      return j >= 0 && j < n && P[j] > 0 && !(parts && parts[j]) && kr[j].outlier !== true &&
+        (kr[j].count | 0) > 0;
+    }
+    var cur = P.slice();
+    for (pass = 0; pass < 2; pass++) {
+      var nxt = cur.slice();
+      for (i = 1; i < n - 1; i++) {
+        if (!ok(i) || !ok(i - 1) || !ok(i + 1)) continue;
+        if (Math.abs(cur[i - 1] - cur[i]) > KNIT_EASE_JUMP * cur[i] ||
+            Math.abs(cur[i + 1] - cur[i]) > KNIT_EASE_JUMP * cur[i]) continue;
+        nxt[i] = (cur[i - 1] + 2 * cur[i] + cur[i + 1]) / 4;
+      }
+      cur = nxt;
+    }
+    for (i = 0; i < n; i++) {
+      if (!(P[i] > 0) || Math.abs(cur[i] - P[i]) < 1e-9) continue;
+      var k = cur[i] / P[i], l = kr[i].stitches;
+      for (var q = 0; q < l.length; q++) l[q].w *= k;
+      kr[i].knitEased = k;
+    }
+  }
+
+  /* ---- the warp: one mapping of the finished mesh, applied by the renderer */
+
+  /** Rotate v about the axis through the origin that turns `u` (horizontal,
+      unit) toward -y by `a`: u -> cos a·u - sin a·y, y -> sin a·u + cos a·y. */
+  function bendRot(ux, uz, a, x, y, z, out) {
+    var ca = Math.cos(a), sa = Math.sin(a);
+    var pa = x * ux + z * uz;                     // along u
+    var rx = x - pa * ux, rz = z - pa * uz;       // the untouched part
+    var na = pa * ca + y * sa, ny = -pa * sa + y * ca;
+    out[0] = rx + na * ux; out[1] = ny; out[2] = rz + na * uz;
+    return out;
+  }
+
+  var _w = [0, 0, 0];
+  /**
+   * Where a point of the straight (walked) piece lands on the finished one.
+   * `w` is `layout(...).warp`; `band` (optional) is the band the point
+   * belongs to, for a rows height field. Pure; `out` is [x, y, z].
+   */
+  function warpPoint(w, band, x, y, z, out) {
+    out = out || [0, 0, 0];
+    if (!w) { out[0] = x; out[1] = y; out[2] = z; return out; }
+    var f = band && band.field;
+    if (f && f.bot && band.yTop > band.yBot) {
+      var gx = (x - f.x0) / f.dx, j = Math.floor(gx), last = f.bot.length - 1;
+      if (j < 0) j = 0; if (j > last - 1) j = Math.max(0, last - 1);
+      var t = last > 0 ? clamp(gx - j, 0, 1) : 0;
+      var fb = f.bot[j] + (f.bot[Math.min(j + 1, last)] - f.bot[j]) * t;
+      var ft = f.top[j] + (f.top[Math.min(j + 1, last)] - f.top[j]) * t;
+      var tt = (y - band.yBot) / (band.yTop - band.yBot);
+      y = fb + tt * (ft - fb);
+    }
+    if (w.chevron) {
+      var a = w.chevron.a, sa = Math.sin(a), ca = Math.cos(a), ta = sa / ca;
+      // worked toward the apex: the same triangle, walked the other way (and
+      // mirrored once more, so the map keeps its handedness)
+      if (w.chevron.rev) { y = w.chevron.H - y; x = -x; }
+      var sg = x < 0 ? 1 : -1, xa = Math.abs(x);
+      var u = xa - y * ta;
+      var nx = sg * (y * sa + u * ca);
+      var ny = -(y * ca - u * sa);
+      x = nx; y = ny;
+    }
+    if (w.bends && w.bends.length) {
+      var y0 = y, px = x, py = y, pz = z, k, b;
+      for (k = w.bends.length - 1; k >= 0; k--) {
+        b = w.bends[k];
+        if (y0 > b.y0) continue;
+        if (y0 >= b.y1) {
+          // inside the bend: a fan about the pivot, the row's height spent as angle
+          var th = b.phi * (b.y0 - y0) / Math.max(b.y0 - b.y1, 1e-9);
+          bendRot(b.ux, b.uz, th, x - b.px, 0, z - b.pz, _w);
+        } else {
+          bendRot(b.ux, b.uz, b.phi, px - b.px, py - b.y0 - (b.y1 - b.y0), pz - b.pz, _w);
+        }
+        px = _w[0] + b.px; py = _w[1] + b.y0; pz = _w[2] + b.pz;
+      }
+      x = px; y = py; z = pz;
+    }
+    if (w.yoke && y >= w.yoke.y0 - 1e-9) {
+      var over = Math.abs(x) - w.yoke.rb;
+      if (over > 0) y -= over * w.yoke.t;
+    }
+    if (w.disp) {
+      var d = w.disp;
+      bendRot(d.ux, d.uz, d.psi, x, y, z, _w);
+      x = _w[0] + d.tx; y = _w[1] + d.ty; z = _w[2] + d.tz;
+    }
+    out[0] = x; out[1] = y; out[2] = z;
+    return out;
+  }
+
+  /* ---- rounds */
+
+  function classifyKnitRounds(m, rounds, o) {
+    var n = rounds.length, i;
+    var parts = knitPartials(rounds);
+    var kr = [];
+    for (i = 0; i < n; i++) kr.push(knitGeoRound(rounds[i], parts ? parts[i] : null));
+    knitEase(kr, parts);
+    var sm = m.shape || {};
+    var shape = shapeOf({ mode: 'rounds', rounds: kr, shape: sm });
+
+    /* A knitted piece starts on a cast-on edge, which is open — unless the
+       pattern names a closed toe cast-on (the store's `closedStart`), or it
+       casts on a handful of stitches and increases at once: a toe or a
+       crown worked from its tip. */
+    var rises = false;
+    for (i = 1; i < Math.min(n, 4); i++) if ((kr[i].count | 0) > shape.firstCount) rises = true;
+    var closedStart = sm.closedStart === true || sm.start === 'magic-ring' ||
+      (shape.firstCount > 0 && shape.firstCount <= KNIT_CLOSED_START &&
+       shape.firstCount <= KNIT_CLOSED_FRAC * shape.maxCount && rises);
+    shape.closedTop = !!closedStart;
+    // a toe grafted shut (Kitchener) is closed too, not only a gathered crown
+    if (sm.graft === true && shape.lastCount > 0 && shape.lastCount <= KNIT_GRAFT_FRAC * shape.maxCount) {
+      shape.closedBottom = true;
+    }
+    shape.knit = true;
+    /* A garment open at both ends (a sweater body, a cowl, a sleeve, a leg)
+       has nothing in it to inflate: the turn-in rule would loft a yoke into a
+       lampshade's dome. Only a stated stuffing or a closed end keeps a slack. */
+    if (shape.stuffed !== true && !shape.closedTop && !shape.closedBottom) shape.slack = SLACK_OPEN;
+
+    var flip;
+    if (o.upsideDown != null) flip = o.upsideDown === true;
+    else if (sm.upsideDownSource === 'part') flip = sm.upsideDown === true;
+    else if (parts) flip = false;
+    // a hat worked brim-up shows its crown up
+    else if (shape.closedBottom && !shape.closedTop) flip = true;
+    else flip = shape.upsideDown === true;
+
+    var cls = classifyRounds(kr, shape, flip, o.terrace !== false);
+    /* A round with no more stitches than the one before it adds no fabric:
+       when its WIDTH still steps (a k2p2 rib at 0.8 a stitch going on in
+       stockinette at 1.0) the fabric flares, and when it drops (a yoke's
+       divide) it steps in — neither frills. */
+    for (i = 1; i < n; i++) {
+      var ek = cls.rounds[i];
+      if (!ek || !ek.ruffle) continue;
+      /* ...and an increase round frills only when it really outruns the
+         fabric: a knitted ruffle doubles its stitches, while a raglan's +8
+         after a rib or the last round before a divide is shaping */
+      var dn = (kr[i].count | 0) - (kr[i - 1].count | 0);
+      if (dn > 0 && (dn > KNIT_RUFFLE_RATE * flatRate(ek.h / SH_SC, 1) || dn > KNIT_RUFFLE_FRAC * (kr[i - 1].count | 0))) continue;
+      ek.ruffle = false; ek.prof = null; ek.lobes = 0; ek.kind = 'ring';
+      ek.radiusDraw = ek.radius; ek.radiusMax = ek.radius; ek.radiusMin = ek.radius;
+      cls.ruffles--;
+    }
+    var info = { partials: 0, bends: [], yoke: null, toeUp: false };
+    if (parts) {
+      for (i = 0; i < n; i++) if (parts[i]) { info.partials++; cls.rounds[i].partial = true; }
+    }
+
+    var yoke = parts ? null : knitYoke(kr, cls);
+    if (yoke) info.yoke = yoke;
+
+    var warp = null;
+    if (parts) {
+      var bends = [];
+      i = 0;
+      while (i < n) {
+        if (!parts[i]) { i++; continue; }
+        var a = i;
+        while (i < n && parts[i]) i++;
+        var b = i - 1;
+        var ea = cls.rounds[a], eb = cls.rounds[b];
+        var top = ea.yTop, bot = eb.y;
+        var L = top - bot;
+        if (!(L > 0)) continue;
+        var r = Math.max(ea.radius, R_MIN);
+        var phi = Math.min(KNIT_BEND_MAX, L / r);
+        /* The worked stitches are drawn at the END of the ring (the renderer
+           puts the held ones first, so they stay solid while the row fills),
+           so the worked side is centred at 2π − π·f; the pivot is opposite. */
+        var f = clamp(parts[a].P / Math.max(parts[a].ringP, 1e-9), 0.05, 1);
+        var thc = TAU - Math.PI * f;
+        var ux = Math.cos(thc), uz = Math.sin(thc);
+        bends.push({ y0: top, y1: bot, phi: phi, ux: ux, uz: uz, px: -r * ux, pz: -r * uz, from: a, to: b, length: L });
+      }
+      if (bends.length) {
+        warp = { bends: bends, disp: null, chevron: null, field: false };
+        info.bends = bends;
+        if (shape.closedTop) {
+          /* Toe-up: the walk starts at the toe, so the LEG is the last segment.
+             Turn the whole piece so the leg stands up, cuff on top. */
+          var Phi = 0;
+          for (i = 0; i < bends.length; i++) Phi += bends[i].phi;
+          var lb = bends[bends.length - 1];
+          warp.disp = { psi: Math.PI - Phi, ux: lb.ux, uz: lb.uz, tx: 0, ty: 0, tz: 0 };
+          info.toeUp = true;
+        }
+      }
+    }
+    if (yoke && !warp) {
+      /* The sleeve tops of a yoke hang off the shoulders: past the body's own
+         radius the yoke falls away at YOKE_DROOP, so its sides read as
+         shoulders running into the arms, not as the brim of a lampshade. */
+      warp = { bends: null, disp: null, chevron: null, field: false,
+        yoke: { rb: yoke.bodyRadius, t: Math.tan(YOKE_DROOP), y0: cls.rounds[yoke.divide].y } };
+    }
+    cls.warp = warp;
+    cls.knit = info;
+    return cls;
+  }
+
+  /** (14) The raglan yoke: an increase run, then a one-round divide. */
+  function knitYoke(kr, cls) {
+    var n = kr.length, i, d = -1;
+    for (i = 1; i < n; i++) {
+      var c = kr[i].count | 0, p = kr[i - 1].count | 0;
+      if (!(c > 0 && p > 0) || c > YOKE_DIVIDE * p) continue;
+      // >= YOKE_MIN_INC increasing rounds before it, growing the ring >= 1.3x
+      var j = i - 1, inc = 0, lo = p;
+      while (j > 0 && (kr[j - 1].count | 0) > 0 && (kr[j - 1].count | 0) <= (kr[j].count | 0)) {
+        if ((kr[j - 1].count | 0) < (kr[j].count | 0)) inc++;
+        lo = kr[j - 1].count | 0;
+        j--;
+      }
+      if (inc < YOKE_MIN_INC || p < YOKE_GROWTH * lo) continue;
+      // and the body goes on: >= 2 rounds at about the divide's count
+      var after = 0;
+      for (var q = i + 1; q < n && after < 2; q++) {
+        if ((kr[q].count | 0) >= 0.9 * c && (kr[q].count | 0) <= 1.1 * c) after++;
+        else break;
+      }
+      if (after < 2) continue;
+      d = i;
+      cls.yokeFrom = j;
+      break;
+    }
+    if (d < 0) return null;
+    var rs = cls.rounds, from = cls.yokeFrom;
+    var body = rs[d];
+    var rb = Math.max(body.radius, R_MIN);
+    var Pb = rb * TAU;
+    for (i = from; i < d; i++) {
+      var e = rs[i];
+      if (!e || e.empty || e.outlier) continue;
+      var P = e.radius * TAU;
+      if (P <= Pb * 1.001) continue;
+      var straight = (P - Pb) / 2;
+      e.prof = profileStadium(straight, rb, e.radius);
+      e.kind = 'yoke';
+      var rg = profileRange(e.prof);
+      e.radiusDraw = e.radius;
+      e.radiusMax = e.radius * rg.max;
+      e.radiusMin = e.radius * rg.min;
+    }
+    /* The divide rises a row: front and back go straight down into the body;
+       only the sleeve tops step in. */
+    var dyWant = body.h, add = dyWant - body.dy;
+    if (add > 0) {
+      body.dy = dyWant;
+      body.y -= add;
+      for (i = d + 1; i < rs.length; i++) { rs[i].y -= add; rs[i].yTop -= add; }
+      cls.height += add;
+      cls.aspect = cls.maxRadius > 0 ? cls.height / (2 * cls.maxRadius) : 0;
+    }
+    var maxX = 0;
+    for (i = 0; i < rs.length; i++) if (rs[i].radiusMax > maxX) maxX = rs[i].radiusMax;
+    return { from: from, divide: d, bodyRadius: rb, width: 2 * maxX };
+  }
+
+  /* ---- rows */
+
+  function classifyKnitRows(m, rounds) {
+    var n = rounds.length, i;
+    var kr = [];
+    for (i = 0; i < n; i++) kr.push(knitGeoRound(rounds[i], null));
+    var shape = shapeOf({ mode: 'rows', rounds: kr, shape: m.shape || {} });
+    shape.knit = true;
+    var cls = classifyRows(kr, shape, true);
+    var info = { shortRows: 0, chevron: null };
+    var field = knitShortRows(rounds, cls);
+    if (field) info.shortRows = field;
+    var chev = knitChevron(kr, cls);
+    if (chev) info.chevron = chev;
+    cls.warp = (field || chev) ? { bends: null, disp: null, chevron: chev, field: !!field } : null;
+    cls.knit = info;
+    return cls;
+  }
+
+  /** (15) Short rows: re-anchor them and lay every row on a height field. */
+  function knitShortRows(rounds, cls) {
+    var rs = cls.rounds, n = rs.length, i, lastFull = -1, nShort = 0;
+    var isShort = new Array(n);
+    for (i = 0; i < n; i++) {
+      var e = rs[i];
+      if (!e || e.outlier || !(e.width > 0)) continue;
+      var src = rounds[i] || {};
+      if (src.shortRow === true && lastFull >= 0 && e.width < SHORT_ROW_FRAC * rs[lastFull].width) {
+        isShort[i] = true;
+        nShort++;
+        var full = rs[lastFull];
+        /* Rows alternate direction (the renderer lays an even row left to
+           right), so the last full row ended at its right edge when its index
+           is even: the short rows start, turn and come back from there. */
+        e.x0 = (lastFull & 1) === 0 ? full.x0 + full.width - e.width : full.x0;
+        // ...and it turns at its other end, where the wrap tapers it to nothing
+        e.turnX = (lastFull & 1) === 0 ? e.x0 : e.x0 + e.width;
+        e.shortRow = true;
+        continue;
+      }
+      /* The reference full row is the last one NOT marked as turning (a
+         flagged row as wide as it does not replace it, or a run of short rows
+         would shrink its own yardstick row by row); a piece whose every row
+         says `turn` takes its first row. */
+      if (src.shortRow !== true || lastFull < 0) lastFull = i;
+    }
+    if (!nShort) return 0;
+    var xMin = Infinity, xMax = -Infinity;
+    for (i = 0; i < n; i++) {
+      if (!rs[i] || rs[i].outlier || !(rs[i].width > 0)) continue;
+      xMin = Math.min(xMin, rs[i].x0); xMax = Math.max(xMax, rs[i].x0 + rs[i].width);
+    }
+    var cols = Math.max(2, Math.ceil((xMax - xMin) / FIELD_DX) + 1);
+    var H = new Float64Array(cols), top = 0;
+    for (i = 0; i < n; i++) {
+      var r = rs[i];
+      if (!r || r.outlier || !(r.width > 0)) {
+        if (r) { r.y = top; r.yTop = top; }
+        continue;
+      }
+      var j0 = Math.max(0, Math.floor((r.x0 - xMin) / FIELD_DX));
+      var j1 = Math.min(cols - 1, Math.ceil((r.x0 + r.width - xMin) / FIELD_DX));
+      var bot = [], tp = [], lo = Infinity, hi = -Infinity, j;
+      var add = [];
+      for (j = j0; j <= j1; j++) {
+        var hj = r.h;
+        if (r.shortRow && r.turnX != null) {
+          hj *= clamp(Math.abs(xMin + j * FIELD_DX - r.turnX) / SHORT_ROW_TAPER, 0, 1);
+        }
+        add.push(hj);
+        bot.push(H[j]); tp.push(H[j] + hj);
+        if (H[j] < lo) lo = H[j];
+        if (H[j] + hj > hi) hi = H[j] + hj;
+      }
+      for (j = j0; j <= j1; j++) H[j] += add[j - j0];
+      r.field = { x0: xMin + j0 * FIELD_DX, dx: FIELD_DX, bot: bot, top: tp };
+      r.y = lo; r.yTop = hi; r.dy = hi - lo;
+      if (hi > top) top = hi;
+    }
+    cls.height = top;
+    cls.aspect = cls.width > 0 ? top / cls.width : 0;
+    return nShort;
+  }
+
+  /** (16) A triangle grown from a centre spine: rows are chevrons. */
+  function knitChevron(kr, cls) {
+    var rs = cls.rounds, n = rs.length, i;
+    var first = 0, last = 0;
+    /* Edge + spine shaping rows, for increases (grown from the centre of the
+       top edge, top-down) and for decreases (worked from the two lower edges
+       up to the neck point, like the Icelandic "Thórdís"): the same triangle,
+       its rows walked the other way. */
+    var tally = { inc: { rows: 0, tri: 0 }, dec: { rows: 0, tri: 0 } };
+    for (i = 0; i < n; i++) {
+      var r = kr[i], c = Math.max(1, r.count | 0);
+      if (!rs[i] || rs[i].outlier || !(rs[i].width > 0)) continue;
+      if (!first) first = c;
+      last = c;
+      var s = sites(r);
+      ['inc', 'dec'].forEach(function (kind) {
+        var list = s[kind];
+        if (!list || !list.length) return;
+        tally[kind].rows++;
+        var edge = Math.max(1, Math.round(c * 0.1));
+        var lo = false, hi = false, mid = false;
+        for (var j = 0; j < list.length; j++) {
+          var ix = list[j];
+          if (ix <= edge) lo = true;
+          else if (ix >= c - 1 - edge) hi = true;
+          else if (Math.abs(ix - c / 2) <= Math.max(1, c * 0.12)) mid = true;
+        }
+        if (lo && hi && mid) tally[kind].tri++;
+      });
+    }
+    var grow = tally.inc.tri >= 2 && tally.inc.tri >= SPINE_FRAC * tally.inc.rows && first <= 0.25 * last;
+    var shrink = !grow && tally.dec.tri >= 2 && tally.dec.tri >= SPINE_FRAC * tally.dec.rows && last <= 0.25 * first;
+    if (!grow && !shrink) return null;
+    // tan(a) = (w/4)/y — y measured from the apex — least squares through it
+    var H = cls.height, sxy = 0, syy = 0;
+    for (i = 0; i < n; i++) {
+      var e = rs[i];
+      if (!e || e.outlier || !(e.width > 0)) continue;
+      var y = (e.y + e.yTop) / 2;
+      if (shrink) y = H - y;
+      sxy += (e.width / 4) * y; syy += y * y;
+    }
+    if (!(syy > 0)) return null;
+    var a = clamp(Math.atan(sxy / syy), CHEVRON_MIN, CHEVRON_MAX);
+    return { a: a, rows: grow ? tally.inc.tri : tally.dec.tri, rev: !!shrink, H: H };
+  }
+
+  /** Band extents through the warp, for the fit (rad about the y axis). */
+  function knitExtents(cls, bands) {
+    var w = cls.warp, i, k, t, p = [0, 0, 0];
+    var bx0 = Infinity, bx1 = -Infinity, by0 = Infinity, by1 = -Infinity, bz0 = Infinity, bz1 = -Infinity;
+    var sig = 0;
+    if (w && w.bends) for (i = 0; i < w.bends.length; i++) sig += w.bends[i].phi * 1000 + w.bends[i].y0 * 7;
+    if (w && w.chevron) sig += w.chevron.a * 5000 + 17;
+    if (w && w.disp) sig += w.disp.psi * 300 + 3;
+    if (w && w.yoke) sig += w.yoke.rb * 100 + 29;
+    function take(b, x, y, z) {
+      warpPoint(w, b, x, y, z, p);
+      if (p[0] < bx0) bx0 = p[0]; if (p[0] > bx1) bx1 = p[0];
+      if (p[1] < by0) by0 = p[1]; if (p[1] > by1) by1 = p[1];
+      if (p[2] < bz0) bz0 = p[2]; if (p[2] > bz1) bz1 = p[2];
+      return p;
+    }
+    var exts = [];
+    for (i = 0; i < bands.length; i++) {
+      var b = bands[i];
+      exts.push(null);
+      if (!b) continue;
+      var rad = 0, ymin = Infinity, ymax = -Infinity;
+      if (cls.mode === 'rows') {
+        for (t = 0; t < 2; t++) {
+          for (k = 0; k <= 8; k++) {
+            var xx = b.x0 + b.width * k / 8;
+            take(b, xx, t ? b.yTop : b.yBot, 0);
+            rad = Math.max(rad, Math.abs(p[0]));
+            ymin = Math.min(ymin, p[1]); ymax = Math.max(ymax, p[1]);
+          }
+        }
+      } else {
+        for (t = 0; t < 2; t++) {
+          var rr = t ? b.rBot : b.rTop, yy = t ? b.yBot : b.yTop;
+          for (k = 0; k < 16; k++) {
+            var th = k / 16 * TAU, mul = b.prof ? b.prof(th, t) : 1;
+            take(b, rr * mul * Math.cos(th), yy, rr * mul * Math.sin(th));
+            rad = Math.max(rad, Math.sqrt(p[0] * p[0] + p[2] * p[2]));
+            ymin = Math.min(ymin, p[1]); ymax = Math.max(ymax, p[1]);
+          }
+        }
+      }
+      b.ext = { rad: rad, ymin: ymin, ymax: ymax };
+      b.warpSig = Math.round(sig);
+      exts[i] = b.ext;
+    }
+    return { x0: bx0, x1: bx1, y0: by0, y1: by1, z0: bz0, z1: bz1 };
+  }
+
+  /** Toe-up display: move the leg onto the y axis, the top to y = 0. */
+  function knitPlace(cls, bands) {
+    var w = cls.warp;
+    if (!w || !w.disp) return;
+    var last = -1, i;
+    for (i = bands.length - 1; i >= 0; i--) if (bands[i]) { last = i; break; }
+    if (last < 0) return;
+    var p = warpPoint(w, null, 0, bands[last].yBot, 0, [0, 0, 0]);
+    w.disp.tx = -p[0]; w.disp.tz = -p[2];
+    var box = knitExtents(cls, bands);
+    w.disp.ty = -box.y1;
+  }
+
+  /** Layout for a knitted piece: the shared bands, then the warp's extents. */
+  function knitLayout(cls, bands) {
+    if (cls.mode === 'rows') {
+      for (var i = 0; i < bands.length; i++) {
+        var e = cls.rounds[i];
+        if (bands[i] && e && e.field) { bands[i].field = e.field; bands[i].sig += 7e6; }
+        if (bands[i] && e && e.shortRow) bands[i].x0 = e.x0;
+      }
+    }
+    if (!cls.warp) return;
+    knitPlace(cls, bands);
+    var box = knitExtents(cls, bands);
+    cls.knit.box = box;
+    cls.knit.extentHeight = box.y1 - box.y0;
+  }
+
   /* -------------------------------------------------------------- 8. layout */
 
   /**
@@ -2534,6 +3260,7 @@
       }
     }
     cls.bands = bands;
+    if (cls.knit) knitLayout(cls, bands);
     return cls;
   }
 
@@ -2645,7 +3372,7 @@
   /* --------------------------------------------------------------- exports */
 
   global.DiagramGeo = {
-    version: '1.4.0',
+    version: '1.5.0',
 
     // constants (read-only by convention; the test page prints them)
     SW: SW,
@@ -2730,6 +3457,18 @@
     profileRange: profileRange,
     arcTable: arcTable,
     arcSlices: arcSlices,
+
+    // knitting (1.5.0, wave H)
+    KNIT: {
+      rowH: KNIT_ROW_H, partial: KNIT_PARTIAL, bendMax: KNIT_BEND_MAX,
+      closedStart: KNIT_CLOSED_START, closedFrac: KNIT_CLOSED_FRAC, graftFrac: KNIT_GRAFT_FRAC,
+      yokeDivide: YOKE_DIVIDE, yokeGrowth: YOKE_GROWTH, shortRowFrac: SHORT_ROW_FRAC,
+      fallbackDrop: KNIT_FB_DROP, fallbackRun: KNIT_FB_RUN
+    },
+    isKnit: isKnit,
+    knitPartials: knitPartials,
+    knitSpan: knitSpan,
+    warpPoint: warpPoint,
 
     // the two the renderer calls
     classify: classify,

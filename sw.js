@@ -18,7 +18,7 @@
                                  "clear the service worker" ritual, ever
      any host    /tmp-pdf/ /test/  never touched by the cache at all
 */
-const CACHE_VERSION = 'h0df855a311';
+const CACHE_VERSION = 'h27157c7b81';
 const CACHE_NAME = 'stitchkeeper-' + CACHE_VERSION;
 
 const PRECACHE_URLS = [
@@ -31,7 +31,9 @@ const PRECACHE_URLS = [
   './css/sewing.css',
   './js/themes.js',
   './js/patterns.js',
+  './js/knits.js',
   './js/pdftext.js',
+  './js/knit-chart.js',
   // pdf.js is lazy-loaded by PdfText, but precached so PDF import works offline.
   './js/vendor/pdf.min.js',
   './js/vendor/pdf.worker.min.js',
@@ -49,6 +51,7 @@ const PRECACHE_URLS = [
   './js/xstitch-photo.js',
   './js/sewing.js',
   './js/app.js',
+  './js/app-knitting.js',
   './js/app-xstitch.js',
   './js/app-sewing.js',
   './icons/icon-192.png',

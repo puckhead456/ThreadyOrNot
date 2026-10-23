@@ -21,6 +21,145 @@
 (function () {
 
   // =====================================================================
+  // 0. The craft profile. Everything below that is CROCHET rather than
+  //    pattern-reading lives in this one object; Patterns.createParser(p)
+  //    builds the same engine over another craft's profile (js/knits.js).
+  //    A key a profile leaves out falls back to crochet's (profileWith).
+  // =====================================================================
+
+  var CROCHET = {
+    id: 'crochet',
+    // [regexSource, produced, consumed]; produced/consumed may also be
+    // functions of the match (m = the exec of '^(?:source)$' on the word),
+    // for names whose count is in the name (knitting's C6F).
+    vocab: [
+      // compound forms first ("Hdc Inc" / "HdcInc" behave like inc)
+      ['(?:hdc|sc|dc|tr)\\s*inc(?:rease)?', 2, 1],
+      ['(?:hdc|sc|dc|tr)\\s*dec(?:rease)?', 1, 2],
+      ['sl\\s*st(?:itch)?(?:es)?', 1, 1],
+      ['slst', 1, 1],
+      ['slip\\s+stitch(?:es)?', 1, 1],
+      // Post stitches (06 #3): the backbone of ribbing, baskets, cuffs and
+      // textured blankets. They must sit above the plain stitches so "fpdc"
+      // never reads as an "f" and a "dc".
+      ['(?:fp|bp)(?:trtr|dtr|htr|hdc|sc|dc|tr)', 1, 1],
+      ['(?:sc|hdc|dc|tr)3tog', 1, 3],
+      ['sc2tog', 1, 2],
+      ['hdc2tog', 1, 2],
+      ['dc2tog', 1, 2],
+      ['inv\\.?\\s*dec', 1, 2],
+      ['invdec', 1, 2],
+      ['decrease', 1, 2],
+      ['dec', 1, 2],
+      ['increase', 2, 1],
+      ['incr', 2, 1],
+      ['inc', 2, 1],
+      ['fsc', 1, 0],
+      ['spike\\s*(?:sc|hdc|dc|tr)?', 1, 1],
+      // A STANDING stitch is an ordinary stitch begun on a fresh loop instead of
+      // a turning chain - "1 standing tr in any 2ch sp" is how every Stylecraft
+      // motif joins a new colour, and it is one stitch made for one consumed.
+      // Without this the whole segment failed to tokenise and the round lost it.
+      ['standing\\s*(?:sc|hdc|dc|htr|dtr|trtr|ttr|tr)', 1, 1],
+      ['crossed\\s+(?:dc|tr)', 2, 2],
+      ['x[- ]?st(?:itch)?', 2, 2],
+      ['v[- ]?st(?:itch)?', 2, 1],
+      ['picot', 0, 0],
+      // UK terms. "htr" and "ttr"/"trtr" have to be matched before "tr" or the
+      // leading letter is left behind and the row never computes.
+      ['trtr', 1, 1],
+      ['ttr', 1, 1],
+      ['dtr', 1, 1],
+      ['htr', 1, 1],
+      ['hdc', 1, 1],
+      ['tr(?:eble)?', 1, 1],
+      ['dc', 1, 1],
+      ['sc', 1, 1],
+      ['puff(?:\\s*st(?:itch)?)?', 1, 1],
+      ['bobble', 1, 1],
+      ['popcorn', 1, 1],
+      ['cluster', 1, 1],
+      ['shell', 1, 1],
+      ['bbl', 1, 1],
+      ['skip', 0, 1],
+      ['miss', 0, 1],
+      ['sk', 0, 1]
+    ],
+    // Segments that contribute nothing to the stitch count.
+    zeroRes: [
+      /^ch(?:ain)?\s*\d*\s*(?:st|sts|ch|chs)?$/i,
+      /^ch(?:ain)?\s*\d+\b/i,
+      /^ch(?:ain)?\b\s*$/i,
+      /^turn\b/i, /^do\s*not\b/i, /^don't\b/i, /^join\b/i, /^fasten\s+off\b/i,
+      /^tie\s+off\b/i, /^flip\b/i, /^with\b/i, /^using\b/i, /^pull\b/i,
+      /^leave\b/i, /^leaving\b/i, /^cut\b/i, /^stuff\b/i, /^start\s+stuffing\b/i,
+      /^place\b/i, /^add\b/i, /^put\b/i, /^mark\b/i, /^before\b/i, /^after\b/i,
+      // "12sc, Attach tail (3sc through both sides of Tail and into body), 21sc"
+      // - "attach X" costs nothing by itself; the stitches that do the joining
+      // are spelled out in the bracket beside it and are counted there.
+      /^attach\b/i,
+      /^now\b/i, /^instead\b/i, /^this\b/i, /^these\b/i, /^colou?r\s+change\b/i,
+      /^change\s+to\b/i, /^switch\s+to\b/i, /^in\s+(?:yellow|black|white|mc|cc|a|b)\s*$/i,
+      /^(?:mr|magic\s*ring|magic\s*circle)\s*$/i,
+      /^[a-z]$/i, /^into\b/i, /^fold\b/i, /^sew\b/i, /^lay\b/i, /^pinch\b/i,
+      // a stray stitch total, e.g. the "30" of a trailing "(30)" / "30 sts"
+      // (NOT "2sc", which is two single crochets)
+      /^\d+\s*(?:sts?|stitches?|total)?$/i
+    ],
+    // the count-from-nothing start: "6 sc in MR" / "MR with 6" / "MR 6 sc."
+    mrRe1: new RegExp('^(\\d+)\\s*(?:sc|sts?|dc|hdc|tr)?\\s*(?:in|into)\\s+(?:a\\s+|the\\s+)?(?:mr|magic\\s*ring|magic\\s*circle|magic\\s*loop|ring|circle)\\b', 'i'),
+    mrRe2: new RegExp('^(?:mr|magic\\s*ring|magic\\s*circle)\\s*(?:with\\s+)?(\\d+)', 'i'),
+    mrOnlyRe: /^(?:make\s+(?:a\s+)?)?(?:mr|magic\s+(?:ring|circle|loop))\s*(?:with|,|:)?\s*(\d+)\s*(?:sc|hdc|dc|htr|tr)\b\s*(?:in(?:to)?\s+(?:the\s+)?(?:ring|mr|[a-z]+))?\s*\.?$/i,
+    prefixRe: /^(?:blo|flo|back\s+loop\s+only|front\s+loop\s+only|work\s+a|work|then|and)\s+/i,
+    imperativeRe: /^(?:make|use|using|start|begin|work|continue|repeat|rep|sew|stuff|fasten|join|attach|turn|skip|insert|place|add|cut|leave|change|weave|thread|pull|fold|close|mark|pinch|do|don'?t|now|then|next|follow|check|keep|take|hold|count)\b/i,
+    // wave G: the pieces a part header names
+    partNounRe: /\b(?:heads?|body|bodies|arms?|legs?|ears?|eyes?|tails?|wings?|feet|foot|hands?|paws?|horns?|antlers?|antennae?|nose|snout|muzzle|beak|fins?|shell|hat|scarf|sleeves?|cuffs?|stalks?|leaf|leaves|petals?|spikes?|mane|cheeks?|hood|mitts?|mittens?|boots?|shoes?|base|motif|square|panel)\b/i,
+    // the things a placing note places
+    placeNounRe: /\b(?:eyes?|nose|noses|mouth|muzzles?|snouts?|beaks?|ears?|arms?|legs?|feet|foot|hands?|paws?|tails?|horns?|wings?|fins?|heads?|body|bodies|buttons?|key\s*rings?|keyrings?|eyebrows?|eyelids?|cheeks?|whiskers?|antennae?|pupils?|hats?|scarf|scarves|bows?|stars?|hearts?|petals?|leaf|leaves|spots?|stripes?|patch(?:es)?|pieces?|limbs?)\b/i,
+    // [prefix, type, US height, UK height] - see section 10
+    stitchH: [
+      [/^(?:trtr|ttr|quad)/, 'dtr', 3.3, 3.3],
+      [/^dtr/, 'dtr', 3.3, 2.68],
+      [/^htr/, 'hdc', 1.34, 1.34],
+      [/^hdc/, 'hdc', 1.34, 1.34],
+      [/^(?:tr|treble)/, 'tr', 2.68, 2.01],
+      [/^dc/, 'dc', 2.01, 1],
+      [/^(?:slst|slipst|slip|sl|ss)/, 'sl', 0.3, 0.3],
+      [/^(?:fsc|sc)/, 'sc', 1, 1],
+      [/^ch/, 'ch', 0, 0]
+    ],
+    slWidth: 0.7,
+    // [abbr, meaning, optional regex source] for glossary(): only the entries
+    // a pattern actually uses are offered
+    glossary: [
+      ['ch', 'chain'], ['sl st', 'slip stitch', 'sl\\s*st|slst'], ['sc', 'single crochet (US)'],
+      ['hdc', 'half double crochet (US)'], ['dc', 'double crochet (US; UK treble)'],
+      ['tr', 'treble crochet (US)'], ['htr', 'half treble (UK)'], ['dtr', 'double treble'],
+      ['inc', 'increase: 2 stitches in one'], ['dec', 'decrease: 2 stitches worked together'],
+      ['sc2tog', 'single crochet 2 together'], ['invdec', 'invisible decrease', 'inv\\.?\\s*dec'],
+      ['MR', 'magic ring', 'mr|magic\\s*ring'], ['BLO', 'back loop only'], ['FLO', 'front loop only'],
+      ['FPdc', 'front post double crochet'], ['BPdc', 'back post double crochet'],
+      ['sk', 'skip'], ['sp', 'space'], ['st(s)', 'stitch(es)', 'sts?'], ['rnd', 'round', 'rnds?'],
+      ['rep', 'repeat'], ['beg', 'beginning'], ['FO', 'fasten off'], ['yo', 'yarn over'],
+      ['tog', 'together'], ['RS', 'right side'], ['WS', 'wrong side']
+    ]
+  };
+
+  function profileWith(p) {
+    var out = {}, k;
+    for (k in CROCHET) if (Object.prototype.hasOwnProperty.call(CROCHET, k)) out[k] = CROCHET[k];
+    if (p && p !== CROCHET) for (k in p) if (Object.prototype.hasOwnProperty.call(p, k)) out[k] = p[k];
+    return out;
+  }
+
+  /**
+   * The whole reader, built over one craft profile. `window.Patterns` is
+   * createParser(CROCHET); js/knits.js builds window.Knits the same way.
+   * (The body below keeps its original indentation.)
+   */
+  function createParser(profile) {
+  var PROFILE = profileWith(profile);
+  // =====================================================================
   // 1. Helpers
   // =====================================================================
 
@@ -81,68 +220,27 @@
   // 2. Stitch vocabulary  (produced, consumed)
   // =====================================================================
 
-  var VOCAB = [
-    // compound forms first ("Hdc Inc" / "HdcInc" behave like inc)
-    ['(?:hdc|sc|dc|tr)\\s*inc(?:rease)?', 2, 1],
-    ['(?:hdc|sc|dc|tr)\\s*dec(?:rease)?', 1, 2],
-    ['sl\\s*st(?:itch)?(?:es)?', 1, 1],
-    ['slst', 1, 1],
-    ['slip\\s+stitch(?:es)?', 1, 1],
-    // Post stitches (06 #3): the backbone of ribbing, baskets, cuffs and
-    // textured blankets. They must sit above the plain stitches so "fpdc"
-    // never reads as an "f" and a "dc".
-    ['(?:fp|bp)(?:trtr|dtr|htr|hdc|sc|dc|tr)', 1, 1],
-    ['(?:sc|hdc|dc|tr)3tog', 1, 3],
-    ['sc2tog', 1, 2],
-    ['hdc2tog', 1, 2],
-    ['dc2tog', 1, 2],
-    ['inv\\.?\\s*dec', 1, 2],
-    ['invdec', 1, 2],
-    ['decrease', 1, 2],
-    ['dec', 1, 2],
-    ['increase', 2, 1],
-    ['incr', 2, 1],
-    ['inc', 2, 1],
-    ['fsc', 1, 0],
-    ['spike\\s*(?:sc|hdc|dc|tr)?', 1, 1],
-    // A STANDING stitch is an ordinary stitch begun on a fresh loop instead of
-    // a turning chain - "1 standing tr in any 2ch sp" is how every Stylecraft
-    // motif joins a new colour, and it is one stitch made for one consumed.
-    // Without this the whole segment failed to tokenise and the round lost it.
-    ['standing\\s*(?:sc|hdc|dc|htr|dtr|trtr|ttr|tr)', 1, 1],
-    ['crossed\\s+(?:dc|tr)', 2, 2],
-    ['x[- ]?st(?:itch)?', 2, 2],
-    ['v[- ]?st(?:itch)?', 2, 1],
-    ['picot', 0, 0],
-    // UK terms. "htr" and "ttr"/"trtr" have to be matched before "tr" or the
-    // leading letter is left behind and the row never computes.
-    ['trtr', 1, 1],
-    ['ttr', 1, 1],
-    ['dtr', 1, 1],
-    ['htr', 1, 1],
-    ['hdc', 1, 1],
-    ['tr(?:eble)?', 1, 1],
-    ['dc', 1, 1],
-    ['sc', 1, 1],
-    ['puff(?:\\s*st(?:itch)?)?', 1, 1],
-    ['bobble', 1, 1],
-    ['popcorn', 1, 1],
-    ['cluster', 1, 1],
-    ['shell', 1, 1],
-    ['bbl', 1, 1],
-    ['skip', 0, 1],
-    ['miss', 0, 1],
-    ['sk', 0, 1]
-  ];
+  var VOCAB = PROFILE.vocab;
+
+  // A profile's entry may capture ("c(\\d+)[fb]" for a cable), but the
+  // alternation is spliced into regexes whose own groups are read by number,
+  // so inside it every group is made non-capturing.
+  function uncapture(src) {
+    return String(src).replace(/(^|[^\\])\((?!\?)/g, '$1(?:').replace(/(^|[^\\])\((?!\?)/g, '$1(?:');
+  }
 
   // One alternation, longest-first (the table above is already ordered).
-  var STITCH_ALT = '(?:' + VOCAB.map(function (v) { return v[0]; }).join('|') + ')';
+  var STITCH_ALT = '(?:' + VOCAB.map(function (v) { return uncapture(v[0]); }).join('|') + ')';
+
+  var VOCAB_RES = VOCAB.map(function (v) { return new RegExp('^(?:' + v[0] + ')$', 'i'); });
+
+  function vocabVal(v, m) { return typeof v === 'function' ? v(m) : v; }
 
   function stitchInfo(word) {
     var w = word.toLowerCase().replace(/\s+/g, ' ').trim();
     for (var i = 0; i < VOCAB.length; i++) {
-      var re = new RegExp('^(?:' + VOCAB[i][0] + ')$', 'i');
-      if (re.test(w)) return { p: VOCAB[i][1], c: VOCAB[i][2] };
+      var m = VOCAB_RES[i].exec(w);
+      if (m) return { p: vocabVal(VOCAB[i][1], m), c: vocabVal(VOCAB[i][2], m) };
     }
     return null;
   }
@@ -355,7 +453,12 @@
   }
 
   // Returns { row, rowEnd, rest, bare } or null.
+  // profile hook: a craft may read this its own way, falling back on ours
   function detectMarker(line) {
+    return PROFILE.detectMarker ? PROFILE.detectMarker(line, baseDetectMarker, E) : baseDetectMarker(line);
+  }
+
+  function baseDetectMarker(line) {
     var m = KEYWORD_RE.exec(line);
     if (m) {
       var r = num(m[1]);
@@ -388,7 +491,12 @@
     return null;
   }
 
+  // profile hook: a craft may read this its own way, falling back on ours
   function detectNextRow(line) {
+    return PROFILE.detectNextRow ? PROFILE.detectNextRow(line, baseDetectNextRow, E) : baseDetectNextRow(line);
+  }
+
+  function baseDetectNextRow(line) {
     var m = NEXT_ROW_RE.exec(line);
     if (!m) return null;
     var span = m[1] === undefined ? 1 : num(m[1]);
@@ -396,7 +504,12 @@
     return { rest: line.slice(m[0].length), span: span };
   }
 
+  // profile hook: a craft may read this its own way, falling back on ours
   function detectSetup(line) {
+    return PROFILE.detectSetup ? PROFILE.detectSetup(line, baseDetectSetup, E) : baseDetectSetup(line);
+  }
+
+  function baseDetectSetup(line) {
     var m = SETUP_RE.exec(line);
     if (!m) return null;
     return { rest: line.slice(m[0].length) };
@@ -445,6 +558,12 @@
   // all rather than to whichever entry the clamp lands on (size L read the
   // 28" length's 224). 0 = unknown, the old clamping behaviour.
   var SIZE_COUNT = 0;
+  // ...and, for a profile's hooks, the size being read and the document's
+  // size names (opts.sizes), for the same call.
+  var CUR_SIZE = 0;
+  var DOC_SIZES = null;
+  // scratch state a profile keeps for the length of one parse() call
+  var RUN = null;
 
   function sizeListFits(sizes) {
     return !(SIZE_COUNT >= 2 && sizes && sizes.length > 1 && sizes.length !== SIZE_COUNT);
@@ -526,7 +645,12 @@
   var SQUARE_MULTI_RE = /(?:^|[\s.;:,])(\d+)\s*\[\s*(\d+(?:\s*:\s*\d+)+)\s*\]\s*(?:sts?|stitches?|sc|dc|htr|tr|dtr|hdc)\b\s*[.;!]?\s*$/i;
   var HOOK_COLON_TOTAL_RE =/\bfrom\s+(?:the\s+)?hook\s*:\s*(\d+)(\s*(?:sc|hdc|dc|htr|tr|sts?))\b(?=\s*(?:[,.]\s*)?(?:ch\s*\d+\s*[,.]?\s*)?(?:turn\s*)?[.,]?\s*$)/i;
 
+  // profile hook: a craft may read this its own way, falling back on ours
   function findExplicit(line) {
+    return PROFILE.findExplicit ? PROFILE.findExplicit(line, baseFindExplicit, E) : baseFindExplicit(line);
+  }
+
+  function baseFindExplicit(line) {
     // (0) "sc in the 2nd chain from the hook: 70sc, ch1, turn" - the number
     //     after the colon is what the row comes to, not one more stitch on
     //     top of the first (wave E, crochet-snowman Scarf R2 read 71).
@@ -737,7 +861,12 @@
   var SIZE_SCOPE_RE = /^(?:for\s+(?:the\s+)?)?(all\s+sizes?|sizes?\s+([^:]{1,60}?)(?:\s+only)?|((?:\d+(?:st|nd|rd|th)\s*(?:,|and|&)?\s*)+)sizes?(?:\s+only)?)\s*(?::|$)/i;
   var SIZE_WORDS = { 'extra small': 'XS', small: 'S', medium: 'M', large: 'L', 'extra large': 'XL' };
 
+  // profile hook: a craft may read this its own way, falling back on ours
   function sizeScope(text, names) {
+    return PROFILE.sizeScope ? PROFILE.sizeScope(text, names, baseSizeScope, E) : baseSizeScope(text, names);
+  }
+
+  function baseSizeScope(text, names) {
     var t = trimLine(String(text == null ? '' : text));
     var m = SIZE_SCOPE_RE.exec(t);
     if (!m) return null;
@@ -764,7 +893,12 @@
     return out.length ? { indices: out, label: label } : null;
   }
 
+  // profile hook: a craft may read this its own way, falling back on ours
   function detectSizes(text) {
+    return PROFILE.detectSizes ? PROFILE.detectSizes(text, baseDetectSizes, E) : baseDetectSizes(text);
+  }
+
+  function baseDetectSizes(text) {
     if (text == null) return null;
     var lines = String(text).split(/\r\n|\r|\n/);
     for (var i = 0; i < lines.length; i++) {
@@ -797,33 +931,14 @@
   // =====================================================================
 
   // Segments that contribute nothing to the stitch count.
-  var ZERO_RES = [
-    /^ch(?:ain)?\s*\d*\s*(?:st|sts|ch|chs)?$/i,
-    /^ch(?:ain)?\s*\d+\b/i,
-    /^ch(?:ain)?\b\s*$/i,
-    /^turn\b/i, /^do\s*not\b/i, /^don't\b/i, /^join\b/i, /^fasten\s+off\b/i,
-    /^tie\s+off\b/i, /^flip\b/i, /^with\b/i, /^using\b/i, /^pull\b/i,
-    /^leave\b/i, /^leaving\b/i, /^cut\b/i, /^stuff\b/i, /^start\s+stuffing\b/i,
-    /^place\b/i, /^add\b/i, /^put\b/i, /^mark\b/i, /^before\b/i, /^after\b/i,
-    // "12sc, Attach tail (3sc through both sides of Tail and into body), 21sc"
-    // - "attach X" costs nothing by itself; the stitches that do the joining
-    // are spelled out in the bracket beside it and are counted there.
-    /^attach\b/i,
-    /^now\b/i, /^instead\b/i, /^this\b/i, /^these\b/i, /^colou?r\s+change\b/i,
-    /^change\s+to\b/i, /^switch\s+to\b/i, /^in\s+(?:yellow|black|white|mc|cc|a|b)\s*$/i,
-    /^(?:mr|magic\s*ring|magic\s*circle)\s*$/i,
-    /^[a-z]$/i, /^into\b/i, /^fold\b/i, /^sew\b/i, /^lay\b/i, /^pinch\b/i,
-    // a stray stitch total, e.g. the "30" of a trailing "(30)" / "30 sts"
-    // (NOT "2sc", which is two single crochets)
-    /^\d+\s*(?:sts?|stitches?|total)?$/i
-  ];
+  var ZERO_RES = PROFILE.zeroRes;
 
   var WORK_EVEN_RE = /^(?:work\s+even|work\s+in\s+(?:the\s+)?(?:established\s+)?pattern|continue\s+in\s+(?:the\s+)?established\s+pattern|work\s+in\s+pattern)/i;
 
-  var MR_RE1 = new RegExp('^(\\d+)\\s*(?:sc|sts?|dc|hdc|tr)?\\s*(?:in|into)\\s+(?:a\\s+|the\\s+)?(?:mr|magic\\s*ring|magic\\s*circle|magic\\s*loop|ring|circle)\\b', 'i');
-  var MR_RE2 = new RegExp('^(?:mr|magic\\s*ring|magic\\s*circle)\\s*(?:with\\s+)?(\\d+)', 'i');
+  var MR_RE1 = PROFILE.mrRe1;
+  var MR_RE2 = PROFILE.mrRe2;
 
-  var PREFIX_RE = /^(?:blo|flo|back\s+loop\s+only|front\s+loop\s+only|work\s+a|work|then|and)\s+/i;
+  var PREFIX_RE = PROFILE.prefixRe;
 
   var R_NEXT_N = new RegExp('^(?:(\\d+)\\s+)?(' + STITCH_ALT + ')\\s+(?:in|into)\\s+(?:each\\s+(?:of\\s+)?)?(?:the\\s+)?next\\s+(\\d+)', 'i');
   var R_FROM_HOOK = new RegExp('^(' + STITCH_ALT + ')\\s+(?:in|into)\\s+(?:the\\s+)?\\d+(?:st|nd|rd|th)\\s+(?:ch|chain|st|stitch)\\s+from', 'i');
@@ -1006,7 +1121,12 @@
   var LOOP_ONLY_EVAL_RE = /^(?:(?:work(?:ing)?\s+)?(?:in(?:to)?\s+(?:the\s+)?)?(?:(?:front|back)\s+loops?(?:\s+only)?|flo|blo)\s*(?:only\s*)?[:,.]?\s*)+/;
   var CLOSING_SLST_RE = /([.,;])\s*(?:join\s+(?:with\s+(?:a\s+)?)?)?(?:sl\s*st|slst|slip\s+stitch)\s*(?:(?:to|in|into)\s+(?:the\s+)?(?:first|1st|top|beg(?:inning)?)\b[^.;]*|,?\s*(?:and\s+)?fasten\s+off\b[^.;]*)(?=[.;]|$)/g;
 
+  // profile hook: a craft may read this its own way, falling back on ours
   function evaluate(instruction, prevCount) {
+    return PROFILE.evaluate ? PROFILE.evaluate(instruction, prevCount, baseEvaluate, E) : baseEvaluate(instruction, prevCount);
+  }
+
+  function baseEvaluate(instruction, prevCount) {
     if (instruction == null) return null;
     var prev = (typeof prevCount === 'number' && isFinite(prevCount)) ? prevCount : null;
     var s = normDashes(normUnicode(instruction));
@@ -1141,7 +1261,7 @@
     'rows?', 'rnds?', 'rounds?',
     // a designer credit on the cover ("By Eleonora Tully of Coastal Crochet")
     'by\\s+[a-z].*', 'design(?:ed)?\\s+by\\b.*'
-  ].join('|') + ')$', 'i');
+  ].concat(PROFILE.nonPartPhrases || []).join('|') + ')$', 'i');
 
   // ...but a couple of those are a crocheted piece in their own right in some
   // patterns ("Eye" with its own rounds) and only a face-detail caption in
@@ -1154,7 +1274,7 @@
   // imperatives and "Make a Magic Ring" / "Use Orange Yarn" happen to be in
   // Title Case, so rule the verbs out before Title Case lets them through.
   // One-word lines are left alone: a part really can be called "Join".
-  var IMPERATIVE_RE = /^(?:make|use|using|start|begin|work|continue|repeat|rep|sew|stuff|fasten|join|attach|turn|skip|insert|place|add|cut|leave|change|weave|thread|pull|fold|close|mark|pinch|do|don'?t|now|then|next|follow|check|keep|take|hold|count)\b/i;
+  var IMPERATIVE_RE = PROFILE.imperativeRe;
 
   // Photo captions / column labels: "A", "E F", "I J K", "(PHOTO M-N)".
   var PHOTO_LABEL_RE = /^(?:\(?\s*photos?\s+[a-z](?:\s*-\s*[a-z])?\s*\)?|(?:[A-Z]\s+)*[A-Z])$/;
@@ -1284,7 +1404,7 @@
   // "Ch 107 (119-131-143-167-191)."
   var PLAIN_ARITH_RE = /^\s*(?:ch\s*1\s*,\s*)?[\s\d(),x×*.:;\-]*(?:(?:sc|hdc|dc|inc|dec|sc2tog|invdec|hdcinc|scinc|around|each|st|sts|in|into|blo|flo|rep|times|repeat|first|next|last|working|front|back|loops?|only|the)\b[\s\d(),x×*.:;\-]*)+$/i;
   var PIECE_CAPS_RE =/^[A-Z][A-Z '&\/-]{2,30}$/;
-  var MR_ONLY_RE =/^(?:make\s+(?:a\s+)?)?(?:mr|magic\s+(?:ring|circle|loop))\s*(?:with|,|:)?\s*(\d+)\s*(?:sc|hdc|dc|htr|tr)\b\s*(?:in(?:to)?\s+(?:the\s+)?(?:ring|mr|[a-z]+))?\s*\.?$/i;
+  var MR_ONLY_RE = PROFILE.mrOnlyRe;
   var CHAIN_ONLY_RE = /^(?:(?:with|using)\s+[a-z0-9 ]{1,16},\s*)?(?:make\s+)?(?:ch|chain)\s*(\d+)\s*(?:\(\s*(\d+(?:\s*[,-]\s*\d+)+)\s*\))?\s*\.?\s*$/i;
 
   // A running head ("WHEAT STITCH CROCHET CARDIGAN" on every page) reads like
@@ -1321,7 +1441,7 @@
 
   // Wave G: the pieces a part header names. A short line naming one of these,
   // or carrying a make-count, with round 1 straight under it, starts a part.
-  var PART_NOUN_RE = /\b(?:heads?|body|bodies|arms?|legs?|ears?|eyes?|tails?|wings?|feet|foot|hands?|paws?|horns?|antlers?|antennae?|nose|snout|muzzle|beak|fins?|shell|hat|scarf|sleeves?|cuffs?|stalks?|leaf|leaves|petals?|spikes?|mane|cheeks?|hood|mitts?|mittens?|boots?|shoes?|base|motif|square|panel)\b/i;
+  var PART_NOUN_RE = PROFILE.partNounRe;
 
   /**
    * "Leg (make 2)", "Arms x2", "Tail": at most four words, a part header by
@@ -1816,7 +1936,12 @@
   var REPEAT_THROUGH_RE =/\b(?:work(?:\s+even)?|cont(?:inue)?(?:\s+even)?)\b[^.;]{0,60}?\b(?:through|thru|until)\s+(?:and\s+including\s+)?(?:rnd|round|row)\s+(\d+)\b/i;
   var WORD_NUM = { two: 2, twice: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
 
+  // profile hook: a craft may read this its own way, falling back on ours
   function detectRepeat(t, size) {
+    return PROFILE.detectRepeat ? PROFILE.detectRepeat(t, size, baseDetectRepeat, E) : baseDetectRepeat(t, size);
+  }
+
+  function baseDetectRepeat(t, size) {
     var m = REPEAT_RE.exec(t) || REPEAT_ORD_RE.exec(t);
     var lastCount = null;
     if (!m) {
@@ -2078,6 +2203,7 @@
       if (!l || l.row === null || l.row === undefined || l.row < 1) continue;
       end = (l.rowEnd === null || l.rowEnd === undefined) ? l.row : l.rowEnd;
       if (row < l.row || row > end) continue;
+      if (l.rowList && l.rowList.indexOf(row) < 0) continue;
       if (l.section === section) return l;
       if (!best) best = l;
     }
@@ -2092,7 +2218,14 @@
    * "rep Rnd 3" written on a "Rnds 3-4" line would add the whole range's
    * growth every round. null when the row has no count to go by.
    */
+  // profile hook: how much one working of a row changes the count (knitting
+  // reads it off the row's own words, so a row printed with a total that
+  // also sets stitches aside replays as what it does, not as the drop)
   function refDelta(lines, section, row) {
+    return PROFILE.refDelta ? PROFILE.refDelta(lines, section, row, baseRefDelta, E) : baseRefDelta(lines, section, row);
+  }
+
+  function baseRefDelta(lines, section, row) {
     var l = refLineAt(lines, section, row);
     if (!l) return null;
     var before = l.prevCount, after = l.count, i;
@@ -2266,7 +2399,7 @@
   // Where it goes: a preposition, a landmark or a round/row/stitch reference.
   var PLACE_CUE_RE = /\b(?:between|onto|on|to|at|around|below|above|under|over|apart|centered|centred|center|centre|middle|underside|top|bottom|front|back|side|sides|next|rnds?|rounds?|rows?|sts?|stitches?)\b|\bR\s?\d/i;
   // ...or the thing being placed.
-  var PLACE_NOUN_RE = /\b(?:eyes?|nose|noses|mouth|muzzles?|snouts?|beaks?|ears?|arms?|legs?|feet|foot|hands?|paws?|tails?|horns?|wings?|fins?|heads?|body|bodies|buttons?|key\s*rings?|keyrings?|eyebrows?|eyelids?|cheeks?|whiskers?|antennae?|pupils?|hats?|scarf|scarves|bows?|stars?|hearts?|petals?|leaf|leaves|spots?|stripes?|patch(?:es)?|pieces?|limbs?)\b/i;
+  var PLACE_NOUN_RE = PROFILE.placeNounRe;
 
   // "Note: ... placement ..." is a placing note however it is phrased.
   var NOTE_PLACE_RE = /^note\b[\s\S]*\bplacement\b/i;
@@ -2400,6 +2533,9 @@
           continue;
         }
         cls = classify(u, size, heads, nextLine(raws, j));
+        // (the rest of a size list the line above left open is prose, not a row)
+        if (cls.marker && cls.marker.bare && /^\d+(?:\s*[-,]\s*\d+)*\s*\)/.test(u) &&
+            /\(\s*\d[\d\s,-]*[-,]\s*$/.test(trimLine(raws[j - 1] || ''))) cls = { note: true };
         if (cls.marker || cls.repeat || cls.nextRow || cls.setup || cls.nameRow || cls.header) break;
         if (FRONT_MATTER_RE.test(u)) break;
         prose++;
@@ -2941,6 +3077,8 @@
   // colon (so "Repeat Row 2 until..." is untouched) and the debris in front of
   // it must be short and must not be the words that make the line a repeat or
   // a cross-reference.
+  // "FINISHING" / "TO FINISH" / "MAKING UP" printed as a heading on its own
+  var FINISH_HEAD_RE = /^(?:FINISHING|FINISH|TO FINISH|MAKING UP|MAKE UP|ASSEMBLY|EDGING|EDGINGS)\s*:?$/;
   var BLEED_ROW_RE = /^(.{1,28}?[a-z)½¼¾])\s+((?:rows?|rnds?|rounds?)\s*\d+\s*(?:\((?:ws|rs)\))?\s*:)/i;
   var BLEED_STOP_RE = /\b(?:rep|repeat|until|as|see|from|through|work|and|end|of|in|to)\s*$/i;
 
@@ -2948,6 +3086,9 @@
     // Unicode hygiene runs here, once, so every downstream rule (and the
     // `text` a section hands back) sees plain ASCII punctuation (06 #7).
     var raws = normUnicode(text).split(/\r\n|\r|\n/);
+    // a craft profile may first take instructions printed inside a paragraph
+    // out onto lines of their own (knitting: Interweave's running prose)
+    if (PROFILE.reflow) raws = PROFILE.reflow(raws, E);
     var repaired = [];
     for (var r0 = 0; r0 < raws.length; r0++) {
       var line = raws[r0];
@@ -2982,7 +3123,7 @@
         continue;
       }
       var nd = NAME_DASH_ROW_RE.exec(tl);
-      if (nd && headerInfo(nd[1]) && headerInfo(nd[1]) !== 'note') {
+      if (nd && !(PROFILE.detectMarker && detectMarker(tl)) && headerInfo(nd[1]) && headerInfo(nd[1]) !== 'note') {
         repaired.push(nd[1]);
         repaired.push(tl.slice(nd[0].length));
         continue;
@@ -3076,6 +3217,10 @@
    */
   function classify(t, size, heads, next) {
     if (!t) return { blank: true };
+    if (PROFILE.classify) {
+      var pre = PROFILE.classify(t, size, E);
+      if (pre) return pre;
+    }
     if (isPhotoLabel(t)) return { photo: true };
     var mk = detectMarker(t);
     if (mk) return { marker: mk };
@@ -3141,13 +3286,20 @@
    *                the line says so with `sizeUnresolved: true` (wave F).
    */
   function parse(text, opts) {
-    var saved = SIZE_COUNT;
+    // a craft profile may fill in what the caller left out (knitting reads the
+    // document's own size line, because every line of it is multi-size)
+    if (PROFILE.parseOpts) opts = PROFILE.parseOpts(text, opts, E);
+    var saved = SIZE_COUNT, savedSize = CUR_SIZE, savedNames = DOC_SIZES, savedRun = RUN;
+    // (the options this parse was asked for, for a profile's hooks to read)
+    RUN = { opts: opts || null };
     var n = opts && typeof opts.sizeCount === 'number' && opts.sizeCount >= 2 ? Math.floor(opts.sizeCount) : 0;
     SIZE_COUNT = n;
+    CUR_SIZE = (opts && typeof opts.size === 'number') ? opts.size : 0;
+    DOC_SIZES = (opts && opts.sizes) || null;
     try {
       return parseBody(text, opts);
     } finally {
-      SIZE_COUNT = saved;
+      SIZE_COUNT = saved; CUR_SIZE = savedSize; DOC_SIZES = savedNames; RUN = savedRun;
     }
   }
 
@@ -3156,7 +3308,7 @@
     var size = (opts && typeof opts.size === 'number') ? opts.size : 0;
     var raws = prepareLines(text);
     var heads = findRunningHeads(raws);
-    var groups = findGroups(raws, heads);
+    var groups = PROFILE.findGroups ? PROFILE.findGroups(raws, heads, findGroups, E) : findGroups(raws, heads);
     // wave G: in a booklet of sizes the same advice is printed once per size
     // ("Sometimes it takes a bit of guess work..."), which is not a running
     // head - only a line that tops two pages is.
@@ -3226,6 +3378,15 @@
       group.entries.push({ name: h.name, makeCount: h.makeCount, line: line, used: !!used });
     }
 
+    // an unused part heading printed after the current part's last row
+    function pendingHeader() {
+      var after = cur.lastRowLine !== null ? cur.lastRowLine : (cur.setupLine !== undefined ? cur.setupLine : -1);
+      for (var g = 0; g < group.entries.length; g++) {
+        if (!group.entries[g].used && group.entries[g].line > after) return true;
+      }
+      return false;
+    }
+
     function takeName() {
       for (var g = 0; g < group.entries.length; g++) {
         if (!group.entries[g].used) { group.entries[g].used = true; return group.entries[g]; }
@@ -3245,7 +3406,16 @@
       }
       var sec = openSection(entry ? entry.name : '', entry ? entry.makeCount : 1, start);
       // An unnamed restart is the same piece continuing, so carry the count.
-      if (!entry) sec.prevCount = prev.prevCount;
+      // (a craft profile may say a named restart is still the same stitches -
+      // knitting: a heel turn after its flap, rounds after the flat neck)
+      if (!entry) {
+        sec.prevCount = prev.prevCount;
+        if (PROFILE.carryCount) sec.carried = { count: prev.prevCount, sizes: prev.prevSizes || null };
+      }
+      else if (PROFILE.carryCount && PROFILE.carryCount(prev, E)) {
+        sec.prevCount = prev.prevCount;
+        sec.carried = { count: prev.prevCount, sizes: prev.prevSizes || null };
+      }
       for (var k = start; k < lineIdx; k++) {
         if (lines[k] && lines[k].section === prev.index) lines[k].section = sec.index;
       }
@@ -3255,16 +3425,37 @@
     // Expected-next-row matching: a row goes to the most recently opened
     // section that expects it; a restart (row 1, or a number already seen)
     // opens a new one; anything else continues the current section.
-    function sectionForRow(rowStart, lineIdx) {
+    function sectionForRow(rowStart, lineIdx, mk) {
       if (!cur.hasRow && cur.lastRow === null) return cur;
-      for (var k = sections.length - 1; k >= 0; k--) {
+      // (a profile may say a part's own foundation takes the rows after it -
+      // knitting: the shawl's border, picked up "as Row 1", writes its Row 15
+      // while the body above it stopped at Row 14)
+      if (PROFILE.setupOwnsRows && cur.hasSetup && !cur.hasRow) return cur;
+      // "Rows 1, 3, 5 and 7 (RS)" then "Rows 2, 4, 6 and 8 (WS)": an
+      // enumeration interleaves with the one before it (knitting profile)
+      if (mk && cur.enumFrom !== undefined && rowStart >= cur.enumFrom - 1 &&
+          rowStart <= cur.lastRow + 1 && !(cur.seenRows && cur.seenRows[rowStart])) return cur;
+      for (var k = sections.length - 1; k >= sectionFloor; k--) {
         if (sections[k].lastRow !== null && sections[k].lastRow + 1 === rowStart) return sections[k];
       }
       if (rowStart === 1 || (cur.lastRow !== null && rowStart <= cur.lastRow)) return openSectionAtRow(lineIdx);
       return cur;
     }
 
+    // after a FINISHING heading: a new part from the heading on - the prose
+    // under it is the finishing's, not the closed part's
+    function openAfterFinish(lineIdx) {
+      var prev = cur, from = prev.finishLine;
+      var sec = openSection(prev.closedByFinish, 1, from);
+      for (var k = from; k < lineIdx; k++) {
+        if (lines[k] && lines[k].section === prev.index) lines[k].section = sec.index;
+      }
+      return sec;
+    }
+
     var cur = openSection('', 1, 0);
+    // (rows never go back into a part before this one - see groupStartsSection)
+    var sectionFloor = 0;
 
     for (var i = 0; i < raws.length; i++) {
       var t = trimLine(raws[i]);
@@ -3282,6 +3473,20 @@
       // a new capitals heading (SLEEVES, FINISHING) ends the piece before it
       if (pieceParent && PIECE_CAPS_RE.test(t) && !special.furniture[i] &&
           !(heads && heads[headKey(t)])) pieceParent = null;
+      // a FINISHING heading in capitals closes the part above it: rounds
+      // worked after it (an outer edging, a sleeve edging) are not that part's
+      // (the Bernat lace cardigan's "Outer edging ... Next rnd" ran on as the
+      // sleeve top's round 6 once its page was read in column order)
+      if (cur.hasRow && FINISH_HEAD_RE.test(t) && !special.furniture[i]) {
+        cur.closedByFinish = /^EDGINGS?/.test(t) ? 'Edging' : '';
+        cur.finishLine = i;
+        // a heading queued above it never names what comes after it
+        // (one printed above the closed part's last row - "Shape Top:" over the
+        // sleeve top - is that part's; one after it still heads what follows)
+        for (var fq = 0; fq < group.entries.length; fq++) {
+          if (group.entries[fq].line < (cur.lastRowLine === null ? 0 : cur.lastRowLine)) group.entries[fq].used = true;
+        }
+      }
       if (special.furniture[i]) {
         L.furniture = true; L.omit = true;
         // wave G: the next size starts - a header queued under the last one
@@ -3290,6 +3495,13 @@
           L.groupHead = groups.at[i];
           group = { entries: [], sawContent: false };
           pieceParent = null;
+          // a profile may say a group is a pattern of its own (knitting's
+          // ebooks): nothing after its heading continues the part before it
+          if (PROFILE.groupStartsSection && (cur.hasRow || cur.hasSetup)) {
+            cur = openSection('', 1, i);
+            L.section = cur.index;
+          }
+          if (PROFILE.groupStartsSection) sectionFloor = cur.index;
         }
         continue;
       }
@@ -3305,6 +3517,10 @@
       }
 
       var cls = classify(t, size, heads, nextLine(raws, i));
+      // "...across back neck edge, 17 (17-17-27-" / "38-38) sc across ...": the
+      // rest of a size list the line above left open is never a bare row "38-38)"
+      if (cls.marker && cls.marker.bare && i > 0 && /^\d+(?:\s*[-,]\s*\d+)*\s*\)/.test(t) &&
+          /\(\s*\d[\d\s,-]*[-,]\s*$/.test(trimLine(raws[i - 1] || ''))) cls = { note: true };
       // Phantom rows from bare numbers (06 #2) and from wrapped size lists
       // (03 #4): both need the context this loop has and detectMarker does
       // not, so they are demoted to notes here.
@@ -3375,8 +3591,34 @@
       }
 
       if (cls.marker) {
-        cur = sectionForRow(cls.marker.row, i);
+        // knitting: a part heading over rows that carry on the numbering (BODY
+        // after the yoke's "Next rnd") starts the part
+        if (PROFILE.headerStartsPart && (cur.hasRow || cur.hasSetup) && pendingHeader()) cur = openSectionAtRow(i);
+        // "Heel turn Row 1 (RS): ..." - a profile's marker may carry the name
+        // of the part it starts (knitting)
+        if (cls.marker.label && cls.marker.row === 1) {
+          pushHeader({ name: cls.marker.label, makeCount: 1 }, i, false);
+        }
+        // a profile may say the numbering goes on from the rows before it
+        // (knitting: "Sizes XL, 2/3XL and 4/5XL only:" / "1st rnd: ..." in the
+        // middle of the yoke is round 33, not a new round 1)
+        if (PROFILE.rowOffset) {
+          var rOff = PROFILE.rowOffset(cur, cls.marker, i, E);
+          if (rOff > 0) {
+            var mk0 = cls.marker, mk1 = {};
+            for (var mkk in mk0) if (Object.prototype.hasOwnProperty.call(mk0, mkk)) mk1[mkk] = mk0[mkk];
+            mk1.row = mk0.row + rOff; mk1.rowEnd = mk0.rowEnd + rOff;
+            if (mk0.rowList) mk1.rowList = mk0.rowList.map(function (r) { return r + rOff; });
+            cls.marker = mk1;
+          }
+        }
+        if (cur.closedByFinish !== undefined && cur.closedByFinish !== false) cur = pendingHeader() ? openSectionAtRow(i) : openAfterFinish(i);
+        cur = sectionForRow(cls.marker.row, i, cls.marker);
         L.row = cls.marker.row; L.rowEnd = cls.marker.rowEnd; L.kind = 'row';
+        if (cls.marker.rowList) {
+          L.rowList = cls.marker.rowList.slice();
+          if (cur.enumFrom === undefined) cur.enumFrom = L.row;
+        }
         prefixLen = t.length - cls.marker.rest.length;
         isRow = true;
       } else if (cls.repeat) {
@@ -3386,24 +3628,38 @@
         // column, so read the repeat off the joined sentence. The following
         // lines are NOT consumed: they stay notes, exactly as before.
         var rt = t;
+        var joined4 = [];
         for (var j4 = i + 1, g4 = 0; g4 < 2 && j4 < raws.length &&
-             (!SENTENCE_END_RE.test(rt) || /\bapprox(?:imately)?\.\s*$/i.test(rt)); j4++) {
+             (!SENTENCE_END_RE.test(rt) || /\bapprox(?:imately)?\.\s*$/i.test(rt) ||
+              (PROFILE.joinRepeatWraps && TOTAL_LINE_RE.test(trimLine(raws[j4] || '')))); j4++) {
           var ct4 = trimLine(raws[j4]);
           if (!ct4 || isFurniture(ct4)) continue;
           var c4 = classify(ct4, size, heads);
           if (c4.marker || c4.header || c4.setup || c4.nameRow) break;
+          if (PROFILE.joinRepeatWraps && (c4.nextRow || c4.repeat)) break;
           rt = rt + ' ' + ct4;
+          joined4.push(j4);
           g4++;
         }
-        var rp = resolveRepeat(detectRepeat(rt, size) || cls.repeat, cur.lastRow);
+        // knitting: the total and the rest of the sentence wrap onto the next
+        // printed line(s); they are this repeat's, so they join it
+        if (PROFILE.joinRepeatWraps && joined4.length) {
+          for (var q4 = 0; q4 < joined4.length; q4++) consumed[joined4[q4]] = true;
+          t = rt; L.text = rt;
+        }
+        // (a profile may count the rows a repeat added as written: "Knit 5
+        // rnds even" then "Rep last 6 rnds" reaches back over them)
+        var lastR = cur.lastRow;
+        if (PROFILE.repeatsAddRows && cur.repeatEnd > (lastR || 0)) lastR = cur.repeatEnd;
+        var rp = resolveRepeat(detectRepeat(rt, size) || cls.repeat, lastR);
         // "Rep 3rd Rnd 3 times" AFTER the 3rd round is written: three more
         // rounds, so round 3 is worked four times in all - the Stylecraft
         // hood's tension box ("6 rnds to 16cm") says so. `times` counts every
         // working of the block, the way "3 times more" -> 4 already does, so
         // the repeat the app offers (rows 3-3 x 4) and the rows the piece runs
         // to (6) finally agree (wave E, coordinator's app-shell walk-through).
-        if (rp.times >= 1 && !rp.more && rp.endRow !== null && cur.lastRow !== null &&
-            rp.endRow <= cur.lastRow) {
+        if (rp.times >= 1 && !rp.more && rp.endRow !== null && lastR !== null &&
+            rp.endRow <= lastR) {
           rp.times += 1;
           rp.more = true;
         }
@@ -3433,14 +3689,14 @@
             // after them (wave E: the Caron cardigan's "Next 6 rows" were
             // numbered 3-8 on top of the repeat's own rows 3-24, and the
             // Wheat Stitch cardigan's closing "Next Row" was row 9, not 25).
-            if (cur.lastRow !== null && rp.endRow <= cur.lastRow) {
+            if (lastR !== null && rp.endRow <= lastR) {
               var blk = rp.endRow - rp.startRow + 1, rEnd = null;
-              if (rp.untilRows !== null && rp.untilRows > cur.lastRow && !rp.untilLength) {
+              if (rp.untilRows !== null && rp.untilRows > lastR && !rp.untilLength) {
                 rEnd = rp.untilRows;
               } else if (rp.times >= 1 && !rp.untilLength) {
-                rEnd = cur.lastRow + (rp.times - (rp.more ? 1 : 0)) * blk;
+                rEnd = lastR + (rp.times - (rp.more ? 1 : 0)) * blk;
               }
-              L.repeatAfter = cur.lastRow;
+              L.repeatAfter = lastR;
               // Wave F (03 #5): "Cont even in pat until work from beg measures
               // 13"" in the middle of a piece, after a repeat, with no tension
               // line for the piece. The document's gauge (Caron: 10 rows = 4")
@@ -3455,7 +3711,7 @@
                 var lenG = null;
                 try {
                   var lenHints = dialectHints(String(text));
-                  if (!(lenHints && lenHints.craft === 'knit')) lenG = gauge(text, cur.name || undefined) || gauge(text);
+                  if (PROFILE.rowHeights !== false && !(lenHints && lenHints.craft === 'knit')) lenG = gauge(text, cur.name || undefined) || gauge(text);
                 } catch (eLen) { lenG = null; }
                 var lenRpu = lenG ? rowsPerUnit(lenG, rp.untilLength.unit) : null;
                 L.lengthEstimate = {
@@ -3468,13 +3724,15 @@
                 // (when rows are written after it, it owns no rows of its own:
                 // see the repeat pass after the loop)
               }
-              if (rEnd !== null && rEnd > cur.lastRow && rEnd - cur.lastRow <= ROW_TARGET_MAX) {
+              if (rEnd !== null && rEnd > lastR && rEnd - lastR <= ROW_TARGET_MAX) {
                 cur.repeatEnd = rEnd;
               }
             }
           }
         }
       } else if (cls.nextRow) {
+        if (PROFILE.headerStartsPart && (cur.hasRow || cur.hasSetup) && pendingHeader()) { cur = openSectionAtRow(i); L.section = cur.index; }
+        else if (cur.closedByFinish !== undefined && cur.closedByFinish !== false) { cur = pendingHeader() ? openSectionAtRow(i) : openAfterFinish(i); L.section = cur.index; }
         L.row = Math.max(cur.lastRow === null ? 0 : cur.lastRow, cur.repeatEnd || 0) + 1;
         L.rowEnd = L.row + (cls.nextRow.span || 1) - 1;
         // after an unresolved "until it measures ..." the count is ours (≈)
@@ -3488,13 +3746,14 @@
         // A line that says "Setup row:" in so many words starts the section;
         // a counted line guessed into a setup further down does not (a
         // materials list - "Hook size: 2-3" - reads as one).
-        cur.hasSetup = true;
+        cur.hasSetup = true; cur.setupLine = i;
         if (cur.lastRow === null) cur.lastRow = 0;
         prefixLen = t.length - cls.setup.rest.length;
         isSetup = true;
       } else if (cls.nameRow) {
         adoptParent(i);
-        if (cur.hasRow || cur.name) cur = openSection(cls.nameRow.name, cls.nameRow.makeCount, i);
+        var nrPrev = null;
+        if (cur.hasRow || cur.name) { nrPrev = cur; cur = openSection(cls.nameRow.name, cls.nameRow.makeCount, i); }
         else { cur.name = cls.nameRow.name; cur.makeCount = cls.nameRow.makeCount; cur.parent = pieceParent; }
         // "FIRST SQUARE: With CA, ch 4; join with a sl st to form a ring." is
         // followed by "Rnd 1:", so it is the setup for round 1, not round 1
@@ -3504,12 +3763,18 @@
         if (firstMarkerRowAhead(raws, i) === 1) cls.nameRow.foundation = true;
         if (cls.nameRow.foundation) {
           L.row = 0; L.rowEnd = 0; L.kind = 'setup';
-          cur.hasSetup = true;
+          cur.hasSetup = true; cur.setupLine = i;
           if (cur.lastRow === null) cur.lastRow = 0;
           isSetup = true;
         } else {
           L.row = 1; L.rowEnd = 1; L.kind = 'row';
           isRow = true;
+          // a craft profile may say the named part goes on with the same
+          // stitches (knitting: "Foot: Work even in patt until ...")
+          if (nrPrev && PROFILE.carryCount && PROFILE.carryCount(nrPrev, E)) {
+            cur.prevCount = nrPrev.prevCount;
+            cur.carried = { count: nrPrev.prevCount, sizes: nrPrev.prevSizes || null };
+          }
         }
         prefixLen = cls.nameRow.prefixLen;
       } else {
@@ -3533,7 +3798,7 @@
       var lastIdx = i;
       if (isRow || isSetup) {
         var guard = 0, j2 = i + 1;
-        while (guard < 3 && j2 < raws.length) {
+        while (guard < (PROFILE.wrapLimit || 3) && j2 < raws.length) {
           var ct = trimLine(raws[j2]);
           // "...Turn. 5 (5-5-6-" / "6-7) shells.": the line broke inside a
           // size list, so the next line is the rest of it whatever it looks
@@ -3575,8 +3840,11 @@
               !t.slice(prefixLen).replace(/^\s*\(?\s*(?:rs|ws)\s*\)?\s*[.:]?/i, '').trim()) {
             hanging = !!classify(ct, size, heads).note;
           }
+          // a profile may say the line stops mid-sentence ("Place marker (pm) and")
+          if (!hanging && PROFILE.hangs && ct && PROFILE.hangs(t, ct, E) && classify(ct, size, heads).note) hanging = true;
           if (!hanging && !/,\s*$/.test(t) && findExplicit(t.slice(prefixLen))) break;
-          if (!hanging && !looksLikeContinuation(ct, classify(ct, size, heads))) break;
+          if (!hanging && !(PROFILE.continues ? PROFILE.continues(ct, classify(ct, size, heads), t, E)
+                                                 : looksLikeContinuation(ct, classify(ct, size, heads)))) break;
           t = t.replace(/\s+$/, '') + ' ' + ct;
           consumed[j2] = true;
           lastIdx = j2;
@@ -3677,7 +3945,8 @@
       }
 
       // A counted line before row 1 of the section is a setup/foundation row.
-      if (!isRow && !isSetup && L.kind === 'note' && (L.stitches !== null || L.sizeUnresolved) && !cur.hasRow) {
+      if (!isRow && !isSetup && L.kind === 'note' && (L.stitches !== null || L.sizeUnresolved) && !cur.hasRow &&
+          (!PROFILE.setupFromNote || PROFILE.setupFromNote(t, E))) {
         L.kind = 'setup'; L.row = 0; L.rowEnd = 0; isSetup = true;
         if (cur.lastRow === null) cur.lastRow = 0;
       }
@@ -3708,6 +3977,12 @@
         // replayed against a count it was not written for can go negative
         // (wave E, Lion Brand Left Shoulder "Rows 8 and 9" read -5).
         if (L.computed !== null && L.computed < 0) { L.computed = null; L.counts = null; }
+        // a craft profile reads what else the row says (knitting: side, markers,
+        // "8 sts inc", short rows...) and may settle the computed count
+        if (PROFILE.lineCount) {
+          PROFILE.lineCount(L, { instr: instr, prev: cur.prevCount, isRow: isRow, isSetup: isSetup,
+            refs: refs, text: t, prefixLen: prefixLen, section: cur, size: size }, E);
+        }
         // ...and a starred repeat that evaluate() could only half read (named
         // special stitches: "work petal, work DCL; repeat from * across") comes
         // out as the one or two stitches it did know - a quarter of the row
@@ -3742,15 +4017,23 @@
           cur.hasRow = true;
           // a section needs real instructions, not just numbered lines
           if (INSTR_ROW_RE.test(instr)) cur.instrRows += 1;
-          cur.lastRow = L.rowEnd;
+          // (an enumeration can end before the one it interleaves with: "Rows 2,
+          // 4, 6 and 8" then "Rows 3, 5 and 7" - the part has still reached 8)
+          cur.lastRow = ((L.rowList || cur.enumFrom !== undefined) && cur.lastRow !== null) ? Math.max(cur.lastRow, L.rowEnd) : L.rowEnd;
           cur.lastRowLine = i;
-          cur.rows += (L.rowEnd - L.row + 1);
+          cur.rows += L.rowList ? L.rowList.length : (L.rowEnd - L.row + 1);
+          if (cur.enumFrom !== undefined || L.rowList) {
+            cur.seenRows = cur.seenRows || {};
+            (L.rowList || [L.row]).forEach(function (sr) { cur.seenRows[sr] = true; });
+            for (var srr = L.row; !L.rowList && srr <= L.rowEnd; srr++) cur.seenRows[srr] = true;
+          }
           if (cur.maxRow === null || L.rowEnd > cur.maxRow) cur.maxRow = L.rowEnd;
         }
       } else if (L.stitches !== null) {
         L.count = L.stitches;
         L.countSource = 'explicit';
       }
+      if (PROFILE.afterLine) PROFILE.afterLine(L, { section: cur, isRow: isRow, isSetup: isSetup, text: t, size: size, lines: lines }, E);
     }
 
     // --- pattern title above the first part header -----------------------
@@ -3797,7 +4080,7 @@
     var docHints = null;
     try { docHints = dialectHints(String(text)); } catch (eUk) { docHints = null; }
     var docUk = !!(docHints && docHints.dialect === 'uk');
-    var docCrochet = !(docHints && docHints.craft === 'knit');
+    var docCrochet = PROFILE.rowHeights !== false && !(docHints && docHints.craft === 'knit');
     var docGauge = docCrochet ? gauge(text) : null;
     for (var rq = 0; rq < lines.length; rq++) {
       var rl = lines[rq];
@@ -3892,7 +4175,7 @@
       // Knitting gets none of it: the negative half of the corpus asks that a knit
       // pattern handed to a crochet counter grow no row past the markers it
       // prints, and the row-height table behind the first form is a crochet one.
-      if (docCrochet && rl.repeatTo >= rl.repeatFrom &&
+      if ((docCrochet || PROFILE.rowHeights === false) && rl.repeatTo >= rl.repeatFrom &&
           (fromLength || rl.repeatTimes >= 1 || rl.repeatUntil >= rl.repeatFrom)) {
         rl.repeatRows = rl.repeatTo;
       }
@@ -3968,6 +4251,7 @@
       for (var q = 0; q < gLines.length && gLines[q] <= ln; q++) g = groups.at[gLines[q]];
       return g;
     }
+    if (PROFILE.postParse) PROFILE.postParse(lines, { sections: sections, text: text, opts: opts, size: size }, E);
     lines.meta = {
       sections: sections.map(function (s) {
         return {
@@ -3997,6 +4281,8 @@
 
   function inRange(line, row) {
     if (!line || line.row === null || line.row === undefined) return false;
+    // "Rows 2, 4, 6 and 8 (WS)" answers for those rows only (knitting profile)
+    if (line.rowList) return line.rowList.indexOf(row) >= 0;
     var end = (line.rowEnd === null || line.rowEnd === undefined) ? line.row : line.rowEnd;
     return row >= line.row && row <= end;
   }
@@ -4026,6 +4312,12 @@
     // repeat sends this one to (row 40 of the throw is row 2's 94 stitches).
     var rl = repeatLineFor(lines, row);
     if (rl) {
+      // a profile that worked out the repeated rows' own counts (knitting:
+      // "Rep Rows 3-4 60 more times" keeps the shaping going)
+      if (rl.countsFrom >= 1 && rl.counts) {
+        c = rl.counts[row - rl.countsFrom];
+        if (typeof c === 'number' && isFinite(c)) return c;
+      }
       var ref = refRowOf(rl, row);
       var src = (ref === null) ? null : refLineAt(lines, rl.section, ref);
       if (src) {
@@ -4062,7 +4354,7 @@
         var l = lines[i];
         if (l.row !== null && l.row !== undefined && l.row >= 1) {
           var end = (l.rowEnd === null || l.rowEnd === undefined) ? l.row : l.rowEnd;
-          rows += (end - l.row + 1);
+          rows += l.rowList ? l.rowList.length : (end - l.row + 1);
           if (maxRow === null || end > maxRow) maxRow = end;
         }
         // "Rep Row 2 until the blanket measures 59"" owns rows 3-89 without
@@ -4124,7 +4416,7 @@
       var l = lines[i];
       if (!l || l.kind !== 'row' || !(l.row >= 1)) continue;
       var end = (l.rowEnd === null || l.rowEnd === undefined) ? l.row : l.rowEnd;
-      var n = end - l.row + 1;
+      var n = l.rowList ? l.rowList.length : end - l.row + 1;
       if (!(n >= 1)) continue;
       out.rows += n;
       if (l.sizeUnresolved) out.unresolved += n;
@@ -4198,11 +4490,16 @@
     }
     carryGauge(out, lines, text);
     carryColourKey(out, text);
+    // a craft may carry more of the front matter into each part (knitting: the
+    // size line, so a part read on its own still knows its sizes)
+    if (PROFILE.carryIntoParts) PROFILE.carryIntoParts(out, lines, text, E);
     inferPairs(out, text);
     inlineSameAs(out);
     return out.map(function (s) {
       var o = { name: s.name, makeCount: s.makeCount, text: s.text, placement: s.placement };
       if (s.makeCountInferred) o.makeCountInferred = true;
+      // (knitting: the pattern's own gauge / needle lines, kept out of the text)
+      if (s.gaugeLines && s.gaugeLines.length) o.gaugeLines = s.gaugeLines.slice();
       // wave G: {name, index} of the size this part belongs to; null when the
       // document has no groups
       o.group = s.group ? { name: s.group, index: gNames.indexOf(s.group) } : null;
@@ -4352,7 +4649,7 @@
   function carryGauge(out, lines, text) {
     var g;
     try {
-      if (dialectHints(String(text)).craft === 'knit') return;
+      if (PROFILE.rowHeights === false || dialectHints(String(text)).craft === 'knit') return;
       g = gauge(text);
     } catch (e) { return; }
     if (!g || !g.source || !(g.rowsPer4in > 0)) return;
@@ -4795,22 +5092,12 @@
   //   [prefix, type, US height, UK height]
   // UK terms are one rung shorter than they read: UK dc = US sc, UK htr = US
   // hdc, UK tr = US dc, UK dtr = US tr, UK ttr/trtr = US dtr (03 #9).
-  var STITCH_H = [
-    [/^(?:trtr|ttr|quad)/, 'dtr', 3.3, 3.3],
-    [/^dtr/, 'dtr', 3.3, 2.68],
-    [/^htr/, 'hdc', 1.34, 1.34],
-    [/^hdc/, 'hdc', 1.34, 1.34],
-    [/^(?:tr|treble)/, 'tr', 2.68, 2.01],
-    [/^dc/, 'dc', 2.01, 1],
-    [/^(?:slst|slipst|slip|sl|ss)/, 'sl', 0.3, 0.3],
-    [/^(?:fsc|sc)/, 'sc', 1, 1],
-    [/^ch/, 'ch', 0, 0]
-  ];
+  var STITCH_H = PROFILE.stitchH;
   // A bobble / puff / cluster stands as tall as whatever it is made of, which
   // the words rarely say - so it is left PENDING and resolved to the row's
   // dominant height at the end of expand().
   var H_PENDING = null;
-  var W_SL = 0.7;                   // a slip stitch is narrower than a stitch
+  var W_SL = PROFILE.slWidth;                   // a slip stitch is narrower than a stitch
 
   // Affixes that decorate a stitch name without changing how tall it is.
   var TOK_LEAD_RE = /^(?:inv(?:isible)?|spike|crossed|cross|foundation|standing|extended|ext|linked|back|front|reverse|rev)+/;
@@ -7068,7 +7355,66 @@
     return null;
   }
 
-  window.Patterns = {
+  // =====================================================================
+  // 12. Glossary: the abbreviations a pattern uses, in plain words
+  // =====================================================================
+
+  // "K2tog = Knit 2 together", "ssk: slip, slip, knit", "PM - Place marker".
+  // A two-column abbreviation table prints two of them on one line ("Alt =
+  // Alternate P = Purl"), so a line is cut before every "<Abbr> =".
+  var GLOSS_HEAD_RE = /^(?:abbreviations?|terminolog(?:y|ies)|terms(?:\s+used)?|glossary|stitch\s+(?:guide|key|terms)|special\s+(?:abbreviations?|stitches))\b[^.]{0,30}$/i;
+  var GLOSS_DEF_RE = /^([A-Za-z][A-Za-z0-9&\/'+.-]{0,11}(?:\s?\(s\)|\s?\([a-z]{1,4}\))?)\s*(?:=|:|\s-\s|–|—)\s*([A-Za-z(].{1,140}?)\s*\.?$/;
+  var GLOSS_SPLIT_RE = /\s(?=[A-Za-z][A-Za-z0-9&\/'+.-]{0,11}(?:\s?\(s\))?\s=\s)/g;
+  var GLOSS_LOOK = 60;
+
+  function glossKey(a) { return String(a).toLowerCase().replace(/\s+/g, '').replace(/\(s\)$/, ''); }
+
+  /**
+   * The abbreviations a pattern uses: its own abbreviation block first (as
+   * printed, `fromPattern: true`), then every entry of the craft's table whose
+   * abbreviation appears in the text and the block did not define.
+   * @returns {Array<{abbr:string, meaning:string, fromPattern:boolean}>}
+   */
+  function glossary(text) {
+    var out = [], seen = {};
+    var s;
+    try { s = normUnicode(textOf(text)); } catch (e) { return out; }
+    if (!s) return out;
+    var raws = s.split(/\r\n|\r|\n/), i, j;
+    for (i = 0; i < raws.length; i++) {
+      if (!GLOSS_HEAD_RE.test(trimLine(raws[i]))) continue;
+      var miss = 0;
+      for (j = i + 1; j < raws.length && j <= i + GLOSS_LOOK; j++) {
+        var t = trimLine(raws[j]);
+        if (!t || PAGE_MARK_RE.test(t)) continue;
+        if (detectMarker(t)) break;
+        var parts = t.split(GLOSS_SPLIT_RE), hit = false;
+        for (var k = 0; k < parts.length; k++) {
+          var m = GLOSS_DEF_RE.exec(parts[k].trim());
+          if (!m) continue;
+          var key = glossKey(m[1]);
+          hit = true;
+          if (seen[key]) continue;
+          seen[key] = true;
+          out.push({ abbr: m[1].trim(), meaning: m[2].trim(), fromPattern: true });
+        }
+        if (hit) miss = 0;
+        else if (++miss > 3) break;
+      }
+    }
+    var table = PROFILE.glossary || [];
+    for (i = 0; i < table.length; i++) {
+      var g = table[i], k2 = glossKey(g[0]);
+      if (seen[k2]) continue;
+      var re = new RegExp('(?:^|[^a-z0-9])(?:' + (g[2] || escapeRe(g[0])) + ')(?![a-z])', 'i');
+      if (!re.test(s)) continue;
+      seen[k2] = true;
+      out.push({ abbr: g[0], meaning: g[1], fromPattern: false });
+    }
+    return out;
+  }
+
+  var api = {
     parse: parse,
     targetFor: targetFor,
     lineFor: lineFor,
@@ -7089,7 +7435,391 @@
     LOOP_CHAIN_W: LOOP_CHAIN_W,
     startHint: startHint,
     workMode: workMode,
-    stuffingHint: stuffingHint
+    stuffingHint: stuffingHint,
+    // wave H: the abbreviations this pattern uses, and which craft reads it
+    glossary: glossary,
+    craft: PROFILE.id,
+    version: ENGINE_VERSION + '/' + PROFILE.id + (PROFILE.version ? '-' + PROFILE.version : '')
   };
+
+  // What a profile's hooks may call: the engine's own helpers, so a craft
+  // reads counts, sizes and colours exactly the way this file does.
+  var E = {
+    api: api, profile: PROFILE,
+    normUnicode: normUnicode, normDashes: normDashes, trimLine: trimLine, num: num,
+    fixTypos: fixTypos, titleCase: titleCase, escapeRe: escapeRe, textOf: textOf,
+    countMatches: countMatches, stitchInfo: stitchInfo, STITCH_ALT: STITCH_ALT,
+    MULTI_SRC: MULTI_SRC, MULTI_ANY: MULTI_ANY, MEASURE_AFTER_RE: MEASURE_AFTER_RE,
+    flattenMulti: flattenMulti, pickSize: pickSize, sizeListFits: sizeListFits,
+    sizeCount: function () { return SIZE_COUNT; },
+    sizeIndex: function () { return CUR_SIZE; },
+    sizeNames: function () { return DOC_SIZES; },
+    run: function () { return RUN || (RUN = {}); },
+    baseDetectMarker: baseDetectMarker, baseFindExplicit: baseFindExplicit,
+    baseDetectRepeat: baseDetectRepeat, baseEvaluate: baseEvaluate,
+    baseDetectSizes: baseDetectSizes, baseSizeScope: baseSizeScope,
+    baseDetectNextRow: baseDetectNextRow, baseDetectSetup: baseDetectSetup,
+    detectNextRow: detectNextRow, detectSetup: detectSetup,
+    detectMarker: detectMarker, detectRepeat: detectRepeat, findExplicit: findExplicit,
+    detectUntilLength: detectUntilLength, stripRowKeyword: stripRowKeyword,
+    headerInfo: headerInfo, gauge: gauge, rowsPerUnit: rowsPerUnit,
+    gaugeUnit: gaugeUnit, gaugeNum: gaugeNum,
+    GAUGE_LABEL_RE: GAUGE_LABEL_RE, GAUGE_BOTH_RE: GAUGE_BOTH_RE,
+    dialectHints: dialectHints, colorHex: colorHex, colors: colors,
+    asParsed: asParsed, normState: normState, applyPhrases: applyPhrases,
+    lineFor: lineFor, repeatLineFor: repeatLineFor, refSource: refSource,
+    refLineAt: refLineAt, instrOf: instrOf, joinRepeatTail: joinRepeatTail,
+    inRange: inRange, isFurniture: isFurniture, MODE_JOIN_RE: MODE_JOIN_RE
+  };
+  if (typeof PROFILE.init === 'function') PROFILE.init(E, api);
+  return api;
+  }   // createParser
+
+  // The engine's own version: bump when a change moves what any parse returns
+  // (the store keys its line cache on `version` + the craft).
+  var ENGINE_VERSION = '2.8';
+
+  // =====================================================================
+  // 12. Tunisian crochet - a vocabulary pack on the crochet profile (wave H)
+  // =====================================================================
+  //
+  // Not a craft of its own (docs/brainstorm/11-knitting-next-crafts.md Part 3,
+  // proposal 6): a Tunisian pattern is a crochet pattern whose rows are each a
+  // FORWARD pass (loops picked up onto the hook: tss, tks, tps, tfs, tes, tdc
+  // ...) and a RETURN pass (worked off again: "yo, draw through 2 loops").
+  // The two passes are ONE row. `Patterns.parse` reads such a text with this
+  // profile and says so (`lines.meta.tunisian`, `dialectHints().craft ===
+  // 'tunisian'`); every other text is read exactly as before.
+  //
+  //   - a row's count is the loops on the hook at the end of its forward pass
+  //     ("—20 loops on hook" is a printed total; the loop already on the hook
+  //     is the first stitch, so "Pull up a loop in 2nd ch from hook and in each
+  //     ch across" over 20 ch is 20, and "Sk first vertical bar, tss across"
+  //     keeps the count);
+  //   - a return pass never makes a row: "RetP: ...", "Row 2 (RetP): ...",
+  //     "Return pass: Standard return." / a "...RetP: ..." tail go on a line of
+  //     their own right after the forward pass (a note, `Line.returnPass`);
+  //   - "Row 2:" over a "FwP: ..." line is one row; a "FwP: ..." / "Forward
+  //     pass: ..." line under no row label is the next row;
+  //   - "Foundation row (FwP): ..." is the foundation; "Bind off: ..." /
+  //     "Bind-off row: ..." is a row of slip stitches;
+  //   - expand() records carry t:'tss' / 'tks' / 'tps' / 'tfs' / 'tes' / 'ttw',
+  //     h 0.9 (a Tunisian row is a little shorter than an sc row), w 1;
+  //     tdc is a double-height stitch (h 1.8), thdc 1.3.
+
+  var TUN_SIMPLE = '(?:ss|ks|ps|fs|es|tw|ds|xs|rs|ls|hs)';
+  var RET_HEAD_RE = /^\s*(?:(?:rows?|r)\s*(\d+)\s*)?[\s:.,-]*\(?\s*(?:retp|rtn|ret|rp|return(?:\s+pass)?)\b\s*\)?\s*[:.-]?\s*/i;
+  var RET_TAIL_RE = /(?:[.;]\s*|\s+|^)(\(?\s*(?:retp|rtn|ret|return\s+pass)\b\s*\)?\s*[:.-][\s\S]*|(?:work\s+(?:a\s+|the\s+)?)?(?:standard\s+)?return\s+(?:pass\s+)?(?:as\s+(?:usual|established|before)|normally)[\s\S]*|(?:work\s+(?:a\s+|the\s+)?)?standard\s+return(?:\s+pass)?\b[\s\S]*)$/i;
+  var FWD_HEAD_RE = /^\s*\(?\s*(?:fwp|fwd|forward\s+pass)\b\s*\)?\s*[:.-]?\s*/i;
+  var BARE_ROW_RE = /^\s*(?:rows?|r)\s*\d+(?:\s*[-–—]\s*\d+)?(?:\s*\((?:fwp|fwd|forward\s+pass)\))?\s*[:.]?\s*$/i;
+  var ROWISH_RE = /^\s*(?:(?:rows?|r)\s*\d|(?:fwp|fwd|forward\s+pass)\b|foundation\b|next\s+row\b|bind[-\s]?off\b|bo\s+row\b)/i;
+  var TUN_ST_G = new RegExp('\\bt' + TUN_SIMPLE + '(?:2tog|3tog)?\\b|\\bt(?:dc|hdc)(?:2tog)?\\b', 'gi');
+  var TUN_PASS_G = /\b(?:fwp|retp|forward\s+pass(?:es)?|return\s+pass(?:es)?|standard\s+return)\b/gi;
+  var TUN_WORD_G = /\btunisian\b/gi;
+
+  function countG(re, s) { var m = s.match(re); return m ? m.length : 0; }
+
+  /** Is this a Tunisian crochet text? Its stitches, its passes, or its own name. */
+  function isTunisian(text) {
+    if (text === null || text === undefined) return false;
+    var s;
+    try { s = String(text).replace(/\s+/g, ' '); } catch (e) { return false; }
+    var st = countG(TUN_ST_G, s), pass = countG(TUN_PASS_G, s), word = countG(TUN_WORD_G, s);
+    if (st + pass === 0) return false;
+    return (st >= 2 && (pass >= 1 || word >= 1)) || (pass >= 2 && (st >= 1 || word >= 1)) || st >= 4;
+  }
+
+  /** The forward pass of an instruction: the return pass and the pass labels off. */
+  function tunForward(instr) {
+    var t = String(instr == null ? '' : instr).replace(FWD_HEAD_RE, '');
+    var r = RET_TAIL_RE.exec(t);
+    if (r) t = t.slice(0, r.index);
+    // "(FwP)" / "FwP:" anywhere in front
+    t = t.replace(/\(\s*(?:fwp|fwd|forward\s+pass)\s*\)\s*:?/ig, ' ').replace(/\b(?:fwp|fwd|forward\s+pass)\s*:/ig, ' ');
+    // "pull up a loop" is a Tunisian simple stitch's forward half
+    t = t.replace(/\b(?:pull|pick|draw)\s+up\s+(?:a\s+)?(?:loop|lp)s?\b/ig, 'tss');
+    // the loop on the hook is the first stitch: "Sk first vertical bar"
+    t = t.replace(/\b(?:sk(?:ip)?|miss)\s+(?:the\s+)?(?:first|1st)\s+(?:vertical\s+)?(?:bar|vb|st(?:itch)?)\b/ig, '1 tss');
+    return t;
+  }
+
+  // A forward pass the crochet reader cannot count: "Pull up a loop in 2nd ch
+  // from hook and in each ch across" (the chain's every ch is a loop - the one
+  // on the hook is the first), "1 tss, *tks in next st, tps in next st; rep
+  // from * to last st, tks in last st", "tss2tog, tks in each st to last st,
+  // tks in last st". Anything it does not know gives null (no count).
+  var TUN_NAME = '(?:t' + TUN_SIMPLE + '|tdc|thdc|tsl(?:\\s*st)?|sl\\s*st|sc)';
+  function tunEval(f, prevCount) {
+    var prev = (typeof prevCount === 'number' && isFinite(prevCount)) ? prevCount : null;
+    var s = String(f || '').toLowerCase().replace(/\([^()]*\)/g, ' ').replace(/[.\s]+$/, '').trim();
+    if (!s) return null;
+    // a whole chain picked up: every ch is a loop
+    if (/\b(?:2nd|second)\s+(?:ch|chain)\s+from\s+(?:the\s+)?hook\b/.test(s) &&
+        /\b(?:in\s+)?each\s+(?:rem(?:aining)?\s+)?(?:ch|chain)\s+across\b/.test(s)) return prev;
+    var stIt = new RegExp('^(\\d+\\s+)?(' + TUN_NAME + ')(2tog|3tog)?(?:\\s+(?:in|into)\\s+(?:the\\s+)?(next(?:\\s+(\\d+))?|each\\s+of\\s+(?:the\\s+)?next\\s+(\\d+)|last|each|every)(?:\\s+(?:vertical\\s+)?(?:sts?|bars?|vbs?|stitches))?' +
+      '(?:\\s+(across|to\\s+end|to\\s+(?:the\\s+)?last(?:\\s+(\\d+))?\\s*(?:sts?|bars?|vbs?)))?)?$');
+    var items = [];
+    var parts = s.replace(/\*/g, ' * ').split(/[,;]/);
+    for (var i = 0; i < parts.length; i++) {
+      var seg = parts[i].trim().replace(/^(?:then|and)\s+/, '');
+      if (!seg) continue;
+      if (seg === '*') { items.push({ mark: true }); continue; }
+      var star = /^\*\s*(.*)$/.exec(seg);
+      if (star) { items.push({ mark: true }); seg = star[1].trim(); if (!seg) continue; }
+      var rp = /^rep(?:eat)?\s+from\s+\*\s*(across|to\s+end|(?:to\s+(?:the\s+)?last(?:\s+(\d+))?\s*(?:sts?|bars?|vbs?))|(\d+)\s+more\s+times?|(\d+)\s+times?)$/.exec(seg);
+      if (rp) { items.push({ rep: { to: /^to\s+(?:the\s+)?last/.test(rp[1]) ? (rp[2] ? +rp[2] : 1) : (/^(?:across|to\s+end)$/.test(rp[1]) ? 0 : null), more: rp[3] ? +rp[3] : null, times: rp[4] ? +rp[4] : null } }); continue; }
+      if (/^yo$/.test(seg)) { items.push({ p: 1, c: 0 }); continue; }
+      var m = stIt.exec(seg);
+      if (!m) return null;
+      var each = m[2] ? (m[2] === undefined ? 1 : 1) : 1;
+      var c1 = m[3] === '2tog' ? 2 : (m[3] === '3tog' ? 3 : 1);
+      var lead = m[1] ? +m[1] : 1;
+      if (m[7] || /^(?:each|every)$/.test(m[4] || '')) {
+        // a fill: "in each st across" / "to last 2 sts"
+        var last = m[7] ? (/last/.test(m[7]) ? (m[8] ? +m[8] : 1) : 0) : 0;
+        items.push({ fill: true, last: last, c: c1 });
+        continue;
+      }
+      var n = m[5] ? +m[5] : (m[6] ? +m[6] : 1);
+      items.push({ p: lead * n, c: lead * n * c1, each: each });
+    }
+    if (prev === null) return null;
+    var P = 0, C = 0, markAt = -1;
+    function run(list) {
+      for (var k = 0; k < list.length; k++) {
+        var it = list[k];
+        if (it.mark) continue;
+        if (it.fill) {
+          var w = prev - C - it.last;
+          if (w < 0 || w % it.c) return false;
+          P += w / it.c; C += w;
+          continue;
+        }
+        if (it.rep) return false;
+        P += it.p; C += it.c;
+      }
+      return true;
+    }
+    for (var q = 0; q < items.length; q++) {
+      var it = items[q];
+      if (it.mark) { markAt = q; continue; }
+      if (it.rep) {
+        if (markAt < 0) return null;
+        var block = items.slice(markAt + 1, q);
+        var bp = 0, bc = 0, ok = true;
+        block.forEach(function (b) { if (b.fill || b.rep || b.mark) ok = false; bp += b.p || 0; bc += b.c || 0; });
+        if (!ok || bc <= 0) return null;
+        var more = 0;
+        if (it.rep.more !== null) more = it.rep.more;
+        else if (it.rep.times !== null) more = it.rep.times - 1;
+        else if (it.rep.to !== null) {
+          var span = prev - C - it.rep.to;
+          if (span < 0 || span % bc) return null;
+          more = span / bc;
+        } else return null;
+        P += bp * more; C += bc * more;
+        continue;
+      }
+      if (!run([it])) return null;
+    }
+    if (C !== prev) return null;
+    return P;
+  }
+
+  function tunReflow(raws) {
+    var out = [];
+    function lastIdx() { for (var k = out.length - 1; k >= 0; k--) if (String(out[k]).trim()) return k; return -1; }
+    for (var i = 0; i < raws.length; i++) {
+      var line = raws[i], t = String(line).trim();
+      // "Row 2:" over "FwP: ..." - one row
+      if (BARE_ROW_RE.test(t) && i + 1 < raws.length && FWD_HEAD_RE.test(String(raws[i + 1]).trim())) {
+        out.push(t.replace(/[:.]?\s*$/, ':') + ' ' + String(raws[i + 1]).trim());
+        i++;
+        continue;
+      }
+      // a return pass on a line of its own stays a line of its own (a note)
+      if (RET_HEAD_RE.test(t) && !/^\s*(?:rows?|r)\s*\d/i.test(t.replace(RET_HEAD_RE, 'X'))) {
+        var rh = RET_HEAD_RE.exec(t);
+        if (rh[1]) {
+          // "Row 2 (RetP): ..." - the return of the row above, never row 2 again
+          out.push('RetP: ' + t.slice(rh[0].length));
+          continue;
+        }
+        out.push(line);
+        continue;
+      }
+      // "Row 2: FwP: tks across. RetP: Standard return." - the return pass on
+      // the line after the forward pass
+      if (ROWISH_RE.test(t)) {
+        var rt = RET_TAIL_RE.exec(t);
+        if (rt && rt.index > 0 && /[a-z0-9)]/i.test(t.slice(0, rt.index))) {
+          out.push(t.slice(0, rt.index).replace(/\s+$/, ''));
+          out.push(rt[1].replace(/^\(?\s*(?:retp|rtn|ret|return\s+pass)\b\s*\)?\s*[:.-]\s*/i, 'RetP: ').trim());
+          continue;
+        }
+      }
+      out.push(line);
+    }
+    return out;
+  }
+
+  var TUNISIAN = {
+    id: 'tunisian',
+    version: '1',
+    vocab: [
+      ['t' + TUN_SIMPLE + '3tog', 1, 3],
+      ['t(?:ss|ks|ps|fs|dc)2tog', 1, 2],
+      ['thdc', 1, 1],
+      ['tdc', 1, 1],
+      ['t' + TUN_SIMPLE, 1, 1],
+      ['tsl(?:\\s*st)?', 1, 1],
+      ['(?:pull|pick|draw)\\s+up\\s+(?:a\\s+)?(?:loop|lp)', 1, 1]
+    ].concat(CROCHET.vocab),
+    stitchH: [
+      [/^tss/, 'tss', 0.9, 0.9], [/^tks/, 'tks', 0.9, 0.9], [/^tps/, 'tps', 0.9, 0.9],
+      [/^tfs/, 'tfs', 0.9, 0.9], [/^tes/, 'tes', 0.9, 0.9], [/^ttw/, 'ttw', 0.9, 0.9],
+      [/^t(?:ds|xs|rs|ls|hs)/, 'tss', 0.9, 0.9], [/^thdc/, 'thdc', 1.3, 1.3], [/^tdc/, 'tdc', 1.8, 1.8],
+      [/^tsl/, 'tsl', 0.9, 0.9], [/^(?:pullup|pickup|drawup)/, 'tss', 0.9, 0.9]
+    ].concat(CROCHET.stitchH),
+    glossary: [
+      ['tss', 'Tunisian simple stitch', 'tss'], ['tks', 'Tunisian knit stitch', 'tks'],
+      ['tps', 'Tunisian purl stitch', 'tps'], ['tfs', 'Tunisian full stitch', 'tfs'],
+      ['tes', 'Tunisian extended stitch', 'tes'], ['tdc', 'Tunisian double crochet', 'tdc'],
+      ['FwP', 'forward pass: loops picked up onto the hook', 'fwp|forward\\s+pass'],
+      ['RetP', 'return pass: loops worked off the hook (one row with its forward pass)', 'retp|return\\s+pass'],
+      ['vb', 'vertical bar', 'vb|vertical\\s+bars?']
+    ].concat(CROCHET.glossary),
+
+    reflow: function (raws) { return tunReflow(raws); },
+
+    // "FwP: tss across." / "Forward pass: ..." under no row label is the next
+    // row; "Bind off: ..." / "Bind-off row: ..." is a row
+    detectNextRow: function (line, base) {
+      var b = base(line);
+      if (b) return b;
+      var t = String(line == null ? '' : line);
+      var m = FWD_HEAD_RE.exec(t);
+      if (m && m[0].length && /\S/.test(t.slice(m[0].length))) return { rest: t.slice(m[0].length), span: 1 };
+      m = /^\s*(?:bind[-\s]?off(?:\s+row)?|bo\s+row|final\s+row)\s*(?:\((?:fwp|fwd|forward\s+pass)\))?\s*[:.-]\s*/i.exec(t);
+      if (m && /\S/.test(t.slice(m[0].length))) return { rest: t.slice(m[0].length), span: 1 };
+      return null;
+    },
+
+    // "Foundation Row (FwP): Pull up a loop in 2nd ch from hook and in each ch across."
+    detectSetup: function (line, base) {
+      var t = String(line == null ? '' : line);
+      var m = /^\s*foundation(?:\s+(?:row|pass))?\s*(?:\(\s*(?:fwp|fwd|forward\s+pass)\s*\))?\s*[:.-]\s*/i.exec(t);
+      if (m) return { rest: t.slice(m[0].length) };
+      return base(line);
+    },
+
+    // "...—20 loops on hook." / "(20 loops)": the loops on the hook are the count
+    findExplicit: function (line, base) {
+      var t = tunForward(line);
+      var r = base(t);
+      if (r) return r;
+      var re = /(?:[-–—=(]\s*|\b(?:you\s+(?:will\s+)?have|there\s+(?:are|will\s+be)|(?:for\s+)?a\s+total\s+of)\s+)(\d+)(\s*\(\s*\d+(?:\s*[,-]\s*\d+)*\s*\))?\s*(?:loops?|lps?)\b(?:\s+on\s+(?:the\s+)?hook)?/ig;
+      var m, last = null;
+      while ((m = re.exec(t)) !== null) last = m;
+      if (!last) return null;
+      var sizes = [parseInt(last[1], 10)];
+      if (last[2]) last[2].replace(/[()]/g, '').split(/\s*[,-]\s*/).forEach(function (x) { if (x.trim()) sizes.push(parseInt(x, 10)); });
+      var at = t.indexOf(last[1], last.index);
+      return { sizes: sizes, start: at, end: t.length };
+    },
+
+    // the forward pass is the row's stitches; the loop on the hook is the first
+    evaluate: function (instruction, prevCount, base) {
+      var f = tunForward(instruction);
+      var v = base(f, prevCount);
+      if (v === null || v === undefined) v = tunEval(f, prevCount);
+      if (v !== null && v !== undefined && /\b(?:2nd|second)\s+(?:ch|chain)\s+from\s+(?:the\s+)?hook\b/i.test(f) &&
+          /\b(?:pull|pick|draw)\s+up\b|\b(?:loops?|lps?)\b/i.test(f)) v += 1;
+      return v;
+    },
+
+    afterLine: function (L) {
+      if (L.kind === 'note' && RET_HEAD_RE.test(String(L.text)) && /^\s*(?:retp|rtn|ret|rp|return)\b|^\s*\(\s*(?:retp|rtn|ret)/i.test(String(L.text))) L.returnPass = true;
+    }
+  };
+
+  var CRO = createParser(CROCHET);
+  var TUN = createParser(TUNISIAN);
+
+  function tunLines(x) { return !!(x && x.meta && x.meta.tunisian); }
+  function pickApi(x) {
+    if (Array.isArray(x)) return tunLines(x) ? TUN : CRO;
+    if (typeof x === 'string') return isTunisian(x) ? TUN : CRO;
+    if (x && typeof x === 'object' && typeof x.text === 'string') return isTunisian(x.text) ? TUN : CRO;
+    return CRO;
+  }
+
+  var Patterns = {};
+  Object.keys(CRO).forEach(function (k) { Patterns[k] = CRO[k]; });
+  // text in: read it as Tunisian when it is
+  Patterns.parse = function (text, opts) {
+    if (!isTunisian(text)) return CRO.parse(text, opts);
+    var L = TUN.parse(text, opts);
+    if (L && L.meta) L.meta.tunisian = true;
+    return L;
+  };
+  Patterns.splitSections = function (text) {
+    if (!isTunisian(text)) return CRO.splitSections(text);
+    var out = TUN.splitSections(text);
+    out.forEach(function (s) { s.tunisian = true; });
+    return out;
+  };
+  // (each wrapper keeps the arity of the function it stands for: the store and
+  // Knits' parity test read `.length`)
+  function arity(n, fn) {
+    switch (n) {
+      case 0: return function () { return fn.apply(null, arguments); };
+      case 1: return function (a) { return fn.apply(null, arguments); };
+      case 2: return function (a, b) { return fn.apply(null, arguments); };
+      case 3: return function (a, b, c) { return fn.apply(null, arguments); };
+      default: return function (a, b, c, d) { return fn.apply(null, arguments); };
+    }
+  }
+  ['placement', 'detectSizes', 'sizeMarks', 'gauge', 'colors', 'glossary', 'stuffingHint'].forEach(function (k) {
+    if (typeof CRO[k] !== 'function') return;
+    Patterns[k] = arity(CRO[k].length, function (text) { return (isTunisian(text) ? TUN : CRO)[k].apply(null, arguments); });
+  });
+  Patterns.dialectHints = function (text) {
+    var r = CRO.dialectHints(text);
+    if (isTunisian(text)) { r.craft = 'tunisian'; r.tunisian = true; }
+    return r;
+  };
+  // lines in: whichever reader made them
+  ['targetFor', 'lineFor', 'summary', 'countReport', 'expand', 'startHint', 'workMode'].forEach(function (k) {
+    if (typeof CRO[k] !== 'function') return;
+    Patterns[k] = arity(CRO[k].length, function (x) { return pickApi(x)[k].apply(null, arguments); });
+  });
+  // "Sk first vertical bar, ...": the loop already on the hook is the row's
+  // first stitch - the 3D sheet gets a record for it (an edge tss)
+  Patterns.expand = function (lines, rowNumber, prevCount, state) {
+    var api = pickApi(lines);
+    var r = api.expand(lines, rowNumber, prevCount, state);
+    if (api !== TUN || !r || !r.stitches) return r;
+    var l = TUN.lineFor(lines, rowNumber);
+    if (l && /\b(?:sk(?:ip)?|miss)\s+(?:the\s+)?(?:first|1st)\s+(?:vertical\s+)?(?:bar|vb|st(?:itch)?)\b/i.test(String(l.text)) &&
+        (typeof prevCount !== 'number' || r.stitches.length < prevCount + 1)) {
+      r.stitches.unshift({ t: 'tss', c: r.stitches.length ? r.stitches[0].c : null, h: 0.9, w: 1, edge: true });
+      if (typeof r.width === 'number') r.width += 1;
+    }
+    return r;
+  };
+  // one instruction: any Tunisian stitch in it
+  Patterns.evaluate = function (instruction, prevCount) {
+    var s = String(instruction == null ? '' : instruction);
+    return (new RegExp(TUN_ST_G.source, "i").test(s) || new RegExp(TUN_PASS_G.source, "i").test(s) ? TUN : CRO).evaluate(instruction, prevCount);
+  };
+  Patterns.isTunisian = isTunisian;
+  Patterns.tunisian = TUN;
+  Patterns.version = CRO.version + '+tunisian-' + TUNISIAN.version;
+
+  window.Patterns = Patterns;
+  // wave H: other crafts build their own reader over the same engine
+  window.Patterns.createParser = createParser;
+  window.Patterns.profile = CROCHET;
 
 })();

@@ -3178,6 +3178,105 @@ group('wave G: size groups (one booklet, several sizes of the same toy)');
     'wave G: a joined-and-turned round with no switch sentence stays a round');
 })();
 
+
+// =====================================================================
+group('Tunisian crochet (wave H): a vocabulary pack on the crochet reader');
+// =====================================================================
+(function () {
+  function rows(L) { return L.filter(function (l) { return l.kind === 'row'; }); }
+  function rowWith(L, sub) { for (var i = 0; i < L.length; i++) if (String(L[i].text).indexOf(sub) >= 0) return L[i]; return null; }
+
+  // a dishcloth: chain, foundation forward pass, tss rows, bind off
+  var CLOTH = 'Tunisian Simple Stitch Dishcloth\nUsing a Tunisian hook, ch 20.\n' +
+    'Foundation Row (FwP): Pull up a loop in 2nd ch from hook and in each ch across—20 loops on hook.\n' +
+    'RetP: Yo, draw through 1 loop, *yo, draw through 2 loops; rep from * until 1 loop remains on hook.\n' +
+    'Row 1: FwP: Sk first vertical bar, tss in each st across. RetP: Standard return.\n' +
+    'Row 2: FwP: Sk first vertical bar, tss in each st across. RetP: Standard return.\n' +
+    'Rows 3-20: Rep Row 2.\n' +
+    'Bind off: Sk first vertical bar, *sl st in next st; rep from * across. Fasten off.';
+  assertTrue(P.isTunisian(CLOTH), 'the dishcloth reads as Tunisian');
+  assertEqual(P.dialectHints(CLOTH).craft, 'tunisian', 'dialectHints says craft "tunisian"');
+  var cl = P.parse(CLOTH);
+  assertTrue(cl.meta.tunisian === true, 'parse: meta.tunisian');
+  var f = rowWith(cl, 'Foundation Row');
+  assertEqual([f.kind, f.count], ['setup', 20], 'the foundation forward pass is the foundation: 20 loops');
+  assertEqual(rows(cl).map(function (l) { return l.row + '-' + l.rowEnd + ':' + l.count; }), ['1-1:20', '2-2:20', '3-20:20', '21-21:20'],
+    'each forward + return pair is ONE row of 20 loops; the bind-off is the last row');
+  assertTrue(cl.filter(function (l) { return l.returnPass; }).length === 3, 'the three return passes are notes (Line.returnPass), never rows');
+  assertTrue(rows(cl).every(function (l) { return !/RetP/.test(l.text); }), 'a row line holds its forward pass; its return follows it');
+  assertEqual(P.summary(cl).rows, 21, 'the cloth is 21 rows (not 41 half-rows)');
+  // no printed count: the loop on the hook is the first stitch
+  var CH = 'Ch 15.\nFoundation Row: Pull up a loop in 2nd ch from hook and in each ch across.\nRetP: Standard return.\nRow 1: Sk first vertical bar, tss in each st across. RetP: Standard return.';
+  var ch = P.parse(CH);
+  assertEqual([rowWith(ch, 'Foundation Row').count, rowWith(ch, 'Row 1:').count], [15, 15],
+    'computed: a loop in 2nd ch from hook and each ch across over 15 ch is 15 loops (the loop on the hook counts); a tss row keeps 15');
+
+  // a textured block: tks / tps, a decrease, a "Row N (RetP)" line of its own
+  var BLOCK = 'Tunisian knit and purl block\nCh 12.\nFoundation Row (FwP): Pull up a loop in 2nd ch from hook and in each ch across. (12 loops)\n' +
+    'Return pass: Standard return.\n' +
+    'Row 1 (FwP): Sk first vertical bar, *tks in next st, tps in next st; rep from * to last st, tks in last st.\n' +
+    'Row 1 (RetP): Standard return.\n' +
+    'Row 2 (FwP): Sk first vertical bar, tss2tog, tks in each st to last st, tks in last st.\n' +
+    'Row 2 (RetP): Standard return.';
+  var bl = P.parse(BLOCK);
+  assertEqual(rows(bl).map(function (l) { return l.row + ':' + l.count; }), ['1:12', '2:11'],
+    'tks/tps keep 12 loops; tss2tog takes one off (11); "Row 1 (RetP)" never restarts the numbering');
+  assertEqual(P.splitSections(BLOCK).length, 1, '...so the block stays one part');
+  var ex = P.expand(bl, 1, 12, null);
+  assertEqual(ex.stitches.map(function (s) { return s.t; }).slice(0, 4), ['tss', 'tks', 'tps', 'tks'],
+    'expand: the first loop, then tks / tps records');
+  assertTrue(ex.stitches.every(function (s) { return s.h === 0.9 && s.w === 1; }), 'expand: Tunisian stitches are h 0.9, w 1');
+  var ex2 = P.expand(bl, 2, 12, ex.state);
+  assertTrue(ex2.stitches.some(function (s) { return s.t === 'dec'; }), 'expand: tss2tog is a decrease record');
+  var tdc = P.parse('Ch 10.\nFoundation Row: Pull up a loop in 2nd ch from hook and in each ch across.\nRetP: Standard return.\nRow 1: Sk first vertical bar, tdc in each st across. RetP: Standard return.');
+  assertTrue(P.expand(tdc, 1, 10, null).stitches.some(function (s) { return s.t === 'tdc' && s.h === 1.8; }), 'expand: tdc is a tall Tunisian stitch (h 1.8)');
+
+  // forward / return passes with no row numbers at all
+  var BARE = 'Tunisian simple stitch\nCh 8.\nForward pass: Pull up a loop in 2nd ch from hook and in each ch across.\nReturn pass: Standard return.\n' +
+    'Forward pass: Sk first vertical bar, tss in each st across.\nReturn pass: Standard return.\nForward pass: Sk first vertical bar, tss in each st across.\nReturn pass: Standard return.';
+  assertEqual(rows(P.parse(BARE)).map(function (l) { return l.row + ':' + l.count; }), ['1:8', '2:8', '3:8'],
+    'unnumbered "Forward pass: ..." lines are rows 1, 2, 3; the return passes are not rows');
+  // "Row 2:" over "FwP: ..."
+  var SPLIT = 'Ch 6.\nFoundation Row: Pull up a loop in 2nd ch from hook and in each ch across.\nRetP: Standard return.\nRow 1:\nFwP: Sk first vertical bar, tss in each st across.\nRetP: Standard return.\nRow 2:\nFwP: Sk first vertical bar, tps in each st across.\nRetP: Standard return.';
+  assertEqual(rows(P.parse(SPLIT)).map(function (l) { return l.row + ':' + l.count; }), ['1:6', '2:6'], '"Row 1:" over "FwP: ..." is one row');
+
+  // entrelac notes talk about rows without being rows
+  var ENT = 'Tunisian entrelac\nNote: Entrelac is worked in tiers of blocks; each block is 6 rows of tss over 6 loops, and rows of each block are worked off the side of the block below.\n' +
+    'Each square is worked in rows 1 to 6 as below; pick up 5 loops along the side of the square below for row 1 of each square.\n' +
+    'Ch 18.\nRow 1 (FwP): Pull up a loop in 2nd ch from hook and in each of next 5 ch (6 loops on hook). RetP: Standard return.\nRow 2: Sk first vertical bar, tss in next 5 sts. RetP: Standard return.';
+  var en = P.parse(ENT);
+  assertTrue(P.isTunisian(ENT), 'the entrelac text reads as Tunisian');
+  assertEqual(rows(en).map(function (l) { return l.row; }), [1, 2], 'entrelac: the notes about rows are notes; only Row 1 and Row 2 are rows');
+  assertEqual(rowWith(en, 'Row 1 (FwP)').count, 6, 'entrelac: "(6 loops on hook)" is the count');
+
+  // plain crochet is never Tunisian
+  ['Ch 21.\nRow 1: Sc in 2nd ch from hook and in each ch across. (20 sc)\nRow 2: Ch 1, turn, sc in each st across.',
+   'Rnd 1: 6 sc in MR (6)\nRnd 2: inc x6 (12)\nRnd 3: (sc, inc) x6 (18)',
+   'Row 1: Dc in 4th ch from hook. Turn. Return the hook to the front loop.'].forEach(function (t, k) {
+    assertTrue(!P.isTunisian(t) && !P.parse(t).meta.tunisian && P.dialectHints(t).craft !== 'tunisian', 'crochet text ' + (k + 1) + ' is not Tunisian');
+  });
+  assertEqual(P.evaluate('tss in each st across', 20), 20, 'Patterns.evaluate reads a Tunisian instruction');
+  assertEqual(P.evaluate('sc in each st across', 20), 20, '...and a crochet one as before');
+  assertTrue(P.glossary(CLOTH).some(function (g) { return g.abbr === 'tss'; }), 'glossary: tss');
+  assertTrue(/tunisian/.test(P.version), 'version says the Tunisian pack is in (store line cache)');
+})();
+
+// =====================================================================
+group('wave H: a FINISHING heading ends the part above it');
+// =====================================================================
+(function () {
+  var FIN = 'SLEEVES\nCh 20.\n1st row: Sc in 2nd ch from hook and in each ch across. Turn. 19 sc.\n2nd row: Ch 1. Sc in each sc across. Turn.\n' +
+    'Shape Top:\nNext row: Ch 1. Sc2tog. Sc to last 2 sc. Sc2tog. Turn. 17 sc.\nFINISHING\nSew seams. Outer edging: Join yarn at seam,\nwork 40 sc around opening, 17 (17-17-27-\n38-38) sc across neck edge. Join.\n' +
+    'Next rnd: Ch 1. Sc in each sc around. Join.\nSleeve edging: Join yarn at seam.\n1st rnd: Ch 1. Sc in each st around. Join.\n2nd rnd: Ch 1. Sc in each st around. Join.';
+  var fs = P.splitSections(FIN);
+  assertEqual(fs.map(function (s) { return s.name + '/' + P.summary(P.parse(s.text)).rows; }), ['Sleeves/3', '/1', '/2'],
+    'the Sleeves keep their own 3 rows; the edging rounds after FINISHING are parts of their own');
+  assertTrue(!/38-38\)/.test(fs[0].text) && !P.parse(FIN).some(function (l) { return l.kind === 'row' && l.row === 38; }),
+    'the size list wrapped as "27-" / "38-38) sc" is one list, never a row 38');
+  assertEqual(P.parse('Rnd 1: 6 sc in MR (6)\nRnd 2: inc x6 (12)\nFinishing\nRnd 3: (sc, inc) x6 (18)').filter(function (l) { return l.kind === 'row'; }).map(function (l) { return l.section; }), [0, 0, 0],
+    'a "Finishing" line in sentence case is not the heading');
+})();
+
 var summaryEl = document.getElementById('summary');
 var finalLine = passed + ' passed, ' + failed + ' failed';
 summaryEl.textContent = finalLine;

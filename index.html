@@ -103,6 +103,9 @@
   <main class="screen-body project-body">
     <div id="part-tabs" class="tabs" role="group" aria-label="Parts"></div>
 
+    <!-- wave H: a counter craft whose pattern reader did not load says so here -->
+    <p id="craft-notice" class="repeat-readout craft-notice" role="status" hidden></p>
+
     <p id="repeat-readout" class="repeat-readout" hidden></p>
 
     <section class="card counter-card" data-tour="row-counter" aria-label="Row counter">
@@ -208,8 +211,12 @@
 <!-- Scripts (order matters) -->
 <script src="./js/themes.js"></script>
 <script src="./js/patterns.js"></script>
+<!-- Knitting's parser (window.Knits), built on the Patterns engine. -->
+<script src="./js/knits.js"></script>
 <!-- pdf.js itself is NOT loaded here: PdfText pulls it in on first use. -->
 <script src="./js/pdftext.js"></script>
+<!-- Knitting charts read off the PDF text layer (window.KnitChart). -->
+<script src="./js/knit-chart.js"></script>
 <script src="./js/celebrate.js"></script>
 <script src="./js/diagram-geo.js"></script>
 <script src="./js/diagram.js"></script>
@@ -226,6 +233,9 @@
 <script src="./js/xstitch-photo.js"></script>
 <script src="./js/sewing.js"></script>
 <script src="./js/app.js"></script>
+<!-- Knitting is a counter craft: its projects use the crochet counter screen
+     with the Knits parser (docs/wave-h/CONTRACT.md §1). -->
+<script src="./js/app-knitting.js"></script>
 <script src="./js/app-xstitch.js"></script>
 <script src="./js/app-sewing.js"></script>
 
