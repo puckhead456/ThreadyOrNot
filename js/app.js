@@ -214,6 +214,10 @@
     // A separate id: the Store memoises per part, and this is not that part.
     tmp.id = (prt.id || 'part') + ':orientpreview';
     tmp.orientation = 'auto';
+    // wave H (knit-qa-2): the preview part reads with its project's craft
+    if (!tmp.craft && typeof Store.craftOf === 'function') {
+      try { var cr = Store.craftOf(prt); if (cr && cr !== 'crochet') tmp.craft = cr; } catch (e0) { /* crochet */ }
+    }
     try {
       return !!Store.partShape(tmp).upsideDown;
     } catch (e) {
@@ -1824,7 +1828,21 @@
    * "Speed Bump Socks" (not "Speed Bump Socks size").
    */
   function groupNoun(p) {
-    return p && p.craft === 'knitting' ? 'pattern' : 'size';
+    if (!p || p.craft !== 'knitting') return 'size';
+    // wave H (knit-qa-2): groups holding the same parts (the Sandnes raglan's
+    // children's and ladies' halves) are size ranges, not patterns
+    var by = {}, order = [];
+    (p.parts || []).forEach(function (q) {
+      if (!q.group) return;
+      if (!by[q.group]) { by[q.group] = []; order.push(q.group); }
+      by[q.group].push(String(q.name || '').toLowerCase().replace(/\s+\d+$/, '').trim());
+    });
+    if (order.length >= 2) {
+      var sig = function (g) { return by[g].slice().sort().join('|'); };
+      var s0 = sig(order[0]);
+      if (order.every(function (g) { return sig(g) === s0; })) return 'size';
+    }
+    return 'pattern';
   }
 
   function groupLabel(p, name) {
@@ -2554,6 +2572,13 @@
       // Grouping off: just the plain stitch number.
       readout = 'stitch ' + prt.stitch;
     }
+    // wave H (knit-qa-2): a knitted row the pattern gives no total for (the
+    // boyfriend's Shape Neck starts from stitches nothing counted) says so —
+    // never a 0 — except in short rows, which count to the turn
+    if (!partFinished(prt) && !target && line && line.kind === 'row' && isKnit(p) &&
+        !(typeof Store.shortRowInfo === 'function' && Store.shortRowInfo(prt))) {
+      readout += ' · count unknown';
+    }
     els.stitchReadout.textContent = readout;
     // Wave F (06 #1): "≈" (and a count that disagrees, or none for your size)
     // is tappable — it says what the number rests on.
@@ -3099,7 +3124,8 @@
       if (sr && !finished) {
         short.hidden = false;
         short.appendChild(el('span', 'knit-short-icon', '↩'));
-        var txt = 'Short row ' + sr.n + (sr.of ? ' of ' + sr.of : '');
+        // (wave H, knit-qa-2: and how far it works, when the reader knows)
+        var txt = 'Short row ' + sr.n + (sr.of ? ' of ' + sr.of : '') + (sr.worked ? ' · ' + sr.worked + ' sts' : '');
         short.appendChild(el('span', 'knit-short-text', txt));
         short.appendChild(el('span', 'knit-short-sub', sr.numbered
           ? 'rows ' + (sr.base + 1) + (sr.of ? '–' + (sr.base + sr.of) : '+') + ' · the row moves on after them'
@@ -3857,6 +3883,8 @@
         var si = Store.sideInfo(prt, p);
         if (chi.text) {
           var dir = si.inRound ? 'read right to left' : si.side === 'ws' ? 'WS, read left to right' : si.side === 'rs' ? 'RS, read right to left' : '';
+          // wave H (knit-qa-2): a panel the pattern writes out is read as written
+          if (chi.textSource === 'pattern') dir = si.inRound ? '' : (si.side === 'ws' ? 'WS, as the pattern writes it' : si.side === 'rs' ? 'RS, as the pattern writes it' : 'as the pattern writes it');
           var w = el('div', 'knit-chart-row');
           w.appendChild(el('div', 'field-label', 'Row ' + chi.row + (dir ? ' (' + dir + ')' : '')));
           w.appendChild(el('div', 'knit-chart-text', chi.text));
@@ -3897,8 +3925,11 @@
         var stage = el('div', 'knit-chart-stage');
         body.appendChild(stage);
         if (!chi.page || !chi.page.key) {
-          stage.appendChild(el('div', 'field-hint', 'The page this chart is printed on is not kept with the project. ' +
-            'Import the PDF again (⋯ → Import pattern) to keep its chart pages.'));
+          // wave H (knit-qa-2): a written-out panel needs no page
+          if (chi.textSource !== 'pattern') {
+            stage.appendChild(el('div', 'field-hint', 'The page this chart is printed on is not kept with the project. ' +
+              'Import the PDF again (⋯ → Import pattern) to keep its chart pages.'));
+          }
           return;
         }
         var B = window.BlobStore;
@@ -4662,7 +4693,9 @@
       if ((cls.knit.bends && cls.knit.bends.length) || cls.knit.toeUp) return 'Sock';
       if (!cls.closedTop && !cls.closedBottom && (cls.aspect || 0) < 0.38) {
         var kr = cls.rounds.filter(function (r) { return !r.empty; });
-        var kGrew = kr.length > 1 && (kr[kr.length - 1].radius || 0) > (kr[0].radius || 0) * 1.3;
+        var r0 = kr.length ? (kr[0].radius || 0) : 0, r1 = kr.length ? (kr[kr.length - 1].radius || 0) : 0;
+        // (knit-qa-2: one that narrows — a Top Yoke 220 → 100 — is a cone too)
+        var kGrew = kr.length > 1 && (r1 > r0 * 1.3 || r0 > r1 * 1.3);
         return kGrew ? 'Cone' : 'Band';
       }
     }
@@ -5504,6 +5537,10 @@
               pdf.focusSize();
               return;
             }
+            // wave H (knit-qa-2): one pattern out of a book is named after it
+            // ("Plain Socks For A Go-Go Guy", not "Single piece" / the file)
+            var bookPattern = secs.length && pdf.patternName ? pdf.patternName() : null;
+            if (!patch.name.trim() && bookPattern) patch.name = bookPattern;
             if (!patch.name.trim() && secs.length && pdf.fileBase()) patch.name = pdf.fileBase();
             patch.templateId = chosenTemplate === PDF_TEMPLATE_ID ? 'blank' : chosenTemplate;
             patch.craft = chosenCraft;
@@ -5709,6 +5746,8 @@
     return {
       text: function () { return picker.getText(); },
       fileBase: function () { return fileBase; },
+      /** wave H (knit-qa-2): the one pattern of a book being imported, else null */
+      patternName: function () { return picker.patternName ? picker.patternName() : null; },
       /** Pasted text gets the same card, under an honest name. */
       sourceLabel: function () { return fileBase ? 'From this PDF' : 'From this pattern'; },
       rerender: function () { picker.rerender(); },
@@ -7393,8 +7432,59 @@
      * the first is ticked to start with, and the size chips are the sizes of
      * the first pattern being imported.
      */
-    function groupsArePatterns() {
-      return craftKey() === 'knitting';
+    function groupsArePatterns(secs) {
+      if (craftKey() !== 'knitting') return false;
+      if (!secs) return patGroups;
+      // wave H (knit-qa-2): ...unless every group holds the SAME parts (the
+      // Sandnes raglan's children's and ladies' halves: Yoke, Back And Front,
+      // Sleeves in each). Those are size groups, all imported, as in crochet.
+      return !groupsShareParts(secs);
+    }
+    var patGroups = false;
+
+    /**
+     * wave H (knit-qa-2): a knitting section with no numbered rows that is a
+     * garment piece by name ("Back And Front", "Sleeves" of the Sandnes
+     * raglan, worked "until it measures") is a part to import, not a note:
+     * it arrived unticked and the import brought only the yokes.
+     */
+    function knitProsePart(sec) {
+      if (craftKey() !== 'knitting' || !sec || !sec.name) return false;
+      if (String(sec.text || '').replace(/\s+/g, ' ').length < 120) return false;
+      // ...or it casts on / picks up a count of its own ("Cast on 72 sts,
+      // divide sts on 3 needles" — Begin to Knit's sock cuff, unnamed)
+      if (/\b(?:cast\s+on|co|pick\s+up(?:\s+and\s+knit)?)\s+\d+\s*(?:\(|sts?\b|stitches\b)/i.test(String(sec.text || ''))) return true;
+      var nouns = (window.AppKnitting && Array.isArray(AppKnitting.sectionNames)) ? AppKnitting.sectionNames : [];
+      var nm = String(sec.name).toLowerCase();
+      return nouns.some(function (n) {
+        var w = String(n).toLowerCase();
+        return new RegExp('(?:^|\\s)' + w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + 's?(?:\\s|$)').test(nm);
+      });
+    }
+
+    /** Every group (two or more) has the same part names, in any order. */
+    function groupsShareParts(secs) {
+      var by = {}, order = [];
+      secs.forEach(function (s) {
+        if (!s.group) return;
+        if (!by[s.group]) { by[s.group] = []; order.push(s.group); }
+        by[s.group].push(String(s.name || '').toLowerCase().trim());
+      });
+      if (order.length < 2) return false;
+      var sig = function (g) { return by[g].slice().sort().join('|'); };
+      var first = sig(order[0]);
+      return order.every(function (g) { return sig(g) === first; });
+    }
+
+    /** The gauge lines the knitting reader carries for these sections. */
+    function groupGaugeLines(secs) {
+      var out = [];
+      secs.forEach(function (s) {
+        (Array.isArray(s.gaugeLines) ? s.gaugeLines : []).forEach(function (g) {
+          if (out.indexOf(g) < 0) out.push(String(g));
+        });
+      });
+      return out.join('\n');
     }
 
     /** The first ticked pattern's sections (all of them when there are no groups). */
@@ -7403,6 +7493,12 @@
       secs.forEach(function (s) {
         if (first === null && s.group && groupTicks[s.group]) first = s.group;
       });
+      // (knit-qa-2: before any tick is known — a first read of size groups —
+      // the first group, which is ticked by default)
+      if (first === null) {
+        var known = secs.some(function (s) { return s.group && groupTicks[s.group] !== undefined; });
+        if (!known) secs.forEach(function (s) { if (first === null && s.group) first = s.group; });
+      }
       if (first === null) return secs;
       return secs.filter(function (s) { return s.group === first; });
     }
@@ -7413,6 +7509,10 @@
       var parser = parserOf(craftKey());
       if (parser && typeof parser.detectSizes === 'function') {
         try { names = parser.detectSizes(typeof ofText === 'string' ? ofText : text); } catch (e) { names = null; }
+      }
+      // wave H (knit-qa-2): a knitting group's carried "Sizes: 2 yrs, 4 yrs …"
+      if (!(names && names.length >= 2) && typeof ofText === 'string' && typeof Store.sizesOfText === 'function') {
+        names = Store.sizesOfText(ofText, craftKey());
       }
       sizeDocCount = names && names.length >= 2 ? names.length : 0;
       if (sizeDocCount) return names.slice();
@@ -7429,7 +7529,8 @@
     function buildRows() {
       var secs = Store.splitSections(text, craftKey());
       var prevNames = sizeNames.join('|');
-      var pat = groupsArePatterns();
+      var pat = groupsArePatterns(secs);
+      patGroups = pat;
       if (pat) {
         // patterns: the first one is ticked to start with, a tick the
         // knitter changed survives a re-read
@@ -7439,13 +7540,17 @@
         groupTicks = {};
         seenG.forEach(function (n, gi) { groupTicks[n] = was0[n] === undefined ? gi === 0 : was0[n]; });
       }
-      var sizeSecs = pat ? sizeSections(secs) : secs;
+      // knitting groups (patterns or size ranges) each name their own sizes:
+      // the chips are the first imported group's
+      var sizeSecs = craftKey() === 'knitting' ? sizeSections(secs) : secs;
       var sizeText = sizeSecs === secs ? null : sizeSecs.map(function (s) { return s.text; }).join('\n');
       sizeNames = sizeText === null ? findSizes(secs) : findSizes(sizeSecs, sizeText);
       // wave H (knit-qa): the gauge the import will write (the imported
-      // pattern's own in a book), shown in the preview
+      // pattern's own in a book, with the gauge lines the reader carries for
+      // it), shown in the preview
+      var gaugeText = sizeText === null ? text : sizeText + '\n' + groupGaugeLines(sizeSecs);
       gaugeRead = craftKey() !== 'crochet' && typeof Store.gaugeFromText === 'function'
-        ? Store.gaugeFromText(sizeText === null ? text : sizeText, craftKey()) : null;
+        ? Store.gaugeFromText(gaugeText, craftKey()) : null;
       // a different document's sizes are a different question
       if (sizeNames.join('|') !== prevNames && prevNames) sizeChoice = null;
       if (sizeChoice !== null && sizeChoice > sizeNames.length - 1) sizeChoice = null;
@@ -7457,11 +7562,14 @@
         return {
           parserName: sec.name,
           name: keep ? old.name : sec.name,
-          checked: keep ? old.checked : info.rows > 0,
+          // (wave H, knit-qa-2: or a prose part the knitting reader offers)
+          checked: keep ? old.checked : (info.rows > 0 || !!sec.offer || knitProsePart(sec)),
+          offer: !!sec.offer,
           // wave G: the size group this section belongs to (null: one size)
           group: sec.group || null,
           makeCount: sec.makeCount,
           makeCountInferred: !!sec.makeCountInferred,
+          gaugeLines: sec.gaugeLines || null,
           text: sec.text,
           placement: sec.placement || '',
           rows: info.rows,
@@ -7780,6 +7888,9 @@
       rows.forEach(function (r) {
         // wave G: a size left out with "Import this size" brings none of its parts
         if (r.checked && groupNames.length && r.group && !groupTicks[r.group]) return;
+        // wave H (knit-qa-2): in a pattern BOOK a section outside every pattern is
+        // front matter (Begin to Knit's "Knitting:" lesson), not a shared part
+        if (r.checked && groupNames.length && !r.group && patGroups) return;
         if (r.checked) {
           var sec = {
             name: (r.name || '').trim(),
@@ -7788,6 +7899,7 @@
             placement: r.placement || ''
           };
           if (r.makeCountInferred) sec.makeCountInferred = true;
+          if (r.gaugeLines) sec.gaugeLines = r.gaugeLines;
           if (r.group) sec.group = r.group;
           out.push(sec);
         }
@@ -7812,6 +7924,12 @@
       noTargets: function () { return noTargets; },
       /** Wave F: the picked size index for Store.importPatternSections, or null. */
       size: function () { return sizeNames.length >= 2 ? sizeChoice : null; },
+      /** wave H (knit-qa-2): the single ticked pattern of a book (its name), else null */
+      patternName: function () {
+        if (!patGroups) return null;
+        var t = groupNames.filter(function (g) { return groupTicks[g]; });
+        return t.length === 1 ? t[0] : null;
+      },
       /** Wave F: the document has sizes and none is picked yet. */
       needsSize: function () {
         return sizeNames.length >= 2 && sizeChoice === null && rows.some(function (r) { return r.rows > 0 && r.checked; });

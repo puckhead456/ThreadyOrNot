@@ -102,6 +102,7 @@
   var TABLE_EVENNESS = 0.40;      // ...and the cells are all about the same width
   var MIN_COLUMN_WIDTH = 24;      // and nothing thinner than this is a column
   var MAX_COLUMNS = 4;            // Yarnspirations reference pages stack four
+  var COLUMN_PITCH = 150;         // ...and a wider sheet one per this many points
   var MARGIN_BAND = 0.08;           // top/bottom slice that holds running heads
 
   var LIGATURES = /^(?:fi|fl|ff|ffi|ffl)$/;
@@ -1322,6 +1323,7 @@
     for (b = 0; b < buckets; b++) crossing[b] = 0;
 
     var seen = new Array(buckets);
+    var lastEnd = {}, firstStart = {};    // by bucket, for printedWidth below
     for (var r = 0; r < rows.length; r++) {
       for (b = 0; b < buckets; b++) seen[b] = false;
       var items = rows[r].items;
@@ -1329,6 +1331,8 @@
         var from = Math.max(0, Math.floor(items[i].x - x0));
         var to = Math.min(buckets - 1, Math.ceil(items[i].end - x0));
         for (b = from; b <= to; b++) seen[b] = true;
+        if (!(lastEnd[to] >= items[i].end)) lastEnd[to] = items[i].end;
+        if (!(firstStart[from] <= items[i].x)) firstStart[from] = items[i].x;
       }
       for (b = 0; b < buckets; b++) if (seen[b]) crossing[b]++;
     }
@@ -1336,7 +1340,20 @@
     var allowed = Math.floor(rows.length * MAX_CROSSING);
     var lo = x0 + width * BAND_LO;
     var hi = x0 + width * BAND_HI;
-    var wide = function (run) { return run.end - run.start >= MIN_GAP_WIDTH; };
+    // The buckets round every item outwards to whole points, so a clear run
+    // is one to three points narrower than the gutter as printed. A run that
+    // just misses is measured on the ink either side of it: a column set at
+    // x 402 arrives at 401.99, and a 12 pt gutter between two of the four
+    // columns of knit-patons-cabled-yoke p2 counted 9 buckets and was no
+    // gutter. Only the decision changes, never the split position.
+    var printedWidth = function (run) {
+      var left = lastEnd[Math.round(run.start - x0) - 1], right = firstStart[Math.round(run.end - x0)];
+      return left === undefined || right === undefined ? 0 : right - left;
+    };
+    var wide = function (run) {
+      var w = run.end - run.start;
+      return w >= MIN_GAP_WIDTH || (w >= MIN_GAP_WIDTH - 2 && printedWidth(run) > MIN_GAP_WIDTH + 1);
+    };
     var wideNoisy = function (run) { return run.end - run.start >= MIN_GAP_WIDTH_NOISY; };
     // A total order, so two runs over the same page can never disagree.
     var widest = function (a, c) {
@@ -1429,6 +1446,8 @@
   // the region wide: a three-word callout centred over the gutter on a photo
   // ("4 sc between", crochet-baphomet p4) crosses it too, and is no band.
   var BRIDGE_MIN_SPAN = 0.3;
+  var TITLE_CENTRED = 0.02;   // a centred title line is this share of the ink width off centre
+  var TITLE_SHORT = 0.6;      // ...and at most this share of it wide
 
   function bridgesGutter(row, mid, width) {
     // Ink only: a justified line's trailing space item reaches into the
@@ -1528,8 +1547,15 @@
     var k = n - 1;
     while (k >= 0 && inRun(k)) k--;
     if (k < n - 1) mark(k + 1, n - 1);
+    // ...and a heading over a table that opens the region is the table's
+    // own ("MATERIALS" over the yarn table of knit-patons-cabled-yoke p1,
+    // whose size cells otherwise fell either side of the abbreviation
+    // columns' gutter, and lost every size but the first)
+    var heads = function (k) {
+      return k + 1 < n && bridge[k + 1] && cellCount(rows[k]) <= 1;
+    };
     k = 0;
-    while (k < n && inRun(k)) k++;
+    while (k < n && (inRun(k) || heads(k))) k++;
     if (k > 0) mark(0, k - 1);
     return any;
   }
@@ -1542,6 +1568,37 @@
     for (i = 0; i < n; i++) whole.push(false);
     var any = false;
     any = tableEnds(rows, mid, width, bridge, whole) || any;
+    // A title block centred over the page: its short lines between the
+    // full-width ones do not reach the gutter, and fell into the column
+    // under them (knit-sandnes-raglan-child p2: "children" and the
+    // "INSTRUCTION: ..." credit were read after the whole first column).
+    // Rows at the head of the region that bridge the gutter or stand
+    // centred on the region's ink, one run each, are read whole.
+    if (n > 1 && bridge[0]) {
+      var lo = Infinity, hi = -Infinity;
+      rows.forEach(function (row) {
+        row.items.forEach(function (it) {
+          if (!it.str.replace(/\s/g, '')) return;
+          if (it.x < lo) lo = it.x;
+          if (it.end > hi) hi = it.end;
+        });
+      });
+      var centre = (lo + hi) / 2;
+      var centred = function (row) {
+        var ink = row.items.filter(function (it) { return it.str.replace(/\s/g, ''); });
+        if (!ink.length || cellCount(row) !== 1) return false;
+        var a = ink[0].x, b = ink[ink.length - 1].end;
+        // a short line: two column heads side by side are centred too
+        if (b - a > (hi - lo) * TITLE_SHORT) return false;
+        return Math.abs((a + b) / 2 - centre) <= (hi - lo) * TITLE_CENTRED;
+      };
+      var head = 0;
+      while (head < n && (bridge[head] || centred(rows[head]))) head++;
+      if (head >= 2) {
+        for (i = 0; i < head; i++) whole[i] = true;
+        any = true;
+      }
+    }
     i = 0;
     while (i < n) {
       if (!bridge[i]) { i++; continue; }
@@ -1865,6 +1922,66 @@
     return false;
   }
 
+  /* A column that runs on across a band cut. A blank in the longest column
+   * of a block cuts a band when the columns beside it have already ended
+   * above it, so nothing on the right fills the blank: the sleeve column of
+   * knit-patons-boxy-cable p4 goes on, past a blank, into FINISHING and
+   * the neckband pick-up, while the shorter column beside it (the neckband
+   * ribbing, the sewing up) stopped three lines higher. Read band by band,
+   * the short column landed between the two halves of the long one. When
+   * the column that reaches the band's foot is followed only by columns
+   * that stop at least RUN_ON_SHORT lines higher, the rows at the head of
+   * the next band that sit inside that column, and clear of every other,
+   * are its run-on. A sidebar under columns that end level is still read
+   * after them. */
+  var RUN_ON_SHORT = 1.5;     // body heights the columns to its right stop short
+  var RUN_ON_SLACK = 0.5;     // body heights a run-on row may overhang its column
+  var RUN_ON_MIN_ROWS = 2;
+
+  function inkSpan(rows) {
+    var lo = Infinity, hi = -Infinity, last = -Infinity;
+    rows.forEach(function (row) {
+      row.items.forEach(function (it) {
+        if (!it.str.replace(/\s/g, '')) return;
+        if (it.x < lo) lo = it.x;
+        if (it.end > hi) hi = it.end;
+      });
+      if (row.order > last) last = row.order;
+    });
+    return { lo: lo, hi: hi, last: last };
+  }
+
+  function runOnColumn(cols, band) {
+    if (cols.length < 2 || band.length < RUN_ON_MIN_ROWS) return null;
+    var bodyH = dominantHeight(band) || 10;
+    var ext = cols.map(inkSpan);
+    var bottom = -Infinity;
+    ext.forEach(function (e) { if (e.last > bottom) bottom = e.last; });
+    for (var k = 0; k < ext.length - 1; k++) {
+      if (ext[k].last < bottom) continue;
+      var short = true;
+      for (var j = k + 1; j < ext.length; j++) {
+        if (ext[j].last > bottom - bodyH * RUN_ON_SHORT) short = false;
+      }
+      if (!short) return null;
+      var slack = bodyH * RUN_ON_SLACK, n = 0, e;
+      for (; n < band.length; n++) {
+        e = inkSpan([band[n]]);
+        if (!(e.lo >= ext[k].lo - slack && e.hi <= ext[k].hi + slack)) break;
+      }
+      if (n < RUN_ON_MIN_ROWS) return null;
+      // whatever follows in the band (a footer) is clear of the column: a
+      // paragraph that only starts inside it and then runs wider beside a
+      // figure is a block of its own (other-embroidery-stitchedstories-guide)
+      for (var r = n; r < band.length; r++) {
+        e = inkSpan([band[r]]);
+        if (e.lo < ext[k].hi && e.hi > ext[k].lo) return null;
+      }
+      return { k: k, n: n };
+    }
+    return null;
+  }
+
   function columnize(rows, x0, x1, budget, minLines) {
     minLines = minLines || MIN_LINES_FOR_COLUMNS;
     if (budget.left <= 0 || rows.length < minLines) {
@@ -1876,8 +1993,20 @@
     // not band breaks (xs-pokemon: a chart cut into bands loses its rows).
     var bands = isSymbolGrid(rows) ? [rows] : horizontalBands(rows);
     if (bands.length >= 2 && bandsDisagree(bands, res, x0, x1)) {
-      var cols = [], split = false;
+      var cols = [], split = false, prev = null;
       bands.forEach(function (band) {
+        // a column of the band above that runs on below the cut takes the
+        // rows that sit under it before the columns to its right are read
+        var on = prev && runOnColumn(prev.columns, band);
+        if (on) {
+          var ci = prev.base + on.k;
+          var merged = cols[ci].concat(band.slice(0, on.n));
+          merged.group = cols[ci].group;
+          cols[ci] = prev.columns[on.k] = merged;
+          band = band.slice(on.n);
+          if (!band.length) return;
+        }
+        prev = null;
         // a table band is read as a region of its own would be, with the
         // usual line minimum: a short size table stays row by row
         // (knit-bernat-topdown-pullover "To fit chest | Finished chest")
@@ -1889,6 +2018,7 @@
         }
         var span = bandSpan(band, x0, x1);
         var sub = columnize(band, span.lo, span.hi, { left: budget.left }, BAND_MIN_LINES);
+        if (sub.columns.length >= 2) prev = { base: cols.length, columns: sub.columns.slice() };
         cols = cols.concat(sub.columns);
         if (sub.split) split = true;
       });
@@ -2151,6 +2281,26 @@
    * REQUIREMENTS"). */
   var SIDE_HEADING_RE = /^(?=(?:[^A-Za-z]*[A-Z]){3})[A-Z0-9 &'’\/:,.()-]+$/;
 
+  /* A spaced-out display heading is not a row of photo letters: "T O
+   * C R O C H E T" over the cover blurb of crochet-stylecraft-guide p1 (once
+   * restoreCase gives it its capitals back). It spells a word (see
+   * spacedRunIsWord), uses five different letters or more (a diagram's
+   * "G E E G G E" uses two), is set near body size (a logo tagline is
+   * not: sew-swoon-mabel-bag) and no bigger than a heading (the 49 pt
+   * "P A T T E R N R" across a pattern-piece sheet of sew-sundress-pattern
+   * is a watermark). */
+  var SPACED_HEADING_LETTERS = 5;
+  var SPACED_HEADING_MAX = 2.5;   // body heights: bigger is a watermark
+
+  function isSpacedHeading(row, text, bodyH) {
+    if (!/^[A-Z](?: [A-Z]){5,}$/.test(text) || !spacedRunIsWord(text)) return false;
+    var seen = {}, n = 0;
+    text.replace(/ /g, '').split('').forEach(function (c) { if (!seen[c]) { seen[c] = true; n++; } });
+    if (n < SPACED_HEADING_LETTERS) return false;
+    var h = rowInkHeight(row);
+    return !(bodyH > 0) || (h >= bodyH * TRACKED_MIN_SIZE && h <= bodyH * SPACED_HEADING_MAX);
+  }
+
   function pageLines(items, pageWidth, pageHeight, rotate) {
     var rows = buildRows(items, rotate);
     // Judge letter spacing on the whole page, before it is cut into columns.
@@ -2167,9 +2317,12 @@
     kept.keySpan = rows.keySpan;
     rows = kept;
 
-    var budget = { left: MAX_COLUMNS - 1 };
     var sideways = !!rows.sideways;
     var span = sideways ? rows.span : { lo: 0, hi: pageWidth > 0 ? pageWidth : 612 };
+    // A landscape sheet has room for one more column than a portrait one:
+    // knit-patons-cabled-yoke p1 sets a three-column abbreviation box
+    // beside two columns of rows, and with four the rows never split.
+    var budget = { left: Math.max(MAX_COLUMNS, Math.floor((span.hi - span.lo) / COLUMN_PITCH)) - 1 };
     var res = spreadHalves(rows, pageWidth, pageHeight) || columnize(rows, span.lo, span.hi, budget);
     // On a page set sideways the margins are the LEFT and RIGHT edges of the
     // sheet, which is what the row key measures there.
@@ -2193,7 +2346,7 @@
       sorted.forEach(function (row, ri) {
         var text = rowText(row, deglyph);
         // judged without control codes: "I\u001f I" is a row of diagram letters
-        if (!text || isFurniture(text.replace(INVISIBLE_RE, ''))) return;
+        if (!text || (isFurniture(text.replace(INVISIBLE_RE, '')) && !isSpacedHeading(row, text, bodyH))) return;
         var at0 = row.y - keyLo;
         var inMargin = at0 >= h * (1 - MARGIN_BAND) || at0 <= h * MARGIN_BAND;
         if (inMargin && BARE_NUMBER_RE.test(text) && !inNumberRun(sorted, ri, text)) return;     // a page number
@@ -2380,6 +2533,17 @@
     return out;
   }
 
+  /* ...but a pattern row is never furniture. A raglan repeats "2nd row: P2.
+   * P2tog. Pat to last" / "4 sts. P2togtbl. P2." near the foot of three of
+   * its five pages, at about the same height each time
+   * (knit-patons-boyfriend-cable p2-p4), and all three copies were dropped.
+   * A line that opens with a row or round label is pattern text, and so is
+   * its run-on while the sentence is still open (it starts in lower case or
+   * with a count). */
+  var ROW_LABEL_RE = /^\s*(?:(?:rows?|rnds?|rounds?)\s*\d+|\d+(?:st|nd|rd|th)\s+(?:rows?|rnds?|rounds?))\b/i;
+  var CONTINUED_RE = /^\s*[a-z0-9(]/;
+  var SENTENCE_END_RE = /[.!?]["')\]]?\s*$/;
+
   function isAnywhereFurniture(l, marks) {
     var key = marginKey(l.text);
     if (key.length < ANYWHERE_MIN_KEY) return false;
@@ -2434,9 +2598,15 @@
     var everywhere = anywhereKeys(pages);
     return pages.map(function (p) {
       var kept = [];
+      var carry = false;    // the line before was a pattern row kept below
       p.lines.forEach(function (l) {
         if (isFolio(l, p, folio)) return;
-        if (isAnywhereFurniture(l, everywhere)) return;
+        var runOn = carry && CONTINUED_RE.test(l.text);
+        carry = false;
+        if (isAnywhereFurniture(l, everywhere)) {
+          if (!runOn && !ROW_LABEL_RE.test(l.text)) return;
+          carry = !SENTENCE_END_RE.test(l.text);
+        }
         if (l.margin) {
           if (counts[marginKey(l.text)] >= threshold) return;
           if (isPageStamp(l.text)) return;
@@ -2693,7 +2863,15 @@
     var columnsDetected = 0;
     var rawSample = '';
     var checked = {};
+    var caseState = newCaseState();   // restoreCase, document-wide
+    var applied = {};
+    var fontsOn = {};
     var chain = Promise.resolve();
+    var noteFonts = function (p, items) {
+      var f = {};
+      items.forEach(function (it) { if (it && it.fontName) f[it.fontName] = true; });
+      fontsOn[p] = f;
+    };
 
     var makeStep = function (p) {
       return function () {
@@ -2702,11 +2880,13 @@
           try { onProgress(p, total); } catch (e) { /* UI errors are not our problem */ }
         }
         return doc.getPage(p).then(function (page) {
-          return visibleItems(page, null).then(function (vis) {
+          return visibleItems(page, null, caseState).then(function (vis) {
             var size = pageSize(page);
             var res = pageLines(vis.items, size.width, size.height, page.rotate);
             if (res.split) columnsDetected++;
             checked[p] = vis.checked;
+            applied[p] = vis.applied;
+            noteFonts(p, vis.items);
             var keys = [];
             vis.items.forEach(function (it) {
               if (it && typeof it.str === 'string' && it.str.length >= CROSS_MIN_CHARS) keys.push(it.str);
@@ -2742,7 +2922,9 @@
         again = again.then(function () {
           if (isCancelled(signal)) throw abortError();
           return doc.getPage(pg.number).then(function (page) {
-            return visibleItems(page, true).then(function (vis) {
+            return visibleItems(page, true, caseState).then(function (vis) {
+              checked[pg.number] = true;
+              applied[pg.number] = vis.applied;
               var size = pageSize(page);
               var res = pageLines(vis.items, size.width, size.height, page.rotate);
               pg.lines = res.lines.map(function (l) {
@@ -2756,7 +2938,32 @@
       return again;
     };
 
-    return chain.then(recheck).then(function () {
+    // A font caught flipping case on a later page: re-read the earlier
+    // pages that use it (see restoreCase).
+    var recase = function () {
+      var again = Promise.resolve();
+      pages.forEach(function (pg) {
+        var done = applied[pg.number] || {};
+        var hit = Object.keys(fontsOn[pg.number] || {}).some(function (f) { return caseState.fonts[f] && !done[f]; });
+        if (!hit) return;
+        again = again.then(function () {
+          if (isCancelled(signal)) throw abortError();
+          return doc.getPage(pg.number).then(function (page) {
+            return visibleItems(page, checked[pg.number] || null, caseState).then(function (vis) {
+              var size = pageSize(page);
+              var res = pageLines(vis.items, size.width, size.height, page.rotate);
+              pg.lines = res.lines.map(function (l) {
+                return { text: normUnicode(l.text), margin: l.margin, edge: l.edge, pos: l.pos };
+              });
+              if (typeof page.cleanup === 'function') page.cleanup();
+            });
+          });
+        });
+      });
+      return again;
+    };
+
+    return chain.then(recheck).then(recase).then(function () {
       if (isCancelled(signal)) throw abortError();
       var cleaned = dropRunningFurniture(pages);
       var numbers = pages.map(function (pg) { return pg.number; });
@@ -2812,7 +3019,9 @@
         return lib.getDocument({
           data: buf,
           isEvalSupported: false,
-          disableFontFace: true
+          disableFontFace: true,
+          // glyph names for restoreCase
+          fontExtraProperties: true
         }).promise;
       })
       .then(function (pdf) {
@@ -2898,21 +3107,339 @@
     };
   }
 
+  /* ---- Capitals a font hands back in lower case ----------------------- *
+   * A subset font may carry a ToUnicode map that gives some capitals the
+   * code point of their small letter. knit-patons-cabled-yoke sets every
+   * heading, size name and abbreviation in such a Gotham-Bold: "MATERIALS"
+   * reads "MaTerIalS", the size L reads "l", "C4B" reads "C4b", "K = Knit"
+   * reads "k = Knit" (crochet-stylecraft-guide's "UK TERMS" reads "uk
+   * TerMS", knit-interweave-8-socks' "FINISHING" "FiNiSHiNG").
+   * pdf.js can only report what the map says, but the font's encoding still
+   * names every glyph ("A", "K", "L"). A glyph whose name is one case of a
+   * letter that the map turns into the other case is restored to the case
+   * of its name. Only the case ever changes, never the letter.
+   * The names come with the operator list (and getDocument's
+   * fontExtraProperties), which costs an image decode, so a page is only
+   * looked at when its text shows the symptom - a word that steps from
+   * small letters to capitals twice or more ("MaTerIalS", "boTToM"), not
+   * counting an OCR layer's glyphless font, whose noise does that too
+   * ("raMAveRTT") - or when it uses a font already caught and its text
+   * cannot be restored without the glyphs (see caseByWidth). */
+  var CASE_MIN_FLIPS = 2;       // a word with this many small-to-capital steps
+  var CASE_LOOKAHEAD = 4;       // glyphs a short text item may sit ahead of the last match
+  var CASE_MIN_RUN = 3;         // ...and an item of this many letters anywhere ahead
+  var CASE_WORD_RE = /[A-Za-z]{3,}/g;
+  var ASCII_LETTER_RE = /^[A-Za-z]$/;
+  var UNI_NAME_RE = /^(?:uni|u)[0-9A-F]{4,6}$|\./;   // "uni0041", "a.sc": no letter of their own
+
+  function newCaseState() {
+    return { fonts: {}, named: {}, shapes: {}, wide: {} };
+  }
+
+  /** An OCR layer's invisible font: pdf.js reports it monospace, ascent 1, no descent. */
+  function isGlyphless(style) {
+    return !!style && style.fontFamily === 'monospace' && style.ascent >= 0.99 &&
+      Math.abs(style.descent || 0) < 0.01;
+  }
+
+  function caseSuspect(items, styles, skip) {
+    // touching items are glued back into words first: a broken heading
+    // comes as one item per change of case ("M|a|T|er|I|al|S")
+    var s = '', prev = null;
+    for (var i = 0; i < items.length; i++) {
+      var it = items[i];
+      if (!it || typeof it.str !== 'string' || !it.transform) continue;
+      if ((skip && skip[it.fontName]) || (styles && isGlyphless(styles[it.fontName]))) { prev = null; continue; }
+      var t = it.transform;
+      var touch = prev && Math.abs(t[5] - prev.y) < 1 && Math.abs(t[4] - prev.end) < 1;
+      s += (touch ? '' : ' ') + it.str;
+      prev = { y: t[5], end: t[4] + (it.width || 0) };
+    }
+    var words = s.match(CASE_WORD_RE) || [];
+    for (i = 0; i < words.length; i++) {
+      var flips = (words[i].match(/[a-z](?=[A-Z])/g) || []).length;
+      if (flips >= CASE_MIN_FLIPS) return true;
+    }
+    return false;
+  }
+
+  function glyphName(font, code) {
+    var n = font.differences && font.differences[code];
+    if (!n && font.defaultEncoding) n = font.defaultEncoding[code];
+    return typeof n === 'string' ? n : '';
+  }
+
+  /* ...but a name is not a shape. crochet-stylecraft-guide's FrutigerCE-Light
+   * charts key puts lowercase drawings at the codes and names of capitals
+   * ("adjustable ring" is printed in lower case, and its ToUnicode map is
+   * right). What tells them apart is width.
+   *  - Capitals keep the proportions of capitals (a wide "L", an "R" as
+   *    wide as a "D"), small letters those of small letters (an "l" as
+   *    narrow as an "i", a narrow "r" and "t"). The flipped glyphs' widths,
+   *    and those of the font's glyphs whose case is not in doubt, are set
+   *    against the Helvetica capitals and small letters, and the names are
+   *    believed when the widths follow the named case more closely (the
+   *    spread of the log ratios: one scale factor fits a typeface of the
+   *    same proportions). Frutiger's key follows the small letters, the
+   *    Patons Gotham, the Sandnes Verlag and the Interweave Avenir headings
+   *    the capitals.
+   *  - With fewer than three glyphs to go on: the font's own glyph for the
+   *    letter in the case the map gives. A capital drawn at a small letter's
+   *    code is wider than the real small letter ("h" 741 against "h" 556);
+   *    a second copy of the small letter is as wide. */
+  var HELV_UPPER = [667, 667, 722, 722, 667, 611, 778, 722, 278, 500, 667, 556, 833,
+    722, 778, 667, 778, 722, 667, 611, 722, 667, 944, 667, 667, 611];
+  var HELV_LOWER = [556, 556, 500, 556, 556, 278, 556, 556, 222, 222, 500, 222, 833,
+    556, 556, 556, 556, 333, 500, 278, 556, 500, 722, 500, 500, 500];
+  var SHAPE_MIN_GLYPHS = 3;
+  var SHAPE_WIDER = 1.08;      // a capital is this much wider than its own small letter
+
+  function drawnAsNamed(shapes, real) {
+    var yes = 0, no = 0, code, s, k;
+    var up = [], low = [];
+    for (code in shapes) {
+      s = shapes[code];
+      k = s.name.toUpperCase().charCodeAt(0) - 65;
+      if (!(s.w > 0) || k < 0 || k > 25) continue;
+      var capital = /[A-Z]/.test(s.name);
+      var w0 = real[s.u];
+      if (w0 > 0) {
+        if ((capital ? s.w / w0 : w0 / s.w) >= SHAPE_WIDER) yes++;
+        else no++;
+      }
+      up.push(Math.log(s.w / (capital ? HELV_UPPER[k] : HELV_LOWER[k])));
+      low.push(Math.log(s.w / (capital ? HELV_LOWER[k] : HELV_UPPER[k])));
+    }
+    if (!up.length) return false;
+    for (var u in real) {
+      k = u.toUpperCase().charCodeAt(0) - 65;
+      if (!(real[u] > 0) || k < 0 || k > 25) continue;
+      var known = Math.log(real[u] / (u === u.toUpperCase() ? HELV_UPPER[k] : HELV_LOWER[k]));
+      up.push(known);
+      low.push(known);
+    }
+    if (up.length < SHAPE_MIN_GLYPHS) return yes > no;
+    var spread = function (a) {
+      var m = 0, v = 0, i;
+      for (i = 0; i < a.length; i++) m += a[i] / a.length;
+      for (i = 0; i < a.length; i++) v += (a[i] - m) * (a[i] - m) / a.length;
+      return Math.sqrt(v);
+    };
+    return spread(up) < spread(low);     // `up`: the widths read as the names say
+  }
+
+  /* A font already caught is restored on later pages from the text where
+   * it can be. A letter the font draws only one way says itself; a letter
+   * it has both glyphs for (Sandnes' Verlag: "a" at 97, width 436, and the
+   * capital at 65, width 681, both mapped to "a") is told by the run's
+   * width: a run of capitals is as wide as the capitals' widths add up to,
+   * a run of small letters as wide as theirs. A run that fits one reading
+   * within CASE_FIT and misses the other by CASE_MISS takes it; a run that
+   * fits neither (a mix, character spacing) is left to the operator list. */
+  var CASE_FIT = 0.03;
+  var CASE_MISS = 0.06;
+
+  /** {char: {real, flip, name}}: the widths of each character's glyphs. */
+  function widthInfo(fo) {
+    var map = fo && fo.toUnicode && fo.toUnicode._map, w = fo && fo.widths;
+    if (!map || !w) return null;
+    var codes = {};
+    for (var code in map) {
+      var u = map[code];
+      // a code with no width has no glyph: a font in a standard encoding
+      // maps all 256 codes, used or not
+      if (typeof u !== 'string' || u.length !== 1 || !(w[code] > 0)) continue;
+      var name = glyphName(fo, +code);
+      var flipped = ASCII_LETTER_RE.test(u) && ASCII_LETTER_RE.test(name) && name !== u &&
+        name.toLowerCase() === u.toLowerCase();
+      var c = codes[u] || (codes[u] = { real: 0, flip: 0, name: null });
+      if (flipped) {
+        if (!c.flip) { c.flip = w[code]; c.name = name; }
+      } else if (!c.real) {
+        c.real = w[code];
+      }
+    }
+    return codes;
+  }
+
+  /** The run's text read by its width, or null when the width does not say. */
+  function caseByWidth(it, codes) {
+    var t = it.transform, size = t ? Math.sqrt(t[0] * t[0] + t[1] * t[1]) : 0;
+    var em0 = 0, em1 = 0, mixed = false;
+    for (var i = 0; i < it.str.length; i++) {
+      var c = codes[it.str.charAt(i)];
+      if (!c) return null;
+      if (c.real && c.flip) mixed = true;
+      em0 += c.real || c.flip;
+      em1 += c.flip || c.real;
+    }
+    var restore = function (all) {
+      return it.str.replace(/[A-Za-z]/g, function (ch) {
+        var k = codes[ch];
+        return k && k.flip && (all || !k.real) ? k.name : ch;
+      });
+    };
+    if (!mixed) return restore(false);     // every letter has one glyph only
+    if (!(size > 0) || !(it.width > 0)) return null;
+    var d0 = Math.abs(Math.log(it.width / (em0 / 1000 * size)));
+    var d1 = Math.abs(Math.log(it.width / (em1 / 1000 * size)));
+    if (d0 <= CASE_FIT && d1 >= CASE_MISS) return restore(false);
+    if (d1 <= CASE_FIT && d0 >= CASE_MISS) return restore(true);
+    return null;
+  }
+
+  /**
+   * `items` with the case of every glyph restored from its name, for the
+   * fonts on the page whose map flips it. `state` (newCaseState) carries
+   * what is known across pages. -> {items, fonts: {fontName: true}}
+   */
+  function restoreCase(items, ol, OPS, objs, state) {
+    state = state || newCaseState();
+    var fonts = {}, queues = {}, bad = {}, tally = {}, any = false;
+    var fontOf = function (name) {
+      if (!(name in fonts)) {
+        var fo = null;
+        try { if (objs && objs.has(name)) fo = objs.get(name); } catch (e) { fo = null; }
+        fonts[name] = fo && (fo.differences || fo.defaultEncoding) ? fo : null;
+      }
+      return fonts[name];
+    };
+    var font = null, stack = [];
+    var show = function (glyphs) {
+      var fo = font && fontOf(font);
+      if (!fo || !glyphs) return;
+      var q = queues[font] || (queues[font] = []);
+      var t = tally[font] || (tally[font] = { flip: 0, wrong: 0, shapes: {}, real: {}, name: fo.name || font });
+      for (var i = 0; i < glyphs.length; i++) {
+        var g = glyphs[i];
+        if (!g || typeof g !== 'object' || typeof g.unicode !== 'string') continue;
+        if (!ASCII_LETTER_RE.test(g.unicode)) {
+          // a ligature ("fi") is its letters, none of them to restore
+          if (/^[A-Za-z]{2,3}$/.test(g.unicode)) {
+            for (var l = 0; l < g.unicode.length; l++) q.push({ u: g.unicode.charAt(l), fix: null });
+          }
+          continue;
+        }
+        var name = glyphName(fo, g.originalCharCode), fix = null;
+        if (ASCII_LETTER_RE.test(name)) {
+          if (name.toLowerCase() !== g.unicode.toLowerCase()) t.wrong++;
+          else if (name !== g.unicode) {
+            fix = name;
+            t.flip++;
+            t.shapes[g.originalCharCode] = { name: name, u: g.unicode, w: g.width };
+          } else if (g.width > 0) t.real[g.unicode] = g.width;
+        } else if (name && !UNI_NAME_RE.test(name)) {
+          t.wrong++;          // "four" for a "c": the names say nothing
+        }
+        q.push({ u: g.unicode, fix: fix });
+      }
+    };
+    for (var i = 0; i < ol.fnArray.length; i++) {
+      var fn = ol.fnArray[i], a = ol.argsArray[i];
+      if (fn === OPS.save) stack.push(font);
+      else if (fn === OPS.restore) { if (stack.length) font = stack.pop(); }
+      else if (fn === OPS.setFont) font = a && a[0];
+      else if (fn === OPS.showText || fn === OPS.showSpacedText || fn === OPS.nextLineShowText) show(a && a[0]);
+      else if (fn === OPS.nextLineSetSpacingShowText) show(a && a[2]);
+    }
+    // Names are only believed in a font where none of them names another
+    // letter: an OCR layer's CID fonts name their glyphs anything at all
+    // ("B" for a "u", "four" for a "c"), and their few "B" for "b" are chance.
+    // The widths are pooled over the pages read so far, and over every copy
+    // of the same subset font (a book gives each page its own font object):
+    // a page with one heading may hold a single flipped glyph.
+    for (var f in tally) {
+      var t = tally[f];
+      if (t.wrong) continue;
+      var pool = state.shapes[t.name] || (state.shapes[t.name] = { flipped: {}, real: {} });
+      for (var code in t.shapes) pool.flipped[code] = t.shapes[code];
+      for (var u in t.real) pool.real[u] = t.real[u];
+      if (!t.flip) continue;
+      if (state.fonts[f] || state.named[t.name] || drawnAsNamed(pool.flipped, pool.real)) {
+        bad[f] = state.fonts[f] = state.named[t.name] = any = true;
+        if (!(f in state.wide)) state.wide[f] = widthInfo(fonts[f]);
+      }
+    }
+    if (!any) return { items: items, fonts: bad };
+    // Each text item is found in its font's glyph stream as one unbroken
+    // run of its letters, from where the last item matched: a lone letter
+    // only a few glyphs on, a longer item anywhere further. An item that is
+    // not found exactly (a reordered run) keeps its text as it came:
+    // matching letter by letter drifted onto the wrong "e" ("havE").
+    var at = {};
+    var out = items.map(function (it) {
+      var q = it && bad[it.fontName] && queues[it.fontName];
+      if (!q || typeof it.str !== 'string') return it;
+      var letters = [], where = [];
+      for (var c = 0; c < it.str.length; c++) {
+        if (ASCII_LETTER_RE.test(it.str.charAt(c))) { letters.push(it.str.charAt(c)); where.push(c); }
+      }
+      if (!letters.length) return it;
+      var p = at[it.fontName] || 0, n = letters.length;
+      var last = (n >= CASE_MIN_RUN ? q.length : Math.min(q.length, p + CASE_LOOKAHEAD)) - n;
+      var hit = -1;
+      for (var k = p; k <= last && hit < 0; k++) {
+        var j = 0;
+        while (j < n && q[k + j].u === letters[j]) j++;
+        if (j === n) hit = k;
+      }
+      if (hit < 0) return it;
+      at[it.fontName] = hit + n;
+      var chars = it.str.split(''), changed = false;
+      for (j = 0; j < n; j++) {
+        if (q[hit + j].fix) { chars[where[j]] = q[hit + j].fix; changed = true; }
+      }
+      if (!changed) return it;
+      var copy = {};
+      for (var key in it) copy[key] = it[key];
+      copy.str = chars.join('');
+      return copy;
+    });
+    return { items: out, fonts: bad };
+  }
+
   /**
    * A page's text items with the hidden runs removed when the page shows
-   * the symptoms of hidden text (or `force`). -> {items, checked}
+   * the symptoms of hidden text (or `force`), and the case of a font that
+   * flips it restored (see above; `state` is a newCaseState, kept for the
+   * whole document). -> {items, checked, applied: {fontName: true}}
    */
-  function visibleItems(page, force) {
+  function visibleItems(page, force, state) {
+    state = state || newCaseState();
     return page.getTextContent().then(function (tc) {
       var items = tc.items || [];
       var OPS = window.pdfjsLib && window.pdfjsLib.OPS;
-      if (!OPS || typeof page.getOperatorList !== 'function' || !(force || overlaySuspect(items))) {
-        return { items: items, checked: false };
-      }
+      if (!OPS || typeof page.getOperatorList !== 'function') return { items: items, checked: false, applied: {} };
+      // A font already caught is restored from the text where its runs'
+      // widths say how (caseByWidth); any run they leave in doubt sends
+      // the page to the operator list like a first sighting does.
+      var known = {}, done = {}, pending = false;
+      var fixed = items.map(function (it) {
+        var f = it && it.fontName;
+        if (!f || !state.fonts[f] || typeof it.str !== 'string') return it;
+        known[f] = true;
+        var s = state.wide[f] ? caseByWidth(it, state.wide[f]) : null;
+        if (s === null) { pending = true; return it; }
+        if (s === it.str) return it;
+        var copy = {};
+        for (var key in it) copy[key] = it[key];
+        copy.str = s;
+        return copy;
+      });
+      var hide = !!(force || overlaySuspect(items));
+      var recase = pending || caseSuspect(items, tc.styles, known);
+      if (!pending) { items = fixed; done = known; }
+      if (!hide && !recase) return { items: items, checked: false, applied: done };
       return page.getOperatorList().then(function (ol) {
-        return { items: dropHiddenItems(items, textVisibility(ol, OPS, imageAlphaOf(page))), checked: true };
+        if (hide) items = dropHiddenItems(items, textVisibility(ol, OPS, imageAlphaOf(page)));
+        if (recase) {
+          var rc = restoreCase(items, ol, OPS, page.commonObjs, state);
+          items = rc.items;
+          for (var f in rc.fonts) done[f] = true;
+        }
+        return { items: items, checked: hide, applied: done };
       }, function () {
-        return { items: items, checked: true };
+        return { items: items, checked: hide, applied: done };
       });
     });
   }
@@ -2951,7 +3478,9 @@
         return lib.getDocument({
           data: buf,
           isEvalSupported: false,
-          disableFontFace: true
+          disableFontFace: true,
+          // glyph names for restoreCase
+          fontExtraProperties: true
         }).promise;
       })
       .then(function (doc) {
@@ -2979,6 +3508,8 @@
           return null;
         }
 
+        var caseState = newCaseState();   // see restoreCase: the pages read so far
+
         function textOf(pageNo) {
           var stop = guard();
           if (stop) return Promise.reject(stop);
@@ -2987,7 +3518,7 @@
             return Promise.resolve('');
           }
           return doc.getPage(n).then(function (page) {
-            return visibleItems(page, null).then(function (vis) {
+            return visibleItems(page, null, caseState).then(function (vis) {
               var size = pageSize(page);
               var res = pageLines(vis.items, size.width, size.height, page.rotate);
               if (typeof page.cleanup === 'function') page.cleanup();
@@ -3137,6 +3668,13 @@
     _isTableBand: isTableBand,
     _dropHiddenItems: dropHiddenItems,
     _overlaySuspect: overlaySuspect,
-    _crossPageSuspects: crossPageSuspects
+    _crossPageSuspects: crossPageSuspects,
+    _dropRunningFurniture: dropRunningFurniture,
+    _anywhereKeys: anywhereKeys,
+    _caseSuspect: caseSuspect,
+    _restoreCase: restoreCase,
+    _drawnAsNamed: drawnAsNamed,
+    _caseByWidth: caseByWidth,
+    _widthInfo: widthInfo
   };
 })();

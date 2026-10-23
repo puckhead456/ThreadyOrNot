@@ -137,6 +137,7 @@
 <script src="../js/store.js"></script>
 <script src="../js/diagram-geo.js"></script>
 <script src="../js/diagram.js"></script>
+<script src="diagram.knit-synth.js"></script>
 <script>
 'use strict';
 
@@ -199,7 +200,29 @@ var FIXTURES = [
   { id: 'k-socks',    file: 'knit-interweave-8-socks.pdf',           label: 'knit · interweave 8 socks', craft: 'knitting' },
   { id: 'k-magic',    file: 'knit-fromtheheart-magicloop-socks.pdf', label: 'knit · magic-loop socks', craft: 'knitting' },
   { id: 'k-lace',     file: 'knit-interweave-lace.pdf',              label: 'knit · interweave lace', craft: 'knitting' },
-  { id: 'k-rico',     file: 'knit-rico-triangular-shawl.pdf',        label: 'knit · rico triangular shawl', craft: 'knitting' }
+  { id: 'k-rico',     file: 'knit-rico-triangular-shawl.pdf',        label: 'knit · rico triangular shawl', craft: 'knitting' },
+  /* knit-3d-2 (docs/wave-h/knit-3d-2.md): batch 2. Each also shows the
+     SYNTHETIC reference built from docs/research/knitting.md §9–§13
+     (test/diagram.knit-synth.js) first, beside the same photo, for as long
+     as Knits does not read the part whole — compare the two. */
+  { id: 'k-mockneck', file: 'knit-patons-mockneck-cable.pdf',        label: 'knit · patons mock neck cables', craft: 'knitting',
+    synth: [{ label: 'Back XS/S — panels C·B·C·A·C·B·C', mode: 'rows', page: 4, build: function () { return window.KnitSynth.mockneckBack(); } }] },
+  { id: 'k-boyfriend', file: 'knit-patons-boyfriend-cable.pdf',      label: 'knit · patons boyfriend cables', craft: 'knitting',
+    synth: [{ label: 'its T3F = 1 twisted st over K1tbl + P1 (vs the mock neck\'s 2 over 1)', mode: 'rows', page: 5,
+      build: function () { return window.KnitSynth.multiSwatch(['BF_T3F', 'T2F', 'T2B', 'CR4F', 'CR4B', 'C4B'], 30, 4); } }] },
+  { id: 'k-boxy',     file: 'knit-patons-boxy-cable.pdf',            label: 'knit · patons boxy cables', craft: 'knitting',
+    synth: [{ label: 'C3FK / C3BK / C3FP / C3BP, Cr5B, Cr7B / Cr7F', mode: 'rows', page: 5,
+      build: function () { return window.KnitSynth.multiSwatch(['C3FK', 'C3BK', 'C3FP', 'C3BP', 'CR5B', 'CR7B', 'CR7F'], 30, 4); } }] },
+  { id: 'k-cabyoke',  file: 'knit-patons-cabled-yoke.pdf',           label: 'knit · patons cabled yoke', craft: 'knitting',
+    synth: [
+      { label: 'Bottom Yoke XS/S — 216 → 284, divide to 184', mode: 'rounds', page: 2, build: function () { return window.KnitSynth.cabledBottomYoke(); } },
+      { label: 'Top Yoke XS/S — worked up 198 → 90, C4B every 5 rnds', mode: 'rounds', page: 3, build: function () { return window.KnitSynth.cabledTopYoke(); } }
+    ] },
+  { id: 'k-sandnes',  file: 'knit-sandnes-raglan-child.pdf',         label: 'knit · sandnes top-down raglan', craft: 'knitting',
+    synth: [
+      { label: 'Yoke, children 2 yrs — German short rows, 56 → 144 → 92', mode: 'rounds', page: 2, build: function () { return window.KnitSynth.sandnesYoke('children'); } },
+      { label: 'Yoke, ladies S — German short rows, 80 → 216 → 132', mode: 'rounds', page: 3, build: function () { return window.KnitSynth.sandnesYoke('ladies'); } }
+    ] }
 ];
 
 var SHAPE_CLASSES = [
@@ -428,6 +451,11 @@ function textDialectOf(text) {
    keeps 'auto', one that does not borrows the whole document's. Without it the
    Stylecraft hood's Motif (tr / dc / ch only) was drawn at US treble height. */
 function makePart(section, mode, docText, craft, forced) {
+  if (section && typeof section.synth === 'function') {
+    partSeq++;
+    return { id: 'ZD4_p' + partSeq, name: section.name, patternText: '', row: 0, stitch: 0, rowStitches: [],
+      sizeIndex: 0, piecesDone: 0, repeat: null, craft: craft || 'knitting', __synth: section.synth };
+  }
   partSeq++;
   if (craft) {
     // wave H: a knitting part names its craft (the store reads it through Knits);
@@ -466,7 +494,8 @@ function fakeProject(mode, craft) {
  * `upto` (0..1) leaves the tail as ghost so the wireframe can be reviewed.
  */
 function finishedModel(part, proj, upto) {
-  var src = window.Store.diagramModel(part, proj);
+  // knit-3d-2: a synthetic reference card carries its own Model
+  var src = part && typeof part.__synth === 'function' ? part.__synth() : window.Store.diagramModel(part, proj);
   var rounds = [];
   var i;
   for (i = 0; i < src.rounds.length; i++) {
@@ -897,7 +926,12 @@ function fillNumbers(card) {
   c.klass.textContent = kindTxt.join(', ') +
     (cls.corners ? '  ·  ' + cls.corners + ' corners' : '') +
     (cls.ruffles ? '  ·  ' + cls.ruffles + ' ruffled (rounds ' + g.ruffled.slice(0, 8).join(',') + ')' : '') +
-    (cls.anchor ? '  ·  anchor ' + cls.anchor : '');
+    (cls.anchor ? '  ·  anchor ' + cls.anchor : '') +
+    // knit-3d-2: what the knitting path made of it
+    (cls.knit ? '  ·  knit: ' + (cls.knit.cables ? cls.knit.cables + ' crossings' : 'no cables') +
+      (cls.knit.wedge ? ', back-neck wedge ' + cls.knit.wedge.rows + ' rows' : '') +
+      (cls.knit.bends && cls.knit.bends.length ? ', bends ' + cls.knit.bends.length : '') +
+      (cls.knit.yoke ? ', yoke to round ' + (cls.knit.yoke.divide + 1) : '') : '');
   /* Corners come from the model builder's own reading of the text
      (`shape.corners` + `cornersSource`) and from the geometry's increase-site
      fit (`cls.corners`). Print BOTH: a square the text knows about and the
@@ -1040,6 +1074,11 @@ function loadFixture(fix, chip) {
       + ', ' + text.length + ' chars';
     var docText = text;
     fix.docText = text;   // the dialect seed for every card (makePart)
+    // knit-3d-2: the synthetic references first, beside the same photos
+    (fix.synth || []).forEach(function (sy, k) {
+      var sec = { name: 'SYNTHETIC reference · ' + sy.label, text: '', synth: sy.build };
+      loaded[fix.id].cards.push(buildCard(fix, sec, k, { mode: sy.mode, rnd: 0, row: 0, from: 'research counts' }, sy.page, host));
+    });
     shown.forEach(function (s, i) {
       var guess = guessMode(s.text, docText);
       var page = pageForSection(pages, s);
