@@ -174,3 +174,114 @@ In `C:\Users\mitch\.claude\projects\C--Users-mitch-CrochetBs\b5d3849d-2162-4d23-
 - After a pattern is removed, the project keeps the sizes of the pattern it was imported with.
 - I did not drive a cable sock's "cable in N" ring on a fixture: no fixture parses one (Genome's panel is
   a stitch guide, #32). knit-counter covers it with synthetic lines.
+
+---
+
+# Batch 2 (knit-qa-2): Patons cables, Sandnes raglan, Cabled Yoke, Begin to Knit
+
+Same rules as before: I edited my own files only, under the private key `ZWH_knitqa2.v1` (removed
+afterwards). I checked at 375×812 and 375×640, read the fixtures through the real app (New project →
+🧣 Knitting → drop the PDF, or paste the .txt), and compared against `docs/research/knitting.md` §9–§17.
+
+## What was walked
+
+- **Mock neck (M).**
+  - Panel rows expand: Back (continued) row 1 has 34 crossing records.
+  - The cable ring shows the next crossing.
+  - The chart chip reads "Panel Pat C · row 2 of 12", and its sheet shows the panel row in the
+    pattern's own words.
+  - The shoulder deviation hint shows "Pattern says 46 · instructions add up to 48".
+  - The gauge reads 20 × 26 / 4 in on a 4.5 mm (US 7) needle.
+- **Sandnes.**
+  - Two size groups, worded "Sizes" / "Import this size", each importing Yoke, Back And Front and
+    Sleeves ×2.
+  - Size chips 2–12 yrs; gauge needle 6 mm.
+  - Yoke at 2 yrs: 56 → 64 … 144 at round 28 → 92, with plain and increase rounds alternating and
+    no 0 anywhere.
+  - The 6 German short rows run in short-row mode ("Short row 3 of 6 · 11 sts", side RS/WS from the
+    reader). The row number stays at 1 and lands on round 8 after the 6th.
+- **Cabled Yoke (XL).**
+  - Bottom Yoke: 236 → 244 → 248/256 → +8 × 13 → 360, divide 244.
+  - Top Yoke: 220 → 210 … 100 (research ✓).
+  - The ring reads "cable in 4 · every 5".
+  - The pick-up "around top edge" draws bottom-up, and the viewer's Auto line now agrees.
+- **Begin to Knit (pasted .txt).**
+  - One tab per pattern.
+  - Plain Socks for a Go-Go Guy imports as its own project named after the pattern, without the
+    book's front matter.
+- **Boyfriend Shape Neck.** The row with no start count reads "… · count unknown", never 0. The 3D
+  model draws the 10 worked stitches.
+- **Coordinator's extra item (abbreviations).** The import keeps the abbreviation block. The
+  boyfriend's T3F draws from its own definition (cf 1, cb 1), and the glossary sheet lists it.
+
+## Defects (batch 2)
+
+| # | Where | Defect | Sev | Status | Assertion |
+|---|---|---|---|---|---|
+| 39 | Mock neck Back (cont.) | "Cast off 7 sts beg next 2 rows. 140 sts." showed 140 on row 3 (it makes 147); the shoulder range showed 46 on every row | H | fixed: a knitted range that changes the count (known start, or "cast off/dec/inc … next N rows" wording) targets its LAST row only | §16 ×2 |
+| 40 | Mock neck | Gauge needle empty: the needle line wraps before the word "needles" | M | fixed: the wrapped line is read; "larger" picks 4.5 mm | §16 |
+| 41 | Mock neck | Cable ring blank on panel rows (the crossings live in the panel definitions) | M | fixed: `panelCableRing` reads `lines.panelDefs` ("cable in 1 · C6F") | §16 |
+| 42 | Mock neck | Chart chip "Panel Pat C · row 2 of 2"; sheet said "read left to right" and "page not kept, import again" | M | fixed: a written panel's `of` is its own rows (12); the sheet shows the row as the pattern writes it, with no page note | §16 |
+| 43 | Sandnes | Children/ladies halves treated as two PATTERNS (only one ticked, "Import this pattern") | H | fixed: knitting groups that hold the same parts are size groups (all ticked, "size" wording, strip "Sizes") | §15 |
+| 44 | Sandnes | Size chips "Size 1–6": `Knits.detectSizes` does not read its own carried "Sizes: 2 yrs, …" line | H | fixed: `Store.sizesOfText` reads the carried line (picker, import, part reads) | §16 ×2 |
+| 45 | Sandnes | Back And Front and Sleeves (prose, no numbered rows) arrived unticked; only the Yokes imported | H | fixed: a knitting section with a cast-on / pick-up count or a garment name is ticked | §15 (book import) |
+| 46 | Sandnes | Gauge needle 5 mm (the rib needle, listed first); "ndl" was not read as a needle | M | fixed: "TENSION … with 6 mm ndls" names the gauge needle; `ndl(s)` counts as a needle; the group's `gaugeLines` reach the preview and the import | §16 |
+| 47 | Sandnes | Short-row side "RS?" and no stitch count to the turn | M | fixed: `shortRowInfo().worked / .side` from `Line.shortRows`; strip "Short row 3 of 6 · 11 sts"; side chip RS/WS | §16 ×4 |
+| 48 | Cabled Yoke | Viewer said "worked bottom-up" and "Auto — top-down" together | L | fixed: `partShape` also reads the knitted "pick up … around top edge" | §16 |
+| 49 | Cabled Yoke Top Yoke | 3D label "Band" for a piece narrowing 220 → 100 | L | fixed: "Cone" | — (§15 covers the helper) |
+| 50 | Begin to Knit | The book's front matter (the "Knitting:" lesson, the block) imported as parts with the chosen pattern; project named "Single piece" | M | fixed: sections outside every pattern are not imported with one pattern of a book; the project takes the pattern's name | §15 ×2 |
+| 51 | Boyfriend Shape Neck | A row with no known count gave no sign (the coordinator asked for "count unknown", not 0) | M | fixed: "… · count unknown" in the stitch readout (not in short rows) | §15 |
+| 52 | Boyfriend / mock neck | The import dropped the abbreviation block, so cables fell back to their names' default shapes | H | fixed: `craftData.abbreviations` + `craftData.glossary` at import; `knitCableDefsFor` and the glossary read them | §16 ×4 |
+| 53 | Mock neck at 375×640 | The chart chip overlapped the "STITCHES" caption (the stitch pad shrank under the knit chips) | L | fixed (css): the pad keeps its height when the knit chips show; the screen scrolls | — (css) |
+| 54 | knit-counter §15 | The iframe app could be driven before its init (`els.home` undefined; the parser worker saw it once) | — | fixed: wait until `App.render()` runs | the suite itself |
+| 55 | Sandnes | Group 0 is named "Ladies" (it is the children's) and group 1 "S–XXL" | M | → parser | — |
+| 56 | Sandnes | `Knits.gauge` does not read a stitch-only gauge ("14 sts … = 10 cm") | M | → parser | — |
+| 57 | Begin to Knit | Groups "Sleeves", "Back (3)", "Plastic Crochet Hook Size G"; the Dolls & Guys mittens sit inside the Go-Go sock group (chips read "Size 1–3"); `dialectHints` says `uk`, not `period` | M | → parser | — |
+| 58 | Cabled Yoke | Sleeves read 88 and Sleeves (continued) 54 on every round (the rounds before the first dec are not that number); rounds after the Bottom Yoke's divide read 244 | H | → parser | — |
+| 59 | Mock neck | `expand` of "Cast off 15 sts beg next 4 rows, then 16 sts beg following 2 rows" binds off all 92 on the first row (a cliff in the 3D) | M | → parser | — |
+| 60 | `Knits.glossary` | Meanings are the first line only ("Slip next stitch onto cable"); the store keeps the full block for the cables | L | → parser | — |
+
+## For knits-parser (batch 2)
+
+- #55–#60 above.
+- The carried "Sizes: 2 yrs, 4 yrs …" line should round-trip through `detectSizes`. The store now
+  reads it itself.
+- A range whose printed total is for its last row should give per-row `counts` where the shaping is
+  regular. The store now leaves the earlier rows without a target.
+- Mark prose parts with `s.offer`: the store passes it through and ticks those parts. A heuristic in
+  the app covers them until then.
+
+## Contract additions (batch 2)
+
+- **Store reads:**
+  - `Store.sizesOfText(text, craft)`.
+  - `shortRowInfo()` gains `worked` and `side`.
+  - `chartInfo()` gains `textSource: 'chart'|'pattern'` and `panel`.
+  - `cableInfo()` may answer `source: 'panel'` with a `panel` name.
+- **Project data:** `craftData.abbreviations` (the printed block, ≤ 8000 chars) and
+  `craftData.glossary` `[{abbr, meaning, fromPattern}]` are written at import for knitting.
+- **Sections:** `Store.splitSections` passes `gaugeLines`, `offer` and `continues` through.
+
+## Suites (batch 2)
+
+| suite | result |
+|---|---|
+| knit-counter | **317 / 0** (295 → +22) |
+| store-safety | 307 / 0 |
+| templates | 147 / 0 |
+| crafts | 124 / 0 |
+| backup | 205 / 0 |
+| diagram-model | 529 / 0 |
+| sw | 29 / 0 |
+| diagram | 260 / 0 |
+
+The app loads in a fresh tab with no console error.
+
+## Screenshots (batch 2)
+
+- `mcp-Claude_Browser-blob-1792746913801-lqjkw0.jpg`: mock neck at 375×640 before #53 (chip over
+  "STITCHES"), with the cable ring "cable in 1" and "Panel Pat C · row 2 of 12".
+- `mcp-Claude_Browser-blob-1792746960596-tvgxyz.jpg`: the same after #53 (the capture tool tiled
+  it; the top-left tile is the screen).
+
+Both are in the tool-results folder named above.

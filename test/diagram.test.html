@@ -245,6 +245,7 @@
 <script src="../js/store.js?v=dev"></script>
 <script src="../js/diagram-geo.js?v=dev"></script>
 <script src="../js/diagram.js?v=dev"></script>
+<script src="diagram.knit-synth.js?v=dev"></script>
 <script>
 /* pdftext.js points the pdf.js worker at './js/vendor/...', right for the app at
    the repo root but wrong from /test/ — pin it, same as diagram.gallery.html. */
@@ -3390,6 +3391,163 @@ try { if (window.Knits && window.Store.registerCraftParser) window.Store.registe
         gN2.rounds[2].hash === gN3.rounds[2].hash && gN3.rounds[3].doneSlices === 4,
         'hash kept ' + (gN2.rounds[2].hash === gN3.rounds[2].hash) + ' · done slices ' + gN3.rounds[3].doneSlices);
 
+      /* ======================================= knit-3d-2: cables, yokes, wedge */
+      group('Knitting — cabled panels, every crossing type, the cabled yoke, the back-neck wedge (knit-3d-2)');
+      var KS = window.KnitSynth;
+      if (!KS || !G.knitCables || !RX.stamp) {
+        ok('knit-3d-2 synthetic references + DiagramGeo 1.6.0 knitCables', false, 'test/diagram.knit-synth.js or DiagramGeo.knitCables missing');
+      } else (function cablesBlock() {
+        /* -- a crossing's two groups, from its name when the pattern defines none -- */
+        var shp = function (nm, nn) { var s0 = G.cableShapeOf(nm, nn); return s0.f + '/' + s0.kb; };
+        ok('a cable\'s name gives its front group and the knits left behind (C4F 2/2, C6B 3/3, T3F 2 over a purl, C3FP 2/0, RT 1/1, 2/1 RPC 2/0)',
+          shp('C4F', 4) === '2/2' && shp('C6B', 6) === '3/3' && shp('T3F', 3) === '2/0' && shp('T4B', 4) === '2/0' &&
+          shp('C3FP', 3) === '2/0' && shp('C3BK', 3) === '2/1' && shp('RT', 2) === '1/1' && shp('2/1 RPC', 3) === '2/0',
+          'C4F ' + shp('C4F', 4) + ' · C6B ' + shp('C6B', 6) + ' · T3F ' + shp('T3F', 3) + ' · T4B ' + shp('T4B', 4) + ' · C3FP ' +
+          shp('C3FP', 3) + ' · C3BK ' + shp('C3BK', 3) + ' · RT ' + shp('RT', 2) + ' · 2/1 RPC ' + shp('2/1 RPC', 3));
+
+        /* -- (1) the mock neck's Back: C·B·C·A·C·B·C side by side -- */
+        var mb = KS.mockneckBack(), mbL = G.layout(mb), mbC = G.knitCables(mb.rounds, 'rows', 0);
+        var lay = KS.mockneckPanels(), W0 = lay.width;
+        var inPanel = function (c) {
+          for (var q = 0; q < lay.panels.length; q++) {
+            var p0 = lay.panels[q];
+            if (c.x0 + W0 / 2 >= p0.c0 - 0.5 && c.x1 + W0 / 2 <= p0.c0 + p0.w + 0.5) return p0.name;
+          }
+          return null;
+        };
+        var hit = { A: 0, B: 0, C: 0 }, stray = 0;
+        mbC.columns.forEach(function (c) { var nm = inPanel(c); if (nm) hit[nm]++; else stray++; });
+        var panelsSeen = lay.panels.every(function (p0) {
+          return mbC.columns.some(function (c) { return c.x0 + W0 / 2 >= p0.c0 - 0.5 && c.x1 + W0 / 2 <= p0.c0 + p0.w + 0.5; });
+        });
+        ok('mock neck Back (research §9): every one of its seven panels C·B·C·A·C·B·C is a cable column of its own, nothing outside them',
+          lay.width === 144 && panelsSeen && stray === 0 && hit.A >= 1 && hit.B >= 2 && hit.C === 4,
+          'cable columns ' + mbC.columns.length + ' (A ' + hit.A + ', B ' + hit.B + ', C ' + hit.C + ', outside the panels ' + stray + ') · ' +
+          mbC.columns.map(function (c) { return n(c.x0 + 72, 1) + '–' + n(c.x1 + 72, 1); }).join(', '));
+        // Panel C's crossings: C6F on pattern row 3, C6B on 9 — every 6 rows, alternating
+        var firstPat = 14, cC = lay.panels[0];
+        var cRows = mbC.crossings.filter(function (k) {
+          var x = k.x + 72; return x > cC.c0 && x < cC.c0 + cC.w;
+        });
+        var cad = cRows.slice(1).map(function (k, q) { return k.i - cRows[q].i; });
+        var alt = cRows.every(function (k, q) { return k.cross === (q % 2 ? -1 : 1); });
+        ok('Panel C crosses at the right cadence: C6F on its row 3, C6B on row 9, every 6 rows, front and back in turn',
+          cRows.length >= 12 && cRows[0].i - firstPat + 1 === 3 && cad.every(function (d) { return d === 6; }) && alt &&
+          cRows[0].lo === 2 && cRows[0].hi === 2,
+          cRows.length + ' crossings · first on pattern row ' + (cRows.length ? cRows[0].i - firstPat + 1 : '-') + ' · gaps ' +
+          cad.slice(0, 6).join(',') + '… · F/B alternate ' + alt + ' · window ' + (cRows.length ? cRows[0].lo + '+1+' + cRows[0].hi : '-'));
+        // Panel A: a travelling stitch every RS row — its windows tile the rows
+        var aP = lay.panels[3], aRows = mbC.crossings.filter(function (k) { var x = k.x + 72; return x > aP.c0 && x < aP.c0 + aP.w && k.i > firstPat + 4; });
+        var t3 = aRows.filter(function (k) { return k.n === 3; }), c4 = aRows.filter(function (k) { return k.n === 4; });
+        // a travelling stitch with another 2 rows on takes 2 rows; one whose next crossing is further keeps up to 2 + 1 + 2
+        var two = t3.filter(function (k) { return k.lo + k.hi + 1 === 2; }).length;
+        var tiles = t3.length > 10 && two >= 0.75 * t3.length && t3.every(function (k) { return k.lo + k.hi + 1 <= 5; });
+        ok('Panel A: T3F / T3B every RS row tile their rows (a 2-row window each, one continuous diagonal); C4F / C4B every 6 rows',
+          tiles && c4.length >= 6 && t3.every(function (k) { return k.f === 2 && k.kb === 0; }),
+          t3.length + ' travelling crossings, ' + two + ' of them on a 2-row window: ' + t3.slice(0, 4).map(function (k) { return k.lo + '+1+' + k.hi; }).join(' ') +
+          ' · front/back-knits ' + (t3[0] ? t3[0].f + '/' + t3[0].kb : '-') + ' · C4 crossings ' + c4.length);
+        var bodyW = [], ribW = mbL.rounds[0].width;
+        for (var bi = firstPat; bi < mb.rounds.length; bi++) bodyW.push(mbL.rounds[bi].width);
+        var bMin = Math.min.apply(null, bodyW), bMax = Math.max.apply(null, bodyW);
+        var pulled = mbC.pull[40] ? Array.prototype.reduce.call(mbC.pull[40], function (a, b) { return a + b; }, 0) : 0;
+        ok('the fabric pulls in under the cables: 144 stitches draw ' + n(bMax, 1) + ' wide (stockinette 144), every pattern row alike; the rib 104',
+          near(bMin, bMax, 1e-6) && bMax < 0.95 * 144 && bMax > 1.15 * ribW && near(ribW, 130 * 0.8, 1e-6) && pulled >= 70,
+          'pattern rows ' + n(bMin, 2) + '…' + n(bMax, 2) + ' · rib ' + n(ribW, 2) + ' (130 × 0.8) · stitches at cable gauge on a plain row ' + pulled);
+        var mbN = RX.normalize(mb), r41 = mbN.rounds[41], wA = 0, wE = 0;
+        for (var q3 = 0; q3 < r41.n; q3++) { var col3 = r41.n - 1 - q3; if (col3 === 70) wA = r41.wt[q3]; if (col3 === 0) wE = r41.wt[q3]; }
+        ok('the renderer draws the same cable gauge: a stitch in Panel A is 0.85 of an edge stitch on a plain WS row',
+          near(wA / wE, 0.85, 1e-3),
+          'slice weight A ' + n(wA, 3) + ' / edge ' + n(wE, 3) + ' = ' + n(wA / wE, 3));
+
+        /* -- (4) every crossing type: its front strand on top, travelling the right way -- */
+        var types = ['C4F', 'C4B', 'C6F', 'C6B', 'T3F', 'T3B', 'T4F', 'T4B', 'TW4R', 'TW4L', 'BF_T3F', 'T2F', 'T2B', 'CR4F', 'CR4B',
+          'C3FK', 'C3BK', 'C3FP', 'C3BP', 'CR5B', 'CR7B', 'CR7F'];
+        var wrong = [], seen = [];
+        types.forEach(function (key) {
+          var c = KS.CABLES[key], sw = KS.cableSwatch(key, 9, 4), N = RX.normalize(sw);
+          var a = c.cf / c.n, fEnd = c.cross === 'f' ? a / 2 : 1 - a / 2, fStart = 1 - fEnd;
+          var dOn = null;
+          for (var q = 0; q < N.rounds[4].n; q++) { var dd = N.rounds[4].descs[N.rounds[4].keys[q]]; if (dd.k === 8) { dOn = dd; break; } }
+          var after = strandAt(N, 6, fEnd), afterOther = strandAt(N, 6, fStart);
+          var before = strandAt(N, 2, fStart), beforeOther = strandAt(N, 2, fEnd);
+          var good = dOn && dOn.f === c.cf && dOn.kb === c.cb && after > afterOther + 0.1 && before > beforeOther + 0.1;
+          seen.push(key.replace('BF_', 'bf ') + ' ' + c.cf + '/' + c.cb + (good ? '' : ' ✗'));
+          if (!good) wrong.push(key + ': desc ' + (dOn ? dOn.f + '/' + dOn.kb : '-') + ', front ' + n(before, 2) + '→' + n(after, 2) + ' vs ' + n(beforeOther, 2) + '→' + n(afterOther, 2));
+        });
+        ok('every new crossing (C4/C6, T2/T3/T4, Tw4, Cr4/Cr5/Cr7, C3FK/BK/FP/BP): its front group is on top and travels left for F, right for B',
+          wrong.length === 0, (wrong.length ? wrong.join(' | ') + ' · ' : '') + seen.join(', '));
+        var mT = RX.normalize(KS.cableSwatch('T3F', 9, 4)), bT = RX.normalize(KS.cableSwatch('BF_T3F', 9, 4));
+        var mFar = strandAt(mT, 6, 0.84), bFar = strandAt(bT, 6, 0.84);
+        ok('the pattern decides what T3F means: the mock neck\'s carries 2 knits over a purl, the boyfriend\'s 1 twisted stitch over a knit and a purl',
+          bFar > mFar + 0.2 && strandAt(mT, 6, 1 / 3) > strandAt(bT, 6, 1 / 3) + 0.05,
+          'two rows after the cross — far side (the back knit): boyfriend ' + n(bFar, 2) + ' vs mock neck ' + n(mFar, 2) +
+          ' · U 1/3 (the mock neck\'s 2-stitch strand): ' + n(strandAt(mT, 6, 1 / 3), 2) + ' vs ' + n(strandAt(bT, 6, 1 / 3), 2));
+        // a cable stays visible at the lowest level of detail (2 px a stitch)
+        var dc0 = null, dc1 = null, rr4 = RX.normalize(KS.cableSwatch('T3F', 9, 4)).rounds[6];
+        for (var q4 = 0; q4 < rr4.n; q4++) {
+          var d4 = rr4.descs[rr4.keys[q4]];
+          if (d4.k !== 8) continue;
+          if (d4.sub === 1) dc0 = d4;
+          if (d4.sub === 2) dc1 = d4;
+        }
+        var lo0 = dc0 ? RX.stamp(dc0, 0, 2, 1).d[4] : 0, lo1 = dc1 ? RX.stamp(dc1, 0, 2, 1).d[4] : 0;
+        var croc0 = RX.stamp(RX.descOf({ t: 'sc', h: 1, w: 1 }, 1, false), 0, 2, 1).d[4];
+        ok('a cable keeps its strands at the lowest level of detail (the front strand stands out of the purl ground); crochet keeps its single bump',
+          lo0 > lo1 + 0.5 && near(croc0, 1.6, 1e-6),
+          'tier 0, two rows after a T3F: the 2-stitch strand (sub 1) ' + n(lo0, 2) + ' vs the purl it crossed (sub 2) ' + n(lo1, 2) + ' · crochet sc ' + n(croc0, 3));
+
+        /* -- (2) the cabled round yoke -- */
+        var by = KS.cabledBottomYoke(), byL = G.layout(by), yk2 = byL.knit.yoke;
+        var bL = byL.bands[byL.bands.length - 2], rTop = byL.rounds[0].radius;
+        var sideD = [0, 0, 0], frontD = [0, 0, 0];
+        if (yk2 && bL) {
+          G.warpPoint(byL.warp, bL, bL.rBot * bL.prof(0, 1), bL.yBot, 0, sideD);
+          G.warpPoint(byL.warp, bL, 0, bL.yBot, bL.rBot * bL.prof(Math.PI / 2, 1), frontD);
+        }
+        ok('Cabled Yoke, Bottom Yoke (research §12): 216 picked up, worked down to 284, divided to 184 — a yoke: front and back into the body, sleeve tops falling',
+          yk2 && yk2.divide === by.rounds.length - 1 && near(bL.rBot * bL.prof(Math.PI / 2, 1), yk2.bodyRadius, 0.03) &&
+          sideD[1] < frontD[1] - 5 && byL.ruffles === 0 && byL.slack === 0,
+          yk2 ? 'divide on the last round (' + (yk2.divide + 1) + ', 284 → 184) · last yoke round: front/back ' + n(bL.rBot * bL.prof(Math.PI / 2, 1), 2) +
+            ' = body r ' + n(yk2.bodyRadius, 2) + ', sleeve tops reach ' + n(sideD[0], 1) + ' and fall ' + n(frontD[1] - sideD[1], 1) +
+            ' · band edge r ' + n(rTop, 2) + ' · frills ' + byL.ruffles : 'no yoke found: ' + by.rounds.map(function (r) { return r.count; }).join(','));
+        var ty = KS.cabledTopYoke(), tyL = G.layout(ty), tyC = G.knitCables(ty.rounds, 'rounds', 0);
+        var chained = tyC.columns.filter(function (c) { return c.crossings >= 5; }).length;
+        ok('Cabled Yoke, Top Yoke: worked UP from 198 to 90 into a funnel collar — first round at the bottom, the cables continuous columns every 5 rounds',
+          tyL.upsideDown === true && tyL.rounds[0].y < tyL.rounds[30].y && tyL.rounds[0].radius > 2 * tyL.rounds[30].radius &&
+          tyL.knit.cables >= 9 * 18 && chained >= 9 && tyL.ruffles === 0,
+          'flipped ' + tyL.upsideDown + ' · ring ' + n(tyL.rounds[0].radius, 1) + ' → ' + n(tyL.rounds[30].radius, 1) + ' · ' +
+          tyL.knit.cables + ' crossings in ' + tyC.columns.length + ' columns (' + chained + ' run the whole height)');
+
+        /* -- (3) the Sandnes top-down raglan: German short rows raise the back neck -- */
+        ['children', 'ladies'].forEach(function (grp) {
+          var sm = KS.sandnesYoke(grp), sL = G.layout(sm), kk = sL.knit, gg = sm.group;
+          var wd2 = kk.wedge, b00 = sL.bands[0], th = wd2 ? wd2.th : 0, rN = b00 ? b00.rTop : 0;
+          var back = [0, 0, 0], front = [0, 0, 0];
+          G.warpPoint(sL.warp, b00, rN * Math.cos(th), b00.yTop, rN * Math.sin(th), back);
+          G.warpPoint(sL.warp, b00, -rN * Math.cos(th), b00.yTop, -rN * Math.sin(th), front);
+          var lb = sL.bands[sL.bands.length - 1], ys = [];
+          for (var a5 = 0; a5 < 8; a5++) {
+            var t5 = a5 / 8 * TAU, p5 = G.warpPoint(sL.warp, lb, lb.rBot * Math.cos(t5), lb.yBot, lb.rBot * Math.sin(t5), [0, 0, 0]);
+            ys.push(p5[1]);
+          }
+          var level = Math.max.apply(null, ys) - Math.min.apply(null, ys);
+          var yk3 = kk.yoke, axisOk = yk3 && Math.abs(Math.cos(yk3.axis - th)) < 1e-6;
+          var lastC = sm.rounds[sm.rounds.length - 2].count;
+          ok('Sandnes raglan, ' + grp + ' (research §13): the 6 German short rows raise the back neck above the front; the yoke widens ' +
+            gg.inc + ' → ' + lastC + ' and divides to ' + gg.body,
+            wd2 && wd2.rows === 6 && kk.bends.length === 1 && kk.bends[0].wedge && kk.partials === 6 &&
+            back[1] > front[1] + 1.5 && yk3 && yk3.divide === sm.rounds.length - 1 && axisOk && level < 1e-6 &&
+            lastC === (grp === 'ladies' ? 216 : 144) && sL.ruffles === 0,
+            'wedge ' + (wd2 ? wd2.rows + ' rows, tilt ' + n(wd2.phi * 180 / Math.PI, 1) + '°' : '-') + ' · neck edge: back ' + n(back[1], 2) +
+            ', front ' + n(front[1], 2) + ' · yoke ' + (yk3 ? 'from ' + (yk3.from + 1) + ' to the divide at ' + (yk3.divide + 1) +
+            ', sleeves across the wedge ' + axisOk : 'none') + ' · last round level within ' + n(level, 6) + ' (the yoke stands up, the neck tilts)');
+        });
+        var skB = G.layout(sockTopDown()).knit;
+        ok('a heel is still a heel: the sock\'s 42-row flap and turn bend 90°, not a wedge',
+          skB.bends.length === 1 && skB.bends.every(function (b) { return !b.wedge; }) && !skB.wedge && near(skB.bends[0].phi, Math.PI / 2, 1e-9),
+          'sock bends ' + skB.bends.map(function (b) { return n(b.phi * 180 / Math.PI, 1) + '° ' + (b.wedge ? 'wedge' : 'heel'); }).join(', '));
+      }());
+
       /* ================================================ through the parser */
       group('Knitting — end to end: Knits.parse / Knits.expand → Store.diagramModel → DiagramGeo (wave H)');
       if (!window.Knits || typeof window.Knits.expand !== 'function' || !window.Store.registerCraftParser) {
@@ -3500,6 +3658,71 @@ try { if (window.Knits && window.Store.registerCraftParser) window.Store.registe
         kmN.rounds[3].n === 68,
         'round 1 from the cast-on: ' + km4.rounds[0].count + ' · markers ' + JSON.stringify(mk) + ' · round 2 delta ' + km4.rounds[1].delta +
         ' → ' + km4.rounds[1].count + ' · BO round: ' + last4.count + ' ' + (last4.stitches[0] || {}).t + ' records, ' + kmN.rounds[3].n + ' slices');
+
+      /* knit-3d-2: the pattern's own cable definitions, a back-neck wedge and a
+         piece worked up from a top edge, read end to end */
+      var defA = [
+        'T3F = Slip next 2 stitches onto a cable', 'needle and leave at front of work. P1, then', 'K2 from cable needle.',
+        'T3B = Slip next stitch onto a cable needle', 'and leave at back of work. K2, then P1 from', 'cable needle.',
+        'Cr7F = Slip next 4 stitches onto cable', 'needle and leave at front of work. K3,', 'then P1 (last st on cable needle), then',
+        'K3 (rem 3 sts on cable needle).', 'K = Knit',
+        'CO 26 sts.', 'Row 1 (RS): P1, T3F, T3B, p2, Cr7F, p2, C4F, p3.', 'Row 2 (WS): K3, p4, k2, p3, k1, p3, k2, p2, k2, p2, k2.'
+      ].join('\n');
+      var defB = [
+        'T3F = Slip next stitch onto cable', 'needle and leave at front of work.', 'K1tbl, P1, then K1tbl from cable', 'needle',
+        'Tog = Together', 'CO 15 sts.', 'Row 1 (RS): P6, T3F, p6.', 'Row 2 (WS): K6, p1, k1, p1, k6.'
+      ].join('\n');
+      var kdA = knitModel(defA, 'rows', 11), kdB = knitModel(defB, 'rows', 12);
+      var runsOf = function (r) {
+        var o = [];
+        (r ? r.stitches : []).forEach(function (st) { if (st.t === 'cable' && st.at === 0) o.push((st.name || '?') + ' ' + st.cf + '/' + st.cb); });
+        return o;
+      };
+      var ra = runsOf(kdA.rounds[0]), rb = runsOf(kdB.rounds[0]);
+      ok('Knits → Store: each crossing takes the pattern\'s own definition — the mock neck\'s T3F 2/0, T3B 2/0, Cr7F 3/3; the boyfriend\'s T3F 1/1; an undefined C4F its name',
+        ra.join(',') === 'T3F 2/0,T3B 2/0,CR7F 3/3,C4F undefined/undefined' && rb.join(',') === 'T3F 1/1',
+        'mock-neck-style row: ' + ra.join(', ') + ' · boyfriend-style row: ' + rb.join(', '));
+      var nkA = RX.normalize(kdA), dCr = null;
+      for (var qa = 0; qa < nkA.rounds[0].n; qa++) { var dqa = nkA.rounds[0].descs[nkA.rounds[0].keys[qa]]; if (dqa.k === 8 && dqa.subN === 7) { dCr = dqa; break; } }
+      ok('...and the renderer draws them with those groups (Cr7F: 3 over 3 with a purl between)',
+        dCr && dCr.f === 3 && dCr.kb === 3, dCr ? 'Cr7F slice: front ' + dCr.f + ', back knits ' + dCr.kb : 'no Cr7F slice');
+      var wedgeText = ['CO 48 sts. Join in the rnd.', 'Rnds 1-18: *K1, p1; rep from * to end.', 'Rnd 19: *K6, m1; rep from * to end. (56 sts)',
+        'Row 20 (RS): K5, turn.', 'Row 21 (WS): Sl 1, p9, turn.', 'Row 22 (RS): Sl 1, k10, turn.', 'Row 23 (WS): Sl 1, p12, turn.',
+        'Row 24 (RS): Sl 1, k14, turn.', 'Row 25 (WS): Sl 1, p16, turn.', 'Rnd 26: Knit to end. (56 sts)',
+        'Rnd 27: *K6, m1; rep from * to end. (64 sts)', 'Rnd 28: Knit.', 'Rnd 29: *K7, m1; rep from * to end. (72 sts)', 'Rnd 30: Knit.',
+        'Rnd 31: *K8, m1; rep from * to end. (80 sts)', 'Rnd 32: Knit.', 'Rnd 33: *K9, m1; rep from * to end. (88 sts)',
+        'Rnd 34: K10, place 34 sts on hold, cast on 4, k10. (60 sts)'].join('\n');
+      var kw = knitModel(wedgeText, 'rounds', 13), kwL = G.layout(kw), kwk = kwL.knit;
+      var kwSeq = kw.rounds.map(function (r) { return r.count + (r.shortRow ? '*' : ''); });
+      ok('Knits → Store → DiagramGeo: short rows across the back of a top-down yoke (5 of 56 at first) are a wedge, not misread counts; the yoke divides on its last round',
+        kwk.wedge && kwk.wedge.rows === 6 && kwk.bends.length === 1 && kwk.yoke && kwk.yoke.divide === kw.rounds.length - 1 &&
+        kw.rounds.slice(19, 25).every(function (r) { return r.shortRow && !r.outlier; }),
+        'rounds [' + kwSeq.slice(17).join(',') + '] · wedge ' + (kwk.wedge ? kwk.wedge.rows + ' rows, ' + n(kwk.wedge.phi * 180 / Math.PI, 1) + '°' : '-') +
+        ' · yoke divide ' + (kwk.yoke ? kwk.yoke.divide + 1 : '-'));
+      var upText = ['With RS facing, pick up and knit 198 sts around top edge of Cable Yoke. Join in rnd.', 'Rnd 1: Knit.',
+        'Rnd 2: *K9, k2tog; rep from * around. (180 sts)', 'Rnd 3: Knit.', 'Rnd 4: *K8, k2tog; rep from * around. (162 sts)', 'Rnds 5-10: Knit.'].join('\n');
+      var downText = upText.replace('top edge', 'bottom edge');
+      var ku = knitModel(upText, 'rounds', 14), kd = knitModel(downText, 'rounds', 15);
+      ok('a piece picked up along a TOP edge is worked up: drawn with its first round at the bottom (a bottom-edge pick-up is not)',
+        ku.shape.upsideDown === true && ku.shape.upsideDownSource === 'text' && G.classify(ku).upsideDown === true &&
+        kd.shape.upsideDown !== true && G.classify(kd).upsideDown !== true,
+        'top edge: shape.upsideDown ' + ku.shape.upsideDown + ' (' + ku.shape.upsideDownSource + '), drawn flipped ' + G.classify(ku).upsideDown +
+        ' · bottom edge: ' + kd.shape.upsideDown + ', flipped ' + G.classify(kd).upsideDown);
+      // live: 0 = unknown (knit-3d-2, 2nd pass): a part with no cast-on carries the part before it
+      var carryA = { id: 'ZDGEO_kc1', name: 'Sleeve', patternText: 'CO 40 sts.\nRow 1 (RS): Knit.\nRow 2 (WS): Purl.', row: 0, stitch: 0,
+        rowStitches: [], sizeIndex: 0, piecesDone: 0, repeat: null, workMode: 'rows', craft: 'knitting' };
+      var carryB = { id: 'ZDGEO_kc2', name: 'Sleeve (continued)', patternText: '1st row: (RS). K2. ssk. Knit to last 4 sts. K2tog. K2.\n2nd row: Purl.\n3rd row: K2. ssk. Knit to last 4 sts. K2tog. K2.',
+        row: 0, stitch: 0, rowStitches: [], sizeIndex: 0, piecesDone: 0, repeat: null, workMode: 'rows', craft: 'knitting' };
+      var carryP = { id: 'ZDGEO_kcp', craft: 'knitting', countMode: 'rows', yarnColors: {}, parts: [carryA, carryB] };
+      var lone = { id: 'ZDGEO_kc3', name: 'alone', patternText: carryB.patternText, row: 0, stitch: 0, rowStitches: [], sizeIndex: 0,
+        piecesDone: 0, repeat: null, workMode: 'rows', craft: 'knitting' };
+      var cB = window.Store.diagramModel(carryB, carryP).rounds, cL = window.Store.diagramModel(lone, { id: 'ZDGEO_kcq', craft: 'knitting',
+        countMode: 'rows', yarnColors: {}, parts: [lone] }).rounds;
+      ok('`live: 0` is unknown, not an empty ring: a part with no cast-on starts on the stitches the part before it ended on (40 → 38, 38, 36); alone, its rows are countless',
+        cB.length === 3 && cB[0].count === 38 && cB[2].count === 36 && !cB.some(function (r) { return r.countless; }) &&
+          cL.length >= 1 && cL.every(function (r) { return r.countless === true; }),
+        'after "Sleeve": [' + cB.map(function (r) { return r.count + (r.countless ? '?' : ''); }).join(',') + '] · alone: [' +
+          cL.map(function (r) { return r.count + (r.countless ? '?' : ''); }).join(',') + ']');
     }());
     // /knit -------------------------------------------------------------------
 
@@ -3655,6 +3878,7 @@ try { if (window.Knits && window.Store.registerCraftParser) window.Store.registe
     var files = {}, i;
     for (i = 0; i < REF.length; i++) files[REF[i][0]] = 1;
     for (i = 0; i < KREF_FILES.length; i++) files[KREF_FILES[i]] = 1;
+    for (i = 0; i < KREF2_FILES.length; i++) files[KREF2_FILES[i]] = 1;
     var names = Object.keys(files);
     var chain = Promise.resolve();
     var texts = {};
@@ -3817,6 +4041,323 @@ try { if (window.Knits && window.Store.registerCraftParser) window.Store.registe
         'mode ' + rm.mode + ' · rows [' + rc.join(',') + '] · anchor ' + rl.anchor + ' · one straight edge ' + straight +
         ' (the pattern section after row 16 restarts its numbering and grows "until half the yarn" — no count to draw)');
     }
+
+    // 4. batch 2 (knit-3d-2): cabled pieces, the cabled yoke, the Sandnes raglan
+    checkKnitBatch2(secsOf, texts);
+  }
+
+  /* ============================== 2c. knitting fixtures, batch 2 (knit-3d-2) */
+  /* Each reference is asserted on what Knits reads from the fixture when it
+     reads the part whole (the qualifying test is printed), and on the
+     synthetic model built from docs/research/knitting.md §9–§13 until then
+     (test/diagram.knit-synth.js). The detail always says which one ran. */
+  var KREF2_FILES = ['knit-patons-mockneck-cable.pdf', 'knit-patons-boyfriend-cable.pdf', 'knit-patons-boxy-cable.pdf',
+    'knit-patons-cabled-yoke.pdf', 'knit-sandnes-raglan-child.pdf'];
+
+  /* A cabled flat piece: >= `cols` cable columns, every one inside the
+     piece, its pattern rows pulled in to cable gauge, the rib narrower. */
+  /* (3rd pass) A row's fabric is every stitch it draws — a cast-off row's
+     bound-off stitches too — not its live count: the armhole and shoulder
+     rows of a whole piece drew 136 stitches for a count of 121 and failed a
+     "narrower than its count" test the geometry was right about. So:
+     - every CABLE row is narrower than its own fabric by its cable stitches
+       (a cable row at full width would be a geometry bug);
+     - every pulled row (a plain WS row in a cable column, an armhole row) is
+       narrower than its fabric by the plain stitches pulled to cable gauge;
+     - a stockinette or rib row outside the cable columns is left alone. */
+  function refCabled(m, cols) {
+    var L = G.layout(m), C = G.knitCables(m.rounds, 'rows', 0);
+    if (!C) return { pass: false, detail: 'no cable crossings' };
+    var pulledRows = 0, pulledOk = 0, rows = 0, cabRows = 0, cabOk = 0, worst = '';
+    for (var i = 0; i < m.rounds.length; i++) {
+      var r = m.rounds[i], e = L.rounds[i];
+      if (!e || e.outlier || !(r.count > 0)) continue;
+      rows++;
+      var fabric = 0, cabSts = 0, plainPulled = 0, pl = C.pull[i];
+      r.stitches.forEach(function (st, q) {
+        // a stitch at its own width before cable gauge: a cable stitch counts as 1 (its 0.85 IS the pull)
+        var w = st.t === 'bo' || st.t === 'cable' ? 1 : (typeof st.w === 'number' ? st.w : 1);
+        fabric += w;
+        if (st.t === 'cable') cabSts++;
+        // (only plain stitches take cable gauge: a lace yo or a decrease in the panel keeps its own width)
+        else if (pl && pl[q] && /^(?:k|p|x|ktbl|ptbl|sl|slip)$/.test(st.t || 'k') && w > 0.85 + 1e-9) plainPulled++;
+      });
+      if (cabSts) {
+        cabRows++;
+        if (e.width <= fabric - 0.14 * cabSts + 1e-6) cabOk++; else if (!worst) worst = 'cable row ' + (i + 1) + ' ' + n(e.width, 1) + ' of fabric ' + n(fabric, 1);
+      }
+      if (pl) {
+        pulledRows++;
+        if (e.width <= fabric - 0.14 * plainPulled + 1e-6) pulledOk++; else if (!worst) worst = 'pulled row ' + (i + 1) + ' ' + n(e.width, 1) + ' of fabric ' + n(fabric, 1);
+      }
+    }
+    var twisted = 0, N = window.Diagram._relief.normalize(m);
+    N.rounds.forEach(function (rr) { for (var q = 0; q < rr.n; q++) if (rr.descs[rr.keys[q]].k === 8) { twisted++; break; } });
+    var pass = C.columns.length >= cols && pulledRows >= 0.5 * rows && cabRows > 0 && cabOk === cabRows && pulledOk === pulledRows &&
+      twisted >= 0.4 * rows;
+    return {
+      pass: pass,
+      detail: C.columns.length + ' cable columns (' + C.crossings.length + ' crossings) · ' + cabOk + ' of ' + cabRows +
+        ' cable rows narrower than their fabric by their cable stitches · ' + pulledOk + ' of ' + pulledRows + ' of ' + rows +
+        ' rows pulled in by their plain stitches in the columns · ' + twisted + ' rows carry a twist' + (worst ? ' · first miss: ' + worst : '')
+    };
+  }
+  /* A round yoke worked down: widening, dividing on (or near) its last round. */
+  function refYoke(m) {
+    var L = G.layout(m), y = L.knit && L.knit.yoke;
+    return {
+      pass: !!y && L.ruffles === 0 && y.divide >= m.rounds.length - 3,
+      detail: y ? 'yoke from round ' + (y.from + 1) + ', divide at ' + (y.divide + 1) + ' of ' + m.rounds.length + ' · frills ' + L.ruffles : 'no yoke'
+    };
+  }
+  function refTopYoke(m) {
+    var L = G.layout(m), n0 = L.rounds.length, C = G.knitCables(m.rounds, 'rounds', 0);
+    var funnel = n0 > 10 && L.rounds[0].radius > 1.5 * L.rounds[n0 - 1].radius;
+    // C4B on rounds 4, 9, 14, 19, 24, 29 … (research §12): every 5 rounds
+    var crossRows = [];
+    (C ? C.crossings : []).forEach(function (k) { if (crossRows.indexOf(k.i) < 0) crossRows.push(k.i); });
+    crossRows.sort(function (a, b) { return a - b; });
+    var every5 = crossRows.length >= 4 && crossRows[0] === 3 && crossRows.slice(1).every(function (r, q) { return r - crossRows[q] === 5; });
+    return { pass: L.upsideDown === true && funnel && L.ruffles === 0 && every5,
+      detail: 'flipped ' + L.upsideDown + ' · ring ' + n(L.rounds[0].radius, 1) + ' → ' + n(L.rounds[n0 - 1].radius, 1) + ' · frills ' + L.ruffles +
+        ' · C4B rounds ' + crossRows.map(function (r) { return r + 1; }).join(',') + ' (' + (C ? C.crossings.length : 0) + ' crossings, ' +
+        (C ? C.columns.length : 0) + ' columns)' };
+  }
+  function refWedge(m) {
+    var L = G.layout(m), k = L.knit || {}, w = k.wedge, b0 = L.bands[0];
+    if (!w || !b0 || !k.yoke) return { pass: false, detail: 'wedge ' + !!w + ', yoke ' + !!k.yoke };
+    var back = G.warpPoint(L.warp, b0, b0.rTop * Math.cos(w.th), b0.yTop, b0.rTop * Math.sin(w.th), [0, 0, 0]);
+    var front = G.warpPoint(L.warp, b0, -b0.rTop * Math.cos(w.th), b0.yTop, -b0.rTop * Math.sin(w.th), [0, 0, 0]);
+    return { pass: w.rows >= 4 && back[1] > front[1] + 1 && k.yoke.divide >= m.rounds.length - 3,
+      detail: w.rows + ' short rows, back neck ' + n(back[1] - front[1], 2) + ' above the front · yoke divide at ' + (k.yoke.divide + 1) + ' of ' + m.rounds.length };
+  }
+
+  function checkKnitBatch2(secsOf, texts) {
+    var KS = window.KnitSynth;
+    group('Knitting fixtures, batch 2 (knit-3d-2) — cabled pieces, the cabled yoke, the Sandnes raglan');
+    if (!KS) { skip('test/diagram.knit-synth.js is not loaded', ''); return; }
+    // every section of the five lays out as knitting, finite
+    var bad = [], drawn = 0, total = 0;
+    KREF2_FILES.forEach(function (f) {
+      var ss = secsOf(f);
+      if (!ss) { bad.push(f + ' unavailable'); return; }
+      ss.forEach(function (s) {
+        total++;
+        try {
+          var m = knitFixtureModel(s);
+          if (!m.rounds.length) return;
+          var L = G.layout(m);
+          drawn++;
+          if (!G.isKnit(m) || !isFinite(L.height)) bad.push(s.name + ': not knitting / not finite');
+          L.bands.forEach(function (b) { if (b && b.ext && !(isFinite(b.ext.rad) && isFinite(b.ext.ymin))) bad.push(s.name + ': ext'); });
+        } catch (e) { bad.push(f.replace(/^knit-|\.pdf$/g, '') + ' · ' + s.name + ' threw ' + e.message); }
+      });
+    });
+    ok('every section of the five batch-2 fixtures lays out as knitting and finite', bad.length === 0 && drawn >= 10,
+      drawn + ' of ' + total + ' sections drew rows' + (bad.length ? ' · ' + bad.slice(0, 6).join(' | ') : ''));
+
+    /* (2nd pass) every reference reads the fixture as the app imports it: ONE
+       project whose parts are the sections in order, so a part that starts
+       mid-piece carries the stitches the part before it ended on. `withDefs`
+       also hands the project the document (its abbreviation block), which
+       the store reads cable definitions from. */
+    var docCache = {};
+    // the project's own mode, as an import sets it: what Knits reads off the whole document
+    // (the majority of its sections; a part whose own mode is unread takes it)
+    function docMode(file) {
+      var v = { rounds: 0, rows: 0 };
+      (secsOf(file) || []).forEach(function (s) {
+        var wm = null;
+        try { wm = window.Knits.workMode ? window.Knits.workMode(s.text || '') : null; } catch (e) { wm = null; }
+        if (wm === 'rounds' || wm === 'rows') v[wm]++;
+      });
+      return v.rounds > v.rows ? 'rounds' : 'rows';
+    }
+    function docModels(file, withDefs) {
+      var key = file + (withDefs ? '+defs' : '');
+      if (docCache[key]) return docCache[key];
+      var ss = secsOf(file) || [];
+      partSeq++;
+      var proj = { id: 'ZDGEO_kdoc' + partSeq, craft: 'knitting', countMode: docMode(file), yarnColors: {}, parts: [],
+        notes: withDefs && texts && typeof texts[file] === 'string' ? texts[file] : '' };
+      ss.forEach(function (s, i) {
+        proj.parts.push({ id: 'ZDGEO_kdp' + partSeq + '_' + i, name: s.name || '(unnamed)', craft: 'knitting',
+          patternText: s.text || '', row: 0, stitch: 0, rowStitches: [], sizeIndex: 0, piecesDone: 0, repeat: null });
+      });
+      var out = proj.parts.map(function (p, i) {
+        var src = window.Store.diagramModel(p, proj);
+        var rounds = src.rounds.map(function (r) {
+          var c = {}, k;
+          for (k in r) if (r.hasOwnProperty(k)) c[k] = r[k];
+          c.done = c.count; c.ghost = false;
+          return c;
+        });
+        while (rounds.length && rounds[rounds.length - 1].count <= 0) rounds.pop();
+        return { s: ss[i], raw: src, m: { mode: src.mode, craft: src.craft, rounds: rounds, current: Math.max(0, rounds.length - 1),
+          defaultColor: src.defaultColor, shape: src.shape, window: src.window, deviation: src.deviation } };
+      });
+      docCache[key] = out;
+      return out;
+    }
+    function sectionWhere(file, test) {
+      var ss = docModels(file), best = null;
+      ss.forEach(function (s) {
+        if (best) return;
+        try { if (test(s.m, s.s)) best = { m: s.m, s: s.s }; } catch (e) { /* skip */ }
+      });
+      return best;
+    }
+    function cabledRows(m) { return m.rounds.filter(function (r) { return r.stitches.some(function (x) { return x.t === 'cable'; }); }).length; }
+    function readsCabled(m) { return m.mode === 'rows' && m.rounds.length >= 30 && cabledRows(m) >= 8; }
+    function reference(label, file, qualifies, synth, check, why) {
+      var got = sectionWhere(file, qualifies);
+      var res, src;
+      if (got) { res = check(got.m); src = 'Knits (' + got.s.name + ')'; }
+      else { res = check(synth()); src = 'synthetic, research counts — ' + why(); }
+      ok(label, res.pass, '[' + src + '] ' + res.detail);
+    }
+    function sizes(file) {
+      return docModels(file).map(function (d) {
+        return d.s.name + (d.s.group ? ' [' + d.s.group + ']' : '') + ': ' + d.m.rounds.length + ' ' + d.m.mode + ', ' + cabledRows(d.m) + ' with cables';
+      }).slice(0, 6).join('; ');
+    }
+
+    reference('mock neck · Back: panels C·B·C·A·C·B·C as cable columns, twisting at their cadence, pulled in under the cables',
+      'knit-patons-mockneck-cable.pdf', readsCabled, function () { return KS.mockneckBack(); },
+      function (m) { return refCabled(m, 7); }, function () { return 'Knits reads ' + sizes('knit-patons-mockneck-cable.pdf'); });
+    reference('boyfriend · Front: panels C·B·A·B·C (its own T3F = 1 over a knit and a purl)',
+      'knit-patons-boyfriend-cable.pdf', readsCabled, function () {
+        // research §10: C (C4B every 6) · B (Cr4F + Cr4B every 4) · A (T3F, then T2B/T2F every RS row)
+        var rs = [], mask = null;
+        for (var i = 0; i < 44; i++) {
+          if (i % 2) { rs.push(KS.kr(KS.wsRow(mask), { side: 'ws' })); continue; }
+          var r = i + 1, c = (r - 1) % 6 === 2 ? ['p1', 'C4B', 'p1'] : ['p1', 'k4', 'p1'];
+          var b = (r - 1) % 4 === 0 ? ['p2', 'CR4F', 'k1', 'CR4B', 'p2'] : ['p2', 'k4', 'k1', 'k4', 'p2'];
+          var ra = (r - 1) % 22;
+          var kk = (ra - 10) / 2;
+          var a = ra === 0 ? ['p6', 'BF_T3F', 'p6'] : ra <= 10 ? ['p' + (6 - ra / 2), 'T2B', 'p' + (ra - 1), 'T2F', 'p' + (6 - ra / 2)] :
+            ['p' + kk, 'T2F', 'p' + (11 - 2 * kk), 'T2B', 'p' + kk];
+          var spec = [].concat(['k2', 'p2', 'k2', 'p2'], c, ['p2', 'k1'], b, ['k1'], a, ['k1'], b, ['k1', 'p2'], c, ['p2', 'k2', 'p2', 'k2']);
+          var o = KS.rsRow(spec, 'rs');
+          mask = o.mask;
+          rs.push(KS.kr(o.recs, { side: 'rs' }));
+        }
+        return KS.km(rs, 'rows');
+      }, function (m) { return refCabled(m, 5); }, function () { return 'Knits reads ' + sizes('knit-patons-boyfriend-cable.pdf'); });
+    reference('boxy · Front yoke: panels B·A·B·C·B·A·B (C3FK/C3BK/C3FP/C3BP, Cr5B, Cr7B/Cr7F) as cable columns',
+      'knit-patons-boxy-cable.pdf', readsCabled, function () {
+        // research §11: A and B 7 sts × 16 rows (Cr5B, C3 pairs, lace), C 23 × 28 (Cr7B / Cr7F every 4)
+        var rs = [], mask = null;
+        for (var i = 0; i < 56; i++) {
+          if (i % 2) { rs.push(KS.kr(KS.wsRow(mask), { side: 'ws' })); continue; }
+          var r = i + 1, rA = (r - 1) % 16 + 1, rB = rA, rC = (r - 1) % 28 + 1;
+          var A = rA === 1 ? ['p1', 'CR5B', 'p1'] : rA === 3 ? ['C3BK', 'p1', 'C3FK'] : rA === 15 ? ['C3FP', 'p1', 'C3BP'] : ['k2', 'p3', 'k2'];
+          var B = rB === 7 ? ['C3FP', 'p1', 'C3BP'] : rB === 9 ? ['p1', 'CR5B', 'p1'] : rB === 11 ? ['C3BK', 'p1', 'C3FK'] : ['k2', 'p3', 'k2'];
+          var C = rC === 5 || rC === 21 || rC === 27 ? ['k3', 'p1', 'k3', 'p1', 'CR7B', 'p1', 'k3', 'p1', 'k3'] :
+            rC === 9 || rC === 17 ? ['k3', 'p1', 'CR7F', 'p1', 'CR7F', 'p1', 'k3'] :
+              rC === 13 ? ['CR7B', 'p1', 'CR7B', 'p1', 'CR7B'] : ['k3', 'p1', 'k3', 'p1', 'k3', 'p1', 'k3', 'p1', 'k3', 'p1', 'k3'];
+          var spec = [].concat(['p3'], B, ['p2'], A, ['p2'], B, ['p2'], C, ['p2'], B, ['p2'], A, ['p2'], B, ['p3']);
+          var o = KS.rsRow(spec, 'rs');
+          mask = o.mask;
+          rs.push(KS.kr(o.recs, { side: 'rs' }));
+        }
+        return KS.km(rs, 'rows');
+      }, function (m) { return refCabled(m, 5); }, function () { return 'Knits reads ' + sizes('knit-patons-boxy-cable.pdf'); });
+    reference('cabled yoke · Bottom Yoke: worked down from the band, 216 → 284, dividing for the sleeves — a yoke, not a tube',
+      'knit-patons-cabled-yoke.pdf', function (m, s) {
+        var c = m.rounds.map(function (r) { return r.count; });
+        return /bottom/i.test(s.name) && m.mode === 'rounds' && c.length >= 10 && c.every(function (v) { return v > 0; }) && Math.max.apply(null, c) >= 280;
+      }, function () { return KS.cabledBottomYoke(); }, refYoke,
+      function () { return 'Knits reads ' + sizes('knit-patons-cabled-yoke.pdf'); });
+    reference('cabled yoke · Top Yoke: picked up along the band\'s top edge and worked up, 198 → 90, into a cabled funnel collar',
+      'knit-patons-cabled-yoke.pdf', function (m, s) {
+        var c = m.rounds.map(function (r) { return r.count; });
+        return /top/i.test(s.name) && c.length >= 20 && c.every(function (v) { return v > 0; }) && c[0] > 1.8 * c[c.length - 1];
+      }, function () { return KS.cabledTopYoke(); }, refTopYoke,
+      function () { return 'Knits reads ' + sizes('knit-patons-cabled-yoke.pdf'); });
+    ['children', 'ladies'].forEach(function (grp) {
+      reference('Sandnes raglan · Yoke [' + grp + ']: German short rows raise the back neck, then the raglan yoke widens and divides',
+        'knit-sandnes-raglan-child.pdf', function (m, s) {
+          var sr = m.rounds.filter(function (r) { return r.shortRow; }).length;
+          // the two groups told apart by their counts (the group labels are the parser's to settle)
+          var top = Math.max.apply(null, m.rounds.map(function (r) { return r.count; }));
+          return /yoke/i.test(s.name) && top === (grp === 'ladies' ? 216 : 144) && m.mode === 'rounds' && sr >= 4 &&
+            m.rounds.every(function (r) { return r.count > 0; });
+        }, function () { return KS.sandnesYoke(grp); }, refWedge,
+        function () { return 'Knits reads ' + sizes('knit-sandnes-raglan-child.pdf'); });
+    });
+
+    /* -- (2nd pass) the cabled rows Knits now reads: each pattern's first
+       panel row, its crossings named, shaped by the pattern's own
+       definitions, drawn as twists and pulled in. The panels' cadence over
+       the piece's height stays on the synthetic models above: the parse has
+       one or two pattern rows ("Cont in pat … until 15½"" is one line). -- */
+    function crossingsOn(m, i) {
+      var r = m.rounds[i], o = [];
+      if (!r) return o;
+      r.stitches.forEach(function (st, q) { if (st.t === 'cable' && st.at === 0) o.push({ q: q, name: st.name, cf: st.cf, cb: st.cb }); });
+      return o;
+    }
+    function realCabledRow(label, file, partRe, count, names, shapes, panelCols) {
+      var plain = docModels(file), defs = docModels(file, true), hit = -1, hitD = null, i;
+      for (var d = 0; d < plain.length && hit < 0; d++) {
+        if (!partRe.test(plain[d].s.name || '')) continue;
+        for (i = 0; i < plain[d].m.rounds.length; i++) {
+          if (plain[d].m.rounds[i].count === count && crossingsOn(plain[d].m, i).length) { hit = d; break; }
+        }
+      }
+      if (hit < 0) { ok(label, false, 'no ' + count + '-stitch row with cables: ' + sizes(file)); return; }
+      var m = plain[hit].m, md = defs[hit].m, row = i;
+      var cx = crossingsOn(m, row), cxD = crossingsOn(md, row);
+      var nm = cx.map(function (c) { return c.name; }).join(','), sh = cxD.map(function (c) { return c.name + ' ' + c.cf + '/' + c.cb; });
+      var shapesOk = Object.keys(shapes).every(function (k) {
+        return cxD.filter(function (c) { return c.name === k; }).every(function (c) { return c.cf + '/' + c.cb === shapes[k]; }) &&
+          cxD.some(function (c) { return c.name === k; });
+      });
+      var L = G.layout(md), C = G.knitCables(md.rounds, 'rows', 0), N = window.Diagram._relief.normalize(md);
+      var twisted = 0, rr = N.rounds[row];
+      for (var q = 0; q < rr.n; q++) if (rr.descs[rr.keys[q]].k === 8) twisted++;
+      var cableSts = cx.length ? m.rounds[row].stitches.filter(function (s) { return s.t === 'cable'; }).length : 0;
+      var inCols = !panelCols || C.crossings.filter(function (k) { return k.i === row; }).every(function (k) {
+        var x = k.x + count / 2;
+        return panelCols.some(function (p) { return x > p[0] && x < p[1]; });
+      });
+      ok(label,
+        // every cable stitch at cable gauge (0.85): at least 0.14 narrower each
+        nm === names && shapesOk && twisted >= cableSts && L.rounds[row].width <= count - 0.14 * cableSts && inCols,
+        '[Knits (' + plain[hit].s.name + '), row ' + (row + 1) + ' of ' + m.rounds.length + '] ' + count + ' sts, crossings ' + nm +
+        ' · with the pattern\'s definitions: ' + sh.join(', ') + ' · ' + twisted + ' slices twisted (' + cableSts + ' cable sts) · drawn ' +
+        n(L.rounds[row].width, 1) + ' wide' + (panelCols ? ' · every crossing inside its panel ' + inCols : ''));
+    }
+    var mlay = KS.mockneckPanels().panels;
+    realCabledRow('mock neck · Back, row 1 as Knits reads it: Tw4R/Tw4L in both Panel Bs, T3F/T3B ×3 in Panel A, at their columns',
+      'knit-patons-mockneck-cable.pdf', /^back/i, 144, 'TW4R,TW4L,T3F,T3B,T3F,T3B,T3F,T3B,TW4R,TW4L',
+      { TW4R: '2/1', TW4L: '2/1', T3F: '2/0', T3B: '2/0' },
+      mlay.filter(function (p) { return p.name === 'A' || p.name === 'B'; }).map(function (p) { return [p.c0, p.c0 + p.w]; }));
+    realCabledRow('boyfriend · Front, row 1 as Knits reads it: Cr4F/Cr4B in both Panel Bs, its own T3F (1 twisted st over K1tbl + P1) in Panel A',
+      'knit-patons-boyfriend-cable.pdf', /^front/i, 81, 'CR4F,CR4B,T3F,CR4F,CR4B', { CR4F: '1/3', CR4B: '1/3', T3F: '1/1' }, null);
+    realCabledRow('boxy · Front yoke, row 1 as Knits reads it: Cr5B in both Panel As (2 over 3)',
+      'knit-patons-boxy-cable.pdf', /^front/i, 115, 'CR5B,CR5B', { CR5B: '2/3' }, null);
+
+    /* -- (2nd pass) `live: 0` is UNKNOWN, never an empty ring -- */
+    var bfd = docModels('knit-patons-boyfriend-cable.pdf');
+    var bySlv = null, byNeck = null;
+    bfd.forEach(function (d) { if (/sleeves \(continued\)/i.test(d.s.name)) bySlv = d; if (/shape neck/i.test(d.s.name)) byNeck = d; });
+    var sc = bySlv ? bySlv.raw.rounds.map(function (r) { return r.count; }) : [];
+    ok('boyfriend · Sleeves (continued) starts mid-sleeve: it carries the 43 stitches Sleeves ended on (XS/S), so its raglan rows draw 41, 39 … — not a chain of empty rings',
+      bySlv && sc.length > 10 && sc[0] === 41 && sc.every(function (c) { return c > 0; }) && !bySlv.raw.rounds.some(function (r) { return r.countless; }),
+      bySlv ? 'rounds [' + sc.slice(0, 10).join(',') + ',…,' + sc[sc.length - 1] + '] · countless ' + bySlv.raw.rounds.filter(function (r) { return r.countless; }).length : 'no Sleeves (continued)');
+    var nk = byNeck ? byNeck.raw.rounds : [], unk = nk.filter(function (r) { return r.countless; });
+    ok('boyfriend · Shape Neck: the rows Knits cannot size (live 0 after "Fasten off") carry the count before them and are marked countless — none is an empty ring',
+      byNeck && unk.length >= 1 && nk.every(function (r) { return r.count > 0; }) &&
+        unk.every(function (r) { var j = nk.indexOf(r); return j > 0 && r.count === nk[j - 1].count; }),
+      byNeck ? 'rounds [' + nk.map(function (r) { return r.count + (r.countless ? '?' : ''); }).join(',') + '] (? = countless, carried)' : 'no Shape Neck');
+    var sdd = docModels('knit-sandnes-raglan-child.pdf'), sbf = null;
+    sdd.forEach(function (d) { if (!sbf && /back and front/i.test(d.s.name)) sbf = d; });
+    var sbr = sbf ? sbf.raw.rounds : [];
+    ok('Sandnes · Back and Front: "= 92 sts." then "Cont St-st in rnds until 32 cm" — the body round is drawn at 92, marked countless, not 0',
+      sbf && sbr.length >= 1 && sbr[0].count === 92 && sbr[0].countless === true,
+      sbf ? 'rounds [' + sbr.map(function (r) { return r.count + (r.countless ? '?' : ''); }).join(',') + ']' : 'no Back and Front');
   }
 
   function sectionOf(texts, file, re) {

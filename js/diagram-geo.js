@@ -2482,7 +2482,7 @@
     };
   }
 
-  /* ======================================================= 7c. knitting (1.5.0)
+  /* ======================================================= 7c. knitting (1.5.0; 1.6.0 knit-3d-2: cables, wedges)
 
      Wave H (docs/wave-h/knit-3d.md). A knitted piece is the same fabric
      physics with a different stitch — a row 0.75 of a stitch width tall
@@ -2534,6 +2534,16 @@
 
      Knitted hats and other pieces that close at their LAST round and start
      open (brim-up) are shown with the crown up.
+
+     1.6.0 (knit-3d-2, docs/wave-h/knit-3d-2.md):
+     (17) CABLES ARE COLUMNS (`knitCables`): every crossing's two groups,
+     a twist window that tiles the rows to the next crossing in the same
+     columns, and the column pulled in to cable gauge from the panel's
+     first plain row to its last. (18) SHORT ROWS ON A FEW ROWS OF A ROUND
+     PIECE ARE A WEDGE: a back neck raised by German short rows tilts the
+     neck, not the yoke below it (the longer stretch stays upright). (19) A
+     yoke section may END at its divide (the body is its own part), and a
+     yoke with a back-neck wedge lays its sleeves across the wedge.
      ===================================================================== */
 
   var KNIT_DETECT = {
@@ -2560,6 +2570,8 @@
   var SHORT_ROW_TAPER = 2;      // SW over which a short row thins to its turn
   var SPINE_FRAC = 0.4;         // share of increasing rows that must be edge + spine
   var CHEVRON_MIN = 15 * Math.PI / 180, CHEVRON_MAX = 65 * Math.PI / 180;
+  var KNIT_WEDGE_ROWS = 12;     // a run of partial rows this short is a wedge, not a heel (1.6.0)
+  var KNIT_WEDGE_MAX = 30 * Math.PI / 180;
 
   /** True for a knitting Model: the craft says so, or a round holds knitting records. */
   function isKnit(model) {
@@ -2607,6 +2619,238 @@
   }
   function isFlatRound(r) {
     return !!r && (r.side === 'rs' || r.side === 'ws' || r.shortRow === true);
+  }
+
+  /* ---- cables (1.6.0, knit-3d-2) ------------------------------------------
+
+     A crossing is not one shape. C4F / C6B swap two equal groups of knit
+     stitches; a T3F (Patons' mock neck: "slip 2 to the cable needle, hold in
+     front, P1, K2 from the cable needle") carries 2 knit stitches over 1
+     purl; the boyfriend's T3F carries 1 twisted knit over a K1tbl and a P1;
+     Cr7B moves 3 over 3 with a purl between. What the 3D needs is how wide
+     the FRONT group is (always knit, always on top) and how many knit
+     stitches the back group keeps (the rest of it is purl background). The
+     store reads that off the pattern's own definition (`rec.cf`, `rec.cb`);
+     with none, the name decides (`cableShapeOf`).
+
+     A cable is a COLUMN of the fabric, not a crossing row: its knit stitches
+     run between the crossings, and the whole column is pulled in (cable
+     gauge — a cabled body is narrower than its stitch count in stockinette,
+     contract §2's 0.85). And the twist of one crossing spans the rows around
+     it up to half way to the next crossing in the same columns: a C4 every 6
+     rows leans over 5 rows and runs straight for 1, a T3 every RS row tiles
+     its rows exactly, so a travelling stitch draws one continuous diagonal.
+     Columns are matched from row to row about the row's CENTRE (flat — so a
+     sleeve's edge increases do not shift its panels) or as a FRACTION of the
+     round (in the round, where a yoke decreases between its cables). */
+  var CABLE_TW = 2;        // rows either side of a lone crossing that lean into it
+  var CABLE_GAP = 16;      // crossings this close in overlapping columns are one cable column
+  var CABLE_W = 0.85;      // a cable column's width per stitch (contract §2)
+  var CABLE_PLAIN = { k: 1, p: 1, cable: 1, x: 1, ktbl: 1, ptbl: 1, sl: 1, slip: 1 };
+  var CABLE_PULL = { k: 1, p: 1, x: 1, ktbl: 1, ptbl: 1, sl: 1, slip: 1 };
+
+  /**
+   * The crossing a cable's name stands for when the pattern does not define
+   * it: `{f, kb}` of `n` stitches — `f` in the front group (knit, on top,
+   * travelling left for an F / LC, right for a B / RC), `kb` knit stitches
+   * in the back group (the rest of the back group is purl).
+   */
+  function cableShapeOf(name, n) {
+    n = Math.max(2, n | 0);
+    var nm = String(name || '').toLowerCase().replace(/\s+/g, ''), m, f, kb;
+    if ((m = /^(\d+)\/(\d+)(?:l|r)(p?)(?:c|t)$/.exec(nm))) { f = +m[1]; kb = m[3] ? 0 : +m[2]; }
+    else if (/^t\d+/.test(nm)) { f = n <= 2 ? 1 : Math.ceil(n / 2); kb = 0; }        // a twist over purls
+    else if (/^c\d+[fblr]p$/.test(nm)) { f = n - 1; kb = 0; }                          // C3FP / C3BP
+    else if (/^cr\d+/.test(nm)) { f = Math.floor(n / 2); kb = n - f; }
+    else if (/^tw\d+/.test(nm)) { f = Math.floor(n / 2); kb = Math.max(0, n - f - 1); }
+    else if (/^(?:rt|lt)$/.test(nm)) { f = 1; kb = 1; }
+    else { f = Math.ceil(n / 2); kb = n - f; }                                           // C4F, C6B, C3FK
+    f = clamp(f | 0, 1, n - 1);
+    kb = clamp(kb | 0, 0, n - f);
+    return { f: f, kb: kb };
+  }
+  function cableShape(rec, n) {
+    var f = rec && isNum(rec.cf) ? rec.cf : NaN, kb = rec && isNum(rec.cb) ? rec.cb : NaN;
+    if (f >= 1 && f <= n - 1 && kb >= 0 && kb <= n - f) return { f: Math.floor(f), kb: Math.floor(kb) };
+    return cableShapeOf(rec && rec.name, n);
+  }
+
+  /**
+   * Every cable crossing of a piece and what it does to the rows around it.
+   * `{ tw, pull, crossings }` or null when the piece has none:
+   *   tw[row][slot]   the twist a stitch slot (work order, a multi-stitch
+   *                   record expanded) belongs to: `{phase, lo, len, sub, n,
+   *                   cross, f, kb, uflip}` — rows from the crossing, the
+   *                   window it spans (`lo` rows before it, `len` in all),
+   *                   its physical column in the cable, the cable's width,
+   *                   its direction (1 = F), its front group and back knits,
+   *                   and whether the slot runs right to left (rows mode)
+   *   pull[row][slot] 1 when the slot is in a cable column (drawn at
+   *                   CABLE_W a stitch)
+   *   crossings       `[{i, c0, n, cross, f, kb, lo, hi}]` in row order
+   * `base` offsets the row index's parity (a caller holding one round).
+   */
+  function knitCables(rounds, mode, base) {
+    var list = arr(rounds) || [], n = list.length, W = new Array(n), cab = [], byRow = {}, i, k;
+    var rowsMode = mode === 'rows', b0 = base | 0;
+    for (i = 0; i < n; i++) {
+      var l = arr(list[i] && list[i].stitches) || [], c = 0;
+      for (k = 0; k < l.length; k++) {
+        var rk = l[k], sp = knitSpan(rk);
+        if (rk && rk.t === 'cable') {
+          var run = 0;
+          if (!isNum(rk.at)) run = sp;
+          else if (rk.at === 0) {
+            // one record per stitch: the cable is the run that starts at `at` 0
+            var span = isNum(rk.span) && rk.span >= 1 ? Math.min(24, rk.span | 0) : 1;
+            run = 1;
+            while (run < span && l[k + run] && l[k + run].t === 'cable' && l[k + run].at === run) run++;
+          }
+          if (run >= 2) {
+            var sh = cableShape(rk, run);
+            var K = { i: i, c0: c, n: run, cross: rk.cross === 'b' ? -1 : 1, f: sh.f, kb: sh.kb, lo: CABLE_TW, hi: CABLE_TW };
+            cab.push(K);
+            (byRow[i] = byRow[i] || []).push(K);
+          }
+        }
+        c += sp;
+      }
+      W[i] = Math.max(c, list[i] ? Math.max(0, list[i].count | 0) : 0);
+    }
+    if (!cab.length) return null;
+    function rtl(j) { return rowsMode && ((j + b0) & 1) === 1; }
+    // physical start column of the crossing on its own row, then its centre
+    // in row-independent coordinates (about the centre / as a fraction)
+    cab.forEach(function (K) {
+      K.p0 = rtl(K.i) ? W[K.i] - K.c0 - K.n : K.c0;
+      K.x = rowsMode ? K.p0 + K.n / 2 - W[K.i] / 2 : (K.p0 + K.n / 2) / Math.max(1, W[K.i]);
+    });
+    function startOn(K, j) {
+      return rowsMode ? Math.round(K.x + W[j] / 2 - K.n / 2) : Math.round(K.x * W[j] - K.n / 2);
+    }
+    function overlaps(A, B) {
+      if (rowsMode) return Math.abs(A.x - B.x) < (A.n + B.n) / 2;
+      var d = Math.abs(A.x - B.x);
+      d = Math.min(d, 1 - d);
+      return d * Math.max(1, W[A.i]) < (A.n + B.n) / 2;
+    }
+    function gapTo(K, dir) {
+      for (var g = 1; g <= CABLE_GAP; g++) {
+        var o = byRow[K.i + dir * g];
+        if (!o) continue;
+        for (var q = 0; q < o.length; q++) if (overlaps(K, o[q])) return g;
+      }
+      return Infinity;
+    }
+    // a row in the window that does lace, a bind-off or shaping in the
+    // cable's columns ends the window there: the strands do not lean into it
+    function plainIn(K, j) {
+      if (j < 0 || j >= n || !(W[j] > 0)) return false;
+      var l = arr(list[j] && list[j].stitches);
+      if (!l || !l.length) return true;
+      var p0 = startOn(K, j), slot = 0, q;
+      for (q = 0; q < l.length; q++) {
+        var sp = knitSpan(l[q]);
+        for (var z = 0; z < sp; z++, slot++) {
+          var col = rtl(j) ? W[j] - 1 - slot : slot;
+          if (col < p0 || col >= p0 + K.n) continue;
+          if (CABLE_PLAIN[(l[q] && l[q].t) || 'k'] !== 1) return false;
+          // a ribbing below the panel (k/p pulled in to 0.8) is not part of the cable
+          if (l[q] && l[q].t !== 'cable' && isNum(l[q].w) && l[q].w < CABLE_W - 1e-6) return false;
+        }
+      }
+      return true;
+    }
+    var tw = new Array(n), pull = new Array(n), d, j, col;
+    function mark(K, jj, phase) {
+      if (!(W[jj] > 0)) return;
+      var p0 = startOn(K, jj);
+      for (col = Math.max(0, p0); col < Math.min(W[jj], p0 + K.n); col++) {
+        var slot = rtl(jj) ? W[jj] - 1 - col : col;
+        if (!tw[jj]) tw[jj] = new Array(W[jj]);
+        var cur = tw[jj][slot];
+        if (cur && Math.abs(cur.phase) <= Math.abs(phase)) continue;
+        tw[jj][slot] = { phase: phase, lo: K.lo, len: K.lo + K.hi + 1, sub: col - p0, n: K.n, cross: K.cross,
+          f: K.f, kb: K.kb, uflip: rtl(jj) };
+      }
+    }
+    // crossings that follow one another in overlapping columns are ONE cable
+    // column (a panel of travelling stitches is one, across its whole width)
+    var up = cab.map(function (K, q) { K.q = q; return q; });
+    function root(q) { while (up[q] !== q) { up[q] = up[up[q]]; q = up[q]; } return q; }
+    cab.forEach(function (K) {
+      var gp = gapTo(K, -1), gn = gapTo(K, 1);
+      K.lo = gp <= CABLE_GAP ? Math.min(CABLE_TW, Math.floor((gp - 1) / 2)) : CABLE_TW;
+      K.hi = gn <= CABLE_GAP ? Math.min(CABLE_TW, gn - 1 - Math.floor((gn - 1) / 2)) : CABLE_TW;
+      for (d = 1; d <= K.lo; d++) if (!plainIn(K, K.i - d)) { K.lo = d - 1; break; }
+      for (d = 1; d <= K.hi; d++) if (!plainIn(K, K.i + d)) { K.hi = d - 1; break; }
+      for (var g = 0; g <= CABLE_GAP; g++) {
+        var o = byRow[K.i + g];
+        if (!o) continue;
+        for (var q = 0; q < o.length; q++) if (o[q] !== K && overlaps(K, o[q])) up[root(o[q].q)] = root(K.q);
+      }
+    });
+    cab.forEach(function (K) { for (d = -K.lo; d <= K.hi; d++) mark(K, K.i + d, d); });
+    // each cable column is pulled in to cable gauge over its whole span
+    var comps = {};
+    cab.forEach(function (K) {
+      var rq = root(K.q), half = rowsMode ? K.n / 2 : K.n / 2 / Math.max(1, W[K.i]);
+      var cp = comps[rq] || (comps[rq] = { x0: Infinity, x1: -Infinity, r0: Infinity, r1: -Infinity, k: 0 });
+      cp.x0 = Math.min(cp.x0, K.x - half); cp.x1 = Math.max(cp.x1, K.x + half);
+      cp.r0 = Math.min(cp.r0, K.i - K.lo); cp.r1 = Math.max(cp.r1, K.i + K.hi);
+      cp.k++;
+    });
+    /* ...from the panel's first plain row to its last: the cable column runs
+       on before its first crossing and after its last one (to the bind-off,
+       a shaping row or the rib below), not only between crossings */
+    function colsOn(cp, jj) {
+      return rowsMode
+        ? [Math.round(cp.x0 + W[jj] / 2), Math.round(cp.x1 + W[jj] / 2)]
+        : [Math.round(cp.x0 * W[jj]), Math.round(cp.x1 * W[jj])];
+    }
+    function compPlain(cp, jj) {
+      if (jj < 0 || jj >= n || !(W[jj] > 0)) return false;
+      var l = arr(list[jj] && list[jj].stitches);
+      if (!l || !l.length) return false;
+      var cc = colsOn(cp, jj), slot = 0, q;
+      for (q = 0; q < l.length; q++) {
+        var sp = knitSpan(l[q]);
+        for (var z = 0; z < sp; z++, slot++) {
+          var c2 = rtl(jj) ? W[jj] - 1 - slot : slot;
+          if (c2 < cc[0] || c2 >= cc[1]) continue;
+          if (CABLE_PLAIN[(l[q] && l[q].t) || 'k'] !== 1) return false;
+          if (l[q] && l[q].t !== 'cable' && isNum(l[q].w) && l[q].w < CABLE_W - 1e-6) return false;
+        }
+      }
+      return true;
+    }
+    for (var ck in comps) {
+      if (!Object.prototype.hasOwnProperty.call(comps, ck)) continue;
+      var cq = comps[ck];
+      cq.r0 = Math.max(0, cq.r0); cq.r1 = Math.min(n - 1, cq.r1);
+      while (cq.r0 > 0 && compPlain(cq, cq.r0 - 1)) cq.r0--;
+      while (cq.r1 < n - 1 && compPlain(cq, cq.r1 + 1)) cq.r1++;
+    }
+    var columns = [];
+    for (var key in comps) {
+      if (!Object.prototype.hasOwnProperty.call(comps, key)) continue;
+      var cp2 = comps[key];
+      columns.push({ x0: cp2.x0, x1: cp2.x1, r0: Math.max(0, cp2.r0), r1: Math.min(n - 1, cp2.r1), crossings: cp2.k });
+      for (j = Math.max(0, cp2.r0); j <= Math.min(n - 1, cp2.r1); j++) {
+        if (!(W[j] > 0)) continue;
+        var c0 = rowsMode ? Math.round(cp2.x0 + W[j] / 2) : Math.round(cp2.x0 * W[j]);
+        var c1 = rowsMode ? Math.round(cp2.x1 + W[j] / 2) : Math.round(cp2.x1 * W[j]);
+        if (!pull[j]) pull[j] = new Uint8Array(W[j]);
+        for (col = Math.max(0, c0); col < Math.min(W[j], c1); col++) pull[j][rtl(j) ? W[j] - 1 - col : col] = 1;
+      }
+    }
+    columns.sort(function (a, b) { return a.x0 - b.x0; });
+    return {
+      tw: tw, pull: pull, columns: columns,
+      crossings: cab.map(function (K) {
+        return { i: K.i, c0: K.c0, n: K.n, cross: K.cross, f: K.f, kb: K.kb, lo: K.lo, hi: K.hi, x: K.x, column: root(K.q) };
+      })
+    };
   }
 
   /**
@@ -2686,17 +2930,22 @@
 
   /** A knit round as the walk wants it: heights in sc units, a partial row
       closed to its ring by its held stitches. */
-  function knitGeoRound(r, part) {
+  function knitGeoRound(r, part, pull) {
     var src = r || {}, c = {}, k;
     for (k in src) if (Object.prototype.hasOwnProperty.call(src, k)) c[k] = src[k];
-    var l = arr(src.stitches) || [], st2 = [], i, rowH = 0;
+    var l = arr(src.stitches) || [], st2 = [], i, rowH = 0, slot = 0;
     for (i = 0; i < l.length; i++) {
       var h = knitRecH(l[i]);
       if (h > rowH) rowH = h;
       /* a cable is one record over several stitches: spread its width over
          them, or the walk pads the round's count with phantom stitches */
-      var span = knitSpan(l[i]), w = knitRecW(l[i]);
-      for (var q = 0; q < span; q++) st2.push({ t: (l[i] && l[i].t) || 'k', h: h / SH_SC, w: w / span });
+      var span = knitSpan(l[i]), w = knitRecW(l[i]), t = (l[i] && l[i].t) || 'k';
+      for (var q = 0; q < span; q++, slot++) {
+        // a stitch in a cable column is drawn at cable gauge (1.6.0)
+        var ws = w / span;
+        if (pull && pull[slot] === 1 && CABLE_PULL[t] === 1 && ws > CABLE_W) ws = CABLE_W;
+        st2.push({ t: t, h: h / SH_SC, w: ws });
+      }
     }
     if (!(rowH > 0)) rowH = isNum(src.height) && src.height > 0 ? src.height : KNIT_ROW_H;
     if (part && part.ring > part.count) {
@@ -2793,6 +3042,13 @@
       var ny = -(y * ca - u * sa);
       x = nx; y = ny;
     }
+    /* the yoke's sleeve tops fall in the walked frame, before any bend
+       (a back-neck wedge above the yoke tilts the yoke with it) */
+    if (w.yoke && y >= w.yoke.y0 - 1e-9) {
+      var ax = w.yoke.ax || 0;
+      var over = (ax ? Math.abs(x * Math.cos(ax) + z * Math.sin(ax)) : Math.abs(x)) - w.yoke.rb;
+      if (over > 0) y -= over * w.yoke.t;
+    }
     if (w.bends && w.bends.length) {
       var y0 = y, px = x, py = y, pz = z, k, b;
       for (k = w.bends.length - 1; k >= 0; k--) {
@@ -2809,10 +3065,6 @@
       }
       x = px; y = py; z = pz;
     }
-    if (w.yoke && y >= w.yoke.y0 - 1e-9) {
-      var over = Math.abs(x) - w.yoke.rb;
-      if (over > 0) y -= over * w.yoke.t;
-    }
     if (w.disp) {
       var d = w.disp;
       bendRot(d.ux, d.uz, d.psi, x, y, z, _w);
@@ -2827,8 +3079,9 @@
   function classifyKnitRounds(m, rounds, o) {
     var n = rounds.length, i;
     var parts = knitPartials(rounds);
+    var cables = knitCables(rounds, 'rounds', 0);
     var kr = [];
-    for (i = 0; i < n; i++) kr.push(knitGeoRound(rounds[i], parts ? parts[i] : null));
+    for (i = 0; i < n; i++) kr.push(knitGeoRound(rounds[i], parts ? parts[i] : null, cables ? cables.pull[i] : null));
     knitEase(kr, parts);
     var sm = m.shape || {};
     var shape = shapeOf({ mode: 'rounds', rounds: kr, shape: sm });
@@ -2873,66 +3126,114 @@
          fabric: a knitted ruffle doubles its stitches, while a raglan's +8
          after a rib or the last round before a divide is shaping */
       var dn = (kr[i].count | 0) - (kr[i - 1].count | 0);
-      if (dn > 0 && (dn > KNIT_RUFFLE_RATE * flatRate(ek.h / SH_SC, 1) || dn > KNIT_RUFFLE_FRAC * (kr[i - 1].count | 0))) continue;
+      /* (1.6.0) ...and only past BOTH: an even increase round of 16 on 64
+         after a rib (Sandnes ladies' neck) is 25% and flares, it does not frill */
+      if (dn > 0 && dn > KNIT_RUFFLE_RATE * flatRate(ek.h / SH_SC, 1) && dn > KNIT_RUFFLE_FRAC * (kr[i - 1].count | 0)) continue;
       ek.ruffle = false; ek.prof = null; ek.lobes = 0; ek.kind = 'ring';
       ek.radiusDraw = ek.radius; ek.radiusMax = ek.radius; ek.radiusMin = ek.radius;
       cls.ruffles--;
     }
-    var info = { partials: 0, bends: [], yoke: null, toeUp: false };
+    var info = { partials: 0, bends: [], yoke: null, toeUp: false, cables: cables ? cables.crossings.length : 0 };
     if (parts) {
       for (i = 0; i < n; i++) if (parts[i]) { info.partials++; cls.rounds[i].partial = true; }
     }
 
-    var yoke = parts ? null : knitYoke(kr, cls);
-    if (yoke) info.yoke = yoke;
-
-    var warp = null;
+    /* (17, 1.6.0) A few short rows on part of the round — the German short
+       rows across a top-down sweater's back neck — are a WEDGE, not a heel:
+       the worked side gains their height and the piece tilts by that much,
+       not a right angle. A heel is a long run (a flap, a turn: 20+ rows). */
+    var runs = [];
     if (parts) {
-      var bends = [];
       i = 0;
       while (i < n) {
         if (!parts[i]) { i++; continue; }
-        var a = i;
+        var a0 = i;
         while (i < n && parts[i]) i++;
-        var b = i - 1;
+        runs.push({ a: a0, b: i - 1, wedge: i - a0 <= KNIT_WEDGE_ROWS });
+      }
+    }
+    var heels = runs.filter(function (u) { return !u.wedge; }).length;
+
+    // a yoke goes on through a wedge (its partial rows are closed to the ring)
+    var yoke = heels ? null : knitYoke(kr, cls);
+    if (yoke) info.yoke = yoke;
+
+    var warp = null;
+    if (runs.length) {
+      var bends = [];
+      for (var ri = 0; ri < runs.length; ri++) {
+        var a = runs[ri].a, b = runs[ri].b;
         var ea = cls.rounds[a], eb = cls.rounds[b];
         var top = ea.yTop, bot = eb.y;
         var L = top - bot;
         if (!(L > 0)) continue;
         var r = Math.max(ea.radius, R_MIN);
-        var phi = Math.min(KNIT_BEND_MAX, L / r);
+        /* A heel turns the tube; a wedge raises its worked side by the rows'
+           own height across the tube's diameter. */
+        var phi = runs[ri].wedge ? Math.min(KNIT_WEDGE_MAX, L / (2 * r)) : Math.min(KNIT_BEND_MAX, L / r);
         /* The worked stitches are drawn at the END of the ring (the renderer
            puts the held ones first, so they stay solid while the row fills),
            so the worked side is centred at 2π − π·f; the pivot is opposite. */
         var f = clamp(parts[a].P / Math.max(parts[a].ringP, 1e-9), 0.05, 1);
         var thc = TAU - Math.PI * f;
         var ux = Math.cos(thc), uz = Math.sin(thc);
-        bends.push({ y0: top, y1: bot, phi: phi, ux: ux, uz: uz, px: -r * ux, pz: -r * uz, from: a, to: b, length: L });
+        bends.push({ y0: top, y1: bot, phi: phi, ux: ux, uz: uz, px: -r * ux, pz: -r * uz, from: a, to: b, length: L,
+          wedge: runs[ri].wedge, th: thc });
       }
       if (bends.length) {
         warp = { bends: bends, disp: null, chevron: null, field: false };
         info.bends = bends;
-        if (shape.closedTop) {
+        var Phi = 0;
+        for (i = 0; i < bends.length; i++) Phi += bends[i].phi;
+        var lb = bends[bends.length - 1];
+        if (shape.closedTop && !lb.wedge) {
           /* Toe-up: the walk starts at the toe, so the LEG is the last segment.
              Turn the whole piece so the leg stands up, cuff on top. */
-          var Phi = 0;
-          for (i = 0; i < bends.length; i++) Phi += bends[i].phi;
-          var lb = bends[bends.length - 1];
           warp.disp = { psi: Math.PI - Phi, ux: lb.ux, uz: lb.uz, tx: 0, ty: 0, tz: 0 };
           info.toeUp = true;
+        } else if (!heels) {
+          /* Wedges only: the longer stretch after them (a yoke and its body
+             below a back neck) stands upright, and the shorter one before
+             them (the neck rib) carries the tilt — back higher than front. */
+          // ...by the fabric each side holds (stitches × row height), not its rise
+          var before = 0, after = 0;
+          for (i = 0; i < bends[0].from; i++) before += (kr[i].count | 0) * (cls.rounds[i].h || 0);
+          for (i = lb.to + 1; i < n; i++) after += (kr[i].count | 0) * (cls.rounds[i].h || 0);
+          if (after > before) warp.disp = { psi: -Phi, ux: lb.ux, uz: lb.uz, tx: 0, ty: 0, tz: 0 };
+          info.wedge = { rows: 0, phi: Phi, th: lb.th };
+          for (i = 0; i < bends.length; i++) info.wedge.rows += bends[i].to - bends[i].from + 1;
         }
       }
     }
-    if (yoke && !warp) {
+    if (yoke) {
       /* The sleeve tops of a yoke hang off the shoulders: past the body's own
          radius the yoke falls away at YOKE_DROOP, so its sides read as
-         shoulders running into the arms, not as the brim of a lampshade. */
-      warp = { bends: null, disp: null, chevron: null, field: false,
-        yoke: { rb: yoke.bodyRadius, t: Math.tan(YOKE_DROOP), y0: cls.rounds[yoke.divide].y } };
+         shoulders running into the arms, not as the brim of a lampshade.
+         With a back-neck wedge the yoke's long axis (the sleeves) lies across
+         the wedge, so the raised side is the back. */
+      var ax = info.wedge ? info.wedge.th + Math.PI / 2 : 0;
+      if (ax) knitYokeTurn(cls, yoke, ax);
+      var yk = { rb: yoke.bodyRadius, t: Math.tan(YOKE_DROOP), y0: cls.rounds[yoke.divide].y, ax: ax };
+      if (warp) warp.yoke = yk;
+      else warp = { bends: null, disp: null, chevron: null, field: false, yoke: yk };
     }
     cls.warp = warp;
     cls.knit = info;
     return cls;
+  }
+
+  /** Turn a yoke's stadium so its long axis lies at angle `ax`. */
+  function knitYokeTurn(cls, yoke, ax) {
+    for (var i = yoke.from; i < yoke.divide; i++) {
+      var e = cls.rounds[i];
+      if (!e || e.kind !== 'yoke' || !e.prof) continue;
+      var base = e.prof;
+      var f = (function (g) { return function (th, t) { return g(th - ax, t); }; }(base));
+      f.kind = base.kind; f.corners = base.corners || 0; f.straight = base.straight; f.endR = base.endR;
+      f.sig = base.sig + Math.round(ax * 1000) * 7919;
+      e.prof = f;
+    }
+    yoke.axis = ax;
   }
 
   /** (14) The raglan yoke: an increase run, then a one-round divide. */
@@ -2955,7 +3256,9 @@
         if ((kr[q].count | 0) >= 0.9 * c && (kr[q].count | 0) <= 1.1 * c) after++;
         else break;
       }
-      if (after < 2) continue;
+      /* ...or the part ends at the divide (a yoke section whose body is its
+         own part: Sandnes' YOKE, Patons' Bottom Yoke) */
+      if (after < 2 && !(q >= n && after === n - 1 - i)) continue;
       d = i;
       cls.yokeFrom = j;
       break;
@@ -2998,11 +3301,12 @@
   function classifyKnitRows(m, rounds) {
     var n = rounds.length, i;
     var kr = [];
-    for (i = 0; i < n; i++) kr.push(knitGeoRound(rounds[i], null));
+    var cables = knitCables(rounds, 'rows', 0);
+    for (i = 0; i < n; i++) kr.push(knitGeoRound(rounds[i], null, cables ? cables.pull[i] : null));
     var shape = shapeOf({ mode: 'rows', rounds: kr, shape: m.shape || {} });
     shape.knit = true;
     var cls = classifyRows(kr, shape, true);
-    var info = { shortRows: 0, chevron: null };
+    var info = { shortRows: 0, chevron: null, cables: cables ? cables.crossings.length : 0 };
     var field = knitShortRows(rounds, cls);
     if (field) info.shortRows = field;
     var chev = knitChevron(kr, cls);
@@ -3132,7 +3436,7 @@
     if (w && w.bends) for (i = 0; i < w.bends.length; i++) sig += w.bends[i].phi * 1000 + w.bends[i].y0 * 7;
     if (w && w.chevron) sig += w.chevron.a * 5000 + 17;
     if (w && w.disp) sig += w.disp.psi * 300 + 3;
-    if (w && w.yoke) sig += w.yoke.rb * 100 + 29;
+    if (w && w.yoke) sig += w.yoke.rb * 100 + 29 + (w.yoke.ax || 0) * 333;
     function take(b, x, y, z) {
       warpPoint(w, b, x, y, z, p);
       if (p[0] < bx0) bx0 = p[0]; if (p[0] > bx1) bx1 = p[0];
@@ -3372,7 +3676,7 @@
   /* --------------------------------------------------------------- exports */
 
   global.DiagramGeo = {
-    version: '1.5.0',
+    version: '1.6.0',
 
     // constants (read-only by convention; the test page prints them)
     SW: SW,
@@ -3463,12 +3767,16 @@
       rowH: KNIT_ROW_H, partial: KNIT_PARTIAL, bendMax: KNIT_BEND_MAX,
       closedStart: KNIT_CLOSED_START, closedFrac: KNIT_CLOSED_FRAC, graftFrac: KNIT_GRAFT_FRAC,
       yokeDivide: YOKE_DIVIDE, yokeGrowth: YOKE_GROWTH, shortRowFrac: SHORT_ROW_FRAC,
-      fallbackDrop: KNIT_FB_DROP, fallbackRun: KNIT_FB_RUN
+      fallbackDrop: KNIT_FB_DROP, fallbackRun: KNIT_FB_RUN,
+      cableTw: CABLE_TW, cableGap: CABLE_GAP, cableW: CABLE_W, wedgeRows: KNIT_WEDGE_ROWS, wedgeMax: KNIT_WEDGE_MAX
     },
     isKnit: isKnit,
     knitPartials: knitPartials,
     knitSpan: knitSpan,
     warpPoint: warpPoint,
+    // cables (1.6.0, knit-3d-2)
+    knitCables: knitCables,
+    cableShapeOf: cableShapeOf,
 
     // the two the renderer calls
     classify: classify,

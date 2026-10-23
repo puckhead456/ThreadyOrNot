@@ -1425,6 +1425,9 @@
       // round 1 under it, once per leg or once per size (wave G - three words
       // made it "wordy", so both legs were swallowed as running heads).
       if (startsPart(t, raws, i)) { pageStart = false; continue; }
+      // ...nor, a profile may say, a heading it knows is a piece ("BACK AND
+      // FRONT" once per size group - knitting)
+      if (PROFILE.notRunningHead && PROFILE.notRunningHead(t, E)) { pageStart = false; continue; }
       key = t.toLowerCase().replace(/\s+/g, ' ');
       counts[key] = (counts[key] || 0) + 1;
       if (pageStart) { firsts[key] = (firsts[key] || 0) + 1; pageStart = false; }
@@ -2331,6 +2334,9 @@
       if (PAGE_LINE_RE.test(t)) { page++; continue; }
       if (!t) continue;
       if (!seenRow && detectMarker(t)) seenRow = true;
+      // (a heading a profile knows is a piece is never a title - see
+      // findRunningHeads)
+      if (PROFILE.notRunningHead && PROFILE.notRunningHead(t, E)) { prevKey = null; continue; }
       var byline = t.length <= 60 && BYLINE_RE.test(t);
       // "<Pattern name>" / "by <Designer>" is a title block wherever it is
       // printed - no part is ever called "by someone" - so the pair goes
@@ -3405,6 +3411,10 @@
         start = Math.min(lineIdx, Math.max(entry.line, floor));
       }
       var sec = openSection(entry ? entry.name : '', entry ? entry.makeCount : 1, start);
+      // (a profile may say rows never go back into a part opened before this
+      // one - knitting: the Front's "3rd row" after a printed pattern skipped
+      // its 2nd row is not the Back rib's row 3, nor a panel's row 17 another's)
+      if (PROFILE.headerFloor) sectionFloor = sec.index;
       // An unnamed restart is the same piece continuing, so carry the count.
       // (a craft profile may say a named restart is still the same stitches -
       // knitting: a heel turn after its flap, rounds after the flat neck)
@@ -3500,6 +3510,10 @@
           if (PROFILE.groupStartsSection && (cur.hasRow || cur.hasSetup)) {
             cur = openSection('', 1, i);
             L.section = cur.index;
+          } else if (PROFILE.groupStartsSection && !cur.name && cur.index === 0) {
+            // (the document's first group: its part starts at its heading, so
+            // the part is that group's - a book's front matter is no pattern's)
+            cur.startLine = i;
           }
           if (PROFILE.groupStartsSection) sectionFloor = cur.index;
         }
@@ -3607,7 +3621,7 @@
           if (rOff > 0) {
             var mk0 = cls.marker, mk1 = {};
             for (var mkk in mk0) if (Object.prototype.hasOwnProperty.call(mk0, mkk)) mk1[mkk] = mk0[mkk];
-            mk1.row = mk0.row + rOff; mk1.rowEnd = mk0.rowEnd + rOff;
+            mk1.row = mk0.row + rOff; mk1.rowEnd = mk0.rowEnd + rOff; mk1.rowOffset = rOff;
             if (mk0.rowList) mk1.rowList = mk0.rowList.map(function (r) { return r + rOff; });
             cls.marker = mk1;
           }
@@ -3629,7 +3643,7 @@
         // lines are NOT consumed: they stay notes, exactly as before.
         var rt = t;
         var joined4 = [];
-        for (var j4 = i + 1, g4 = 0; g4 < 2 && j4 < raws.length &&
+        for (var j4 = i + 1, g4 = 0; g4 < (PROFILE.joinRepeatWraps && PROFILE.repeatWrapLimit || 2) && j4 < raws.length &&
              (!SENTENCE_END_RE.test(rt) || /\bapprox(?:imately)?\.\s*$/i.test(rt) ||
               (PROFILE.joinRepeatWraps && TOTAL_LINE_RE.test(trimLine(raws[j4] || '')))); j4++) {
           var ct4 = trimLine(raws[j4]);
@@ -3641,6 +3655,7 @@
           joined4.push(j4);
           g4++;
         }
+        // (knitting: up to PROFILE.repeatWrapLimit lines - a narrow column)
         // knitting: the total and the rest of the sentence wrap onto the next
         // printed line(s); they are this repeat's, so they join it
         if (PROFILE.joinRepeatWraps && joined4.length) {
@@ -3741,7 +3756,10 @@
         prefixLen = t.length - cls.nextRow.rest.length;
         isRow = true;
       } else if (cls.setup) {
-        if (cur.hasRow) cur = openSectionAtRow(i);
+        // (a profile may say a new heading over a second start is a new part
+        // even before any row - knitting prose: "BACK AND FRONT" / "= 92 sts."
+        // then "SLEEVES" / "Transfer sleeve sts ... = 34 sts.")
+        if (cur.hasRow || (PROFILE.headerFloor && cur.hasSetup && pendingHeader())) cur = openSectionAtRow(i);
         L.row = 0; L.rowEnd = 0; L.kind = 'setup';
         // A line that says "Setup row:" in so many words starts the section;
         // a counted line guessed into a setup further down does not (a
@@ -3876,7 +3894,8 @@
       // Second Block (for a total of 30 (32, 34, 38, 40, 42) sc)." - the pick-up
       // counts come first and the row's own total last, a few lines down
       // (wave E, crochet-lionbrand-logcabin-pullover: every block read 20).
-      if ((isRow || isSetup) && !L.sizeUnresolved && (!SENTENCE_END_RE.test(t) || TOTAL_OF_RE.test(t))) {
+      // (a profile may say its lines are whole sentences already: knitting prose)
+      if ((isRow || isSetup) && !L.sizeUnresolved && !(PROFILE.wholeLines && PROFILE.wholeLines(E)) && (!SENTENCE_END_RE.test(t) || TOTAL_OF_RE.test(t))) {
         var tot = totalOfAhead(raws, lastIdx, size, heads, t);
         if (tot) {
           for (var jt = lastIdx + 1; jt <= tot.line; jt++) {
@@ -3893,7 +3912,7 @@
         }
       }
 
-      if ((isRow || isSetup) && L.stitches === null && !L.sizeUnresolved) {
+      if ((isRow || isSetup) && L.stitches === null && !L.sizeUnresolved && !(PROFILE.wholeLines && PROFILE.wholeLines(E))) {
         var cont = continuationCount(raws, lastIdx) ||
           strandedCount(raws, lastIdx, t, size, heads);
         if (cont) {
@@ -3959,6 +3978,13 @@
         // the row has no words of its own, so it is counted from the row it
         // points at rather than from evaluate(), which reads it as prose.
         var refs = isRow ? backRefRows(instr, L.row) : null;
+        // (a row renumbered on from the rows before it - "Sizes XS/S, M, L and XL
+        // only:" / "1st row: ..." / "3rd row: As 1st row." as rows 7 and 9 - points
+        // at the rows as printed: row 7, not row 1)
+        if (refs && isRow && cls.marker && cls.marker.rowOffset > 0) {
+          var rShift = cls.marker.rowOffset;
+          if (refs.every(function (r) { return r + rShift < L.row; })) refs = refs.map(function (r) { return r + rShift; });
+        }
         if (refs) {
           L.repeatOf = refs;
           L.repeatFrom = L.row;
@@ -3990,8 +4016,10 @@
         // "Blush Rose Afghan" rows read "1").
         // (the same holds for any row that does not say it decreases, leaves
         // stitches unworked or works only some of them)
+        // (a profile may name words that do shrink a row that far - knitting:
+        // "cast off 8 sts at beg of next 8 rows" leaves 15 of 79)
         if (L.computed !== null && L.stitches === null && L.prevCount >= 8 &&
-            L.computed * 4 < L.prevCount &&
+            L.computed * 4 < L.prevCount && !(PROFILE.shrinkRe && PROFILE.shrinkRe.test(instr)) &&
             (/\brep(?:eat)?\s+from\b/i.test(instr) ||
              !/\b(?:dec\w*|\w*tog|decrease|leave|leaving|unworked|rem(?:aining)?|sl\s*st\s+across|fasten|close)\b/i.test(instr))) {
           L.computed = null; L.counts = null;
@@ -4254,12 +4282,15 @@
     if (PROFILE.postParse) PROFILE.postParse(lines, { sections: sections, text: text, opts: opts, size: size }, E);
     lines.meta = {
       sections: sections.map(function (s) {
-        return {
+        var ms = {
           index: s.index, name: s.name, makeCount: s.makeCount,
           startLine: s.startLine, endLine: s.endLine, rows: s.rows,
           maxRow: s.maxRow, instrRows: s.instrRows,
           group: gLines.length ? groupAtLine(s.startLine) : null
         };
+        // (a part a profile offers without numbered rows - see isRealSection)
+        if (s.offer) ms.offer = true;
+        return ms;
       }),
       groups: groups.names.slice(),
       groupAtLine: groupAtLine,
@@ -4276,6 +4307,8 @@
   // A section worth offering as a part: it has rows, and at least one of them
   // is a real instruction rather than a bare number or a glossary line.
   function isRealSection(s) {
+    // (a profile may offer a part that numbers no rows - knitting prose)
+    if (s.offer) return true;
     return s.rows > 0 && (s.instrRows === undefined || s.instrRows > 0);
   }
 
@@ -4495,6 +4528,8 @@
     if (PROFILE.carryIntoParts) PROFILE.carryIntoParts(out, lines, text, E);
     inferPairs(out, text);
     inlineSameAs(out);
+    // (...and may settle what the parts are once they are all known)
+    if (PROFILE.finishParts) PROFILE.finishParts(out, lines, text, E);
     return out.map(function (s) {
       var o = { name: s.name, makeCount: s.makeCount, text: s.text, placement: s.placement };
       if (s.makeCountInferred) o.makeCountInferred = true;
@@ -6948,7 +6983,9 @@
       l = lines[i];
       if (!l || l.kind !== 'repeat' || !l.repeatOf || !(l.repeatFrom >= 1)) continue;
       if (row < l.repeatFrom) continue;
-      if (l.repeatTo >= l.repeatFrom && row > l.repeatTo) continue;
+      // ("Rep last 2 rnds 0 (1-3) time(s) more": no rows at all for this size -
+      // repeatTo is repeatFrom - 1, which is not the open end of a null)
+      if (typeof l.repeatTo === 'number' && row > l.repeatTo) continue;
       if (l.section === 0) return l;
       if (!best) best = l;
     }

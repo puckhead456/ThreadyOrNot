@@ -41,6 +41,11 @@
          stitches — and the finished mesh is moved through DiagramGeo's
          `warp` (a heel's bend, a short-row field, a shawl's chevron, a
          yoke's sleeve tops). Crochet takes none of these paths.
+         1.7.0 (knit-3d-2): every crossing has its own two groups (a T3F's
+         two knits over a purl, Cr7B's 3 over 3 past a purl, C4F's 2 and 2),
+         a twist window that tiles the rows between crossings in the same
+         columns (DiagramGeo.knitCables), and its columns drawn at cable
+         gauge (0.85 a stitch) between the crossings.
      handle.setSafeInsets({ top, right, bottom, left })   // CSS px
          Margins the piece must stay out of. The stitch button's number and
          pills own the middle of the canvas, and a round-worked solid is also a
@@ -729,6 +734,10 @@
   var KNIT_LEAN = { k2tog: 1, p2tog: 1, k3tog: 1, p3tog: 1, ssk: -1, ssp: -1, sssk: -1, sssp: -1, skp: -1, sk2p: -1 };
   var KNIT_INC = { m1: 1, m1l: 1, m1r: 1, m1p: 1, kyok: 1, kfb: 2, pfb: 2 };
   var KNIT_HOLE = { lo: 0.15, hi: 0.85, u: 0.17 };
+  // cable gauge (1.7.0): the stitches DiagramGeo.knitCables pulls in, and how far
+  var KNIT_PULL_T = { k: 1, p: 1, x: 1, ktbl: 1, ptbl: 1, sl: 1, slip: 1 };
+  var KNIT_CABLE_W = 0.85;
+  var KNIT_LOW_GAIN = 1.8;   // tier-0 gain on a cable / rib relief (its peak ~1.3 vs the low bump 1.6)
 
   /** Stitches a knit record stands for: a cable crosses several. */
   function knitSpan(st) {
@@ -760,15 +769,21 @@
     if (t === 'yo') {
       D.k = K_YO; D.hole = true; D.holeLo = KNIT_HOLE.lo; D.holeHi = KNIT_HOLE.hi; D.holeU = KNIT_HOLE.u;
       D.peak = KNIT_PEAK.yo;
-    } else if (tw && (t === 'cable' || !purl) && t !== 'co' && t !== 'bo') {
-      // a cable crossing, or a knit stitch leaning into one
+    } else if (tw && t !== 'co' && t !== 'bo') {
+      /* a cable crossing, or a stitch in its columns within its window: the
+         knits lean into the cross and the purls between them are the
+         cable's own background (1.7.0), so the cable is one surface */
       D.k = K_CAB; D.sub = tw.sub | 0; D.subN = Math.max(1, tw.n | 0); D.phase = tw.phase | 0;
       D.uflip = tw.uflip ? 1 : 0;
       D.cross = (tw.cross < 0 ? -1 : 1) * (mode === 'rounds' ? -1 : 1);
+      cableGroups(D, tw.f, tw.kb);
+      D.lo = typeof tw.lo === 'number' ? tw.lo | 0 : CABLE_TW;
+      D.len = typeof tw.len === 'number' && tw.len >= 1 ? tw.len | 0 : 2 * CABLE_TW + 1;
       D.peak = KNIT_PEAK.cab;
     } else if (t === 'cable') {
       // no twist table (a lone round handed to the test hook): its own row only
       D.k = K_CAB; D.subN = Math.max(1, knitSpan(st)); D.cross = (st && st.cross === 'b' ? -1 : 1) * m;
+      cableGroups(D, st && st.cf, st && st.cb);
       D.peak = KNIT_PEAK.cab;
     } else if (t === 'co') {
       D.k = K_CO; D.peak = KNIT_PEAK.edge;
@@ -787,6 +802,24 @@
     }
     D.key = 'K' + D.k + ':' + D.lean + ':' + D.rib + ':' + D.cross + ':' + D.sub + '/' + D.subN + ':' +
       D.phase + ':' + D.uflip + ':' + D.ctr + ':' + D.inc + ':' + D.slip;
+    if (D.k === K_CAB) D.key += ':' + D.f + '/' + D.kb + ':' + D.lo + '/' + D.len;
+    return D;
+  }
+
+  /* A crossing's two groups (1.7.0): `f` stitches in front (knit, on top),
+     `kb` knit stitches left in the back group — the rest of it is purl, the
+     background the front strand travels over. Missing or impossible values
+     fall back to two equal halves of knit (C4F, C6B). */
+  function cableGroups(D, f, kb) {
+    var n = Math.max(1, D.subN | 0);
+    f = typeof f === 'number' && isFinite(f) ? Math.floor(f) : NaN;
+    kb = typeof kb === 'number' && isFinite(kb) ? Math.floor(kb) : NaN;
+    if (!(n >= 2 && f >= 1 && f <= n - 1 && kb >= 0 && kb <= n - f)) {
+      f = n >= 2 ? Math.ceil(n / 2) : 1;
+      kb = Math.max(0, n - f);
+    }
+    D.f = f; D.kb = kb;
+    if (D.lo == null) { D.lo = CABLE_TW; D.len = 2 * CABLE_TW + 1; }
     return D;
   }
 
@@ -837,21 +870,30 @@
     return d * KNIT_FLAT * win;
   }
 
-  /* A cable's twist (wave H). One crossing row is 0.75 of a stitch tall and
-     a 6-stitch cable crosses 3 stitches sideways, so a crossing drawn inside
-     its own row is a near-horizontal smear. On the fabric the stitches lean
-     into the cross for a couple of rows either side of it, so the twist is
-     drawn over a window of 2·CABLE_TW + 1 rows: every faced-knit stitch in
-     the cable's columns within CABLE_TW rows of a crossing row carries
-     `phase` (rows from the crossing), `sub` (its physical column within the
-     cable), `subN`, `cross` and `uflip` (its slice runs right-to-left on
-     screen), from `knitTwists`. Across that window strand A runs from
-     U 0.25 to 0.75 and B back; the front strand stands proud and the back
-     one dips where they pass. `cross` > 0 puts B — the one travelling left on
-     screen — in front: a C6F. Each row stays zero on its own top and bottom
-     edges (watertight like every band); across the cable's slices the surface
-     is continuous, and only the cable's outer edges are windowed. */
+  /* A cable's twist (wave H; generalised in 1.7.0, knit-3d-2). One crossing
+     row is 0.75 of a stitch tall and a 6-stitch cable crosses 3 stitches
+     sideways, so a crossing drawn inside its own row is a near-horizontal
+     smear. On the fabric the stitches lean into the cross for the rows
+     around it, so the twist is drawn over a WINDOW of rows from
+     DiagramGeo.knitCables: `lo` rows before the crossing and `len` in all
+     (2 + 1 + 2 for a lone crossing; a T3 every RS row tiles its 2 rows, so a
+     travelling stitch is one continuous diagonal). Every stitch in the
+     cable's columns inside the window carries `phase` (rows from the
+     crossing), `sub` (its physical column within the cable), `subN`,
+     `cross`, `uflip` (its slice runs right-to-left on screen) and the two
+     groups: `f` stitches in FRONT (knit, on top) and `kb` knit stitches in
+     the back group, whose other stitches are purl background. In a frame V
+     where the front group travels toward V = 0 (`cross` > 0 is screen-left:
+     an F / left cross), the front group's centre runs from 1 − f/2n to f/2n
+     and the back group's knits from kb/2n to 1 − kb/2n — so a C6F is two
+     3-stitch strands crossing, a T3F two knit stitches travelling over one
+     purl, the boyfriend's T3F one twisted stitch over a knit and a purl. The
+     front strand stands proud and the back one dips where they pass. Each
+     row stays zero on its own top and bottom edges (watertight like every
+     band); across the cable's slices the surface is continuous, and only
+     the cable's outer edges are windowed. */
   var CABLE_TW = 2;
+  var CABLE_SEAM = 0.16;
   function strandV(U, centre, n, s) {
     var fu = (U - centre) * n + 0.5;
     fu -= Math.floor(fu);
@@ -863,16 +905,24 @@
     var U = (D.sub + uu) / D.subN;
     if (!(U > 0 && U < 1 && s > 0 && s < 1)) return 0;
     var win = smoothstep(0, 0.07, U) * smoothstep(0, 0.07, 1 - U) *
-      smoothstep(0, 0.06, s) * smoothstep(0, 0.06, 1 - s);
-    var S = (D.phase + CABLE_TW + s) / (2 * CABLE_TW + 1);
+      // 1.7.0: a gentler seam between the rows a twist spans (0.06 cut a dark
+      // groove across every strand at each row edge, notching the silhouette)
+      smoothstep(0, CABLE_SEAM, s) * smoothstep(0, CABLE_SEAM, 1 - s);
+    var len = D.len >= 1 ? D.len : 2 * CABLE_TW + 1, lo = D.len >= 1 ? D.lo : CABLE_TW;
+    var S = (D.phase + lo + s) / len;
     var e = smoothstep(0, 1, S);
-    var ua = 0.25 + 0.5 * e, ub = 0.75 - 0.5 * e;
-    var front = D.cross > 0 ? ub : ua, back = D.cross > 0 ? ua : ub;
+    var nS = Math.max(1, D.subN);
+    var a = clamp((D.f > 0 ? D.f : nS / 2) / nS, 0.05, 1), kb = clamp((D.kb >= 0 ? D.kb : nS / 2) / nS, 0, 1 - a);
+    // V: the front group travels toward V = 0
+    var V = D.cross > 0 ? U : 1 - U;
+    var front = (1 - a / 2) + (a - 1) * e;
+    var back = kb / 2 + (1 - kb) * e;
     var pass = Math.exp(-Math.pow((S - 0.5) / 0.13, 2));
     var lobe = 0.86 + 0.14 * Math.sin(Math.PI * s);
     // each strand is a column of knit stitches: its V's lean with it
-    var dF = 1.85 * yarnP((U - front) / 0.17) * lobe * (0.72 + 0.28 * strandV(U, front, D.subN, s));
-    var dB = (1.25 - 0.85 * pass) * yarnP((U - back) / 0.17) * lobe * (0.72 + 0.28 * strandV(U, back, D.subN, s));
+    var dF = 1.85 * yarnP((V - front) / (0.34 * a)) * lobe * (0.72 + 0.28 * strandV(V, front, nS, s));
+    var dB = kb > 0 ? (1.25 - 0.85 * pass) * yarnP((V - back) / (0.34 * kb)) * lobe *
+      (0.72 + 0.28 * strandV(V, back, nS, s)) : 0;
     var d = Math.max(dF, dB, 0.18);
     return d * KNIT_FLAT * win;
   }
@@ -880,51 +930,20 @@
   /**
    * Per round, per slot (work order; a cable expanded to its stitches): the
    * twist a slot belongs to, or undefined. Null when the piece has no cable.
-   * Physical columns: a rows-mode odd row is laid right to left, so its slot
-   * k sits in column W-1-k; rounds always run one way. `base` offsets the
-   * row index (its parity) for a caller holding a single round.
+   * DiagramGeo.knitCables decides (1.7.0: the window, the column a crossing
+   * runs in from row to row, its two groups); `base` offsets the row index
+   * (its parity) for a caller holding a single round.
    */
   function knitTwists(raw, mode, base) {
-    var n = raw.length, W = new Array(n), cab = [], i, k;
-    var b0 = base | 0;
-    for (i = 0; i < n; i++) {
-      var l = (raw[i] && raw[i].stitches) || [], c = 0;
-      for (k = 0; k < l.length; k++) {
-        var sp = knitSpan(l[k]), rk = l[k];
-        if (rk && rk.t === 'cable') {
-          if (typeof rk.at !== 'number') cab.push({ i: i, c0: c, n: sp, cross: rk.cross === 'b' ? -1 : 1 });
-          else if (rk.at === 0) {
-            // one record per stitch: the cable is the run that starts at `at` 0
-            var span = typeof rk.span === 'number' && rk.span >= 1 ? Math.min(24, rk.span | 0) : 1;
-            var run = 1;
-            while (run < span && l[k + run] && l[k + run].t === 'cable' && l[k + run].at === run) run++;
-            if (run >= 2) cab.push({ i: i, c0: c, n: run, cross: rk.cross === 'b' ? -1 : 1 });
-          }
-        }
-        c += sp;
-      }
-      W[i] = Math.max(c, raw[i] ? raw[i].count | 0 : 0);
+    var c = knitCablesOf(raw, mode, base);
+    return c ? c.tw : null;
+  }
+  function knitCablesOf(raw, mode, base) {
+    var Geo = geoOf();
+    if (Geo && Geo.knitCables) {
+      try { return Geo.knitCables(raw, mode, base | 0); } catch (e) { /* none */ }
     }
-    if (!cab.length) return null;
-    var rtl = function (j) { return mode === 'rows' && ((j + b0) & 1) === 1; };
-    var out = new Array(n);
-    for (var q = 0; q < cab.length; q++) {
-      var K = cab[q];
-      var p0 = rtl(K.i) ? W[K.i] - K.c0 - K.n : K.c0;
-      for (var d = -CABLE_TW; d <= CABLE_TW; d++) {
-        var j = K.i + d;
-        if (j < 0 || j >= n || !(W[j] > 0)) continue;
-        if (!out[j]) out[j] = new Array(W[j]);
-        for (var col = p0; col < p0 + K.n; col++) {
-          var slot = rtl(j) ? W[j] - 1 - col : col;
-          if (slot < 0 || slot >= W[j]) continue;
-          var cur = out[j][slot];
-          if (cur && Math.abs(cur.phase) <= Math.abs(d)) continue;
-          out[j][slot] = { phase: d, sub: col - p0, n: K.n, cross: K.cross, uflip: rtl(j) };
-        }
-      }
-    }
-    return out;
+    return null;
   }
 
   /* One stamp per (descriptor, tier, rows, direction): the relief sampled on
@@ -935,7 +954,11 @@
   var STAMP_N = 0;
   function stampOf(D, tier, rows, sdir) {
     var segs = LOD_TIERS[tier].segs;
-    var key = (tier === 0 ? 'L' : D.key) + '|' + tier + '|' + rows + '|' + sdir;
+    /* 1.7.0: at the lowest tier a knitted cable or rib keeps its own relief
+       (sampled on the coarse grid, gained up), so a cable panel still reads
+       as raised columns twisting when a stitch is 2 px across */
+    var lowK = tier === 0 && D && D.knit && (D.k === K_CAB || D.rib !== 0);
+    var key = (tier === 0 && !lowK ? 'L' : D.key) + '|' + tier + '|' + rows + '|' + sdir;
     var hit = STAMPS[key];
     if (hit) return hit;
     if (STAMP_N > 400) { STAMPS = {}; STAMP_N = 0; }
@@ -946,6 +969,7 @@
     var hu = 1 / segs, ht = 1 / rows;
     function f(u, tt) {
       var s = sdir > 0 ? tt : 1 - tt;
+      if (lowK) return KNIT_LOW_GAIN * relief(u, s, D);
       return tier === 0 ? reliefLow(u, s) : relief(u, s, D);
     }
     for (var t = 0; t < vrows; t++) {
@@ -1247,7 +1271,7 @@
      index runs right-to-left on screen (every round seen from outside, and
      the odd rows of a flat piece), so a k2tog leans right and a C6F crosses
      left whichever way the row was worked. */
-  function prepKnitRound(round, defColor, prev, index, pad, mode, tws) {
+  function prepKnitRound(round, defColor, prev, index, pad, mode, tws, pull) {
     var count = Math.max(0, round.count | 0);
     var done = clamp(round.done | 0, 0, count);
     var stitches = round.stitches || null;
@@ -1257,11 +1281,22 @@
     var padKey = pad ? pad.ring + ':' + Math.round(pad.ringP * 100) + ':' + Math.round(pad.P * 100) : '';
     var mir = mode === 'rows' ? ((index & 1) === 1 ? -1 : 1) : -1;
     if (tws === undefined) {
-      var own = knitTwists([round], mode, index);
-      tws = own ? own[0] || null : null;
+      var own = knitCablesOf([round], mode, index);
+      tws = own ? own.tw[0] || null : null;
+      if (pull === undefined) pull = own ? own.pull[0] || null : null;
     }
     var twKey = 0;
-    if (tws) for (var tk = 0; tk < tws.length; tk++) if (tws[tk]) twKey = (twKey * 31 + tk * 7 + (tws[tk].phase + 3) * 3 + tws[tk].sub) | 0;
+    if (tws) {
+      for (var tk = 0; tk < tws.length; tk++) {
+        var tq = tws[tk];
+        if (!tq) continue;
+        twKey = (twKey * 31 + tk * 7 + (tq.phase + 3) * 3 + tq.sub) | 0;
+        // 1.7.0: the window and the two groups shape the strands too
+        twKey = (twKey * 31 + (tq.lo | 0) * 5 + (tq.len | 0) * 11 + (tq.f | 0) * 13 + (tq.kb | 0) * 17) | 0;
+      }
+    }
+    // ...and the cable columns pulled in to cable gauge
+    if (pull) for (var pk = 0; pk < pull.length; pk++) if (pull[pk]) twKey = (twKey * 31 + pk * 3 + 1) | 0;
 
     if (prev && prev.knit && prev.ref === stitches && prev.count === count && prev.base === base &&
         prev.height === height && prev.ghost === ghost && prev.padKey === padKey && prev.mir === mir && prev.twKey === twKey) {
@@ -1280,7 +1315,12 @@
         var span = knitSpan(st);
         // a bound-off stitch is fabric in its own row (Knits gives it w 0)
         var w = st.t === 'bo' ? 1 : (typeof st.w === 'number' && isFinite(st.w) && st.w > 0 ? st.w : (span > 1 ? span * 0.85 : 1));
-        for (j = 0; j < span; j++) { sRec.push(st); sSub.push(j); sN.push(span); sW.push(w / span); }
+        for (j = 0; j < span; j++) {
+          var ws = w / span;
+          // a stitch in a cable column is at cable gauge, as DiagramGeo walked it (1.7.0)
+          if (pull && pull[sRec.length] === 1 && KNIT_PULL_T[st.t || 'k'] === 1 && ws > KNIT_CABLE_W) ws = KNIT_CABLE_W;
+          sRec.push(st); sSub.push(j); sN.push(span); sW.push(ws);
+        }
       }
     }
     while (sRec.length < count) {
@@ -1372,11 +1412,11 @@
       // wave H: knitting records, and the held stitches of a heel flap
       for (var ki = 0; ki < src.length; ki++) if (src[ki]) raw.push(src[ki]);
       var pads = mode === 'rounds' && GeoK.knitPartials ? GeoK.knitPartials(raw) : null;
-      var twists = knitTwists(raw, mode, 0);
+      var cabs = knitCablesOf(raw, mode, 0), twists = cabs ? cabs.tw : null;
       for (ki = 0; ki < raw.length; ki++) {
         var pv = prevRounds ? prevRounds[ki] : null;
         rounds.push(prepKnitRound(raw[ki], def, pv && pv.knit ? pv : null, ki, pads ? pads[ki] : null, mode,
-          twists ? twists[ki] || null : null));
+          twists ? twists[ki] || null : null, cabs ? cabs.pull[ki] || null : null));
       }
     }
     for (var i = 0; !knit && i < src.length; i++) {
@@ -1746,18 +1786,20 @@
       var lum = 0.2126 * cr + 0.7152 * cg + 0.0722 * cb;
       var base = j * vps;
       var pk = D.peak > 0 ? D.peak : 1;
+      // 1.7.0: a knitted cable / rib keeps its relief (and so its cavities) at tier 0
+      var lowKnit = tier === 0 && D.knit && (D.k === K_CAB || D.rib !== 0);
 
       for (t = 0; t < vrows; t++) {
         var edgeT = (t === 0 || t === vrows - 1) ? 1 : 0;
         for (k = 0; k < cols; k++) {
           vi = t * cols + k;
           var ao;
-          if (tier === 0) {
+          if (tier === 0 && !lowKnit) {
             ao = P.edge[k] * AO_EDGE + edgeT * AO_BAND;
           } else {
             // crevice AO from the relief itself: the low ground between the
             // legs, beside a post and under a welt is where light does not reach
-            var cav = clamp(1 - S.d[vi] / (0.95 * pk), 0, 1.3);
+            var cav = clamp(1 - S.d[vi] / (0.95 * pk * (lowKnit ? KNIT_LOW_GAIN : 1)), 0, 1.3);
             ao = cav * AO_CAV + edgeT * AO_BAND * 0.6;
           }
           var mixv = Math.min(1, ao * (AO_DESAT / (AO_EDGE + AO_BAND)));
@@ -4021,7 +4063,7 @@
 
   global.Diagram = {
     mount: mount,
-    version: '1.6.0',
+    version: '1.7.0',
     /* Follow mode's pure arithmetic (wave F), for hosts and the test page.
        angle(index, count[, a0, aw])  ring angle of the working point
        yawFor(angle)                  camera yaw that puts that angle in front

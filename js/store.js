@@ -1932,16 +1932,41 @@
   var EMPTY_ENTRY = { text: '', length: 0, size: 0, lines: [], version: 0, index: null };
 
   /**
+   * wave H (knit-qa-2): the size names a text declares — the parser's
+   * `detectSizes`, else the `Sizes: a, b, c` line the knitting reader puts on
+   * top of every part it splits off (which its own detector does not read
+   * back when the names are "2 yrs, 4 yrs …"). null when fewer than two.
+   */
+  var CARRIED_SIZES_RE = /^\s*sizes\s*:\s*([^\n]+)$/im;
+
+  function knitSizesFromText(api, text) {
+    var own = null;
+    if (api && typeof api.detectSizes === 'function' && text) {
+      try { own = api.detectSizes(text); } catch (e) { own = null; }
+    }
+    if (Array.isArray(own) && own.length >= 2) return own.map(String);
+    var m = CARRIED_SIZES_RE.exec(str(text, ''));
+    if (m && m[1].indexOf(',') >= 0) {
+      var names = m[1].split(',').map(function (s) { return s.trim(); }).filter(function (s) { return s && s.length <= 24; });
+      if (names.length >= 2 && names.length <= 20) return names;
+    }
+    return null;
+  }
+
+  function sizesOfText(text, craft) {
+    var c = craftKeyOf(craft);
+    if (c === DEFAULT_CRAFT) return null;
+    return knitSizesFromText(patternsApi(c), str(text, ''));
+  }
+
+  /**
    * wave H (knit-qa): the size names a counter-craft part is read at — its own
    * text's when it names two or more (an ebook pattern's "Sizes:" line), else
    * the project's (a probe part's `sizeCount` stands for its project). `count`
    * is how many (0 = none known).
    */
   function knitPartSizes(prt, api, text) {
-    var own = null;
-    if (api && typeof api.detectSizes === 'function' && text) {
-      try { own = api.detectSizes(text); } catch (e) { own = null; }
-    }
+    var own = knitSizesFromText(api, text);
     if (Array.isArray(own) && own.length >= 2) return { names: own.map(String), count: own.length, own: true };
     var proj = prt && typeof prt.sizeCount !== 'number' ? projectOfPart(prt) : null;
     if (proj && Array.isArray(proj.sizes) && proj.sizes.length >= 2) {
@@ -2066,7 +2091,7 @@
    * count does not shadow a later line that has one, and it is read PER ROW so a
    * growing range keeps its shape (`countAtRow`).
    */
-  function buildRowIndex(lines, upTo) {
+  function buildRowIndex(lines, upTo, knit) {
     var line = [];
     var count = [];
     var pass, i, l, r, end, c, per, cr;
@@ -2082,10 +2107,23 @@
         // only a line with per-row `counts` pays for a lookup per row.
         c = strictCount(l);
         per = l.counts ? l.counts : null;
+        // wave H (knit-qa-2): a knitted range that CHANGES the count and has
+        // no per-row counts ("Cast off 7 sts beg next 2 rows. 140 sts.",
+        // "Cast off 15 sts beg next 4 rows, then 16 sts beg next 2 rows")
+        // prints its total for its LAST row; the rows before it are not that
+        // number (row 3 of the mock neck back makes 147, not 140), so they
+        // get no target rather than the finished one
+        // (only when the count BEFORE it is known and differs: a range whose
+        // start is unknown keeps its one count, as before)
+        var knitShaping = knit && !per && c !== null && end > l.row &&
+          ((typeof l.prevCount === 'number' && l.prevCount !== c) ||
+           // ...or it says it shapes ("Cast off 15 sts beg next 4 rows")
+           /\b(?:cast\s+off|bind\s+off|bo|dec(?:rease)?|inc(?:rease)?)\b[^.]{0,60}\bnext\s+\d+\s+(?:rows|rnds|rounds)\b/i.test(str(l.text, '')));
         for (r = l.row; r <= end; r++) {
           // wave H: "Rows 2, 4, 6 and 8 (WS)" covers those rows, not 3, 5, 7
           if (l.rowList && l.rowList.indexOf(r) < 0) continue;
           if (line[r] === undefined) line[r] = l;
+          if (knitShaping && r < end && !(l.rowList && l.rowList[l.rowList.length - 1] === r)) continue;
           if (count[r] === undefined) {
             cr = per ? countAtRow(l, r) : c;
             if (cr !== null) count[r] = cr;
@@ -2103,7 +2141,7 @@
     var entry = partLines(prt);
     if (!entry.index) {
       if (entry === EMPTY_ENTRY) return buildRowIndex([], ROW_INDEX_MAX);
-      entry.index = buildRowIndex(entry.lines, ROW_INDEX_MAX);
+      entry.index = buildRowIndex(entry.lines, ROW_INDEX_MAX, entry.craft === 'knitting');
     }
     return entry.index;
   }
@@ -2217,9 +2255,15 @@
             // Wave F: "made twice, from the assembly text" - the import
             // preview and the part list say so (wave E left it unshown).
             if (s && s.makeCountInferred) sec.makeCountInferred = true;
+            // wave H (knit-qa-2): a prose part the reader offers for import
+            // although it has no numbered rows (Sandnes' Back And Front)
+            if (s && s.offer) sec.offer = true;
+            if (s && s.continues) sec.continues = str(s.continues, '');
             // Wave G: the size group's name ("Keyring" / "Medium" / "Big"),
             // null when the document has one size
             sec.group = normalizeGroupName(s && s.group);
+            // wave H (knit-qa-2): the gauge lines the knitting reader carries for a group
+            if (s && Array.isArray(s.gaugeLines) && s.gaugeLines.length) sec.gaugeLines = s.gaugeLines.slice(0, 6).map(String);
             return sec;
           });
           // wave H (knit-qa): a knitting section the parser could not name
@@ -3576,7 +3620,8 @@
     '\\bU\\.?\\s?S\\.?\\s*(?:size\\s*)?(\\d+(?:\\.\\d+)?)\\s*[\\(\\[]\\s*(\\d+(?:[.,]\\d+)?)\\s*mm\\s*[\\)\\]]' +
     '|(\\d+(?:[.,]\\d+)?)\\s*mm\\b(?:\\s*[\\(\\[]\\s*U\\.?\\s?S\\.?\\s*(?:size\\s*)?(\\d+(?:\\.\\d+)?)\\s*[\\)\\]])?' +
     '|\\bU\\.?\\s?S\\.?\\s*(?:size\\s*)?(\\d+(?:\\.\\d+)?)\\b', 'gi');
-  var NEEDLE_LINE_RE = /\bneedles?\b|\bcircular\b|\bdpns?\b|\bdouble[- ]pointed\b/i;
+  // (wave H, knit-qa-2: "ndl" / "ndls" is Sandnes' word for a needle)
+  var NEEDLE_LINE_RE = /\bneedles?\b|\bndls?\b|\bcircular\b|\bdpns?\b|\bdouble[- ]pointed\b/i;
 
   /** Every needle size the needle lines name, in order: [{ mm, label }]. */
   function needleSizes(text) {
@@ -3585,7 +3630,11 @@
     for (var i = 0; i < rows.length && i < 400; i++) {
       var t = rows[i];
       // the size may sit on the line after a bare "NEEDLES" label
-      if (!NEEDLE_LINE_RE.test(t) && !(i > 0 && /^\s*needles?\s*:?\s*$/i.test(rows[i - 1]))) continue;
+      // (wave H, knit-qa-2: or the line the PDF wrapped before "needles":
+      // "Sizes U.S. 6 (4 mm) and U.S. 7 (4.5 mm) Susan Bates®" /
+      // "Silvalume® knitting needles or size needed to obtain gauge.")
+      if (!NEEDLE_LINE_RE.test(t) && !(i > 0 && /^\s*needles?\s*:?\s*$/i.test(rows[i - 1])) &&
+          !(i + 1 < rows.length && /^[^.]{0,40}\bneedles?\b/i.test(rows[i + 1]) && /\bmm\b|\bU\.?\s?S\.?\s*\d/i.test(t))) continue;
       NEEDLE_SIZE_RE.lastIndex = 0;
       var m;
       while ((m = NEEDLE_SIZE_RE.exec(t)) !== null) {
@@ -3617,6 +3666,13 @@
       hint = at >= 0 ? raw.slice(at, at + gaugeSource.length + 80) : gaugeSource;
     }
     var want = /\blarger\b/i.test(hint) ? 1 : (/\bsmaller\b/i.test(hint) ? -1 : 0);
+    // wave H (knit-qa-2): "TENSION: 14 sts St-st with 6 mm ndls = 10 cm" names
+    // the gauge needle itself (the Sandnes raglan listed its 5 mm rib needle first)
+    var tm = /\b(?:tension|gauge)\b[^\n]{0,80}?\bwith\s+(\d+(?:[.,]\d+)?)\s*mm\b/i.exec(hint || raw);
+    if (tm) {
+      var tmm = parseFloat(tm[1].replace(',', '.'));
+      for (var ti = 0; ti < sizes.length; ti++) if (sizes[ti].mm === tmm) return sizes[ti].label;
+    }
     if (!want) return sizes[0].label;
     var best = null;
     sizes.forEach(function (s) {
@@ -3670,6 +3726,55 @@
       unit: printed,
       needle: needle
     };
+  }
+
+  /*
+   * wave H (knit-qa-2): the pattern's own abbreviation block ("C4F = Slip
+   * next 2 stitches onto a cable needle and leave at front of work. K2, then
+   * K2 from cable needle.") as printed, from its heading to the next heading
+   * of the front matter. The importer keeps it on the project
+   * (`craftData.abbreviations`, plus `craftData.glossary` read from it) so the
+   * 3D draws a cable from the PATTERN's definition (the boyfriend's T3F is 1
+   * over 1, the mock neck's 2 over a purl) and the glossary sheet lists it.
+   * '' when the document has no such block.
+   */
+  var ABBR_HEAD_RE = /^\s*(?:abbreviations?|abbreviation\s+key|stitch\s+abbreviations)\s*:?\s*$/i;
+  var ABBR_END_RE = /^\s*(?:={3}\s*page\b|sizes?\b|to fit\b|gauge\b|tension\b|instructions\b|materials\b|measurements\b|notes?\s*:?\s*$|the instructions are written|finished\s+(?:size|measurements|chest))/i;
+
+  function knitAbbreviationBlock(fullText) {
+    var rows = str(fullText, '').split(/\r?\n/);
+    for (var i = 0; i < rows.length && i < 2000; i++) {
+      if (!ABBR_HEAD_RE.test(rows[i])) continue;
+      var out = [];
+      for (var j = i + 1; j < rows.length && out.length < 160; j++) {
+        var t = rows[j];
+        if (ABBR_END_RE.test(t)) break;
+        if (!/\S/.test(t)) continue;
+        out.push(t.replace(/\s+$/, ''));
+      }
+      var block = out.join('\n');
+      // a heading with no "X = …" lines under it is not the block
+      if (/^\s*[A-Za-z][\w/()&.]{0,12}\s*(?:=|:)\s*\S/m.test(block)) return block.slice(0, 8000);
+    }
+    return '';
+  }
+
+  /** Keep the document's abbreviation block on a knitting project (in the import's snapshot). */
+  function importAbbreviations(proj, fullText, api) {
+    var block = knitAbbreviationBlock(fullText);
+    if (!block) return false;
+    if (!proj.craftData || typeof proj.craftData !== 'object' || Array.isArray(proj.craftData)) proj.craftData = {};
+    if (proj.craftData.abbreviations === block) return false;
+    proj.craftData.abbreviations = block;
+    var gl = [];
+    if (api && typeof api.glossary === 'function') {
+      try {
+        gl = (api.glossary('ABBREVIATIONS\n' + block) || []).filter(function (g) { return g && g.fromPattern && str(g.abbr, '').trim(); })
+          .slice(0, 120).map(function (g) { return { abbr: str(g.abbr, '').trim(), meaning: str(g.meaning, '').trim(), fromPattern: true }; });
+      } catch (e) { gl = []; }
+    }
+    proj.craftData.glossary = gl;
+    return true;
   }
 
   function importGauge(proj, fullText, api) {
@@ -3756,12 +3861,16 @@
         var g = normalizeGroupName(s0 && s0.group);
         if (!g) return;
         if (g0 === null) g0 = g;
-        if (g === g0) gText.push(str(s0 && s0.text, ''));
+        if (g === g0) {
+          gText.push(str(s0 && s0.text, ''));
+          // (knit-qa-2: and the gauge lines the reader carries for it)
+          if (s0 && Array.isArray(s0.gaugeLines)) s0.gaugeLines.forEach(function (gl) { gText.push(str(gl, '')); });
+        }
       });
       if (g0 !== null) {
         knitGroupText = gText.join('\n');
         try {
-          var gNames = docApi.detectSizes(knitGroupText);
+          var gNames = knitSizesFromText(docApi, knitGroupText);
           if (Array.isArray(gNames) && gNames.length > 1) proj.sizes = gNames.map(String);
         } catch (e) { /* ignore parser errors */ }
       }
@@ -3772,6 +3881,8 @@
     // read from its sections; the book's first gauge line is another sock's)
     var gaugeText = knitGroupText !== null ? knitGroupText : fullText;
     if (gaugeText && craft !== DEFAULT_CRAFT && importGauge(proj, gaugeText, docApi)) out.gauge = true;
+    // wave H (knit-qa-2): the abbreviation block (cable definitions) rides along
+    if (fullText && craft === 'knitting' && importAbbreviations(proj, fullText, docApi)) out.abbreviations = true;
     // Wave F (size-once, 03 #1): the size picked in the import preview, for
     // the whole project. Every part this import touches is read at it, and
     // its target is that size's ("a total of 25 (29, 33 …) Rows").
@@ -5772,6 +5883,15 @@
         /* leave it null — "the pattern does not say" */
       }
     }
+    // wave H (knit-qa-2): a knitted piece picked up along the TOP edge of
+    // another and worked up (the Cabled Yoke's Top Yoke) is drawn bottom-up
+    // by the model (knitShapeHints); the viewer's "Auto — …" line reads it here,
+    // so it no longer said "Auto — top-down" over "worked bottom-up"
+    if (!out.upsideDownSource && craftKeyOf(prt) === 'knitting' &&
+        KNIT_WORKED_UP_RE.test(prt && prt.patternText ? String(prt.patternText) : '')) {
+      out.upsideDown = true;
+      out.upsideDownSource = 'text';
+    }
     return out;
   }
 
@@ -6271,6 +6391,7 @@
     // short rows, markers) and how its ends close (graft, a toe cast-on).
     var knit = craftKeyOf(proj || prt) === 'knitting';
     if (knit) knitShapeHints(shape, prt);
+    var cableDefs = knit ? knitCableDefsFor(prt, proj) : null;
 
     var maxRow = 0;
     if (lines.length) {
@@ -6319,6 +6440,11 @@
           break;
         }
       }
+      /* knit-3d-2: a part that starts mid-piece ("Sleeves (continued)": the
+         section break fell inside the sleeve) carries the stitches the part
+         before it in the project ended on — Knits expands its rows from 0
+         otherwise and answers `live: 0`, "unknown" */
+      if (!prevCount && lines.length) prevCount = knitCarriedCount(prt, proj);
     }
 
     // Rows past the window are never pushed and nothing downstream reads their
@@ -6335,6 +6461,7 @@
       var positions = 0;
       var truncated = false;
       var boOnly = 0;
+      var knitUnknown = false;
 
       if (canExpand) {
         try {
@@ -6348,6 +6475,9 @@
           if (ex.color) color = resolve(ex.color);
           var list = Array.isArray(ex.stitches) ? ex.stitches : [];
           if (list.length > DIAGRAM_MAX_POSITIONS) list = list.slice(0, DIAGRAM_MAX_POSITIONS);
+          // knit-3d-2: a fallback (Knits now writes `at` on every cable record): a cable written one record per stitch without `at` (a
+          // panel row Knits expanded) is numbered, so it counts as its stitches
+          if (knit) list = knitCableAt(list);
           positions = list.length;
           // The round's COUNT is its stitches; its POSITIONS are its geometry.
           // On a ch-3 mesh row those differ four-fold, and it is the count that
@@ -6361,6 +6491,13 @@
             for (var bi = 0; bi < list.length; bi++) if (list[bi] && list[bi].t === 'bo') boOnly++;
             if (boOnly) count = boOnly;
           }
+          /* knit-3d-2: `live: 0` on a row that says something is UNKNOWN (no
+             start count reached it), not an empty ring: it carries the count
+             before it and is marked `countless` below */
+          // (a round with no row of its own — "Cont St-st in rnds until 32 cm"
+          // after "= 92 sts." — carries the stitches it was started on)
+          if (knit && !count && !list.length && ex.live === 0 &&
+              (line ? line.kind !== 'setup' && /\S/.test(String(line.text || '')) : prevCount > 0)) knitUnknown = true;
           // Rows before the window are walked only to carry `prevCount` and the
           // colour state forward, so they never pay for stitch records.
           if (row >= first && positions > 0) {
@@ -6397,9 +6534,17 @@
                 if (typeof st.n === 'number' && isFinite(st.n) && st.n >= 1) rec.n = Math.floor(st.n);
                 if (typeof st.span === 'number' && isFinite(st.span) && st.span >= 1) rec.span = Math.floor(st.span);
                 if (typeof st.at === 'number' && isFinite(st.at) && st.at >= 0) rec.at = Math.floor(st.at);
+                // knit-3d-2: a crossing's name and its two groups, when Knits sends them
+                if (st.t === 'cable') {
+                  if (typeof st.name === 'string' && st.name) rec.name = st.name.slice(0, 8);
+                  if (typeof st.cf === 'number' && isFinite(st.cf) && st.cf >= 1) rec.cf = Math.floor(st.cf);
+                  if (typeof st.cb === 'number' && isFinite(st.cb) && st.cb >= 0) rec.cb = Math.floor(st.cb);
+                }
               }
               stitches.push(rec);
             }
+            // knit-3d-2: which cable each crossing is, and its two groups
+            if (knit && cableDefs) knitNameCables(stitches, line, cableDefs);
           }
         } else {
           ex = null;
@@ -6421,6 +6566,9 @@
          repeat sentence — so the piece can turn 360/target per tap. With no
          target either, the ring is only as long as what has been tapped and
          the round says so (`countless`): there is no honest size to turn by. */
+      // knit-3d-2: an unknown knitted row (`live: 0`) carries the count before it
+      var knitCarried = false;
+      if (knitUnknown && !count && prevCount > 0) { count = prevCount; knitCarried = true; }
       var countless = false;
       if (!count && row === workingRow) {
         var tgt = (rowIndex ? usableCount(rowIndex.count[patternRow]) : null) || targetFor(prt, patternRow) || 0;
@@ -6488,6 +6636,8 @@
         // its `count` is just the stitches tapped so far, so the renderer's
         // follow mode must not turn by it. Absent otherwise.
         if (countless) roundRec.countless = true;
+        // knit-3d-2: an unknown knitted row drawn at the count it carried (or none)
+        if (knitUnknown && (knitCarried || !count)) roundRec.countless = true;
         if (knit && line) knitRoundFields(roundRec, line);
         // wave H (knit-qa): a flat stretch inside a piece knitted in the
         // round takes its side by parity from the last stated tag — the
@@ -6508,6 +6658,16 @@
     if (current < 0) current = rounds.length ? rounds.length - 1 : 0;
 
     flagOutliers(mode, rounds);
+    /* knit-3d-2: a short row worked flat inside a round piece is SUPPOSED to
+       be a few stitches of the ring (the first German short row across a
+       back neck is 5 of 56) — DiagramGeo closes it with its held stitches;
+       it is not a misread count */
+    if (knit && mode === 'rounds') {
+      for (var oi = 0; oi < rounds.length; oi++) {
+        var orr = rounds[oi];
+        if (orr.outlier && orr.shortRow === true && (orr.side === 'rs' || orr.side === 'ws')) orr.outlier = false;
+      }
+    }
     var ck = cornersOf(mode, rounds, prt);
     shape.corners = ck.corners;
     shape.cornersSource = ck.cornersSource;
@@ -6545,11 +6705,234 @@
     if (entry === EMPTY_ENTRY) return shape;
     if (!entry.knitHints) {
       var text = prt && prt.patternText ? String(prt.patternText) : '';
-      entry.knitHints = { graft: KNIT_GRAFT_RE.test(text), closedStart: KNIT_CLOSED_START_RE.test(text) };
+      entry.knitHints = { graft: KNIT_GRAFT_RE.test(text), closedStart: KNIT_CLOSED_START_RE.test(text),
+        up: KNIT_WORKED_UP_RE.test(text) };
     }
     if (entry.knitHints.graft) shape.graft = true;
     if (entry.knitHints.closedStart) shape.closedStart = true;
+    /* knit-3d-2: a piece picked up along the TOP edge of another and worked
+       up from it (the Patons Cabled Yoke's Top Yoke, a collar) is drawn
+       with its first round at the bottom — unless the part already says. */
+    if (entry.knitHints.up && !shape.upsideDownSource) {
+      shape.upsideDown = true;
+      shape.upsideDownSource = 'text';
+    }
     return shape;
+  }
+
+  /**
+   * Number a cable written one record per stitch without `at` (Knits'
+   * expanded panel rows): a run of identical cable records whose length is a
+   * multiple of their `span` is that many crossings, `at` 0..span-1 each.
+   * Returns the list itself when there is nothing to number.
+   */
+  function knitCableAt(list) {
+    var out = null, i = 0, n = list.length;
+    while (i < n) {
+      var r = list[i];
+      if (!r || r.t !== 'cable' || typeof r.at === 'number' || !(r.span >= 2)) { i++; continue; }
+      var sp = Math.min(24, Math.floor(r.span)), j = i;
+      while (j < n && list[j] && list[j].t === 'cable' && typeof list[j].at !== 'number' && list[j].span === r.span &&
+             list[j].cross === r.cross && (list[j].name || '') === (r.name || '')) j++;
+      var len = j - i;
+      if (len >= sp && len % sp === 0) {
+        if (!out) out = list.slice();
+        for (var q = i; q < j; q++) {
+          var c = {};
+          for (var k in list[q]) if (Object.prototype.hasOwnProperty.call(list[q], k)) c[k] = list[q][k];
+          c.at = (q - i) % sp;
+          out[q] = c;
+        }
+      }
+      i = j;
+    }
+    return out || list;
+  }
+
+  /**
+   * The stitches a knitting part starts on when it prints no cast-on: what
+   * the part before it in the project ended on ("Sleeves (continued)" after
+   * "Sleeves"). 0 when there is no such part, it ended bound off, or it is
+   * too long for its model to reach its end.
+   */
+  var knitCarryDepth = 0;
+  function knitPrevPart(prt, proj) {
+    var ps = proj && Array.isArray(proj.parts) ? proj.parts : null;
+    if (!ps || !prt) return null;
+    var i = ps.indexOf(prt);
+    if (i < 0) for (var j = 0; j < ps.length; j++) if (ps[j] && ps[j].id === prt.id) { i = j; break; }
+    return i > 0 ? ps[i - 1] || null : null;
+  }
+  function knitCarriedCount(prt, proj) {
+    var pp = knitPrevPart(prt, proj);
+    if (!pp || knitCarryDepth > 6) return 0;
+    var m;
+    knitCarryDepth++;
+    try { m = diagramModel(pp, proj); } catch (e) { m = null; } finally { knitCarryDepth--; }
+    var rs = m && Array.isArray(m.rounds) ? m.rounds : [];
+    if (!rs.length || !m.window || m.window.total !== rs.length) return 0;
+    for (var k = rs.length - 1; k >= 0; k--) {
+      var r = rs[k];
+      if (!r || !(r.count > 0) || r.shortRow === true) continue;
+      if (r.countless) return 0;
+      var st = Array.isArray(r.stitches) ? r.stitches : [], bo = 0;
+      for (var q = 0; q < st.length; q++) if (st[q] && st[q].t === 'bo') bo++;
+      return st.length && bo === st.length ? 0 : Math.floor(r.count);
+    }
+    return 0;
+  }
+  /** What a knitting part's model reads from the part before it (for the cache key). */
+  function knitPrevKey(prt, proj) {
+    if (!proj || craftKeyOf(proj) !== 'knitting') return '';
+    var pp = knitPrevPart(prt, proj);
+    if (!pp) return '';
+    var e = partLines(pp);
+    return pp.id + ':' + sizeIndexOf(pp) + ':' + e.length + ':' + e.version;
+  }
+
+  /** "pick up and knit 198 sts around top edge of Cable Yoke" — worked up from it. */
+  var KNIT_WORKED_UP_RE =
+    /\bpick(?:ed)?\s+up\b[^.]{0,120}?\b(?:around|along|across)\s+(?:the\s+)?top\s+edge\b|\bwork(?:ed)?\s+up(?:ward)?s?\s+in\s+(?:the\s+)?(?:round|rnds?)\b/i;
+
+  /* ---- cables (knit-3d-2) ----------------------------------------------
+     DiagramGeo 1.6.0 draws each crossing from its two groups: `cf` stitches
+     in front (knit, on top) and `cb` knit stitches left in the back group
+     (the rest of it is purl). A cable's name does not say that reliably —
+     Patons' mock neck T3F carries 2 knits over a purl, the boyfriend's T3F
+     one twisted stitch over a knit and a purl — so the pattern's OWN
+     definition decides ("T3F = Slip next 2 stitches onto a cable needle and
+     leave at front of work. P1, then K2 from cable needle."). `Knits.expand`
+     writes a cable as one record per stitch (`span`, `at`) without its name,
+     so the name comes from the row's own words (the n-th 3-stitch front
+     cross on the row is the n-th of them in its text), else from the only
+     cable of that width and direction the pattern defines. */
+  var KNIT_CABLE_NAME_G = /\b((?:c|t|cr|tw)\d{1,2}(?:f|b|l|r)(?:k|p)?|\d\/\d\s*(?:l|r)p?(?:c|t)|rt|lt)\b/gi;
+  var KNIT_CABLE_DEF_RE = /^\s*((?:c|t|cr|tw)\d{1,2}(?:f|b|l|r)(?:k|p)?|\d\/\d\s*(?:l|r)p?(?:c|t))\s*(?:=|:|–|—|-)\s*(.*)$/i;
+  var KNIT_ABBR_LINE_RE = /^\s*[A-Za-z][\w/()&.]{0,12}\s*(?:=|:)\s*\S/;
+  var KNIT_CABLE_HOLD_RE = /\bsl(?:ip)?\s+(?:the\s+)?(?:next\s+)?(\d+|one|two|three|four|five|six)?\s*(?:st(?:itch)?(?:e?s)?)?\s*(?:onto|on|to)\s+(?:a\s+|the\s+)?(?:cable\s+needle|cn)\b[^.]*?\b(front|back)\b/i;
+  var KNIT_WORD_N = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6 };
+
+  function knitCableKey(name) { return String(name || '').toUpperCase().replace(/\s+/g, ''); }
+  function knitCableNameN(name) {
+    var k = knitCableKey(name), m = /^(\d)\/(\d)/.exec(k);
+    if (m) return (+m[1]) + (+m[2]);
+    if (k === 'RT' || k === 'LT') return 2;
+    m = /\d+/.exec(k);
+    return m ? +m[0] : 0;
+  }
+  function knitCableNameCross(name) {
+    var k = knitCableKey(name), m = /^\d\/\d(L|R)/.exec(k);
+    if (m) return m[1] === 'L' ? 'f' : 'b';
+    if (k === 'LT') return 'f';
+    if (k === 'RT') return 'b';
+    m = /^(?:C|T|CR|TW)\d+(F|B|L|R)/.exec(k);
+    return m ? (m[1] === 'F' || m[1] === 'L' ? 'f' : 'b') : null;
+  }
+
+  /** One definition → `{n, cf, cb}`, or null when it does not say. */
+  function knitCableDefOf(name, body) {
+    var hold = KNIT_CABLE_HOLD_RE.exec(body);
+    if (!hold) return null;
+    var held = hold[1] ? (KNIT_WORD_N[hold[1].toLowerCase()] || +hold[1]) : 1;
+    var rest = body.slice(hold.index + hold[0].length), m, re = /\b([kp])(\d{1,2})/gi, toks = [], tot = 0;
+    while ((m = re.exec(rest)) && tot < 48) { toks.push({ k: m[1].toLowerCase() === 'k', c: +m[2] }); tot += +m[2]; }
+    var n = knitCableNameN(name);
+    if (!(n >= 2) || tot !== n || !(held >= 1 && held < n)) return null;
+    /* The stitches worked first come off the left needle (n − held of them);
+       the rest come off the cable needle (the held group). The group held
+       in FRONT is the one on top; count the knits each group shows. */
+    var need = n - held, kWorked = 0, kHeld = 0;
+    for (var i = 0; i < toks.length; i++) {
+      var c = toks[i].c, take = Math.min(c, need);
+      if (toks[i].k) { kWorked += take; kHeld += c - take; }
+      need -= take;
+    }
+    var front = hold[2].toLowerCase() === 'front';
+    var cf = front ? kHeld : kWorked, cb = front ? kWorked : kHeld;
+    if (!(cf >= 1 && cf < n && cb >= 0 && cf + cb <= n)) return null;
+    return { n: n, cf: cf, cb: cb };
+  }
+
+  /** `{NAME: {n, cf, cb}}` from every cable definition in the text. */
+  function knitCableDefs(text) {
+    var lines = String(text || '').split(/\r?\n/), out = {}, i, j;
+    for (i = 0; i < lines.length; i++) {
+      var m = KNIT_CABLE_DEF_RE.exec(lines[i]);
+      if (!m) continue;
+      // a definition wraps over the lines after it, up to the next abbreviation
+      var body = m[2];
+      for (j = i + 1; j < lines.length && j < i + 8 && body.length < 320; j++) {
+        if (KNIT_ABBR_LINE_RE.test(lines[j])) break;
+        body += ' ' + lines[j];
+      }
+      var d = knitCableDefOf(m[1], body);
+      if (d) out[knitCableKey(m[1])] = d;
+    }
+    return out;
+  }
+
+  /** The definitions a part can see: its own text, its project's notes and sibling parts. */
+  function knitCableDefsFor(prt, proj) {
+    var entry = partLines(prt);
+    var bits = [prt && prt.patternText ? String(prt.patternText) : ''];
+    if (proj) {
+      if (proj.notes) bits.push(String(proj.notes));
+      // wave H (knit-qa-2): the abbreviation block the importer kept
+      if (proj.craftData && typeof proj.craftData.abbreviations === 'string') bits.push(proj.craftData.abbreviations);
+      var ps = Array.isArray(proj.parts) ? proj.parts : [];
+      for (var i = 0; i < ps.length && i < 40; i++) if (ps[i] && ps[i] !== prt && ps[i].patternText) bits.push(String(ps[i].patternText));
+    }
+    var text = bits.join('\n');
+    if (entry !== EMPTY_ENTRY && entry.knitCables && entry.knitCables.len === text.length) return entry.knitCables.defs;
+    var defs = text.length < 400000 ? knitCableDefs(text) : {};
+    if (entry !== EMPTY_ENTRY) entry.knitCables = { len: text.length, defs: defs };
+    return defs;
+  }
+
+  /**
+   * Name each cable crossing of a knitted row's records and, when the
+   * pattern defines it, give its records `cf` / `cb`. In place.
+   */
+  function knitNameCables(stitches, line, defs) {
+    var i, k, m;
+    var hasCable = false;
+    for (i = 0; i < stitches.length; i++) if (stitches[i] && stitches[i].t === 'cable') { hasCable = true; break; }
+    if (!hasCable) return;
+    var said = {}, text = line && line.text ? String(line.text) : '';
+    KNIT_CABLE_NAME_G.lastIndex = 0;
+    while ((m = KNIT_CABLE_NAME_G.exec(text))) {
+      var nm = knitCableKey(m[1]), key = knitCableNameN(nm) + (knitCableNameCross(nm) || '?');
+      (said[key] = said[key] || []).push(nm);
+    }
+    var defined = {};
+    for (k in defs) {
+      if (!Object.prototype.hasOwnProperty.call(defs, k)) continue;
+      var dk = defs[k].n + (knitCableNameCross(k) || '?');
+      (defined[dk] = defined[dk] || []).push(k);
+    }
+    var used = {};
+    i = 0;
+    while (i < stitches.length) {
+      var r = stitches[i];
+      if (!r || r.t !== 'cable' || (typeof r.at === 'number' && r.at !== 0)) { i++; continue; }
+      var run = 1;
+      if (typeof r.at === 'number') {
+        while (i + run < stitches.length && stitches[i + run] && stitches[i + run].t === 'cable' &&
+               stitches[i + run].at === run) run++;
+      } else run = knitRecordSpan(r);
+      var cross = r.cross === 'b' ? 'b' : 'f', key2 = run + cross;
+      var name = r.name ? knitCableKey(r.name) : null;
+      if (!name && said[key2]) { var u = used[key2] | 0; name = said[key2][u % said[key2].length]; used[key2] = u + 1; }
+      if (!name && defined[key2] && defined[key2].length === 1) name = defined[key2][0];
+      var def = name ? defs[name] : null;
+      var span = typeof r.at === 'number' ? run : 1;
+      for (k = 0; k < span; k++) {
+        var rr = stitches[i + k];
+        if (name) rr.name = name.slice(0, 8);
+        if (def && def.n === run) { rr.cf = def.cf; rr.cb = def.cb; }
+      }
+      i += span;
+    }
   }
 
   /**
@@ -6616,7 +6999,9 @@
       // chip, and the document's answer the importer wrote onto the part.
       '|' + (partDialect(prt) || '-') +
       '|' + yarnSerial(proj) +
-      '|' + entry.length + '|v' + entry.version
+      '|' + entry.length + '|v' + entry.version +
+      // knit-3d-2: a part with no cast-on starts where the part before it ended
+      '|' + knitPrevKey(prt, proj)
     );
   }
 
@@ -7291,6 +7676,26 @@
    *   numbered:boolean, line:Object|null, patternRow:number|null}|null}
    */
   function shortRowInfo(prt) {
+    var info = shortRowInfoBase(prt);
+    if (!info) return info;
+    // wave H (knit-qa-2): `Line.shortRows` [{n, side, worked}] — how far this
+    // short row works and on which side ("Short row 3 of 6 · 11 sts")
+    var list = info.line && Array.isArray(info.line.shortRows) ? info.line.shortRows : null;
+    info.worked = null;
+    info.side = null;
+    if (list) {
+      for (var i = 0; i < list.length; i++) {
+        var e = list[i];
+        if (!e || e.n !== info.n) continue;
+        if (typeof e.worked === 'number' && isFinite(e.worked) && e.worked > 0) info.worked = Math.floor(e.worked);
+        info.side = normalizeKnitSide(e.side);
+        break;
+      }
+    }
+    return info;
+  }
+
+  function shortRowInfoBase(prt) {
     if (!prt || !isKnitPart(prt)) return null;
     var st = prt.shortRows && typeof prt.shortRows === 'object' ? prt.shortRows : null;
     if (st && !st.active && st.row === prt.row) return null;   // done for this row
@@ -7661,6 +8066,9 @@
       // an unnumbered short-row line's own tag ("Short row 1 (RS)") holds
       // when the line is one short row; a numbered one answers below
       if (tag && !sr.numbered && sideStated(sr.line) && unnumberedSpan(sr.line) === 1) pat = { side: tag, source: 'pattern' };
+      // wave H (knit-qa-2): the reader's own list of the short rows a line
+      // spans says each one's side (Sandnes' German short rows: RS, WS …)
+      else if (sr.side) pat = { side: sr.side, source: 'pattern' };
       else pat = patternSideAt(prt, rowEq, proj, { flat: true });   // a short row turns: flat
       row = rowEq;
     } else {
@@ -7900,6 +8308,89 @@
     return out;
   }
 
+  /**
+   * wave H (knit-qa-2): the crossing rows of one panel definition, read once
+   * per definition text: `{rows: N, cross: [{row, name}]}` or null. The
+   * panel's rows are expanded by the knitting reader, so "7th to 12th rows:
+   * As 1st to 6th rows" crosses where the 1st-6th do.
+   */
+  var panelCrossCache = Object.create(null);
+
+  function panelCrossRows(api, def) {
+    if (!def || !def.text || !api || typeof api.parse !== 'function' || typeof api.expand !== 'function') return null;
+    var key = String(api.version || '') + '\u0001' + def.text;
+    if (panelCrossCache[key] !== undefined) return panelCrossCache[key];
+    var out = null;
+    try {
+      var pl = api.parse(String(def.text));
+      var n = 0, m = /\bthese\s+(\d{1,3})\s+rows\b/i.exec(def.text);
+      if (m) n = +m[1];
+      if (!n) pl.forEach(function (l) { var e = l && l.rowEnd >= l.row ? l.rowEnd : (l && l.row); if (e > n && e < 200) n = e; });
+      if (n >= 2 && n <= 120) {
+        var cross = [];
+        for (var r = 1; r <= n; r++) {
+          var ex = null;
+          try { ex = api.expand(pl, r, def.width >= 1 ? def.width : null, null); } catch (e) { ex = null; }
+          var cab = ex && Array.isArray(ex.stitches) ? ex.stitches.filter(function (s) { return s && s.t === 'cable'; }) : [];
+          if (cab.length) cross.push({ row: r, name: cab[0].name ? String(cab[0].name) : null });
+        }
+        out = { rows: n, cross: cross };
+      }
+    } catch (e) { out = null; }
+    panelCrossCache[key] = out;
+    return out;
+  }
+
+  /**
+   * wave H (knit-qa-2): one panel row in the panel's own words ("C6F. K3."),
+   * following "As 1st row" / "7th to 12th rows: As 1st to 6th rows" back to
+   * the row it repeats. null when the definition does not say.
+   */
+  function panelRowText(api, def, row) {
+    if (!def || !def.text || !api || typeof api.parse !== 'function' || typeof api.lineFor !== 'function') return null;
+    try {
+      var pl = api.parse(String(def.text));
+      var r = row, seen = 0, l = null;
+      while (seen++ < 6) {
+        l = api.lineFor(pl, r);
+        if (!l) return null;
+        var t = str(l.text, '').replace(/^\s*[^:]{0,40}:\s*/, '').replace(/\s*\(\s*(?:rs|ws)\s*\)\s*\.?\s*/i, ' ').trim();
+        var as = /^as\s+(\d+)(?:st|nd|rd|th)\s+(?:to\s+(\d+)(?:st|nd|rd|th)\s+)?rows?\b/i.exec(t);
+        if (!as) return t || null;
+        var from = +as[1];
+        r = as[2] && l.row >= 1 ? from + (r - l.row) : from;
+      }
+    } catch (e) { return null; }
+    return null;
+  }
+
+  /** "cable in 2" from the panels the working row works, or null. */
+  function panelCableRing(prt, lines, W) {
+    var defs = lines && lines.panelDefs;
+    if (!defs || typeof defs !== 'object') return null;
+    var ul = underlyingLine(prt, patternRowOf(prt, W));
+    var ch = ul && ul.chart;
+    if (!ch) return null;
+    var api = patternsApi(prt);
+    var best = null;
+    [ch].concat(Array.isArray(ch.also) ? ch.also : []).forEach(function (c) {
+      if (!c || !(c.row >= 1)) return;
+      var def = defs[str(c.name, '').toLowerCase().trim()];
+      var pc = panelCrossRows(api, def);
+      if (!pc || !pc.cross.length) return;
+      for (var d = 0; d < pc.rows; d++) {
+        var q = ((c.row - 1 + d) % pc.rows) + 1;
+        var hit = null;
+        for (var k = 0; k < pc.cross.length; k++) if (pc.cross[k].row === q) { hit = pc.cross[k]; break; }
+        if (hit) {
+          if (!best || d < best.inRows) best = { inRows: d, every: null, nextRow: W + d, name: hit.name, source: 'panel', panel: str(c.name, '') };
+          break;
+        }
+      }
+    });
+    return best;
+  }
+
   function cableScan(prt, lines) {
     var stated = null, any = false;
     for (var i = 0; i < lines.length; i++) {
@@ -7907,7 +8398,7 @@
       if (l && l.cable && l.cable.every >= 2 && (!stated || (l.row || 0) <= prt.row + 1)) stated = l;
       if (!any && isCableLine(l)) any = true;
     }
-    if (!any && !stated) return null;
+    if (!any && !stated) return lines.panelDefs ? panelCableRing(prt, lines, prt.row + 1) : null;
     var W = prt.row + 1;
     var hits = [];
     if (any) {
@@ -7919,6 +8410,15 @@
       }
     }
     var name = stated && stated.cable.name ? str(stated.cable.name, '') : null;
+    // wave H (knit-qa-2): a row that works PANELS ("Work 1st row of Panel
+    // Pat C … Panel Pat B … Panel Pat A") crosses where the panels' own rows
+    // do. The part's numbered rows are only the set-up rows (the rest is
+    // "cont in pat until …"), so the walk above finds nothing; the panels'
+    // definitions (`lines.panelDefs`) say "C6F on 3rd row, C6B on 9th".
+    if (!hits.length && !stated) {
+      var pan = panelCableRing(prt, lines, W);
+      if (pan) return pan;
+    }
     if (hits.length) {
       var every = hits.length >= 2 ? hits[1] - hits[0] : (stated ? Math.floor(stated.cable.every) : null);
       return { inRows: hits[0], every: every, nextRow: W + hits[0], name: name, source: 'pattern' };
@@ -8103,8 +8603,14 @@
     if (Array.isArray(projOrPart.parts)) {
       var bits = projOrPart.parts.map(function (p) { return str(p.patternText, ''); });
       bits.push(str(projOrPart.notes, ''));
+      // wave H (knit-qa-2): the pattern's abbreviation block, kept at import
+      var cd = projOrPart.craftData;
+      if (cd && typeof cd.abbreviations === 'string') bits.unshift('ABBREVIATIONS\n' + cd.abbreviations);
       return bits.join('\n');
     }
+    var pp = projectOfPart(projOrPart);
+    var pcd = pp && pp.craftData;
+    if (pcd && typeof pcd.abbreviations === 'string') return 'ABBREVIATIONS\n' + pcd.abbreviations + '\n' + str(projOrPart.patternText, '');
     return str(projOrPart.patternText, '');
   }
 
@@ -8252,6 +8758,18 @@
       var nos = Array.isArray(chart.rowNos) ? chart.rowNos.filter(function (n) { return n > 0; }) : [];
       of = nos.length ? Math.max.apply(null, nos) : (chart.rows > 0 ? Math.floor(chart.rows) : null);
     }
+    // wave H (knit-qa-2): a written-out panel ("Panel Pat C (worked over 9
+    // sts): 1st row: … These 12 rows form Panel Pat C") is a chart the
+    // pattern spells out: its row count is the panel's, and the row's own
+    // words are the "written out" line (the chip said "row 2 of 2")
+    var panelText = null;
+    var pdefs = linesFor(prt).panelDefs;
+    var pdef = !chart && pdefs && typeof pdefs === 'object' ? pdefs[str(name, '').toLowerCase().trim()] : null;
+    if (pdef) {
+      var pc = panelCrossRows(patternsApi(prt), pdef);
+      if (pc && pc.rows) of = pc.rows;
+      if (row) panelText = panelRowText(patternsApi(prt), pdef, row);
+    }
     if (!of) {
       // the highest row of this chart any line names
       linesFor(prt).forEach(function (l) {
@@ -8271,7 +8789,10 @@
         if (typeof t === 'string' && t.trim()) text = t.trim();
       } catch (e) { text = null; }
     }
-    return { name: name, row: row, of: of, page: page, chart: chart, text: text, repeat: repeat, line: line };
+    var textSource = text ? 'chart' : null;
+    if (!text && panelText) { text = panelText; textSource = 'pattern'; }
+    return { name: name, row: row, of: of, page: page, chart: chart, text: text, textSource: textSource,
+      panel: !!pdef, repeat: repeat, line: line };
   }
 
   /**
@@ -8561,6 +9082,8 @@
     splitSections: splitSections,
     // wave H (knit-qa): the gauge an import would write (preview), never writing
     gaugeFromText: gaugeFromText,
+    // wave H (knit-qa-2): the sizes a (part) text names, carried "Sizes:" line included
+    sizesOfText: sizesOfText,
     sizeCount: sizeCount,
     setupLine: setupLine,
     countOf: countOf,

@@ -1783,6 +1783,18 @@ function sizeOf(path) {
  */
 function extractCached(name) {
   var path = '../tmp-pdf/' + name;
+  // a plain-text fixture (the Gutenberg knitting books) is read as text, as
+  // bee.txt is above: no pages, nothing image-only
+  if (/\.txt$/i.test(name)) {
+    var t0t = performance.now();
+    return fetch(path, { cache: 'no-store' }).then(function (r) {
+      if (r.status === 404) return { missing: true };
+      return r.text().then(function (t) {
+        return { text: t, pages: '-', chars: t.length, columnsDetected: '-', emptyPages: [], garbled: false,
+                 ms: Math.round(performance.now() - t0t) };
+      });
+    }, function (err) { return { error: String(err), ms: 0 }; });
+  }
   var key = 'pfx.v1:' + name;
   var hit = cacheGet(key);
   if (hit) {
@@ -2433,6 +2445,28 @@ var NEG_CORPUS = [
     maxRow: 0, maxSecs: 1, emptyCount: 205 },
   { file: 'knit-sandnes-0216.pdf', what: 'Sandnes Garn booklet (18 MB, heavy)',
     verdict: 'exact - no rows', maxRow: 0, maxSecs: 1, empty: [14] },
+  // wave H batch 2 (research §9-§17): read with the crochet reader they must
+  // still say "knit", stay inside the time budget and invent no rows past what
+  // the text prints. (Their knitting reading is test/knits.fixtures.html.)
+  { file: 'knit-patons-mockneck-cable.pdf', what: 'Patons cabled pullover, panels written + charted',
+    verdict: 'acceptable - read as knitting', maxRow: 28, maxSecs: 6, craft: 'knit' },
+  { file: 'knit-patons-boyfriend-cable.pdf', what: 'Patons cabled raglan, size-only blocks',
+    verdict: 'acceptable - read as knitting (the crochet reader takes "row. 81 sts" for a row; the knitting reader does not)',
+    maxRow: 81, maxSecs: 6, craft: 'knit' },
+  { file: 'knit-patons-boxy-cable.pdf', what: 'Patons boxy cabled crew',
+    verdict: 'acceptable - read as knitting', maxRow: 28, maxSecs: 6, craft: 'knit' },
+  { file: 'knit-patons-cabled-yoke.pdf', what: 'Patons cabled yoke, interleaved columns',
+    verdict: 'acceptable - read as knitting', maxRow: 29, maxSecs: 6, craft: 'knit' },
+  { file: 'knit-sandnes-raglan-child.pdf', what: 'Sandnes raglan, two size groups, prose',
+    verdict: 'exact - no numbered rows (prose); p1 is a cover', maxRow: 0, maxSecs: 2, empty: [1], craft: 'knit' },
+  { file: 'knit-pg-57273-stocking-knitters-manual.txt', what: 'Gutenberg, Cupples (19th c. stockings)',
+    verdict: 'acceptable - read as knitting, one plain-text book', maxRow: 30, maxSecs: 4, craft: 'knit' },
+  { file: 'knit-pg-62646-ladys-knitting-book.txt', what: 'Gutenberg, Corbould (rows in words)',
+    verdict: 'acceptable - read as knitting', maxRow: 142, maxSecs: 4, craft: 'knit' },
+  { file: 'knit-pg-26113-handbook-wool-knitting-crochet.txt', what: 'Gutenberg, Handbook (knitting + crochet)',
+    verdict: 'acceptable - read as knitting', maxRow: 40, maxSecs: 24, craft: 'knit' },
+  { file: 'knit-pg-61105-begin-to-knit.txt', what: 'Gutenberg, Begin to Knit (American Thread)',
+    verdict: 'acceptable - read as knitting', maxRow: 30, maxSecs: 10, craft: 'knit' },
 
   { file: 'other-weaving-handwoven.pdf', what: 'Handwoven magazine',
     verdict: 'acceptable - no phantom crochet part', maxRow: 7, maxSecs: 2 },
@@ -2572,13 +2606,20 @@ function runOneNeg(entry, table) {
     window.__pdfText = window.__pdfText || {};
     window.__pdfText[entry.file] = res.text;
 
+    var tSplit = performance.now();
     var secs = P.splitSections(res.text);
     var mx = maxRowOf(secs);
+    var splitMs = Math.round(performance.now() - tSplit);
     var printed = textMaxRow(res.text);
     var dh = P.dialectHints(res.text);
     var empties = res.emptyPages.length > 12
       ? res.emptyPages.length + ' pages'
       : JSON.stringify(res.emptyPages);
+    // (wave H batch 2: the reading itself inside the budget too - a 3,000-line
+    // book is read here in one go)
+    if (/^knit-(?:patons|sandnes-raglan|pg-)/.test(entry.file)) {
+      log(splitMs <= TIME_BUDGET_MS, entry.file + ': split and read inside the time budget', splitMs + ' ms');
+    }
 
     corpusRow(table, [
       entry.file, res.pages, res.chars, empties,

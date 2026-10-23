@@ -1066,6 +1066,99 @@ if (!window.Knits || typeof Knits.parse !== 'function') {
   Store.registerCraftParser('knitting', FakeKnits);
 })();
 
+/* ====================================================================== */
+
+group('16. knit-qa-2: batch 2 (Patons cables, Sandnes, Cabled Yoke, older books)');
+
+(function () {
+  // --- a knitted range that changes the count prints its total on its LAST row
+  Store.registerCraftParser('knitting', FakeKnits);
+  var SH = fixture('shaping', [
+    L(0, 'Start with 154 sts.', { kind: 'setup', count: 154 }),
+    L(1, '1st row: Pat. (154 sts)', { count: 154, prevCount: 154 }),
+    L(2, '2nd row: Pat. (154 sts)', { count: 154, prevCount: 154 }),
+    L(3, 'Cast off 7 sts beg next 2 rows. 140 sts.', { rowEnd: 4, count: 140, prevCount: 154 }),
+    L(5, 'Rows 5-8: Pat. (140 sts)', { rowEnd: 8, count: 140, prevCount: 140 })
+  ]);
+  var shp = knitProject('Shaping', [{ name: 'Back', patternText: SH }]);
+  eq([Store.targetFor(shp.parts[0], 3), Store.targetFor(shp.parts[0], 4)], [null, 140],
+    '"Cast off 7 sts beg next 2 rows. 140 sts.": row 3 has no target (it makes 147), row 4 is 140');
+  eq([Store.targetFor(shp.parts[0], 5), Store.targetFor(shp.parts[0], 7)], [140, 140], 'a range that keeps its count still answers on every row');
+  eq(Store.targetFor({ id: 'qa2-cro', craft: 'crochet', patternText: 'R1: 6 sc in MR. (6)\nR2-R4: inc around. (24)' }, 3), 24,
+    'crochet ranges are unchanged (no per-row rule)');
+
+  Store.registerCraftParser('knitting', 'Knits');
+  // --- the gauge needle: a needle line wrapped before "needles"; a TENSION line that names it
+  var NT = 'Sizes U.S. 6 (4 mm) and U.S. 7 (4.5 mm) Susan Bates®\nSilvalume® knitting needles or size needed to obtain gauge.\nGAUGE\n20 sts and 26 rows = 4" [10 cm] in\nstocking st with larger needles.';
+  var ng = Store.gaugeFromText(NT, 'knitting');
+  eq(ng && [ng.sts, ng.rows, ng.needle], [20, 26, '4.5 mm (US 7)'], 'a needle line the PDF wrapped before "needles" is read; "larger" picks 4.5 mm (it read no needle)');
+  var ST = 'With small 5 mm circular ndl cast on loosely 48 sts.\nTENSION: 14 sts St-st with 6 mm ndls = 10 cm';
+  var sg = Store.gaugeFromText(ST, 'knitting');
+  eq(sg && sg.needle, '6 mm', '"TENSION: … with 6 mm ndls" is the gauge needle, not the 5 mm rib needle listed first');
+
+  // --- the carried "Sizes:" line a group's parts start with
+  eq(Store.sizesOfText('Sizes: 2 yrs, 4 yrs, 6 yrs, 8 yrs, 10 yrs, 12 yrs\nWith small 5 mm circular ndl cast on 48 (52, 56, 56, 60, 60) sts.', 'knitting'),
+    ['2 yrs', '4 yrs', '6 yrs', '8 yrs', '10 yrs', '12 yrs'], 'Store.sizesOfText reads the carried "Sizes: 2 yrs, 4 yrs …" line (Knits.detectSizes does not)');
+  eq(Store.sizesOfText('Sizes: 2 yrs, 4 yrs', 'crochet'), null, '... and nothing for crochet');
+
+  Store.registerCraftParser('knitting', FakeKnits);
+  // --- short rows: how far each one works and on which side (Line.shortRows)
+  var GS = fixture('german', [
+    L(0, 'Start with 56 sts.', { kind: 'setup', count: 56 }),
+    L(1, 'Rnd 1: Knit. (56 sts)', { count: 56, workedIn: 'rounds' }),
+    L(2, 'German short rows 1-2.', { rowEnd: 3, shortRow: true, workedIn: 'rows',
+      shortRows: [{ n: 1, side: 'rs', worked: 5 }, { n: 2, side: 'ws', worked: 9 }] }),
+    L(4, 'Rnd 4: Knit. (56 sts)', { count: 56, workedIn: 'rounds' })
+  ], 'rounds');
+  var gp = knitProject('German', [{ name: 'Yoke', patternText: GS }]);
+  Store.jumpToRow(gp.id, gp.parts[0].id, 2);
+  var gsi = Store.shortRowInfo(Store.part(Store.project(gp.id), gp.parts[0].id));
+  eq(gsi && [gsi.n, gsi.of, gsi.worked, gsi.side], [1, 2, 5, 'rs'], 'short row 1 of 2 works 5 sts on the RS (Line.shortRows)');
+  eq(Store.sideInfo(Store.part(Store.project(gp.id), gp.parts[0].id)).side, 'rs', 'the side chip takes it (it said "RS?")');
+  Store.tapRow(gp.id, gp.parts[0].id);
+  gsi = Store.shortRowInfo(Store.part(Store.project(gp.id), gp.parts[0].id));
+  eq(gsi && [gsi.n, gsi.worked, gsi.side], [2, 9, 'ws'], 'short row 2 works 9 sts on the WS');
+  eq(Store.part(Store.project(gp.id), gp.parts[0].id).row, 1, '... and the round does not advance');
+
+  // --- the real reader: panels, the cable ring, the panel's own words
+  Store.registerCraftParser('knitting', 'Knits');
+  if (window.Knits && Knits.parse) {
+    var PN = ['Start with 13 sts.',
+      '1st row: (RS). P2. Work 1st row of Panel Pat C. P2.',
+      '2nd row: K2. Work 2nd row of Panel Pat C. K2.',
+      'Panel Pat C (worked over 9 sts): 1st row: (RS). Knit. | 2nd and every alt row: Purl. | 3rd row: C6F. K3. | 5th and 7th rows: Knit. | 9th row: K3. C6B. | 11th row: Knit. | 12th row: Purl. | These 12 rows form Panel Pat C.'].join('\n');
+    var pnp = knitProject('Panels', [{ name: 'Back', patternText: PN }]);
+    Store.jumpToRow(pnp.id, pnp.parts[0].id, 2);
+    var pci = Store.cableInfo(Store.part(Store.project(pnp.id), pnp.parts[0].id));
+    eq(pci && [pci.inRows, pci.name, pci.source], [1, 'C6F', 'panel'], 'a row working Panel Pat C rings "cable in 1" (C6F on the panel\'s 3rd row) — it was blank');
+    var pch = Store.chartInfo(Store.part(Store.project(pnp.id), pnp.parts[0].id));
+    eq(pch && [pch.name, pch.row, pch.of, pch.text, pch.textSource], ['Panel Pat C', 2, 12, 'Purl.', 'pattern'],
+      'the chart chip of a written panel: row 2 of 12 (it said "of 2"), written out as the pattern words it');
+  }
+
+  // --- the abbreviation block rides with the import: glossary + cable definitions
+  var DOC = ['ABBREVIATIONS', 'K = Knit', 'P = Purl',
+    'T3F = Slip next stitch onto cable', 'needle and leave at front of work.', 'K1tbl, P1, then K1tbl from cable needle.',
+    'WS = Wrong side', '', 'SIZES', 'To fit chest 36"', 'INSTRUCTIONS'].join('\n');
+  var ab = Store.createProject({ name: 'Abbr', craft: 'knitting' });
+  Store.importPatternSections(ab.id, [{ name: 'Front', text: 'Start with 9 sts.\n1st row: (RS). P3. T3F. P3.\n2nd row: K3. P3. K3.' }],
+    { mode: 'parts', text: DOC });
+  var abp = Store.project(ab.id);
+  ok(abp.craftData && /T3F = Slip next stitch/.test(abp.craftData.abbreviations || ''), 'the import keeps the pattern\'s abbreviation block (craftData.abbreviations)');
+  ok(abp.craftData && (abp.craftData.glossary || []).some(function (g) { return g.abbr === 'T3F' && g.fromPattern; }), '... and its glossary (craftData.glossary has T3F)');
+  ok(Store.glossary(abp).some(function (g) { return g.abbr === 'T3F' && g.fromPattern; }), 'the glossary sheet lists T3F as "this pattern"');
+  var abm = Store.diagramModel(abp.parts[abp.parts.length - 1], abp);
+  var t3 = [];
+  (abm && abm.rounds || []).forEach(function (r) { (r.stitches || []).forEach(function (s) { if (s.t === 'cable') t3.push([s.cf, s.cb]); }); });
+  eq(t3.length ? t3[0] : null, [1, 1], 'the 3D draws T3F from the pattern\'s own definition: 1 over a K1tbl and a P1 (cf 1, cb 1)');
+
+  // --- a piece picked up along a TOP edge is drawn bottom-up, and Auto says so
+  var TY = knitProject('Top yoke', [{ name: 'Top Yoke', patternText: 'With RS facing, pick up and knit 198 sts around top edge of Cable Yoke. Join.\n1st rnd: *P7. K4. Rep from * around.' }]);
+  var shp2 = Store.partShape(Store.part(Store.project(TY.id), TY.parts[0].id));
+  eq([shp2.upsideDown, shp2.upsideDownSource], [true, 'text'], 'partShape reads "pick up … around top edge" as worked bottom-up (the viewer said "Auto — top-down")');
+  Store.registerCraftParser('knitting', FakeKnits);
+})();
+
 Store.flush();
 try { localStorage.removeItem(TEST_KEY); localStorage.removeItem(TEST_KEY + '.preimport'); } catch (e) { /* ignore */ }
 Store.__setKeyForTests(REAL_KEY);
@@ -1101,7 +1194,15 @@ function runAppTests() {
     for (var i = 0; i < bs.length; i++) if (re.test(bs[i].textContent.trim())) return bs[i];
     return null;
   }
-  return waitFor(function () { return fr.contentWindow && fr.contentWindow.App && fr.contentWindow.Store && fr.contentWindow.Knits; }, 15000).then(function (ready) {
+  // (knit-qa-2: wait for the app's own init — DOMContentLoaded done and a screen drawn —
+  // not just its globals: App.render before init threw on els.home)
+  return waitFor(function () {
+    var w = fr.contentWindow;
+    if (!(w && w.App && w.Store && w.Knits && w.document.readyState === 'complete')) return null;
+    try { w.App.render(); } catch (e) { return null; }   // init not done yet
+    return true &&
+      w.document.querySelector('.screen:not([hidden]), #screen-home:not([hidden])');
+  }, 15000).then(function (ready) { return sleep(250).then(function () { return ready; }); }).then(function (ready) {
     if (!ready) { log(false, 'the app loaded in the iframe'); return; }
     W = fr.contentWindow; D = W.document;
     ORIG_KEY = W.Store.KEY;
@@ -1240,6 +1341,48 @@ function runAppTests() {
         var dl = openDlg();
         ok(dl && /off the needles/.test(dl.textContent) && !/off the hook/.test(dl.textContent), 'a finished knitting project is "off the needles"');
         W.App.closeAllSheets();
+      });
+    }).then(function () {
+      // knit-qa-2: a knitted row with no total says "count unknown", never 0
+      var cu = S.createProject({ name: 'Unknown count', craft: 'knitting' });
+      S.updatePart(cu.id, cu.parts[0].id, { patternText: '1st row: (RS). K2. ssk. Pat to last 4 sts. K2tog. K2.\n2nd row: Purl.' });
+      S.setActiveProject(cu.id);
+      W.App.render();
+      var ro = D.getElementById('stitch-readout');
+      ok(ro && /count unknown/.test(ro.textContent), 'a knitted row with no total says "count unknown" in the stitch readout', ro && ro.textContent);
+      // knit-qa-2: groups holding the same parts are SIZE ranges (Sandnes children / ladies)
+      var sz = S.createProject({ name: 'Raglan', craft: 'knitting' });
+      S.importPatternSections(sz.id, [
+        { name: 'Yoke', text: 'Rnd 1: Knit.\nRnd 2: Knit.', group: '2-12 yrs' },
+        { name: 'Sleeves', text: 'Rnd 1: Knit.\nRnd 2: Knit.', group: '2-12 yrs' },
+        { name: 'Yoke', text: 'Rnd 1: Knit.\nRnd 2: Purl.', group: 'S-XXL' },
+        { name: 'Sleeves', text: 'Rnd 1: Knit.\nRnd 2: Purl.', group: 'S-XXL' }
+      ], { mode: 'parts', text: '' });
+      eq(Q.groupNoun(S.project(sz.id)), 'size', 'knitting groups with the same parts (Yoke, Sleeves ×2 groups) are sizes, not patterns');
+      S.setActiveProject(null);
+      W.App.render();
+      // knit-qa-2: one pattern out of a book: no front matter, named after the pattern
+      W.App.openProjectEditor(null);
+      return sleep(300).then(function () {
+        var dl = openDlg();
+        btn(dl, /Knitting/).click();
+        btn(dl, /^or paste pattern text$/).click();
+        var area = dl.querySelector('textarea[aria-label="Pattern text to import"]');
+        area.value = ['Contents', 'Sock One ........ 2', 'Sock Two ........ 3', 'KNITTING LESSON', 'Rnd 1: Knit.', 'Rnd 2: Knit.',
+          '=== page 2 ===', 'Sock One', 'LEG', 'CO 56 sts.', 'Rnd 1: Knit.', 'Rnd 2: Knit.',
+          '=== page 3 ===', 'Sock Two', 'FOOT', 'CO 60 sts.', 'Rnd 1: Knit.', 'Rnd 2: Knit.'].join('\n');
+        area.dispatchEvent(new W.Event('input', { bubbles: true }));
+        return waitFor(function () { return dl.querySelector('.imp-size-tabs'); }, 4000).then(function () {
+          var before = S.getState().projects.length;
+          btn(dl, /^Save$/).click();
+          return sleep(600).then(function () {
+            var ps = S.getState().projects;
+            var np = ps.length > before ? ps[ps.length - 1] : null;
+            eq(np && np.name, 'Sock One', 'one pattern out of a book is named after it, not "Single piece"');
+            eq(np && [np.parts.length, np.parts.some(function (q) { return /lesson/i.test(q.name); })], [1, false], '... and the book\'s front matter ("Knitting Lesson") is not imported as a part');
+            W.App.closeAllSheets();
+          });
+        });
       });
     });
   }).then(function () {

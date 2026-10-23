@@ -104,6 +104,8 @@ function withFixture(name, label, checks) {
 function pageLines(f, n) { return String(f.pages[n] || '').split('\n'); }
 function hasLine(f, n, text) { return pageLines(f, n).indexOf(text) >= 0; }
 function lineIndex(f, n, text) { return pageLines(f, n).indexOf(text); }
+/** The line after `a` on page p. */
+function after(f, p, a) { var l = pageLines(f, p), i = l.indexOf(a); return i >= 0 ? l[i + 1] : undefined; }
 
 var chain = Promise.resolve();
 function step(fn) { chain = chain.then(fn).catch(function (e) { log(false, 'threw', String(e && e.stack || e)); }); }
@@ -708,7 +710,10 @@ step(function () {
     return withFixture('knit-sandnes-0216.pdf', 'sandnes', function (f) {
       ok(!pageLines(f, 3).some(function (l) { return /Booklet Booklet|0216EN 0216EN/.test(l); }),
         'p3 the two info boxes of a spread are not zipped together');
-      ok(lineIndex(f, 3, 'Model 1 -- 2-12 years') < lineIndex(f, 3, 'yarn: duo'), 'p3 left page, then right page');
+      // printed in capitals ("2-12 YEARS", "YARN: DUO"): restoreCase gives
+      // the Verlag headings their case back (pdftext-knit-2)
+      ok(lineIndex(f, 3, 'Model 1 -- 2-12 YEARS') >= 0 &&
+        lineIndex(f, 3, 'Model 1 -- 2-12 YEARS') < lineIndex(f, 3, 'YARN: DUO'), 'p3 left page, then right page');
     });
   }).then(function () {
     return withFixture('crochet-stylecraft-guide.pdf', 'stylecraft guide', function (f) {
@@ -730,6 +735,114 @@ step(function () {
       ok(t.indexOf('17th roic--Work to within 2 sp of motif and make 19 d,\n9 sp, 19 d ; r e peat around.') >= 0,
         'an OCR page with a narrow drifting gutter is read column by column (wave E residual)');
     });
+  });
+});
+
+/* ===================================================================== */
+step(function () {
+  group('Knitting fixtures, batch 2 (wave H, pdftext-knit-2)');
+  var P = window.PdfText;
+
+  // ---- units -------------------------------------------------------------
+  // a pattern row repeated at the same height on most pages is not furniture
+  var pages = [1, 2, 3, 4, 5].map(function (n) {
+    var lines = [{ text: 'Some text on page ' + n, margin: false, edge: 0.4, pos: 0.5 }];
+    if (n >= 2 && n <= 4) {
+      lines.push({ text: '2nd row: P2. P2tog. Pat to last', margin: false, edge: 0.18, pos: 0.18 });
+      lines.push({ text: '4 sts. P2togtbl. P2.', margin: false, edge: 0.16, pos: 0.16 });
+      lines.push({ text: 'FREE PATTERN - NOT FOR SALE', margin: false, edge: 0.3, pos: 0.3 });
+    }
+    return { number: n, lines: lines };
+  });
+  var kept = P._dropRunningFurniture(pages);
+  ok(kept[1].indexOf('2nd row: P2. P2tog. Pat to last') >= 0 && kept[1].indexOf('4 sts. P2togtbl. P2.') >= 0,
+    'a row label and its run-on, repeated at one height on 3 of 5 pages, are kept');
+  ok(kept[1].indexOf('FREE PATTERN - NOT FOR SALE') < 0, '...while a repeated notice there is still furniture');
+
+  // case symptoms
+  var it = function (s, x) { return { str: s, transform: [9, 0, 0, 9, x, 100], width: s.length * 5, fontName: 'f' }; };
+  ok(P._caseSuspect([it('M', 0), it('a', 5), it('T', 10), it('er', 15), it('I', 25), it('al', 30), it('S', 40)]),
+    'caseSuspect: "M|a|T|er|I|al|S" glued back together is a word with flipped capitals');
+  ok(!P._caseSuspect([it('McDonald', 0), it('YouTube and iPhone', 100)]), 'caseSuspect: ordinary camel case is not');
+  ok(!P._caseSuspect([it('raMAveRTT', 0)], { f: { fontFamily: 'monospace', ascent: 1, descent: 0 } }),
+    'caseSuspect: an OCR layer\'s glyphless font is never suspect');
+  // glyph widths decide whether the names are believed
+  var gotham = { 30: { name: 'A', u: 'a', w: 790 }, 28: { name: 'L', u: 'l', w: 619 }, 18: { name: 'R', u: 'r', w: 723 },
+    22: { name: 'K', u: 'k', w: 730 }, 20: { name: 'U', u: 'u', w: 756 } };
+  ok(P._drawnAsNamed(gotham, { a: 592, l: 302, r: 418, n: 623 }), 'drawnAsNamed: capitals drawn at small letters\' codes are capitals');
+  var frutiger = { 65: { name: 'A', u: 'a', w: 500 }, 76: { name: 'L', u: 'l', w: 222 }, 82: { name: 'R', u: 'r', w: 333 },
+    84: { name: 'T', u: 't', w: 333 }, 73: { name: 'I', u: 'i', w: 222 }, 79: { name: 'O', u: 'o', w: 556 } };
+  ok(!P._drawnAsNamed(frutiger, {}), 'drawnAsNamed: small letters named as capitals stay small (stylecraft charts key)');
+  var codes = { a: { real: 436, flip: 681, name: 'A' }, r: { real: 300, flip: 594, name: 'R' },
+    n: { real: 500, flip: 726, name: 'N' }, y: { real: 450, flip: 635, name: 'Y' }, ' ': { real: 250, flip: 0, name: null } };
+  var run = function (s, em) { return { str: s, transform: [10, 0, 0, 10, 0, 0], width: em / 100 }; };
+  eq(P._caseByWidth(run('yarn', 635 + 681 + 594 + 726), codes), 'YARN', 'caseByWidth: a run as wide as its capitals is capitals');
+  eq(P._caseByWidth(run('yarn', 450 + 436 + 300 + 500), codes), 'yarn', 'caseByWidth: ...as wide as its small letters stays small');
+  eq(P._caseByWidth(run('yarn', 2100), codes), null, 'caseByWidth: a width that fits neither is left to the glyphs');
+});
+step(function () {
+  return withFixture('knit-patons-boyfriend-cable.pdf', 'boyfriend', function (f) {
+    eq(after(f, 2, 'ssk. Pat to last 4 sts. K2tog. K2.'), '2nd row: P2. P2tog. Pat to last',
+      'p2 col 4: the printed "2nd row" of the 4/5XL raglan is read (it was dropped as furniture)');
+    eq(after(f, 2, '2nd row: P2. P2tog. Pat to last'), '4 sts. P2togtbl. P2.', 'p2: ...with its run-on line');
+    eq(after(f, 3, 'last 4 sts. K2tog. K2.'), '2nd row: P2. P2tog. Pat to last', 'p3 col 3: the front raglan "2nd row" is read');
+    var p4 = pageLines(f, 4), i = p4.indexOf('1st row: (RS). K2. ssk. Pat to last');
+    ok(i >= 0 && p4[i + 2] === '2nd row: P2. P2tog. Pat to last' && p4[i + 3] === '4 sts. P2togtbl. P2.',
+      'p4 col 3: the sleeve raglan "2nd row" is read');
+  });
+});
+step(function () {
+  return withFixture('knit-patons-boxy-cable.pdf', 'boxy', function (f) {
+    ok(lineIndex(f, 4, 'down from first cast off edges.') >= 0 &&
+      after(f, 4, 'down from first cast off edges.') === 'FINISHING',
+      'p4: the sleeve column runs on into FINISHING across the blank');
+    ok(lineIndex(f, 4, 'Knit 2 rows.') >= 0 && lineIndex(f, 4, 'Knit 2 rows.') < lineIndex(f, 4, 'Beg on a 2nd row, work 9 rows in'),
+      'p4: the neckband pick-up is read before the neckband ribbing (column 2 no longer spliced into column 1)');
+  });
+});
+step(function () {
+  return withFixture('knit-patons-cabled-yoke.pdf', 'cabled yoke', function (f) {
+    ok(hasLine(f, 1, 'MATERIALS') && hasLine(f, 1, 'ABBREVIATIONS: www.yarnspirations.com/abbreviations') &&
+      hasLine(f, 1, 'INSTRUCTIONS') && hasLine(f, 2, 'BOTTOM YOKE'),
+      'p1-p2: headings in the Gotham-Bold whose map lowercases capitals read in capitals');
+    eq(after(f, 1, 'Patons ® Decor™ (3.5 oz/100 g; 208 yds/190 m)'), 'Sizes XS/S M L XL 2/3XL 4/5XL',
+      'p1: the yarn table keeps every size, size L reads "L"');
+    eq(after(f, 1, 'Sizes XS/S M L XL 2/3XL 4/5XL'), 'Aran (87602) 6 6 7 7 8 10 balls', 'p1: ...and every ball count');
+    ok(hasLine(f, 1, 'C4B = Slip next 2 stitches') && hasLine(f, 1, 'K = Knit') && hasLine(f, 1, 'T3B = Slip next stitch onto'),
+      'p1: abbreviation keys keep their capitals ("C4B", "K", "T3B")');
+    eq(after(f, 1, 'GAUGE'), '20 sts and 26 rows = 4" [10 cm] with', 'p1: the gauge sentence is whole...');
+    eq(after(f, 1, '20 sts and 26 rows = 4" [10 cm] with'), 'larger needles in stocking st.', '...with nothing glued into it');
+    eq(after(f, 1, '1st row: (RS). (P4. C4B) 3 times. P4.'), '2nd row: (K4. P4) 3 times. K4.',
+      'p1: column 4 (Panel Pat A) reads down its own column (five columns across a landscape sheet)');
+    ok(lineIndex(f, 2, 'Rep last rnd 9 times more. 452 sts.') >= 0 &&
+      lineIndex(f, 2, 'Rep last rnd 9 times more. 452 sts.') < lineIndex(f, 2, 'Proceed as follows:'),
+      'p2: column 2 is read before column 3 (a 12 pt gutter that bucket rounding made 9)');
+    ok(hasLine(f, 2, 'body: Sizes XS/S, M and L only: Knit in') || hasLine(f, 2, 'Body: Sizes XS/S, M and L only: Knit in'),
+      'p2: "M and L only" (was "M and l only")');
+    ok(hasLine(f, 4, 'Size XL-5XL') && hasLine(f, 4, 'Size XS-L'), 'p4: a page with no symptom of its own is restored from the font caught on p1');
+  });
+});
+step(function () {
+  return withFixture('crochet-stylecraft-guide.pdf', 'stylecraft guide', function (f) {
+    ok(hasLine(f, 5, 'UK TERMS US TERMS'), 'p5: "UK TERMS US TERMS" (was "uk TerMS uS TerMS")');
+    ok(/adjustable ring/.test(f.pages[5] || '') && !/ADJUSTABLE RING/.test(f.pages[5] || ''),
+      'p5: the charts key printed in lower case stays lower case (glyphs named as capitals, drawn small)');
+    ok(hasLine(f, 1, 'TEACH') && hasLine(f, 1, 'YOURSELF'), 'p1: the cover blurb under "T O C R O C H E T" is kept');
+  });
+});
+step(function () {
+  return withFixture('knit-interweave-8-socks.pdf', 'socks', function (f) {
+    ok(/\bFINISHING\b/.test(f.res.text) && !/FiNiSHiNG|FiNishiNg|FiNiShiNg/.test(f.res.text),
+      'small-caps headings read "FINISHING" throughout the book');
+  });
+});
+
+step(function () {
+  return withFixture('knit-sandnes-raglan-child.pdf', 'sandnes raglan', function (f) {
+    eq(pageLines(f, 2).slice(0, 5).join(' | '),
+      'Limited edition | children | SINGLE PATTERN NO 133 / RAGLAN SWEATER WORKED FROM NECK DOWN | INSTRUCTION: OLAUG BEATE BJELLAND | SIZES',
+      'p2: the centred title block is read whole before the first column');
+    eq(pageLines(f, 3).slice(0, 2).join(' | '), 'Limited edition | ladies', 'p3: ...and on the ladies page');
   });
 });
 

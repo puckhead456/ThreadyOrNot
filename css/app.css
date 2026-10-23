@@ -2490,6 +2490,10 @@ mark.size-mark {
   margin: 6px 0 0;
 }
 .knit-extra[hidden] { display: none; }
+/* wave H (knit-qa-2): with the chart / length chips showing, the stitch pad
+   keeps its own height (the screen scrolls) instead of shrinking under them;
+   at 375x640 its "STITCHES" caption slid up under the chart chip */
+.knit-extra:not([hidden]) ~ .stitch-section { flex-shrink: 0; }
 .knit-chip {
   min-height: 36px;
   max-width: 100%;
