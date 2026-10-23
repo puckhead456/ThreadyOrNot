@@ -462,6 +462,8 @@
         // wave G: the size this part belongs to (present only when set)
         var tg = normalizeGroupName(p.group);
         if (tg) parts[parts.length - 1].group = tg;
+        // wave H: knitting markers + two-at-a-time partner (present only when set)
+        knitTemplatePart(parts[parts.length - 1], p);
       }
     }
     if (!parts.length) {
@@ -516,6 +518,8 @@
     // the built-ins are unchanged.
     var tgroups = normalizeGroups(t.groups, parts);
     if (tgroups.length) nt.groups = tgroups;
+    // Wave H: the pattern gauge (present only when known)
+    knitTemplateCarry(nt, t);
     return nt;
   }
 
@@ -641,6 +645,8 @@
       // wave G: the part's size group rides along
       var vg = normalizeGroupName(p.group);
       if (vg) parts[parts.length - 1].group = vg;
+      // wave H: so do knitting markers and the two-at-a-time partner
+      knitTemplatePart(parts[parts.length - 1], p);
     }
     if (!parts.length) throw new Error('Add at least one part.');
     var checklist = [];
@@ -673,6 +679,8 @@
       size: tpl.size !== undefined ? tpl.size : existing ? existing.size : undefined,
       // wave G: the size groups' order (the parts say which exist)
       groups: tpl.groups !== undefined ? tpl.groups : existing ? existing.groups : undefined,
+      // wave H: the pattern gauge (kept from the saved template when not said)
+      gauge: tpl.gauge !== undefined ? tpl.gauge : existing ? existing.gauge : undefined,
       updatedAt: now()
     });
     if (existing) list[list.indexOf(existing)] = next;
@@ -735,6 +743,8 @@
         };
         // wave G: the size each part belongs to, unless one size was asked for
         if (!only && p.group) tp.group = p.group;
+        // wave H: markers and the two-at-a-time partner (as an index)
+        knitTemplatePartFromProject(tp, p, srcParts);
         return tp;
       }),
       checklist: proj.checklist
@@ -754,6 +764,9 @@
     if (!only && proj.groups && proj.groups.length) {
       draft.groups = proj.groups.map(function (g) { return { name: g.name }; });
     }
+    // wave H: the pattern gauge (never the swatch: that is this knitter's)
+    var tg = templateGauge(proj.gauge);
+    if (tg) draft.gauge = tg;
     return draft;
   }
 
@@ -1014,7 +1027,8 @@
       activeGroup = ap && ap.group ? ap.group : (groups.length ? groups[0].name : null);
     }
 
-    return {
+    // wave H (knit-counter): gauge, side, markers, links, short rows
+    return knitNormalizeProject({
       id: str(p.id, '') || uid(),
       name: safeName(p.name, 'Untitled project'),
       emoji: str(p.emoji, '') || '🧶',
@@ -1058,7 +1072,7 @@
       // Additive with a default, so no backup migration is due.
       groups: groups,
       activeGroup: activeGroup
-    };
+    }, p);
   }
 
   function defaultState() {
@@ -1796,11 +1810,107 @@
   }
 
   /* ------------------------------------------------------------------ *
-   * Pattern bridge (defensive — window.Patterns may be missing)
+   * Pattern bridge (defensive — the parser may be missing)
+   *
+   * Wave H: one parser per craft. Crochet (and any craft that never
+   * registered one) reads its text through `window.Patterns`; a counter craft
+   * registers its own with `registerCraftParser('knitting', 'Knits')` — the
+   * api object itself, or the name of its window global, looked up on every
+   * call so script order never matters. A registered parser whose global is
+   * missing resolves to null: that craft's parts get no parse at all (a plain
+   * counter), never crochet's reading of knitting text.
    * ------------------------------------------------------------------ */
 
-  function patternsApi() {
-    return window.Patterns && typeof window.Patterns === 'object' ? window.Patterns : null;
+  var craftParsers = Object.create(null);   // craftId -> api object | global name
+  var craftParserExtras = Object.create(null); // craftId -> { checklistStart, checklistSections }
+  var partProjectMemo = Object.create(null); // partId -> project (verified on every read)
+
+  /**
+   * @param {string} craftId
+   * @param {Object|string|null} api  the parser (same names as window.Patterns),
+   *   the name of its window global, or null to unregister
+   * @param {{checklistStart?:RegExp, checklistSections?:RegExp}} [extras]
+   *   the craft's own "this line is a finishing step" verbs and section names
+   *   for `suggestChecklist`
+   * @returns {boolean}
+   */
+  function registerCraftParser(craftId, api, extras) {
+    var id = str(craftId, '').trim();
+    // crochet IS window.Patterns; it cannot be re-pointed
+    if (!id || id === DEFAULT_CRAFT) return false;
+    if (api === null) {
+      delete craftParsers[id];
+      delete craftParserExtras[id];
+    } else if ((typeof api === 'string' && api.trim()) || (api && typeof api === 'object')) {
+      craftParsers[id] = typeof api === 'string' ? api.trim() : api;
+      var ex = {};
+      if (extras && extras.checklistStart instanceof RegExp) ex.checklistStart = extras.checklistStart;
+      if (extras && extras.checklistSections instanceof RegExp) ex.checklistSections = extras.checklistSections;
+      craftParserExtras[id] = ex;
+    } else {
+      return false;
+    }
+    // every cached parse may have been read by the old parser
+    lineCache = Object.create(null);
+    diagramCache = Object.create(null);
+    return true;
+  }
+
+  function resolveParser(entry) {
+    var api = typeof entry === 'string' ? window[entry] : entry;
+    return api && typeof api === 'object' ? api : null;
+  }
+
+  /**
+   * The craft a project, part, probe part or craft id is read as. A part
+   * names no craft of its own, so it is the craft of the project holding it
+   * (a probe part from the import preview may carry `craft` itself). Never
+   * loads the state just to answer.
+   */
+  function craftKeyOf(ctx) {
+    if (!ctx) return DEFAULT_CRAFT;
+    if (typeof ctx === 'string') return ctx.trim() || DEFAULT_CRAFT;
+    if (typeof ctx !== 'object') return DEFAULT_CRAFT;
+    if (typeof ctx.craft === 'string' && ctx.craft.trim()) return ctx.craft.trim();
+    if (Array.isArray(ctx.parts)) return DEFAULT_CRAFT;   // a project with no craft
+    if (!ctx.id) return DEFAULT_CRAFT;
+    // The memo is keyed on the part OBJECT: a binding from bindPartProject
+    // (the project a caller handed in wins) or an earlier lookup.
+    var m = partProjectMemo[ctx.id];
+    if (m && m.part === ctx) return m.craft;
+    if (!state || !Array.isArray(state.projects)) return DEFAULT_CRAFT;
+    var proj = projectOfPart(ctx);
+    if (!proj) return DEFAULT_CRAFT;   // not remembered: it may join a project yet
+    var craft = typeof proj.craft === 'string' && proj.craft.trim() ? proj.craft.trim() : DEFAULT_CRAFT;
+    partProjectMemo[ctx.id] = { part: ctx, craft: craft };
+    return craft;
+  }
+
+  /**
+   * A caller that names the project (`diagramModel(part, project)`) decides
+   * the craft of a part with none of its own, for EVERY read of that part —
+   * parse, row index and expand alike — so it can never be parsed as one
+   * craft and expanded as another. A part's own `craft` still wins.
+   */
+  function bindPartProject(prt, proj) {
+    if (!prt || typeof prt !== 'object' || !prt.id || !proj || typeof proj !== 'object') return;
+    if (typeof prt.craft === 'string' && prt.craft.trim()) return;
+    partProjectMemo[prt.id] = { part: prt, craft: craftKeyOf(proj) };
+  }
+
+  /**
+   * The parser for a project, a part, a probe part or a craft id: the craft's
+   * registered parser, else `window.Patterns` (crochet, and any craft that
+   * registered none). Null when it is not loaded.
+   */
+  function parserFor(ctx) {
+    var craft = craftKeyOf(ctx);
+    if (craft !== DEFAULT_CRAFT && craftParsers[craft] !== undefined) return resolveParser(craftParsers[craft]);
+    return resolveParser('Patterns');
+  }
+
+  function patternsApi(ctx) {
+    return parserFor(ctx);
   }
 
   function sizeIndexOf(prt) {
@@ -1822,6 +1932,25 @@
   var EMPTY_ENTRY = { text: '', length: 0, size: 0, lines: [], version: 0, index: null };
 
   /**
+   * wave H (knit-qa): the size names a counter-craft part is read at — its own
+   * text's when it names two or more (an ebook pattern's "Sizes:" line), else
+   * the project's (a probe part's `sizeCount` stands for its project). `count`
+   * is how many (0 = none known).
+   */
+  function knitPartSizes(prt, api, text) {
+    var own = null;
+    if (api && typeof api.detectSizes === 'function' && text) {
+      try { own = api.detectSizes(text); } catch (e) { own = null; }
+    }
+    if (Array.isArray(own) && own.length >= 2) return { names: own.map(String), count: own.length, own: true };
+    var proj = prt && typeof prt.sizeCount !== 'number' ? projectOfPart(prt) : null;
+    if (proj && Array.isArray(proj.sizes) && proj.sizes.length >= 2) {
+      return { names: proj.sizes.map(String), count: proj.sizes.length, own: false };
+    }
+    return { names: null, count: 0, own: false };
+  }
+
+  /**
    * The per-part parsed-pattern cache: `{ text, length, size, lines, version,
    * index }`.
    *
@@ -1839,21 +1968,42 @@
     if (!prt) return EMPTY_ENTRY;
     var text = prt.patternText || '';
     var size = sizeIndexOf(prt);
+    // wave H: the craft (and the parser it resolves to) is part of the key
+    var craft = craftKeyOf(prt);
+    var api = patternsApi(craft);
     var cached = lineCache[prt.id];
-    if (cached && cached.size === size && cached.length === text.length && cached.text === text &&
-        (typeof prt.sizeCount !== 'number' || cached.sizeCount === (prt.sizeCount >= 2 ? Math.floor(prt.sizeCount) : 0))) {
+    // wave H (knit-qa): the parser's own `version` is part of the key, so a
+    // reader that changed under a live page never answers from a stale parse
+    var apiVersion = api && api.version !== undefined ? String(api.version) : '';
+    if (cached && cached.craft === craft && cached.api === api && cached.apiVersion === apiVersion &&
+        cached.size === size && cached.length === text.length && cached.text === text &&
+        (typeof prt.sizeCount !== 'number' || cached.sizeCountAsked === (prt.sizeCount >= 2 ? Math.floor(prt.sizeCount) : 0))) {
       return cached;
     }
     var lines = [];
     // Wave F: how many sizes the DOCUMENT names (`Project.sizes`), so a list
     // of another length resolves to no count instead of the clamp's guess.
     // Read on a miss only; setProjectSize / the importer drop the entries.
-    var sizeN = text ? partSizeCount(prt) : 0;
+    var askedN = text ? partSizeCount(prt) : 0;
+    var sizeN = askedN;
+    // wave H (knit-qa): a counter craft's parser also gets the size NAMES
+    // (`opts.sizes`), so "Sizes XL, 2/3XL and 4/5XL only:" maps to the right
+    // sizes. A part whose own text names its sizes (an ebook pattern carries
+    // its own "Sizes: 6 (7¼, 7¾)" line) reads at those, not at the project's
+    // (the first pattern's): a six-size sock read with a three-size count
+    // resolved every list in it to no count at all.
+    var docSizes = null;
+    if (craft !== DEFAULT_CRAFT && /\S/.test(text)) {
+      var ps = knitPartSizes(prt, api, text);
+      docSizes = ps.names;
+      if (ps.count) sizeN = ps.count;
+    }
     if (/\S/.test(text)) {
-      var api = patternsApi();
       if (api && typeof api.parse === 'function') {
         try {
-          var out = api.parse(text, { size: size, sizeCount: sizeN });
+          var popts = { size: size, sizeCount: sizeN };
+          if (docSizes) popts.sizes = docSizes.slice();
+          var out = api.parse(text, popts);
           if (Array.isArray(out)) lines = out;
         } catch (e) {
           lines = [];
@@ -1864,6 +2014,10 @@
       text: text,
       length: text.length,
       size: size,
+      craft: craft,
+      api: api,
+      apiVersion: apiVersion,
+      sizeCountAsked: askedN,
       sizeCount: sizeN,
       lines: lines,
       version: ++lineVersion,
@@ -1892,7 +2046,12 @@
    */
   function countAtRow(line, row) {
     if (!line) return null;
-    if (line.counts && line.row >= 1) {
+    // wave H (knit-qa): a repeat line's per-row `counts` start at its own
+    // `countsFrom` (the first row it adds), not at `row`
+    if (line.counts && line.countsFrom >= 1) {
+      var cf = line.counts[row - line.countsFrom];
+      if (typeof cf === 'number' && isFinite(cf)) return cf;
+    } else if (line.counts && line.row >= 1) {
       var c = line.counts[row - line.row];
       if (typeof c === 'number' && isFinite(c)) return c;
     }
@@ -1924,6 +2083,8 @@
         c = strictCount(l);
         per = l.counts ? l.counts : null;
         for (r = l.row; r <= end; r++) {
+          // wave H: "Rows 2, 4, 6 and 8 (WS)" covers those rows, not 3, 5, 7
+          if (l.rowList && l.rowList.indexOf(r) < 0) continue;
           if (line[r] === undefined) line[r] = l;
           if (count[r] === undefined) {
             cr = per ? countAtRow(l, r) : c;
@@ -1996,7 +2157,7 @@
 
   function patternSummary(prt) {
     var lines = linesFor(prt);
-    var api = patternsApi();
+    var api = patternsApi(prt);
     if (!lines.length || !api || typeof api.summary !== 'function') return emptySummary();
     try {
       return normalizeSummary(api.summary(lines));
@@ -2032,15 +2193,18 @@
     return null;
   }
 
-  /** Sections of a raw pattern text, for the import flow. */
-  function splitSections(text) {
-    var api = patternsApi();
+  /**
+   * Sections of a raw pattern text, for the import flow.
+   * @param {string} [craft] wave H: read with that craft's parser (default crochet)
+   */
+  function splitSections(text, craft) {
+    var api = patternsApi(craft);
     if (!text || !String(text).replace(/\s/g, '')) return [];
     if (api && typeof api.splitSections === 'function') {
       try {
         var out = api.splitSections(String(text));
         if (Array.isArray(out)) {
-          return out.map(function (s) {
+          var mapped = out.map(function (s) {
             var sec = {
               name: str(s && s.name, ''),
               makeCount: clampInt(s && s.makeCount, 1, 99, 1),
@@ -2058,6 +2222,10 @@
             sec.group = normalizeGroupName(s && s.group);
             return sec;
           });
+          // wave H (knit-qa): a knitting section the parser could not name
+          // is named from its own text, else "Part N"
+          if (craftKeyOf(craft) === 'knitting') nameKnitSections(mapped);
+          return mapped;
         }
       } catch (e) {
         /* fall through */
@@ -2067,9 +2235,108 @@
     return [{ name: '', makeCount: 1, text: String(text), placement: '' }];
   }
 
-  /** Parse a loose block of pattern text without touching any part's cache. */
-  function parseLoose(text, opts) {
-    var api = patternsApi();
+  /*
+   * wave H (knit-qa): the garment part an unnamed knitting section is about,
+   * from the dominant garment noun in its OWN text — "neck" → Neck,
+   * "raglan" / "yoke" → Yoke. A noun only counts where it names the piece
+   * being worked: not inside "measures … from front neck" (a place to measure
+   * from), not on a "Divide for Sleeves and Body" line (the parts that come
+   * next), not on an abbreviation line ("PM = Place marker"). The winner must
+   * lead outright and must not already name another section of the same
+   * pattern (two parts of one name would merge on import); otherwise the
+   * section is "Part N", N its place in its pattern.
+   */
+  var KNIT_SECTION_NOUNS = [
+    ['Yoke', /\b(?:yoke|raglans?)\b/gi],
+    ['Neckband', /\bneck\s*band\b/gi],
+    ['Neck', /\bneck(?:line)?\b(?!\s*band)/gi],
+    ['Collar', /\bcollar\b/gi],
+    ['Hood', /\bhood\b/gi],
+    ['Button Band', /\bbutton\s*band\b/gi],
+    ['Pocket', /\bpockets?\b/gi],
+    ['Sleeve', /\bsleeves?\b/gi],
+    ['Cuff', /\bcuffs?\b/gi],
+    ['Body', /\bbody\b/gi],
+    ['Heel', /\bheels?\b/gi],
+    ['Gusset', /\bgussets?\b/gi],
+    ['Foot', /\bfoot\b/gi],
+    ['Toe', /\btoes?\b/gi],
+    ['Leg', /\blegs?\b/gi],
+    ['Brim', /\bbrim\b/gi],
+    ['Crown', /\bcrown\b/gi],
+    ['Border', /\bborder\b/gi],
+    ['Edging', /\bedging\b/gi]
+  ];
+
+  function knitSectionNoun(text) {
+    var lines = String(text || '').split(/\r?\n/);
+    var counts = {};
+    for (var i = 0; i < lines.length; i++) {
+      var ln = lines[i];
+      // the size line the parser carries, abbreviation lines, "Divide for …"
+      if (/^\s*sizes?\s*:/i.test(ln) || /\s=\s/.test(ln) || /\bdivide\s+for\b/i.test(ln)) continue;
+      // "measures 8½" from front neck", "from back of heel", "from tip of toe"
+      ln = ln.replace(/\bfrom\s+(?:the\s+)?(?:\w+\s+){0,2}?(?:of\s+(?:the\s+)?)?(?:neck|heel|toe|cuff|sleeve\s+divide|underarm|brim|crown|cast[-\s]on)\b/gi, ' ');
+      // a stitch's own "leading leg" / "right leg" is not the sock's leg
+      ln = ln.replace(/\b(?:leading|trailing|right|left|front|back|both)\s+legs?\b/gi, ' ');
+      for (var k = 0; k < KNIT_SECTION_NOUNS.length; k++) {
+        var m = ln.match(KNIT_SECTION_NOUNS[k][1]);
+        if (m) counts[KNIT_SECTION_NOUNS[k][0]] = (counts[KNIT_SECTION_NOUNS[k][0]] || 0) + m.length;
+      }
+    }
+    var best = null, bestN = 0, second = 0;
+    Object.keys(counts).forEach(function (n) {
+      if (counts[n] > bestN) { second = bestN; bestN = counts[n]; best = n; }
+      else if (counts[n] > second) second = counts[n];
+    });
+    return best && bestN > second ? best : null;
+  }
+
+  /** `name`, or "name 2", "name 3" … when a part of the same group has it. */
+  function knitUniqueName(proj, name, group) {
+    var has = function (n) {
+      return proj.parts.some(function (q) {
+        return (q.group || null) === (group || null) && String(q.name).toLowerCase() === n.toLowerCase();
+      });
+    };
+    if (!has(name)) return name;
+    for (var k = 2; k < 100; k++) if (!has(name + ' ' + k)) return name + ' ' + k;
+    return name;
+  }
+
+  /** "Sleeves" and "Sleeve" are the same part name. */
+  function knitNameKey(n) {
+    return String(n || '').toLowerCase().replace(/\s+/g, ' ').trim().replace(/s$/, '');
+  }
+
+  function nameKnitSections(secs) {
+    var taken = {};
+    var place = {};
+    secs.forEach(function (s) {
+      var g = s.group || '';
+      if (s.name) taken[g + '\u0001' + knitNameKey(s.name)] = true;
+    });
+    secs.forEach(function (s) {
+      var g = s.group || '';
+      place[g] = (place[g] || 0) + 1;
+      if (s.name) return;
+      var noun = knitSectionNoun(s.text);
+      if (noun && !taken[g + '\u0001' + knitNameKey(noun)]) {
+        s.name = noun;
+      } else {
+        s.name = 'Part ' + place[g];
+      }
+      taken[g + '\u0001' + knitNameKey(s.name)] = true;
+    });
+    return secs;
+  }
+
+  /**
+   * Parse a loose block of pattern text without touching any part's cache.
+   * `craft` (wave H): the craft whose parser reads it; crochet by default.
+   */
+  function parseLoose(text, opts, craft) {
+    var api = patternsApi(craft);
     if (!api || typeof api.parse !== 'function') return [];
     if (!text || !String(text).replace(/\s/g, '')) return [];
     try {
@@ -2088,23 +2355,48 @@
    * parsed as a row) gets no target rather than a wrong one.
    * Wave F: `size` / `sizeCount` read it at the maker's size — a garment's
    * "until there are a total of 25 (29, 33 …) Rows" is 33 rows in size M.
+   * Wave H: `craft` reads it with that craft's parser (crochet by default).
    * @returns {number|null}
    */
-  function targetRowsFromText(text, size, sizeCount) {
+  function targetRowsFromText(text, size, sizeCount, craft) {
     var sz = typeof size === 'number' && size > 0 ? Math.floor(size) : 0;
     var n = typeof sizeCount === 'number' && sizeCount >= 2 ? Math.floor(sizeCount) : 0;
-    var lines = parseLoose(text, sz || n ? { size: sz, sizeCount: n } : null);
+    // wave H (knit-qa): a counter craft's section that names its own sizes
+    // (an ebook pattern's "Sizes:" line) is read at those, as partLines does
+    var popts = sz || n ? { size: sz, sizeCount: n } : null;
+    if (craftKeyOf(craft) !== DEFAULT_CRAFT) {
+      var own = knitPartSizes(null, patternsApi(craft), text);
+      if (own.count) popts = { size: sz, sizeCount: own.count, sizes: own.names };
+    }
+    var lines = parseLoose(text, popts, craft);
     if (!lines.length) return null;
+    // wave H (knit-qa): a knitting piece is a target only when every row of
+    // it is counted. "Knit even until work measures 2½"" is rows nobody can
+    // number without a gauge (the chip says "≈"), and a section whose own
+    // numbering starts again ("Sizes XL … only: 1st rnd") has no last row to
+    // aim at: the Bernat yoke at XL called itself done at round 5 and the
+    // sleeves at 55, a round before their 2" of rib.
+    var knitTarget = craftKeyOf(craft) === 'knitting';
     var seen = Object.create(null);
     var max = 0;
     for (var i = 0; i < lines.length; i++) {
       var l = lines[i];
-      if (!l || l.kind !== 'row') continue;
+      if (!l || l.sizeSkip) continue;
+      if (knitTarget && l.until && l.until.kind === 'length') return null;
+      // ...nor "Cont in patt until half the yarn has been used up" / "Rep
+      // Rows 3 and 4 until all yos have been consumed": a stretch worked
+      // until something happens, that the reader did not turn into rows (the
+      // Rico shawl's pattern section called itself done at row 9)
+      if (knitTarget && l.kind !== 'row' && /\buntil\b/i.test(String(l.text || '')) &&
+          !(l.until && l.until.kind === 'rows') && !(typeof l.repeatRows === 'number' && l.repeatRows >= 1)) return null;
+      if (l.kind !== 'row') continue;
       var a = typeof l.row === 'number' && isFinite(l.row) ? Math.floor(l.row) : 0;
       if (a < 1) continue;
       var b = typeof l.rowEnd === 'number' && isFinite(l.rowEnd) && l.rowEnd >= a ? Math.floor(l.rowEnd) : a;
       if (b - a > 9999) continue;
       for (var r = a; r <= b; r++) {
+        if (knitTarget && seen[r] && (!l.rowList || l.rowList.indexOf(r) >= 0)) return null;
+        if (l.rowList && l.rowList.indexOf(r) < 0) continue;
         seen[r] = true;
         if (r > max) max = r;
       }
@@ -2154,11 +2446,21 @@
    * copies of them.
    * @returns {string} '' when there is nothing to key on
    */
-  function sectionImportKey(name, text) {
+  function sectionImportKey(name, text, knit) {
     var first = '';
     var rows = str(text, '').split(/\r?\n/);
     for (var i = 0; i < rows.length; i++) {
       var t = rows[i].replace(/\s+/g, ' ').trim();
+      // wave H (knit-qa): the size and carried-count lines Knits puts on top of
+      // every part of a pattern are not what tells two parts apart
+      // (and a knitting part is told apart by its first three lines: the
+      // Time Traveler's two "Foot" sections both open with a "Foot" heading)
+      if (t && knit && (/^sizes?\s*:/i.test(t) || /^start with \d/i.test(t))) continue;
+      if (t && knit) {
+        first += (first ? '\n' : '') + t;
+        if (first.split('\n').length >= 3) break;
+        continue;
+      }
       if (t) { first = t; break; }
     }
     var n = str(name, '').trim();
@@ -2256,10 +2558,19 @@
    * two lines, or one that only qualified by living in an Assembly section —
    * the sheet should offer those unticked (01 #3).
    * @returns {Array<{text:string, confidence:'strong'|'weak'}>} at most 20
+   *
+   * Wave H: `craft` reads the text with that craft's parser, and a craft
+   * that registered its own finishing verbs (`registerCraftParser(id, api,
+   * { checklistStart, checklistSections })` — knitting's Block, Seam, Graft,
+   * Weave in ends …) is matched on those instead of crochet's.
    */
-  function suggestChecklist(text) {
+  function suggestChecklist(text, craft) {
     var out = [];
     var seen = Object.create(null);
+    var craftKey = craftKeyOf(craft);
+    var extras = craftKey !== DEFAULT_CRAFT ? craftParserExtras[craftKey] || {} : {};
+    var startRe = extras.checklistStart || CHECKLIST_START_RE;
+    var sectionRe = extras.checklistSections || CHECKLIST_SECTION_RE;
 
     function add(raw, strong, next) {
       if (out.length >= CHECKLIST_MAX) return;
@@ -2312,7 +2623,7 @@
     var raw = str(text, '');
     if (!raw.replace(/\s/g, '')) return out;
 
-    var api = patternsApi();
+    var api = patternsApi(craftKey);
     var lines = null;
     if (api && typeof api.parse === 'function') {
       try { lines = api.parse(raw); } catch (e) { lines = null; }
@@ -2322,14 +2633,14 @@
       var assembly = Object.create(null);
       var secs = (lines.meta && Array.isArray(lines.meta.sections)) ? lines.meta.sections : [];
       secs.forEach(function (s) {
-        if (s && CHECKLIST_SECTION_RE.test(str(s.name, ''))) assembly[s.index] = true;
+        if (s && sectionRe.test(str(s.name, ''))) assembly[s.index] = true;
       });
       for (var i = 0; i < lines.length; i++) {
         var l = lines[i];
         if (!l) continue;
         var notes = Array.isArray(l.notes) ? l.notes : [];
         for (var n = 0; n < notes.length; n++) {
-          if (CHECKLIST_START_RE.test(tidyStep(notes[n]))) add(notes[n], true, notes[n + 1]);
+          if (startRe.test(tidyStep(notes[n]))) add(notes[n], true, notes[n + 1]);
         }
         if (l.photo || l.kind === 'header' || l.kind === 'row' || l.kind === 'repeat') continue;
         var t = tidyStep(l.text);
@@ -2337,7 +2648,7 @@
         var nxt = lines[i + 1] && !lines[i + 1].photo ? str(lines[i + 1].text, '') : '';
         // An explicit sewing-up verb is a strong signal; living in an Assembly
         // section is a weak one.
-        if (CHECKLIST_START_RE.test(t)) add(l.text, true, nxt);
+        if (startRe.test(t)) add(l.text, true, nxt);
         else if (assembly[l.section]) add(l.text, false, nxt);
       }
       return out;
@@ -2347,7 +2658,7 @@
     var plain = raw.split(/\r?\n/);
     for (var p = 0; p < plain.length; p++) {
       var pt = tidyStep(plain[p]);
-      if (pt && CHECKLIST_START_RE.test(pt)) add(plain[p], true, plain[p + 1]);
+      if (pt && startRe.test(pt)) add(plain[p], true, plain[p + 1]);
     }
     return out;
   }
@@ -2380,7 +2691,7 @@
       // is affordable; anything the index did hold is answered above.
       if (!hasRepeatLine(lines)) return null;
     }
-    var api = patternsApi();
+    var api = patternsApi(prt);
     if (!api || typeof api.lineFor !== 'function') return null;
     try {
       return api.lineFor(lines, rowNumber) || null;
@@ -2407,7 +2718,7 @@
         return usableCount(idx.count[rowNumber]);
       }
     }
-    var api = patternsApi();
+    var api = patternsApi(prt);
     if (!api || typeof api.targetFor !== 'function') return null;
     try {
       return usableCount(api.targetFor(lines, rowNumber));
@@ -2450,6 +2761,8 @@
   /** Stitch target for the row currently being worked on this part. */
   function currentTarget(prt) {
     if (!prt) return null;
+    // wave H: a short row is counted to the turn, not to a row total
+    if (knitInShortRows(prt)) return null;
     return targetFor(prt, repeatInfo(prt).patternRow);
   }
 
@@ -2671,6 +2984,7 @@
     recordRowStitches(prt, prt.row + 1, prt.stitch);
     prt.row += 1;
     prt.stitch = 0;
+    knitRowMoved(prt, 1);   // wave H: the side turns with the work
     pushHistory(proj, prt);
 
     if (prt.targetRows && prt.row >= prt.targetRows) {
@@ -2679,6 +2993,7 @@
         prt.row = 0;
         // The next piece starts from nothing, and so does its diagram.
         prt.rowStitches = [0];
+        knitNewPiece(prt);
         return {
           event: 'pieceDone',
           piecesDone: prt.piecesDone,
@@ -2713,9 +3028,11 @@
       // A finished part pins its stitch count at the target instead of
       // creeping past it forever (13 #6).
       if (res.event === 'alreadyDone') prt.stitch = target;
+      // wave H: two at a time, the work moves on to the other piece
+      knitAfterAutoRow(proj, prt, res);
       touch(proj);
       // Plain row completions report as 'rowAuto'; bigger milestones win.
-      if (res.event === 'row') return { event: 'rowAuto', row: prt.row };
+      if (res.event === 'row') return { event: 'rowAuto', row: prt.row, switchedTo: res.switchedTo };
       return res;
     }
 
@@ -2756,6 +3073,9 @@
     var proj = project(projectId);
     var prt = part(proj, partId);
     if (!proj || !prt) return { event: 'none' };
+    // wave H: short rows and two-at-a-time (null = the ordinary row below)
+    var knitRes = knitTapRow(proj, prt);
+    if (knitRes) return knitRes;
     // A dead press on a finished part costs nothing: no snapshot, no write,
     // no second celebration, no rewritten finishedAt (13 #6).
     if (isPartTerminal(prt)) {
@@ -2780,6 +3100,9 @@
     var proj = project(projectId);
     var prt = part(proj, partId);
     if (!proj || !prt) return { event: 'none' };
+    // wave H: back a short row, or both pieces worked two at a time
+    var knitRes = knitUntapRow(proj, prt);
+    if (knitRes) return knitRes;
 
     var canStep = prt.row > 0 || prt.piecesDone > 0;
     if (!canStep) {
@@ -2806,6 +3129,7 @@
       prt.row = prt.targetRows || 0;
     }
     prt.stitch = 0;
+    knitRowMoved(prt, -1);   // wave H
     trimRowStitches(prt, prt.row);
     var last = proj.history[proj.history.length - 1];
     if (last && last.partId === prt.id) proj.history.pop();
@@ -2819,8 +3143,10 @@
     if (!proj || !prt) return { event: 'none' };
     snapshot(proj);
     // "Jump to row 7" means row 7 is the one being worked → 6 completed.
+    var rowBefore = prt.row;
     prt.row = Math.max(0, clampInt(rowNumber, 1, 999999, 1) - 1);
     prt.stitch = 0;
+    knitRowMoved(prt, prt.row - rowBefore);   // wave H
     trimRowStitches(prt, prt.row);
     touch(proj);
     return { event: 'row', row: prt.row };
@@ -2834,6 +3160,7 @@
     prt.row = 0;
     prt.stitch = 0;
     prt.rowStitches = [0];
+    knitNewPiece(prt);   // wave H
     touch(proj);
     return true;
   }
@@ -2897,7 +3224,7 @@
         // template was saved from had all of them.
         if (tplSize) made.sizeIndex = tplIdx;
         if (made.patternText) {
-          made.targetRows = targetRowsFromText(made.patternText, tplIdx, tplSizes ? tplSizes.length : 0);
+          made.targetRows = targetRowsFromText(made.patternText, tplIdx, tplSizes ? tplSizes.length : 0, craft);
         }
         // wave G: the size this part belongs to
         made.group = normalizeGroupName(p.group);
@@ -2910,6 +3237,9 @@
       // wave G: every size the template carries, in order; the first is open
       groups: Array.isArray(tpl.groups) ? deepCopy(tpl.groups) : []
     });
+    // wave H: the template's gauge, markers and two-at-a-time pairs (and a
+    // gauge the New project sheet read off the PDF, `opts.gauge`)
+    knitFromTemplate(proj, tpl, opts.gauge);
     projects().push(proj);
     save();
     return proj;
@@ -3073,6 +3403,7 @@
     // part shared by every size)
     var ag = opts.group !== undefined ? normalizeGroupName(opts.group) : proj.activeGroup;
     prt.group = ag && (proj.groups || []).some(function (g) { return g.name === ag; }) ? ag : null;
+    if (isKnitProject(proj)) knitPartDefaults(prt);   // wave H
     proj.parts.push(prt);
     proj.activePartId = prt.id;
     touch(proj);
@@ -3198,8 +3529,8 @@
    * the parser cannot place ('rows' or null) blocks the answer — flipping a
    * project's counting label on a guess is worse than leaving it.
    */
-  function sectionsAllRounds(sections) {
-    var api = patternsApi();
+  function sectionsAllRounds(sections, craft) {
+    var api = patternsApi(craft);
     if (!api || typeof api.workMode !== 'function') return false;
     var seen = 0;
     for (var i = 0; i < sections.length; i++) {
@@ -3223,8 +3554,8 @@
    * question the importer asks of a SECTION before it lends it the document's
    * answer, and the question `partDialect` asks of a part's own text.
    */
-  function textDialect(text) {
-    var api = patternsApi();
+  function textDialect(text, craft) {
+    var api = patternsApi(craft);
     if (!api || typeof api.dialectHints !== 'function') return null;
     var s = str(text, '');
     if (!/\S/.test(s)) return null;
@@ -3236,6 +3567,136 @@
     }
     var v = d && typeof d === 'object' ? str(d.dialect, '') : '';
     return v === 'uk' || v === 'us' ? v : null;
+  }
+
+  /* ---- wave H: gauge + needle from a knitting pattern's front matter ---- */
+
+  // "Needles: 4 mm (US 6)", "4.5mm (US 7)", "Sizes U.S. 8 (5 mm) and U.S. 10 (6 mm)", "US 6"
+  var NEEDLE_SIZE_RE = new RegExp(
+    '\\bU\\.?\\s?S\\.?\\s*(?:size\\s*)?(\\d+(?:\\.\\d+)?)\\s*[\\(\\[]\\s*(\\d+(?:[.,]\\d+)?)\\s*mm\\s*[\\)\\]]' +
+    '|(\\d+(?:[.,]\\d+)?)\\s*mm\\b(?:\\s*[\\(\\[]\\s*U\\.?\\s?S\\.?\\s*(?:size\\s*)?(\\d+(?:\\.\\d+)?)\\s*[\\)\\]])?' +
+    '|\\bU\\.?\\s?S\\.?\\s*(?:size\\s*)?(\\d+(?:\\.\\d+)?)\\b', 'gi');
+  var NEEDLE_LINE_RE = /\bneedles?\b|\bcircular\b|\bdpns?\b|\bdouble[- ]pointed\b/i;
+
+  /** Every needle size the needle lines name, in order: [{ mm, label }]. */
+  function needleSizes(text) {
+    var rows = str(text, '').split(/\r?\n/);
+    var out = [];
+    for (var i = 0; i < rows.length && i < 400; i++) {
+      var t = rows[i];
+      // the size may sit on the line after a bare "NEEDLES" label
+      if (!NEEDLE_LINE_RE.test(t) && !(i > 0 && /^\s*needles?\s*:?\s*$/i.test(rows[i - 1]))) continue;
+      NEEDLE_SIZE_RE.lastIndex = 0;
+      var m;
+      while ((m = NEEDLE_SIZE_RE.exec(t)) !== null) {
+        var mm = m[2] || m[3] || null;
+        var us = m[1] || m[4] || m[5] || null;
+        var v = mm ? parseFloat(mm.replace(',', '.')) : null;
+        if (mm && !(v > 0 && v < 30)) continue;
+        out.push({
+          mm: v,
+          label: mm ? mm.replace(',', '.') + ' mm' + (us ? ' (US ' + us + ')' : '') : 'US ' + us
+        });
+      }
+    }
+    return out;
+  }
+
+  /**
+   * The needle the gauge is knitted on, as printed ("6 mm (US 10)"), or ''.
+   * "… in stocking st with larger needles" picks the largest size the
+   * pattern lists ("smaller" the smallest); otherwise the first one.
+   */
+  function needleFromText(text, gaugeSource) {
+    var sizes = needleSizes(text);
+    if (!sizes.length) return '';
+    var raw = str(text, '');
+    var hint = '';
+    if (gaugeSource) {
+      var at = raw.indexOf(gaugeSource);
+      hint = at >= 0 ? raw.slice(at, at + gaugeSource.length + 80) : gaugeSource;
+    }
+    var want = /\blarger\b/i.test(hint) ? 1 : (/\bsmaller\b/i.test(hint) ? -1 : 0);
+    if (!want) return sizes[0].label;
+    var best = null;
+    sizes.forEach(function (s) {
+      if (s.mm === null) return;
+      if (!best || (want > 0 ? s.mm > best.mm : s.mm < best.mm)) best = s;
+    });
+    return (best || sizes[0]).label;
+  }
+
+  function round1(v) {
+    return typeof v === 'number' && isFinite(v) && v > 0 ? Math.round(v * 10) / 10 : null;
+  }
+
+  /**
+   * Read the gauge (`api.gauge`) and the needle size out of a whole document
+   * into `{ sts, rows, over, unit, needle }`, in the unit the pattern printed
+   * its swatch in (else the knitter's unit setting). Written to
+   * `Project.gauge` when the project carries that field (knit-counter's
+   * normaliser), else to `craftData.gauge`. A gauge the knitter already has
+   * (any number on it) is never overwritten, and their swatch is kept.
+   * @returns {boolean} whether anything was written
+   */
+  /**
+   * wave H (knit-qa): the gauge an import of `fullText` would write, without
+   * writing it — `{sts, rows, over, unit, needle}` or null. The import
+   * preview shows it ("Gauge 12 sts × 17 rows = 4 in · 6 mm (US 10)").
+   */
+  function gaugeFromText(fullText, craft) {
+    var c = craftKeyOf(craft);
+    if (!fullText || c === DEFAULT_CRAFT) return null;
+    return readImportGauge(String(fullText), patternsApi(c), c);
+  }
+
+  function readImportGauge(fullText, api, craft) {
+    var g = null;
+    if (api && typeof api.gauge === 'function') {
+      try { g = api.gauge(fullText); } catch (e) { g = null; }
+    }
+    var needle = needleFromText(fullText, g && g.source ? String(g.source) : '');
+    var hasG = !!(g && (g.stsPer10cm || g.rowsPer10cm));
+    if (!hasG && !needle) return null;
+    var src = g && g.source ? String(g.source) : '';
+    var pref = (craftSettings(craft) || {}).unit === 'in' ? 'in' : 'cm';
+    var cmAt = src.search(/\b10\s*cm\b/i);
+    var inAt = src.search(/\b4\s*(?:"|''|in\b|inch)/i);
+    var printed = cmAt >= 0 && (inAt < 0 || cmAt < inAt) ? 'cm' : (inAt >= 0 ? 'in' : pref);
+    return {
+      sts: hasG ? round1(printed === 'in' ? g.stsPer4in : g.stsPer10cm) : null,
+      rows: hasG ? round1(printed === 'in' ? g.rowsPer4in : g.rowsPer10cm) : null,
+      over: printed === 'in' ? 4 : 10,
+      unit: printed,
+      needle: needle
+    };
+  }
+
+  function importGauge(proj, fullText, api) {
+    // The swatch as PRINTED, in the unit printed FIRST: "12 sts and 17 rows =
+    // 4in [10 cm]" is 12 / 17 over 4 in (docs/research/knitting.md §1); with
+    // no unit printed, the knitter's own. The gauge card converts.
+    var next = readImportGauge(fullText, api, craftKeyOf(proj));
+    if (!next) return false;
+    var needle = next.needle;
+    var useField = Object.prototype.hasOwnProperty.call(proj, 'gauge');
+    if (!useField && (!proj.craftData || typeof proj.craftData !== 'object' || Array.isArray(proj.craftData))) {
+      proj.craftData = {};
+    }
+    var have = useField ? proj.gauge : proj.craftData.gauge;
+    have = have && typeof have === 'object' ? have : null;
+    if (have && (have.sts || have.rows)) {
+      // the knitter's (or an earlier import's) gauge stands; only a missing needle is filled in
+      if (needle && !have.needle) { have.needle = needle; return true; }
+      return false;
+    }
+    if (have && have.swatch) next.swatch = have.swatch;
+    if (have && have.needle && !next.needle) next.needle = have.needle;
+    // knit-counter's setGauge normalises it (inside the import's own snapshot)
+    if (useField && typeof setGauge === 'function') setGauge(proj.id, next, { undo: false });
+    else if (useField) proj.gauge = next;
+    else proj.craftData.gauge = next;
+    return true;
   }
 
   /**
@@ -3276,12 +3737,41 @@
     // them in the whole pasted text and remember them on the project.
     var fullText = opts && typeof opts.text === 'string' ? opts.text : '';
     var sizesBefore = JSON.stringify(proj.sizes || null);
-    if (fullText && window.Patterns && typeof window.Patterns.detectSizes === 'function') {
+    // wave H: the project's own craft reads it (knitting → Knits)
+    var craft = craftKeyOf(proj);
+    var docApi = patternsApi(craft);
+    if (fullText && docApi && typeof docApi.detectSizes === 'function') {
       try {
-        var names = window.Patterns.detectSizes(fullText);
+        var names = docApi.detectSizes(fullText);
         if (Array.isArray(names) && names.length > 1) proj.sizes = names.map(String);
       } catch (e) { /* ignore parser errors */ }
     }
+    // wave H (knit-qa): a knitting ebook's groups are PATTERNS, each with its
+    // own sizes; the project's sizes are those of the (first) pattern it
+    // imports, not the book's first pattern ("7 (8½, 9½)"" for Speed Bump).
+    var knitGroupText = null;
+    if (craft !== DEFAULT_CRAFT && docApi && typeof docApi.detectSizes === 'function') {
+      var g0 = null, gText = [];
+      sections.forEach(function (s0) {
+        var g = normalizeGroupName(s0 && s0.group);
+        if (!g) return;
+        if (g0 === null) g0 = g;
+        if (g === g0) gText.push(str(s0 && s0.text, ''));
+      });
+      if (g0 !== null) {
+        knitGroupText = gText.join('\n');
+        try {
+          var gNames = docApi.detectSizes(knitGroupText);
+          if (Array.isArray(gNames) && gNames.length > 1) proj.sizes = gNames.map(String);
+        } catch (e) { /* ignore parser errors */ }
+      }
+    }
+    // wave H: a counter craft's gauge and needle lines (front matter) go to
+    // the project's gauge, never into a part's rows
+    // (wave H, knit-qa: a pattern book's gauge is the imported pattern's own,
+    // read from its sections; the book's first gauge line is another sock's)
+    var gaugeText = knitGroupText !== null ? knitGroupText : fullText;
+    if (gaugeText && craft !== DEFAULT_CRAFT && importGauge(proj, gaugeText, docApi)) out.gauge = true;
     // Wave F (size-once, 03 #1): the size picked in the import preview, for
     // the whole project. Every part this import touches is read at it, and
     // its target is that size's ("a total of 25 (29, 33 …) Rows").
@@ -3303,7 +3793,7 @@
 
     // Read ONCE for the whole document, not once per section: `dialectHints`
     // scans the text with ten regexes and a 200-page leaflet is not a contest.
-    var docDialect = fullText ? textDialect(fullText) : null;
+    var docDialect = fullText ? textDialect(fullText, craft) : null;
 
     /**
      * Lend `prt` the document's dialect, but only where there is nothing to
@@ -3313,7 +3803,7 @@
     function lendDialect(prt, sectionText) {
       if (!docDialect || !prt) return;
       if (normalizeDialect(prt.dialect, 'auto') !== 'auto') return;
-      if (textDialect(sectionText)) return;
+      if (textDialect(sectionText, craft)) return;
       prt.dialect = docDialect;
       out.dialectSet++;
     }
@@ -3336,7 +3826,7 @@
       }
       if (sizeIdx !== null || proj.size) prt.sizeIndex = readSize;
       if (!(opts && opts.noTargets) && !prt.targetRows) {
-        var activeTarget = targetRowsFromText(joined, readSize, docSizeN);
+        var activeTarget = targetRowsFromText(joined, readSize, docSizeN, craft);
         if (activeTarget) { prt.targetRows = activeTarget; out.targeted = 1; }
       }
       lendDialect(prt, joined);
@@ -3361,12 +3851,17 @@
     var importedGroups = [];
     out.groups = [];
 
+    // wave H (knit-qa): in a knitting import a part made or updated by THIS
+    // import is never matched again: the Time Traveler sock has two "Foot"
+    // sections and the second overwrote the first. It is "Foot 2".
+    var knitImport = craft === 'knitting';
+    var takenNow = [];
     for (var i = 0; i < sections.length; i++) {
       var sec = sections[i] || {};
       var name = str(sec.name, '').trim();
       var text = str(sec.text, '');
       var makeCount = clampInt(sec.makeCount, 1, 99, 1);
-      var key = sectionImportKey(name, text);
+      var key = sectionImportKey(name, text, knitImport);
       var secGroup = normalizeGroupName(sec.group);
       if (secGroup && keepGroups && !keepGroups[secGroup]) continue;
       if (secGroup && importedGroups.indexOf(secGroup) < 0) importedGroups.push(secGroup);
@@ -3377,7 +3872,7 @@
       // within the section's own size)
       if (key) {
         for (j = 0; j < proj.parts.length; j++) {
-          if (proj.parts[j].importKey && proj.parts[j].importKey === key &&
+          if (proj.parts[j].importKey && proj.parts[j].importKey === key && !(knitImport && takenNow.indexOf(proj.parts[j]) >= 0) &&
               (proj.parts[j].group || null) === secGroup) {
             existing = proj.parts[j];
             break;
@@ -3386,7 +3881,7 @@
       }
       if (!existing && name) {
         for (j = 0; j < proj.parts.length; j++) {
-          if (proj.parts[j].name.toLowerCase() === name.toLowerCase() &&
+          if (proj.parts[j].name.toLowerCase() === name.toLowerCase() && !(knitImport && takenNow.indexOf(proj.parts[j]) >= 0) &&
               (proj.parts[j].group || null) === secGroup) {
             existing = proj.parts[j];
             break;
@@ -3394,7 +3889,7 @@
         }
       }
       // 01 #1 / 02 #1: without this every PDF project is un-finishable.
-      var target = noTargets ? null : targetRowsFromText(text, readSize, docSizeN);
+      var target = noTargets ? null : targetRowsFromText(text, readSize, docSizeN, craft);
       var place = str(sec.placement, '');
       if (existing) {
         existing.patternText = text;
@@ -3420,9 +3915,10 @@
         }
         lendDialect(existing, text);
         delete lineCache[existing.id];
+        takenNow.push(existing);
         out.updated++;
       } else {
-        var added = makePart(name || 'Part ' + (proj.parts.length + 1), makeCount);
+        var added = makePart(knitImport && name ? knitUniqueName(proj, name, secGroup) : (name || 'Part ' + (proj.parts.length + 1)), makeCount);
         added.patternText = text;
         added.importKey = key;
         added.group = secGroup;
@@ -3432,6 +3928,7 @@
         if (place) { added.placementNotes = place; out.placed++; }
         lendDialect(added, text);
         proj.parts.push(added);
+        takenNow.push(added);
         out.created++;
       }
     }
@@ -3451,7 +3948,7 @@
       // although every line reads `R12-R17: 66 sc around`, and one project-level
       // word then modelled two spheres as a flat sheet. The parts themselves
       // stay on 'auto' — this only corrects the project's own label.
-      if (proj.countMode !== 'rounds' && sectionsAllRounds(sections)) {
+      if (proj.countMode !== 'rounds' && sectionsAllRounds(sections, craft)) {
         proj.countMode = 'rounds';
         out.modeFlipped = true;
       }
@@ -3607,8 +4104,8 @@
       var old = sizeIndexOf(prt);
       var text = str(prt.patternText, '');
       if (text.replace(/\s/g, '') && old !== idx) {
-        var was = targetRowsFromText(text, old, docN);
-        var now = targetRowsFromText(text, idx, docN);
+        var was = targetRowsFromText(text, old, docN, proj.craft);
+        var now = targetRowsFromText(text, idx, docN, proj.craft);
         // only a target that IS the pattern's reading moves ("Don't set
         // targets" and a hand-typed number both stay as they are)
         if (now && was !== null && prt.targetRows === was) {
@@ -3617,8 +4114,8 @@
         }
         var rep = prt.repeat;
         if (rep && rep.mode === 'untilRows') {
-          var sugOld = untilSuggestion(text, old, docN);
-          var sugNew = untilSuggestion(text, idx, docN);
+          var sugOld = untilSuggestion(text, old, docN, proj.craft);
+          var sugNew = untilSuggestion(text, idx, docN, proj.craft);
           if (sugNew && rep.untilRows === sugOld) {
             prt.repeat = normalizeRepeat({
               enabled: rep.enabled, startRow: rep.startRow, endRow: rep.endRow,
@@ -3661,10 +4158,10 @@
   }
 
   /** The parser's "until there are a total of N Rows" for a text at a size. */
-  function untilSuggestion(text, size, sizeCount) {
-    var api = patternsApi();
+  function untilSuggestion(text, size, sizeCount, craft) {
+    var api = patternsApi(craft);
     if (!api || typeof api.summary !== 'function') return null;
-    var lines = parseLoose(text, { size: size, sizeCount: sizeCount });
+    var lines = parseLoose(text, { size: size, sizeCount: sizeCount }, craft);
     if (!lines.length) return null;
     try {
       var s = api.summary(lines);
@@ -3706,14 +4203,16 @@
   /**
    * `Patterns.countReport` for a part (its own size) or for loose text.
    * @param {Object|string} partOrText
-   * @param {{size?:number, sizeCount?:number}} [opts] for loose text
+   * @param {{size?:number, sizeCount?:number, craft?:string}} [opts] for loose text
    */
   function countReport(partOrText, opts) {
     var empty = { rows: 0, printed: 0, computed: 0, missing: 0, unresolved: 0, disagree: [] };
-    var api = patternsApi();
+    var loose = typeof partOrText === 'string';
+    var craft = loose ? (opts && opts.craft) || DEFAULT_CRAFT : partOrText;
+    var api = patternsApi(craft);
     if (!api || typeof api.countReport !== 'function') return empty;
-    var lines = typeof partOrText === 'string'
-      ? parseLoose(partOrText, opts && (opts.size || opts.sizeCount) ? { size: opts.size || 0, sizeCount: opts.sizeCount || 0 } : null)
+    var lines = loose
+      ? parseLoose(partOrText, opts && (opts.size || opts.sizeCount) ? { size: opts.size || 0, sizeCount: opts.sizeCount || 0 } : null, craft)
       : linesFor(partOrText);
     try {
       return api.countReport(lines) || empty;
@@ -3739,7 +4238,7 @@
   function colorPlan(prt) {
     var entry = partLines(prt);
     var lines = entry.lines;
-    var api = patternsApi();
+    var api = patternsApi(prt);
     if (!lines.length || !api || typeof api.expand !== 'function') return [];
     var rep = prt.repeat || {};
     var key = entry.version + '|' + (rep.enabled ? rep.startRow + '-' + rep.endRow + 'x' + rep.times : '');
@@ -4914,8 +5413,8 @@
   }
 
   /** Patterns.colorHex(name) → '#hex' | null, never throwing. */
-  function patternColorHex(name) {
-    var api = patternsApi();
+  function patternColorHex(name, craft) {
+    var api = patternsApi(craft);
     if (!api || typeof api.colorHex !== 'function') return null;
     try {
       return normalizeHex(api.colorHex(name));
@@ -4925,9 +5424,9 @@
   }
 
   /** Patterns.colors(text) → { legend, names }, never throwing. */
-  function patternColorsOf(text) {
+  function patternColorsOf(text, craft) {
     var out = { legend: {}, names: [] };
-    var api = patternsApi();
+    var api = patternsApi(craft);
     if (!api || typeof api.colors !== 'function') return out;
     if (!text || !String(text).replace(/\s/g, '')) return out;
     try {
@@ -4975,11 +5474,11 @@
 
       var out = override(name);
       if (!out) {
-        if (legend === null) legend = patternColorsOf(prt && prt.patternText).legend || {};
+        if (legend === null) legend = patternColorsOf(prt && prt.patternText, proj || prt).legend || {};
         var full = str(legend[name], '').trim();
-        if (full && full !== name) out = override(full) || patternColorHex(full);
+        if (full && full !== name) out = override(full) || patternColorHex(full, proj || prt);
       }
-      if (!out) out = patternColorHex(name);
+      if (!out) out = patternColorHex(name, proj || prt);
       if (!out) out = main;
       memo[name] = out;
       return out;
@@ -5006,7 +5505,7 @@
    * pattern text per tap is exactly the kind of thing finding 2 was about.
    */
   function patternWorkMode(prt) {
-    var api = patternsApi();
+    var api = patternsApi(prt);
     if (!api || typeof api.workMode !== 'function') return null;
     var text = prt && prt.patternText ? String(prt.patternText) : '';
     // /\S/ stops at the first non-space character; `text.replace(/\s/g,'')`
@@ -5020,6 +5519,19 @@
     try {
       var m = api.workMode(text);
       if (m === 'rounds' || m === 'rows') out = m;
+      // wave H (knit-qa): a knitted piece BEGUN in the round (a sock's cuff)
+      // is a piece in the round, whatever flat stretch it holds (its heel
+      // flap); the per-row `workedIn` makes those rows ROW (rowWorkMode).
+      // Knits.workMode says 'rows' as soon as any row is flat, which drew the
+      // whole sock as a flat panel.
+      if (out === 'rows' && craftKeyOf(prt) === 'knitting') {
+        for (var wi = 0; wi < entry.lines.length; wi++) {
+          var wl = entry.lines[wi];
+          if (!wl || wl.kind !== 'row' || !(wl.row >= 1) || wl.sizeSkip) continue;
+          if (wl.workedIn === 'rounds') out = 'rounds';
+          break;
+        }
+      }
     } catch (e) {
       /* a parser without workMode, or a bad pattern — leave it unknown */
     }
@@ -5187,7 +5699,7 @@
     var entry = partLines(prt);
     if (entry === EMPTY_ENTRY) return null;
     if (entry.dialectText === undefined) {
-      entry.dialectText = textDialect(prt && prt.patternText ? String(prt.patternText) : '') || false;
+      entry.dialectText = textDialect(prt && prt.patternText ? String(prt.patternText) : '', entry.craft) || false;
     }
     return entry.dialectText || null;
   }
@@ -5237,7 +5749,7 @@
       // or the import, else this piece's own text, else null. See `partDialect`.
       dialect: partDialect(prt)
     };
-    var api = patternsApi();
+    var api = patternsApi(prt);
     var lines = linesFor(prt);
     if (api && typeof api.startHint === 'function' && lines.length) {
       try {
@@ -5690,10 +6202,20 @@
       } else {
         open = false;
         if (!gotDec && t === 'dec') dec.push(i);
+        // Wave H: a knitting record is its own site — one yo / m1 / kfb is one
+        // increase, one k2tog / ssk / cdd one decrease. No crochet type is here.
+        else if (!gotInc && KNIT_INC_T[t] === 1) inc.push(i);
+        else if (!gotDec && KNIT_DEC_T[t] === 1) dec.push(i);
       }
     }
     return { inc: inc, dec: dec };
   }
+
+  var KNIT_INC_T = { yo: 1, m1: 1, m1l: 1, m1r: 1, m1p: 1, kfb: 1, pfb: 1, kyok: 1 };
+  var KNIT_DEC_T = {
+    k2tog: 1, ssk: 1, p2tog: 1, ssp: 1, k3tog: 1, p3tog: 1, sssk: 1, sssp: 1, cdd: 1, s2kp: 1,
+    sk2p: 1, skp: 1
+  };
 
   /**
    * How many of `expand`'s positions the pattern COUNTS. A chain space is a ring
@@ -5710,23 +6232,45 @@
     var n = 0, i, e;
     for (i = 0; i < list.length; i++) {
       e = list[i];
-      if (!e || e.t !== 'ch') n++;
+      if (!e || e.t !== 'ch') n += knitRecordSpan(e);
     }
     return n;
   }
 
+  /**
+   * Stitches one record stands for: 1, except a knitted cable (wave H), which
+   * is ONE record `w` wide over several stitches (contract §2) — its own `n`
+   * when `Knits.expand` gives it, else its width at 0.85 a stitch. Crochet
+   * records never carry either, so their count is unchanged.
+   */
+  function knitRecordSpan(e) {
+    // a bound-off stitch is in its row's fabric but no longer on the needle
+    if (e && e.t === 'bo') return 0;
+    // Knits.expand writes a cable as one record per stitch (`span`, `at`)
+    if (!e || e.t !== 'cable' || typeof e.at === 'number') return 1;
+    if (typeof e.n === 'number' && isFinite(e.n) && e.n >= 1) return Math.min(24, Math.floor(e.n));
+    var w = typeof e.w === 'number' && isFinite(e.w) && e.w > 0 ? e.w : 4 * 0.85;
+    return Math.max(2, Math.min(24, Math.round(w / 0.85)));
+  }
+
   function buildDiagramModel(prt, proj) {
+    // wave H: lines and expand come from ONE craft — the project's
+    bindPartProject(prt, proj);
     var mode = partWorkMode(prt, proj === undefined ? null : proj);
     var main = mainYarn(proj);
     var resolve = makeColorResolver(proj, prt);
     var lines = linesFor(prt);
     var rowIndex = lines.length ? rowIndexOf(prt) : null;
     var rs = Array.isArray(prt.rowStitches) ? prt.rowStitches : [];
-    var api = patternsApi();
+    var api = patternsApi(prt);
     var canExpand = !!(lines.length && api && typeof api.expand === 'function');
     // Read up front: round 1 is seeded from a big chain ring (D5) while the
     // rows are being walked, not patched up afterwards.
     var shape = partShape(prt);
+    // Wave H: a knitting part tells the 3D how its rows were worked (side,
+    // short rows, markers) and how its ends close (graft, a toe cast-on).
+    var knit = craftKeyOf(proj || prt) === 'knitting';
+    if (knit) knitShapeHints(shape, prt);
 
     var maxRow = 0;
     if (lines.length) {
@@ -5762,6 +6306,20 @@
     // dialect seeds nothing and `expand` goes on deciding for itself.
     var state = shape.dialect ? { uk: shape.dialect === 'uk' } : null;
     var prevCount = 0;
+    // Wave H: a knitted piece starts on its cast-on ("CO 56 sts", the parser's
+    // row-0 setup line), so row 1 is worked over those stitches, not from 0 —
+    // "*k2, p2; rep from * to end" needs to know where the end is.
+    if (knit) {
+      for (var li = 0; li < lines.length; li++) {
+        var sl0 = lines[li];
+        if (!sl0) continue;
+        if (typeof sl0.row === 'number' && sl0.row >= 1) break;
+        if (sl0.kind === 'setup' && typeof sl0.count === 'number' && isFinite(sl0.count) && sl0.count > 0) {
+          prevCount = Math.floor(sl0.count);
+          break;
+        }
+      }
+    }
 
     // Rows past the window are never pushed and nothing downstream reads their
     // colour state, so the walk stops at `last`.
@@ -5776,6 +6334,7 @@
       var ex = null;
       var positions = 0;
       var truncated = false;
+      var boOnly = 0;
 
       if (canExpand) {
         try {
@@ -5795,6 +6354,13 @@
           // the next row starts from (and that the stitch counter compares
           // against), so the chain spaces are left out of it.
           count = countableStitches(list);
+          // Wave H: a row that binds every stitch off leaves none on the needle,
+          // but it is still a row of fabric — the bind-off edge — so it is drawn
+          // as the stitches it bound off, and the next row starts from 0.
+          if (knit && !count) {
+            for (var bi = 0; bi < list.length; bi++) if (list[bi] && list[bi].t === 'bo') boOnly++;
+            if (boOnly) count = boOnly;
+          }
           // Rows before the window are walked only to carry `prevCount` and the
           // colour state forward, so they never pay for stitch records.
           if (row >= first && positions > 0) {
@@ -5823,6 +6389,15 @@
               // the two known values of each pass, and only when expand sends them.
               if (st.post === 'front' || st.post === 'back') rec.post = st.post;
               if (st.lp === 'blo' || st.lp === 'flo') rec.lp = st.lp;
+              // Wave H: the side of the row a knit stitch was worked on (a purl
+              // on the WS is a knit V on the face), a cable's cross and span.
+              if (knit) {
+                if (st.side === 'rs' || st.side === 'ws') rec.side = st.side;
+                if (st.cross === 'f' || st.cross === 'b') rec.cross = st.cross;
+                if (typeof st.n === 'number' && isFinite(st.n) && st.n >= 1) rec.n = Math.floor(st.n);
+                if (typeof st.span === 'number' && isFinite(st.span) && st.span >= 1) rec.span = Math.floor(st.span);
+                if (typeof st.at === 'number' && isFinite(st.at) && st.at >= 0) rec.at = Math.floor(st.at);
+              }
               stitches.push(rec);
             }
           }
@@ -5877,7 +6452,10 @@
       // renderer never has to guess how long the round is.
       if (row >= first && !stitches.length && count > 0) {
         var generic = Math.min(count, STITCH_DETAIL_MAX);
-        for (var gi = 0; gi < generic; gi++) stitches.push({ t: 'x', c: null, h: 1, w: 1 });
+        // wave H: a knitted row with nothing behind it is plain knitting, 0.75 tall
+        for (var gi = 0; gi < generic; gi++) {
+          stitches.push(knit ? { t: 'k', c: null, h: 0.75, w: 1 } : { t: 'x', c: null, h: 1, w: 1 });
+        }
       }
 
       if (row >= first) {
@@ -5910,9 +6488,21 @@
         // its `count` is just the stitches tapped so far, so the renderer's
         // follow mode must not turn by it. Absent otherwise.
         if (countless) roundRec.countless = true;
+        if (knit && line) knitRoundFields(roundRec, line);
+        // wave H (knit-qa): a flat stretch inside a piece knitted in the
+        // round takes its side by parity from the last stated tag — the
+        // sock's "Rows 59-88: Rep Rows 57-58" states none, so 30 of its 32
+        // heel-flap rows read as full rounds and the sock never turned its L
+        if (knit && line && !roundRec.side && mode === 'rounds' && line.workedIn === 'rows') {
+          var flatSide = patternSideAt(prt, patternRow, proj, { flat: true });
+          if (flatSide && flatSide.side) roundRec.side = flatSide.side;
+        }
+        // the expand's own short-row verdict ("K25, wrap next st, turn")
+        if (knit && ex && ex.shortRow === true) roundRec.shortRow = true;
+        if (knit && ex && !roundRec.side && (ex.side === 'rs' || ex.side === 'ws')) roundRec.side = ex.side;
         rounds.push(roundRec);
       }
-      prevCount = count;
+      prevCount = boOnly ? 0 : count;
     }
 
     if (current < 0) current = rounds.length ? rounds.length - 1 : 0;
@@ -5923,7 +6513,7 @@
     shape.cornersSource = ck.cornersSource;
 
     var dev = roundDeviation(prt);
-    return {
+    var model = {
       mode: mode,
       rounds: rounds,
       current: current,
@@ -5932,6 +6522,59 @@
       window: { first: rounds.length ? first : 0, total: total },
       deviation: { expected: dev.expected, actual: dev.actual }
     };
+    // Wave H: the renderer and DiagramGeo take their knitting path from this
+    if (knit) model.craft = 'knitting';
+    return model;
+  }
+
+  /* ---- knitting (wave H, docs/wave-h/knit-3d.md) ---- */
+
+  /** A toe or a sock closed by grafting — Kitchener stitch — is shut. */
+  var KNIT_GRAFT_RE = /\b(?:kitchener|graft(?:ed|ing)?)\b/i;
+  /** A cast-on that starts a toe (or a crown) closed instead of on an open edge. */
+  var KNIT_CLOSED_START_RE =
+    /\b(?:turkish|judy'?s|figure[\s-]*(?:8|eight)|magic[\s-]+cast[\s-]*on|pinhole|emily\s+ocker'?s?|circular\s+cast[\s-]*on|disappearing\s+loop)\b/i;
+
+  /**
+   * `shape.graft` / `shape.closedStart` (knitting only), memoised on the parse
+   * like the orientation hint. Only `true` is ever written, so a crochet
+   * shape and a knitting text that says neither keep exactly their keys.
+   */
+  function knitShapeHints(shape, prt) {
+    var entry = partLines(prt);
+    if (entry === EMPTY_ENTRY) return shape;
+    if (!entry.knitHints) {
+      var text = prt && prt.patternText ? String(prt.patternText) : '';
+      entry.knitHints = { graft: KNIT_GRAFT_RE.test(text), closedStart: KNIT_CLOSED_START_RE.test(text) };
+    }
+    if (entry.knitHints.graft) shape.graft = true;
+    if (entry.knitHints.closedStart) shape.closedStart = true;
+    return shape;
+  }
+
+  /**
+   * The parse line's knitting fields onto a Model round, only when they say
+   * something: `side` 'rs'|'ws' (a row worked flat — inside a round piece,
+   * a heel flap), `shortRow: true`, `markers` [{name, at}], `delta` (a
+   * stated change, "8 sts inc"). DiagramGeo reads the first two; the rest
+   * ride along for the renderer and the counter.
+   */
+  function knitRoundFields(rec, line) {
+    if (line.side === 'rs' || line.side === 'ws') rec.side = line.side;
+    if (line.shortRow === true) rec.shortRow = true;
+    if (Array.isArray(line.markers) && line.markers.length) {
+      var mk = [];
+      for (var i = 0; i < line.markers.length && mk.length < 24; i++) {
+        var m = line.markers[i];
+        if (!m || typeof m !== 'object') continue;
+        var at = typeof m.at === 'number' && isFinite(m.at) && m.at >= 0 ? Math.floor(m.at) : null;
+        if (at === null) continue;
+        mk.push({ name: str(m.name, '').slice(0, 24), at: at });
+      }
+      if (mk.length) rec.markers = mk;
+    }
+    if (typeof line.delta === 'number' && isFinite(line.delta)) rec.delta = line.delta;
+    return rec;
   }
 
   /** Cheap palette fingerprint — these objects hold a handful of keys. */
@@ -6014,6 +6657,7 @@
   function diagramModel(prt, proj) {
     if (!prt) return emptyModel();
     if (!proj) proj = projectOfPart(prt);
+    bindPartProject(prt, proj);
     var key;
     try {
       key = diagramKey(prt, proj);
@@ -6055,7 +6699,7 @@
 
     if (!proj || !Array.isArray(proj.parts)) return out;
     for (var i = 0; i < proj.parts.length; i++) {
-      var info = patternColorsOf(proj.parts[i].patternText);
+      var info = patternColorsOf(proj.parts[i].patternText, proj);
       var legend = info.legend || {};
       for (var n = 0; n < info.names.length; n++) {
         var name = str(info.names[n], '').trim();
@@ -6076,7 +6720,7 @@
     var main = mainYarn(proj);
     if (!key || key === MAIN_YARN) return main;
     var yarn = yarnColorsOf(proj);
-    return normalizeHex(yarn[key]) || patternColorHex(key) || main;
+    return normalizeHex(yarn[key]) || patternColorHex(key, proj) || main;
   }
 
   /** Whether the user has pinned this name to a colour of their own. */
@@ -6115,6 +6759,1682 @@
   }
 
   /* ------------------------------------------------------------------ *
+   * Knitting (wave H, knit-counter; docs/wave-h/CONTRACT.md §3)
+   *
+   * The knitting-only state that rides on the shared counter:
+   *
+   *   Project.gauge   { sts, rows, over, unit, needle, swatch: { sts, rows } }
+   *                   sts / rows over `over` units of `unit` ('cm' | 'in') as
+   *                   printed; `swatch` is what the knitter measured, over the
+   *                   same span. Numbers are null until known.
+   *   Part.side       'rs' | 'ws' | null - the knitter's own word on the side
+   *                   of the row being worked. null = follow the pattern
+   *                   (`Line.side`, else parity from the nearest tagged row).
+   *                   It flips with every row (and every short row) worked.
+   *   Part.markers    [{ id, name, at }] - `at` = stitches from the row start;
+   *                   the name 'BOR' (beginning of round) is reserved, at 0.
+   *   Part.markerTotal  the row's stitch total when the markers were placed
+   *                   (null = unknown), so a row that makes a different total
+   *                   never shows a "7 → marker" it cannot vouch for.
+   *   Part.linked     partId | null - worked two-at-a-time with that part
+   *                   (always mutual; repaired on load).
+   *   Part.shortRows  { active, n, of, row, base, numbered } | null - the
+   *                   short-row sub-counter. `n` = the short row being worked
+   *                   (1-based), `of` = how many the pattern says (null when it
+   *                   says "until all sts are worked"), `row` = Part.row while
+   *                   they are worked (it does not advance), `base` = the row
+   *                   before the first short row, `numbered` = the pattern
+   *                   numbers them as rows of the part (a heel turn's Row 1-8),
+   *                   so leaving the run lands the counter on the row after it.
+   *                   `active: false` is the "done for this row" marker.
+   *
+   * Every knitting project carries all of them (defaults: an empty gauge,
+   * null, [], null, null, null). Any other craft carries one only when it is
+   * set, so a crochet save is exactly what it was, and nothing crochet reads
+   * them. Every writer below snapshots and touches (one Undo each).
+   * ------------------------------------------------------------------ */
+
+  var KNIT_CRAFT = 'knitting';
+  var KNIT_MARKERS_MAX = 40;
+  var KNIT_MARKER_NAME_MAX = 24;
+  var KNIT_CM_PER_IN = 2.54;
+  var KNIT_LOOKAHEAD = 64;              // rows scanned ahead for the next cable crossing
+
+  function isKnitProject(proj) {
+    return !!(proj && proj.craft === KNIT_CRAFT);
+  }
+
+  function isKnitPart(prt) {
+    if (!prt) return false;
+    try { return craftKeyOf(prt) === KNIT_CRAFT; } catch (e) { return false; }
+  }
+
+  /** A positive measurement (22.5, '22,5'), two decimals, or null. */
+  function knitNum(v, max) {
+    if (v === null || v === undefined || v === '') return null;
+    var n = typeof v === 'number' ? v : parseFloat(String(v).replace(',', '.'));
+    if (!isFinite(n) || n <= 0) return null;
+    if (n > max) n = max;
+    return Math.round(n * 100) / 100;
+  }
+
+  function knitUnit(v) {
+    var s = str(v, '').trim().toLowerCase();
+    return s === 'in' || s === 'inch' || s === 'inches' || s === '"' || s === "''" ? 'in' : 'cm';
+  }
+
+  /** Settings → Knitting's unit, read without loading the state. */
+  function knitDefaultUnit() {
+    var k = state && state.settings && state.settings.crafts ? state.settings.crafts[KNIT_CRAFT] : null;
+    return k && k.unit === 'in' ? 'in' : 'cm';
+  }
+
+  function emptyGauge(unit) {
+    var u = knitUnit(unit);
+    return { sts: null, rows: null, over: u === 'in' ? 4 : 10, unit: u, needle: '', swatch: { sts: null, rows: null } };
+  }
+
+  /** `Project.gauge`, or null when `raw` is not a gauge at all. */
+  function normalizeGauge(raw) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+    var g = emptyGauge(raw.unit);
+    g.sts = knitNum(raw.sts, 999);
+    g.rows = knitNum(raw.rows, 999);
+    var over = knitNum(raw.over, 100);
+    if (over) g.over = over;
+    g.needle = str(raw.needle, '').replace(/\s+/g, ' ').trim().slice(0, 60);
+    var sw = raw.swatch && typeof raw.swatch === 'object' ? raw.swatch : {};
+    g.swatch = { sts: knitNum(sw.sts, 999), rows: knitNum(sw.rows, 999) };
+    return g;
+  }
+
+  function gaugeIsEmpty(g) {
+    return !g || (!g.sts && !g.rows && !g.needle && !(g.swatch && (g.swatch.sts || g.swatch.rows)));
+  }
+
+  function normalizeKnitSide(v) {
+    var s = str(v, '').trim().toLowerCase();
+    return s === 'rs' || s === 'ws' ? s : null;
+  }
+
+  /** A marker position: a whole stitch count >= 0, else -1 (clampInt would pin -1 to 0). */
+  function knitAt(v) {
+    var n = typeof v === 'number' ? v : parseInt(v, 10);
+    if (!isFinite(n) || n < 0) return -1;
+    return Math.min(99999, Math.floor(n));
+  }
+
+  function isBorName(name) {
+    return /^bor$/i.test(str(name, '').trim());
+  }
+
+  /** `Part.markers`: sorted by position, ids unique, one BOR at 0, capped. */
+  function normalizeMarkers(raw) {
+    var out = [];
+    if (!Array.isArray(raw)) return out;
+    var seen = {}, bor = false;
+    for (var i = 0; i < raw.length && out.length < KNIT_MARKERS_MAX; i++) {
+      var m = raw[i];
+      if (!m || typeof m !== 'object') continue;
+      var name = str(m.name, '').replace(/\s+/g, ' ').trim().slice(0, KNIT_MARKER_NAME_MAX);
+      var at = knitAt(m.at);
+      if (isBorName(name)) {
+        if (bor) continue;
+        bor = true;
+        name = 'BOR';
+        at = 0;
+      }
+      if (at < 0) continue;
+      var id = str(m.id, '') || uid();
+      if (seen[id]) id = uid();
+      seen[id] = true;
+      out.push({ id: id, name: name, at: at, _i: i });
+    }
+    out.sort(function (a, b) { return a.at - b.at || a._i - b._i; });
+    for (var j = 0; j < out.length; j++) delete out[j]._i;
+    return out;
+  }
+
+  function normalizeShortRows(raw) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+    var of = raw.of === null || raw.of === undefined || raw.of === '' ? null : (clampInt(raw.of, 1, 9999, 0) || null);
+    var out = {
+      active: !!raw.active,
+      n: clampInt(raw.n, 1, 9999, 1),
+      of: of,
+      row: clampInt(raw.row, 0, 999999, 0),
+      base: 0,
+      numbered: !!raw.numbered
+    };
+    out.base = clampInt(raw.base, 0, out.row, out.row);
+    if (of && out.n > of) out.n = of;
+    return out;
+  }
+
+  function knitPartDefaults(prt) {
+    if (!prt) return prt;
+    if (prt.side === undefined) prt.side = null;
+    if (!Array.isArray(prt.markers)) prt.markers = [];
+    if (prt.markerTotal === undefined) prt.markerTotal = null;
+    if (prt.linked === undefined) prt.linked = null;
+    if (prt.shortRows === undefined) prt.shortRows = null;
+    return prt;
+  }
+
+  /** Links are mutual, point at a part that exists and never at itself. */
+  function repairLinks(parts) {
+    var byId = {};
+    parts.forEach(function (q) { byId[q.id] = q; });
+    parts.forEach(function (q) {
+      if (!q.linked) return;
+      var mate = byId[q.linked];
+      if (!mate || mate === q) { q.linked = null; return; }
+      if (!mate.linked) mate.linked = q.id;
+      if (mate.linked !== q.id) q.linked = null;
+    });
+  }
+
+  /** Called by normalizeProject with the normalised project and the raw one. */
+  function knitNormalizeProject(np, raw) {
+    var knit = np.craft === KNIT_CRAFT;
+    var rawParts = raw && Array.isArray(raw.parts) ? raw.parts : [];
+    var g = normalizeGauge(raw && raw.gauge);
+    if (knit) np.gauge = g || emptyGauge(knitDefaultUnit());
+    else if (g && !gaugeIsEmpty(g)) np.gauge = g;
+    for (var i = 0; i < np.parts.length; i++) {
+      var prt = np.parts[i];
+      var rp = rawParts[i] && typeof rawParts[i] === 'object' ? rawParts[i] : {};
+      var side = normalizeKnitSide(rp.side);
+      var markers = normalizeMarkers(rp.markers);
+      var mt = rp.markerTotal === null || rp.markerTotal === undefined ? null : (clampInt(rp.markerTotal, 1, 999999, 0) || null);
+      var linked = str(rp.linked, '').trim() || null;
+      var sr = normalizeShortRows(rp.shortRows);
+      if (knit) {
+        prt.side = side;
+        prt.markers = markers;
+        prt.markerTotal = markers.length ? mt : null;
+        prt.linked = linked;
+        prt.shortRows = sr;
+      } else {
+        if (side) prt.side = side;
+        if (markers.length) { prt.markers = markers; if (mt) prt.markerTotal = mt; }
+        if (linked) prt.linked = linked;
+        if (sr) prt.shortRows = sr;
+      }
+    }
+    repairLinks(np.parts);
+    if (!knit) np.parts.forEach(function (q) { if (q.linked === null) delete q.linked; });
+    return np;
+  }
+
+  /* ---- templates carry the knitting state that is not progress -------- *
+   * Template.gauge (the pattern gauge, no swatch), and per template part
+   * `markers` ([{name, at}]) plus `linked` (the INDEX of its partner in the
+   * template's parts). Side and short rows are progress: never carried. */
+
+  function knitTemplatePart(out, src) {
+    if (!out || !src || typeof src !== 'object') return out;
+    var ms = normalizeMarkers(src.markers);
+    if (ms.length) out.markers = ms.map(function (m) { return { name: m.name, at: m.at }; });
+    if (typeof src.linked === 'number' && src.linked >= 0 && src.linked < 999) out.linked = Math.floor(src.linked);
+    return out;
+  }
+
+  /** The partner's index in a parts list, for a template drafted from a project. */
+  function knitTemplatePartFromProject(out, prt, srcParts) {
+    if (!out || !prt) return out;
+    knitTemplatePart(out, { markers: prt.markers });
+    if (prt.linked) {
+      for (var i = 0; i < srcParts.length; i++) {
+        if (srcParts[i].id === prt.linked) { out.linked = i; break; }
+      }
+    }
+    return out;
+  }
+
+  /** The pattern half of a gauge (a template never carries a swatch). */
+  function templateGauge(raw) {
+    var g = normalizeGauge(raw);
+    if (!g) return null;
+    g.swatch = { sts: null, rows: null };
+    return gaugeIsEmpty(g) ? null : g;
+  }
+
+  function knitTemplateCarry(nt, src) {
+    var g = src ? templateGauge(src.gauge) : null;
+    if (g) nt.gauge = g;
+    else delete nt.gauge;
+    // a link must point at another part of this template
+    (nt.parts || []).forEach(function (p, i) {
+      if (typeof p.linked !== 'number') return;
+      if (p.linked === i || p.linked >= nt.parts.length) delete p.linked;
+    });
+    return nt;
+  }
+
+  /** createProject: the template's gauge, markers and links on the new project. */
+  function knitFromTemplate(proj, tpl, extraGauge) {
+    if (!proj || !tpl) return proj;
+    var g = normalizeGauge(extraGauge);
+    if (!g || gaugeIsEmpty(g)) g = templateGauge(tpl.gauge);
+    if (g && !gaugeIsEmpty(g)) proj.gauge = g;
+    var tparts = Array.isArray(tpl.parts) ? tpl.parts : [];
+    for (var i = 0; i < proj.parts.length && i < tparts.length; i++) {
+      var tp = tparts[i] || {};
+      var ms = normalizeMarkers(tp.markers);
+      if (ms.length) proj.parts[i].markers = ms;
+      if (typeof tp.linked === 'number' && proj.parts[tp.linked] && tp.linked !== i) {
+        proj.parts[i].linked = proj.parts[tp.linked].id;
+      }
+    }
+    repairLinks(proj.parts);
+    return proj;
+  }
+
+  /* ---- gauge ----------------------------------------------------------- */
+
+  /** The project's gauge (always an object for a knitting project). */
+  function gaugeOf(projOrId) {
+    var proj = projOrId && typeof projOrId === 'object' ? projOrId : project(projOrId);
+    if (!proj) return null;
+    return normalizeGauge(proj.gauge) || (isKnitProject(proj) ? emptyGauge(knitDefaultUnit()) : null);
+  }
+
+  /**
+   * Merge `patch` into the project's gauge: any of sts, rows, over, unit,
+   * needle, swatch: {sts, rows}. `null` / '' clears a number. Undoable unless
+   * `opts.undo === false` (the importer's own write inside its snapshot).
+   */
+  function setGauge(projectId, patch, opts) {
+    var proj = project(projectId);
+    if (!proj || !patch || typeof patch !== 'object') return null;
+    var silent = !!(opts && (opts.undo === false || opts.undoable === false));
+    if (!silent) snapshot(proj);
+    var g = gaugeOf(proj) || emptyGauge(knitDefaultUnit());
+    var next = deepCopy(g);
+    ['sts', 'rows', 'over', 'needle'].forEach(function (k) {
+      if (patch[k] !== undefined) next[k] = patch[k];
+    });
+    if (patch.unit !== undefined) {
+      next.unit = knitUnit(patch.unit);
+      // a new unit with no span given takes that unit's usual span
+      if (patch.over === undefined && next.unit !== g.unit) next.over = next.unit === 'in' ? 4 : 10;
+    }
+    if (patch.swatch && typeof patch.swatch === 'object') {
+      if (patch.swatch.sts !== undefined) next.swatch.sts = patch.swatch.sts;
+      if (patch.swatch.rows !== undefined) next.swatch.rows = patch.swatch.rows;
+    }
+    proj.gauge = normalizeGauge(next);
+    if (silent) save();
+    else touch(proj);
+    return proj.gauge;
+  }
+
+  /** Rows (or sts) per one unit of the gauge's own unit. */
+  function gaugePer(g, what, which) {
+    if (!g || !g.over) return null;
+    var key = what === 'sts' ? 'sts' : 'rows';
+    var mine = g.swatch ? g.swatch[key] : null;
+    var v = which === 'pattern' ? g[key] : which === 'swatch' ? mine : (mine || g[key]);
+    return v ? v / g.over : null;
+  }
+
+  function lengthIn(value, fromUnit, toUnit) {
+    var u = str(fromUnit, '').toLowerCase();
+    var cm = u === 'in' || u === '"' || u === 'inch' || u === 'inches' ? value * KNIT_CM_PER_IN
+      : u === 'mm' ? value / 10 : value;
+    return toUnit === 'in' ? cm / KNIT_CM_PER_IN : cm;
+  }
+
+  /**
+   * "32 cm" → rows, through the measured row gauge (`which` 'swatch'), the
+   * pattern's ('pattern'), or the measured one when there is one (default).
+   * null when that gauge has no row count.
+   */
+  function lengthToRows(projOrGauge, value, unit, which) {
+    var g = projOrGauge && projOrGauge.over !== undefined && projOrGauge.swatch ? normalizeGauge(projOrGauge) : gaugeOf(projOrGauge);
+    var v = knitNum(value, 99999);
+    if (!g || !v) return null;
+    var per = gaugePer(g, 'rows', which);
+    if (!per) return null;
+    return Math.round(lengthIn(v, unit || g.unit, g.unit) * per);
+  }
+
+  /** Measured vs printed: { rowsPct, stsPct } (+8 = 8% more per cm = tighter). */
+  function gaugeCompare(projOrId) {
+    var g = gaugeOf(projOrId);
+    var out = { gauge: g, rowsPct: null, stsPct: null };
+    if (!g) return out;
+    if (g.rows && g.swatch.rows) out.rowsPct = Math.round((g.swatch.rows / g.rows - 1) * 1000) / 10;
+    if (g.sts && g.swatch.sts) out.stsPct = Math.round((g.swatch.sts / g.sts - 1) * 1000) / 10;
+    return out;
+  }
+
+  /* ---- reading the pattern for knitting extras ------------------------- */
+
+  function knitSpan(l) {
+    if (!l || !(l.row >= 1)) return 1;
+    var end = l.rowEnd >= l.row ? l.rowEnd : l.row;
+    return end - l.row + 1;
+  }
+
+  function isRowLine(l) {
+    return !!(l && l.row >= 1);
+  }
+
+  /** The written row a pattern row is: a repeat sentence sends you back. */
+  function underlyingLine(prt, patternRow) {
+    var l = lineForRow(prt, patternRow);
+    var from = backRefFrom(l);
+    if (from && patternRow >= from) {
+      var u = l.repeatOf[(patternRow - from) % l.repeatOf.length];
+      if (typeof u === 'number' && u >= 1 && u !== patternRow) {
+        var ul = lineForRow(prt, u);
+        if (ul && !backRefFrom(ul)) return ul;
+      }
+    }
+    return l;
+  }
+
+  /**
+   * The first row a back-reference covers ("Rep Rows 91-92 4 more times", or
+   * the parser's numbered "Rows 93-100: Rep Rows 91-92"), else 0.
+   */
+  function backRefFrom(l) {
+    if (!l || !Array.isArray(l.repeatOf) || !l.repeatOf.length) return 0;
+    if (l.repeatFrom >= 1) return l.repeatFrom;
+    return l.row >= 1 ? l.row : 0;
+  }
+
+  /** A back-reference whose every re-worked row is a short row. */
+  function shortBackRef(prt, l) {
+    if (!backRefFrom(l)) return false;
+    return l.repeatOf.every(function (r) {
+      var ul = lineForRow(prt, r);
+      return !!(ul && ul.shortRow && !backRefFrom(ul));
+    });
+  }
+
+  /** The pattern row an actual row is, through the part's own repeat block. */
+  function patternRowOf(prt, row) {
+    var r = prt && prt.repeat;
+    if (!r || !r.enabled) return row;
+    var len = r.endRow - r.startRow + 1;
+    var times = repeatTimes(r);
+    if (len <= 0 || times < 1) return row;
+    if (row >= r.startRow && row < r.startRow + len * times) return r.startRow + ((row - r.startRow) % len);
+    return row;
+  }
+
+  var SHORT_RANGE_RE = /\bshort\s+rows?\s+(\d{1,3})\s*(?:-|–|—|to|through)\s*(\d{1,3})\b/i;
+
+  function unnumberedSpan(l) {
+    var m = SHORT_RANGE_RE.exec(str(l && l.text, ''));
+    if (m) {
+      var a = parseInt(m[1], 10), b = parseInt(m[2], 10);
+      if (b >= a && b - a < 200) return b - a + 1;
+    }
+    return 1;
+  }
+
+  /**
+   * The run of short rows the counter is in (or about to work), or null.
+   *   numbered: the working row's own line says `turn` / `w&t` (a heel turn's
+   *     Row 1..8); the run is the contiguous short-row lines around it, plus
+   *     a repeat sentence that sends you back into it.
+   *   unnumbered: short-row lines sitting between the row just finished and
+   *     the next numbered row ("Short row 1 (RS): K to 3 sts before m, w&t").
+   * @returns {{numbered:boolean, start:number, base:number, n:number,
+   *            of:number|null, lines:Array}|null}
+   */
+  function shortRowRun(prt) {
+    var lines = linesFor(prt);
+    if (!lines.length) return null;
+    var R = prt.row || 0;
+    var PW = repeatInfo(prt).patternRow;
+    var L = lineForRow(prt, PW);
+    var i, of, l;
+    // the written row this one is (a "Rep Rows 91-92" row is Row 91 or 92)
+    var U = underlyingLine(prt, PW);
+    if (U && U.shortRow && isRowLine(U) && !backRefFrom(U)) {
+      var at = lines.indexOf(U);
+      var s = at;
+      var firstRow = U.row;
+      // back over the short rows (and numbered back-references to them)
+      // written before it
+      for (i = at - 1; i >= 0; i--) {
+        l = lines[i];
+        if (isRowLine(l) && l.kind !== 'repeat') {
+          if ((l.shortRow || shortBackRef(prt, l)) && (l.rowEnd >= l.row ? l.rowEnd : l.row) === firstRow - 1) {
+            s = i;
+            firstRow = l.row;
+            continue;
+          }
+          break;
+        }
+        if (l.kind === 'repeat' || l.kind === 'setup') break;
+      }
+      var start = firstRow;
+      var last = start - 1;
+      var run = [];
+      // forward: contiguous short rows, and repeat sentences that send you
+      // back into them ("Rep Rows 91-92 4 more times", "... until all heel
+      // sts have been worked" = no known end)
+      for (i = s; i < lines.length; i++) {
+        l = lines[i];
+        if (l && l.kind === 'repeat') {
+          var refs = Array.isArray(l.repeatOf) ? l.repeatOf : [];
+          var inside = refs.length && refs.every(function (r) { return r >= start && r <= last; });
+          if (!inside || !(l.repeatFrom >= 1) || l.repeatFrom !== last + 1) break;
+          if (l.repeatTo >= l.repeatFrom) { last = l.repeatTo; continue; }
+          last = null;
+          break;
+        }
+        if (isRowLine(l)) {
+          if ((l.shortRow || shortBackRef(prt, l)) && l.row === last + 1) {
+            run.push(l);
+            last = l.rowEnd >= l.row ? l.rowEnd : l.row;
+            continue;
+          }
+          break;
+        }
+        // a note between them ("18 heel sts remain") does not end the run
+      }
+      if (last !== null && PW > last) return null;
+      of = last === null ? null : last - start + 1;
+      return { numbered: true, start: start, base: start - 1, n: PW - start + 1, of: of || null, lines: run };
+    }
+    // unnumbered short rows after the row just finished
+    var iPrev = -1, iNext = lines.length;
+    var prevLine = R >= 1 ? lineForRow(prt, patternRowOf(prt, R)) : null;
+    if (prevLine) iPrev = lines.indexOf(prevLine);
+    if (L && isRowLine(L)) iNext = lines.indexOf(L);
+    if (iNext < 0) iNext = lines.length;
+    var found = [];
+    for (i = iPrev + 1; i < iNext; i++) {
+      l = lines[i];
+      if (isRowLine(l)) break;
+      if (l.shortRow) found.push(l);
+      else if (found.length && l.kind === 'repeat') { found.push(l); }
+    }
+    if (!found.length) return null;
+    of = 0;
+    for (i = 0; i < found.length; i++) {
+      if (found[i].kind === 'repeat' && !found[i].shortRow) {
+        if (found[i].repeatTimes >= 1 && found[i].repeatTimes < 100) of = of === null ? null : of * (found[i].repeatTimes + 1);
+        else of = null;
+        continue;
+      }
+      if (of !== null) of += unnumberedSpan(found[i]);
+    }
+    return { numbered: false, start: null, base: R, n: 1, of: of || null, lines: found };
+  }
+
+  /** The line short row `n` of a run is worked from. */
+  function shortRowLine(prt, run, n) {
+    if (!run) return null;
+    if (run.numbered) return underlyingLine(prt, run.base + n) || run.lines[run.lines.length - 1] || null;
+    var acc = 0, real = run.lines.filter(function (l) { return l.shortRow; });
+    for (var i = 0; i < real.length; i++) {
+      acc += unnumberedSpan(real[i]);
+      if (n <= acc) return real[i];
+    }
+    // past the written ones ("rep the last 2 short rows"): alternate the last two
+    if (real.length >= 2) return real[real.length - 2 + ((n - acc - 1) % 2)];
+    return real[real.length - 1] || null;
+  }
+
+  /**
+   * The short-row state of a part right now: its stored sub-counter, or the
+   * one the pattern puts it in, or null (not in short rows, or done here).
+   * @returns {{active:boolean, n:number, of:number|null, row:number, base:number,
+   *   numbered:boolean, line:Object|null, patternRow:number|null}|null}
+   */
+  function shortRowInfo(prt) {
+    if (!prt || !isKnitPart(prt)) return null;
+    var st = prt.shortRows && typeof prt.shortRows === 'object' ? prt.shortRows : null;
+    if (st && !st.active && st.row === prt.row) return null;   // done for this row
+    var run = null;
+    try { run = shortRowRun(prt); } catch (e) { run = null; }
+    if (st && st.active) {
+      var n = st.n;
+      return {
+        active: true, n: n, of: st.of, row: st.row, base: st.base, numbered: !!st.numbered,
+        line: shortRowLine(prt, run || { numbered: st.numbered, base: st.base, lines: [] }, n),
+        patternRow: st.numbered ? st.base + n : null
+      };
+    }
+    if (!run) return null;
+    return {
+      active: false, n: run.n, of: run.of, row: prt.row, base: run.base, numbered: run.numbered,
+      line: shortRowLine(prt, run, run.n),
+      patternRow: run.numbered ? run.base + run.n : null
+    };
+  }
+
+  function flipSideOf(prt) {
+    if (prt && (prt.side === 'rs' || prt.side === 'ws')) prt.side = prt.side === 'rs' ? 'ws' : 'rs';
+  }
+
+  /** Hook: the counter moved `delta` rows (completeRow, untapRow, jumpToRow). */
+  function knitRowMoved(prt, delta) {
+    if (!prt || !isKnitPart(prt)) return;
+    if (delta % 2 !== 0) flipSideOf(prt);
+    // the knitter's word holds until the pattern states a side again: a row
+    // whose own line says (RS) / (WS) takes over from it
+    if (prt.side && delta !== 0) {
+      var pr = patternRowOf(prt, prt.row + 1);
+      try { if (lineSideFor(lineForRow(prt, pr), pr)) prt.side = null; } catch (e) { /* keep it */ }
+    }
+    // a "done here" marker below the row it was for is stale
+    var st = prt.shortRows;
+    if (st && !st.active && prt.row < st.row) prt.shortRows = null;
+  }
+
+  /** Hook: a new piece (or a reset) starts from nothing. */
+  function knitNewPiece(prt) {
+    if (!prt || !isKnitPart(prt)) return;
+    prt.side = null;
+    prt.shortRows = null;
+  }
+
+  /** In short rows, the stitch count is stitches worked before the turn: no target. */
+  function knitInShortRows(prt) {
+    return !!(prt && isKnitPart(prt) && shortRowInfo(prt));
+  }
+
+  /** One short row finished. Called inside tapRow's snapshot. */
+  function shortRowStep(proj, prt, info) {
+    if (info.of && info.n >= info.of) {
+      var done = info.of;
+      if (info.numbered) {
+        // the rows the pattern numbered are worked: land on the row after them
+        prt.shortRows = null;
+        prt.row = Math.max(0, info.base + done - 1);
+        var res = completeRow(proj, prt);   // records, history, piece/part done, side flip
+        prt.shortRows = { active: false, n: done, of: done, row: prt.row, base: info.base, numbered: true };
+        res.shortRowsDone = done;
+        return res;
+      }
+      prt.stitch = 0;
+      flipSideOf(prt);
+      prt.shortRows = { active: false, n: done, of: done, row: prt.row, base: info.base, numbered: false };
+      return { event: 'shortRowsDone', n: done, of: done, row: prt.row, partName: prt.name };
+    }
+    prt.stitch = 0;
+    flipSideOf(prt);
+    prt.shortRows = {
+      active: true, n: info.n + 1, of: info.of, row: prt.row, base: info.base, numbered: !!info.numbered
+    };
+    return { event: 'shortRow', n: info.n + 1, of: info.of, row: prt.row, partName: prt.name };
+  }
+
+  /* ---- two at a time --------------------------------------------------- */
+
+  function linkedPart(proj, prt) {
+    if (!proj || !prt || !prt.linked) return null;
+    var mate = part(proj, prt.linked);
+    return mate && mate !== prt && mate.linked === prt.id ? mate : null;
+  }
+
+  var LINK_NUM_RE = /^(.*?)\s*#?(\d{1,2})$/;
+  var LINK_SIDE_RE = /^(left|right)\s+(.+)$/i;
+
+  /** "Sleeve 1+2", "Sock 1+2", "Left+Right Front", else "Back+Front". */
+  function linkedLabel(proj, prt) {
+    var mate = linkedPart(proj, prt);
+    if (!mate) return prt ? prt.name : '';
+    var a = prt, b = mate;
+    if (proj.parts.indexOf(b) < proj.parts.indexOf(a)) { a = mate; b = prt; }
+    if (a.name === b.name) return a.name + ' 1+2';
+    var ma = LINK_NUM_RE.exec(a.name), mb = LINK_NUM_RE.exec(b.name);
+    if (ma && mb && ma[1] && ma[1].toLowerCase() === mb[1].toLowerCase()) return ma[1] + ' ' + ma[2] + '+' + mb[2];
+    var sa = LINK_SIDE_RE.exec(a.name), sb = LINK_SIDE_RE.exec(b.name);
+    if (sa && sb && sa[2].toLowerCase() === sb[2].toLowerCase()) return sa[1] + '+' + sb[1] + ' ' + sa[2];
+    return a.name + '+' + b.name;
+  }
+
+  function unlinkIn(proj, prt) {
+    if (!prt) return;
+    var mate = prt.linked ? part(proj, prt.linked) : null;
+    if (mate && mate.linked === prt.id) mate.linked = null;
+    prt.linked = null;
+  }
+
+  /** Work two parts two-at-a-time (each is unlinked from any other first). */
+  function linkParts(projectId, partId, otherId) {
+    var proj = project(projectId);
+    var a = part(proj, partId), b = part(proj, otherId);
+    if (!proj || !a || !b || a === b) return false;
+    snapshot(proj);
+    unlinkIn(proj, a);
+    unlinkIn(proj, b);
+    a.linked = b.id;
+    b.linked = a.id;
+    touch(proj);
+    return true;
+  }
+
+  function unlinkPart(projectId, partId) {
+    var proj = project(projectId);
+    var a = part(proj, partId);
+    if (!proj || !a || !a.linked) return false;
+    snapshot(proj);
+    unlinkIn(proj, a);
+    touch(proj);
+    return true;
+  }
+
+  /**
+   * "Knit both at once" for a part made twice (a Socks template's one Sock
+   * ×2, Sleeves ×2): it becomes two linked parts, "Sock 1" and "Sock 2",
+   * each made once, the second a copy of the first's pattern and settings
+   * starting from nothing. Only before the first piece is finished. One Undo.
+   * @returns {{a:Object, b:Object}|null}
+   */
+  function splitTwoAtATime(projectId, partId) {
+    var proj = project(projectId);
+    var prt = part(proj, partId);
+    if (!proj || !prt || prt.makeCount !== 2 || prt.piecesDone > 0) return null;
+    snapshot(proj);
+    var stem = prt.name.replace(/([^s])s$/i, '$1');
+    var twin = makePart(stem + ' 2', 1);
+    ['patternText', 'placementNotes', 'sizeIndex', 'workMode', 'orientation', 'dialect', 'targetRows', 'group']
+      .forEach(function (k) { if (prt[k] !== undefined) twin[k] = deepCopy(prt[k]); });
+    twin.repeat = deepCopy(prt.repeat);
+    twin.alerts = (prt.alerts || []).slice();
+    knitPartDefaults(twin);
+    twin.markers = normalizeMarkers((prt.markers || []).map(function (m) { return { name: m.name, at: m.at }; }));
+    twin.markerTotal = twin.markers.length ? (prt.markerTotal || null) : null;
+    prt.name = safeName(stem + ' 1', prt.name);
+    prt.makeCount = 1;
+    delete prt.makeCountInferred;
+    knitPartDefaults(prt);
+    proj.parts.splice(proj.parts.indexOf(prt) + 1, 0, twin);
+    unlinkIn(proj, prt);
+    prt.linked = twin.id;
+    twin.linked = prt.id;
+    touch(proj);
+    return { a: prt, b: twin };
+  }
+
+  var knitLinkBusy = false;
+
+  function undoTop() {
+    return undoStack.length ? undoStack[undoStack.length - 1] : null;
+  }
+
+  /** Drop the one snapshot a nested call pushed on top of `mark` (one Undo for two moves). */
+  function dropSnapshotAbove(mark) {
+    if (undoTop() === mark || !undoStack.length) return;
+    var e = undoStack.pop();
+    undoBytesTotal -= e.bytes || 0;
+    if (undoBytesTotal < 0) undoBytesTotal = 0;
+  }
+
+  /**
+   * Hook at the top of tapRow. Returns a result when knitting handled it
+   * (short-row mode, a linked pair), else null for the ordinary path.
+   */
+  function knitTapRow(proj, prt) {
+    if (!isKnitProject(proj)) return null;
+    var mate = knitLinkBusy ? null : linkedPart(proj, prt);
+    var res = null;
+    var before = undoTop();
+    var sr = shortRowInfo(prt);
+    if (sr) {
+      if (!isPartTerminal(prt)) {
+        snapshot(proj);
+        res = shortRowStep(proj, prt, sr);
+        touch(proj);
+      }
+    }
+    if (!mate) return res;
+    // Two at a time: one row tap advances both, one Undo takes both back.
+    if (!res) {
+      knitLinkBusy = true;
+      try { res = tapRow(proj.id, prt.id); } finally { knitLinkBusy = false; }
+    }
+    if (res.event === 'alreadyDone' && isPartTerminal(mate)) return res;
+    var firstPushed = undoTop() !== before;
+    var mid = undoTop();
+    knitLinkBusy = true;
+    var other;
+    try { other = tapRow(proj.id, mate.id); } finally { knitLinkBusy = false; }
+    if (firstPushed) dropSnapshotAbove(mid);
+    res.linked = { partId: mate.id, partName: mate.name, event: other ? other.event : 'none', row: mate.row };
+    // the bigger milestone wins the announcement
+    var rank = { none: 0, alreadyDone: 0, shortRow: 1, row: 1, shortRowsDone: 2, pieceDone: 3, partDone: 4, groupDone: 5, projectDone: 6 };
+    if (other && (rank[other.event] || 0) > (rank[res.event] || 0)) {
+      other.linked = { partId: prt.id, partName: prt.name, event: res.event, row: prt.row };
+      return other;
+    }
+    return res;
+  }
+
+  /** Hook at the top of untapRow (the inverse of knitTapRow). */
+  function knitUntapRow(proj, prt) {
+    if (!isKnitProject(proj)) return null;
+    var mate = knitLinkBusy ? null : linkedPart(proj, prt);
+    var res = null;
+    var before = undoTop();
+    var st = prt.shortRows;
+    if (st && st.active && st.n > 1) {
+      snapshot(proj);
+      st.n -= 1;
+      prt.stitch = 0;
+      flipSideOf(prt);
+      touch(proj);
+      res = { event: 'shortRow', n: st.n, of: st.of, row: prt.row };
+    } else if (st && !st.active && !st.numbered && st.row === prt.row && st.of) {
+      // straight after the last short row: back onto it
+      snapshot(proj);
+      prt.shortRows = { active: true, n: st.of, of: st.of, row: st.row, base: st.base, numbered: false };
+      prt.stitch = 0;
+      flipSideOf(prt);
+      touch(proj);
+      res = { event: 'shortRow', n: st.of, of: st.of, row: prt.row };
+    } else if (st && st.active) {
+      // short row 1: leave short-row mode and step back a row as usual
+      snapshot(proj);
+      var mine = undoTop();
+      prt.shortRows = null;
+      knitLinkBusy = true;
+      try { res = untapRow(proj.id, prt.id); } finally { knitLinkBusy = false; }
+      dropSnapshotAbove(mine);
+      if (!res || res.event === 'none') { touch(proj); res = { event: 'row', row: prt.row }; }
+    }
+    if (!mate) return res;
+    if (!res) {
+      knitLinkBusy = true;
+      try { res = untapRow(proj.id, prt.id); } finally { knitLinkBusy = false; }
+    }
+    var firstPushed = undoTop() !== before;
+    var mid = undoTop();
+    knitLinkBusy = true;
+    var other;
+    try { other = untapRow(proj.id, mate.id); } finally { knitLinkBusy = false; }
+    if (firstPushed) dropSnapshotAbove(mid);
+    if (res && res.event === 'none' && other && other.event !== 'none') res = other;
+    if (res) res.linked = { partId: mate.id, partName: mate.name, event: other ? other.event : 'none', row: mate.row };
+    return res;
+  }
+
+  /**
+   * Hook in tapStitch after a row completed on its own: two at a time, the
+   * work moves on to the partner when it is behind ("Sock 2 next").
+   */
+  function knitAfterAutoRow(proj, prt, res) {
+    if (!isKnitProject(proj) || !res || (res.event !== 'row' && res.event !== 'rowAuto')) return res;
+    var mate = linkedPart(proj, prt);
+    if (!mate || isPartTerminal(mate)) return res;
+    if (mate.piecesDone < prt.piecesDone || (mate.piecesDone === prt.piecesDone && mate.row < prt.row)) {
+      proj.activePartId = mate.id;
+      res.switchedTo = { partId: mate.id, partName: mate.name };
+    }
+    return res;
+  }
+
+  /* ---- right side / wrong side ----------------------------------------- */
+
+  function otherSide(s) { return s === 'rs' ? 'ws' : s === 'ws' ? 'rs' : null; }
+
+  // A side the line's own words state: "(RS)", "(wrong side)", "Row 3 RS:".
+  // A parser may also fill `side` by parity on untagged rows; that is only
+  // as good as its count, so the chip does its own parity from stated tags.
+  var SIDE_STATED_RE = /\(\s*(?:rs|ws|right\s+side|wrong\s+side)\s*\)|^[^:]{0,40}?\b(?:rs|ws)\s*[:.]|\bright[-\s]side\s+rows?\b|\bwrong[-\s]side\s+rows?\b/i;
+
+  function sideStated(l) {
+    return !!(l && SIDE_STATED_RE.test(str(l.text, '').slice(0, 80)));
+  }
+
+  function lineSideFor(l, row) {
+    if (!l || !l.side || !sideStated(l)) return null;
+    var side = normalizeKnitSide(l.side);
+    if (!side) return null;
+    var list = enumRows(l);
+    if (list && list.indexOf(row) >= 0) return side;   // "Rows 2, 4, 6 and 8 (WS)"
+    if (l.row === row) return side;
+    return null;
+  }
+
+  /** An enumerated line's rows (Knits `rowList`; `rows` accepted too), or null. */
+  function enumRows(l) {
+    if (l && Array.isArray(l.rowList) && l.rowList.length) return l.rowList;
+    if (l && Array.isArray(l.rows) && l.rows.length) return l.rows;
+    return null;
+  }
+
+  /**
+   * The side the PATTERN puts a row on: its own tag, else parity from the
+   * nearest tagged row (a setup row counts as row 0). null in the round, and
+   * null when the pattern never says.
+   * @returns {{side:'rs'|'ws'|null, source:'pattern'|'parity'|'round'|null}}
+   */
+  function patternSideAt(prt, row, proj, opts) {
+    if (!prt) return { side: null, source: null };
+    var lines = linesFor(prt);
+    // a row that states its side is worked flat, even in a piece knitted in
+    // the round (a sock's heel flap: "Row 57 (RS)" between rounds)
+    var ownLine = lines.length ? lineForRow(prt, patternRowOf(prt, row)) : null;
+    var own = lineSideFor(ownLine, patternRowOf(prt, row));
+    if (own) return { side: own, source: 'pattern' };
+    if (!(opts && opts.flat) && rowWorkMode(prt, Math.max(1, row), proj) === 'rounds' &&
+        !(normalizeWorkMode(prt.workMode, 'auto') === 'auto' && ownLine && /^\s*rows?\b/i.test(str(ownLine.text, '')))) {
+      return { side: null, source: 'round' };
+    }
+    if (!lines.length) return { side: null, source: null };
+    var best = null, bestD = Infinity;
+    for (var i = 0; i < lines.length; i++) {
+      var l = lines[i];
+      var side = normalizeKnitSide(l && l.side);
+      if (!side || !sideStated(l)) continue;
+      var tagRows = enumRows(l) || (l.row >= 1 ? [l.row] : (l.kind === 'setup' ? [0] : []));
+      for (var j = 0; j < tagRows.length; j++) {
+        // ONLY the last tag at or before the row: patterns put RS on even
+        // rows and swap mid-way, so a tag further on says nothing about here
+        // (research: docs/wave-h/knit-research.md)
+        if (tagRows[j] > row) continue;
+        var d = row - tagRows[j];
+        if (d < bestD) { bestD = d; best = { row: tagRows[j], side: side }; }
+      }
+    }
+    if (!best) return { side: null, source: null };
+    return { side: (row - best.row) % 2 === 0 ? best.side : otherSide(best.side), source: 'parity' };
+  }
+
+  /**
+   * The RS/WS chip: the side of the row (or short row) being worked.
+   * @returns {{side, source:'you'|'pattern'|'parity'|'round'|null, pattern, inRound:boolean, row:number}}
+   */
+  function sideInfo(prt, proj) {
+    if (!prt) return { side: null, source: null, pattern: null, inRound: false, row: 0 };
+    proj = proj || projectOfPart(prt);
+    var ri = repeatInfo(prt);
+    var row = ri.workingRow;
+    var sr = shortRowInfo(prt);
+    var pat;
+    if (sr) {
+      // a short row turns the work: each one flips the side
+      var rowEq = sr.numbered ? sr.base + sr.n : (sr.row || 0) + sr.n;
+      var tag = sr.line ? normalizeKnitSide(sr.line.side) : null;
+      // an unnumbered short-row line's own tag ("Short row 1 (RS)") holds
+      // when the line is one short row; a numbered one answers below
+      if (tag && !sr.numbered && sideStated(sr.line) && unnumberedSpan(sr.line) === 1) pat = { side: tag, source: 'pattern' };
+      else pat = patternSideAt(prt, rowEq, proj, { flat: true });   // a short row turns: flat
+      row = rowEq;
+    } else {
+      pat = patternSideAt(prt, row, proj);
+    }
+    if (pat.source === 'round') return { side: null, source: 'round', pattern: null, inRound: true, row: row };
+    var mine = normalizeKnitSide(prt.side);
+    if (mine) return { side: mine, source: 'you', pattern: pat.side, inRound: false, row: row };
+    return { side: pat.side, source: pat.side ? pat.source : null, pattern: pat.side, inRound: false, row: row };
+  }
+
+  /** Set the side of the row being worked ('rs' | 'ws' | null = the pattern's). */
+  function setSide(projectId, partId, side) {
+    var proj = project(projectId);
+    var prt = part(proj, partId);
+    if (!proj || !prt) return null;
+    snapshot(proj);
+    prt.side = normalizeKnitSide(side);
+    touch(proj);
+    return sideInfo(prt, proj);
+  }
+
+  /** The chip's tap: the other side. Agreeing with the pattern again clears it. */
+  function flipSide(projectId, partId) {
+    var proj = project(projectId);
+    var prt = part(proj, partId);
+    if (!proj || !prt) return null;
+    var info = sideInfo(prt, proj);
+    if (info.inRound) return info;
+    var next = info.side ? otherSide(info.side) : 'rs';
+    snapshot(proj);
+    prt.side = next === info.pattern ? null : next;
+    touch(proj);
+    return sideInfo(prt, proj);
+  }
+
+  /* ---- stitch markers -------------------------------------------------- */
+
+  /** The markers a pattern line places (`Line.markers`) at or before a row. */
+  function patternMarkers(prt) {
+    var lines = linesFor(prt);
+    if (!lines.length) return null;
+    var row = repeatInfo(prt).patternRow;
+    var best = null;
+    for (var i = 0; i < lines.length; i++) {
+      var l = lines[i];
+      if (!l || !Array.isArray(l.markers) || !l.markers.length) continue;
+      var lr = l.row >= 1 ? l.row : 0;
+      if (lr > row) continue;
+      if (!best || lr >= best.row) best = { row: lr, line: l };
+    }
+    if (!best) return null;
+    var list = [];
+    best.line.markers.forEach(function (m, i) {
+      if (!m || typeof m !== 'object') return;
+      var at = knitAt(m.at);
+      if (at < 0) return;
+      var nm = str(m.name, '').trim();
+      list.push({ id: 'pattern:' + i, name: isBorName(nm) ? 'BOR' : nm, at: isBorName(nm) ? 0 : at });
+    });
+    list.sort(function (a, b) { return a.at - b.at; });
+    var total = usableCount(best.line.count);
+    if (!total && best.line.row >= 1) total = usableCount(targetFor(prt, best.line.row));
+    return list.length ? { markers: list, row: best.row, total: total || null, line: best.line } : null;
+  }
+
+  /**
+   * The marker strip: where the markers are, how far the next one is, and
+   * the stitches between them.
+   * @returns {{markers:Array, source:'part'|'pattern'|null, stitch:number,
+   *   total:number|null, basis:number|null, shifted:boolean,
+   *   next:{marker:Object|null, end:boolean, in:number}|null, atMarker:Object|null,
+   *   segments:Array<number>|null, segIndex:number}}
+   */
+  function markerInfo(prt) {
+    var out = { markers: [], source: null, stitch: prt ? prt.stitch : 0, total: null, basis: null,
+      shifted: false, next: null, atMarker: null, segments: null, segIndex: -1 };
+    if (!prt) return out;
+    var mine = normalizeMarkers(prt.markers);
+    if (mine.length) {
+      out.markers = mine;
+      out.source = 'part';
+      out.basis = usableCount(prt.markerTotal);
+    } else {
+      var pm = null;
+      try { pm = patternMarkers(prt); } catch (e) { pm = null; }
+      if (pm) {
+        out.markers = pm.markers;
+        out.source = 'pattern';
+        out.basis = pm.total;
+      }
+    }
+    if (!out.markers.length) return out;
+    var total = null;
+    try { total = knitInShortRows(prt) ? null : usableCount(targetFor(prt, repeatInfo(prt).patternRow)); } catch (e2) { total = null; }
+    out.total = total;
+    // markers set on a row of another size: the stitch counts to them are not this row's
+    out.shifted = !!(out.basis && total && out.basis !== total);
+    var pos = out.markers.filter(function (m) { return m.at > 0; }).map(function (m) { return m.at; });
+    var uniq = [];
+    pos.forEach(function (a) { if (uniq.indexOf(a) < 0) uniq.push(a); });
+    var s = out.stitch;
+    if (!out.shifted) {
+      for (var i = 0; i < out.markers.length; i++) {
+        var m = out.markers[i];
+        if (m.at > 0 && m.at === s && !out.atMarker) out.atMarker = m;
+        if (m.at > s) { out.next = { marker: m, end: false, in: m.at - s }; break; }
+      }
+      if (!out.next && total && s < total && uniq.length) out.next = { marker: null, end: true, in: total - s };
+      var lastAt = uniq.length ? uniq[uniq.length - 1] : 0;
+      var closes = total || out.basis;
+      if (uniq.length && (!closes || closes > lastAt)) {
+        var segs = [], prev = 0;
+        uniq.forEach(function (a) { segs.push(a - prev); prev = a; });
+        segs.push(closes ? closes - prev : null);
+        out.segments = segs;
+        var idx = 0;
+        for (var k = 0; k < uniq.length; k++) if (s >= uniq[k]) idx = k + 1;
+        out.segIndex = idx;
+      }
+    }
+    return out;
+  }
+
+  function writeMarkers(proj, prt, list, total) {
+    prt.markers = normalizeMarkers(list);
+    if (!prt.markers.length) prt.markerTotal = null;
+    else if (total !== undefined) prt.markerTotal = usableCount(total);
+  }
+
+  /** The markers the strip shows, as a list the part can own (pattern ones copied). */
+  function ownedMarkers(prt) {
+    var info = markerInfo(prt);
+    return {
+      list: info.markers.map(function (m) { return { id: info.source === 'part' ? m.id : uid(), name: m.name, at: m.at }; }),
+      total: info.source === 'part' ? usableCount(prt.markerTotal) : info.basis
+    };
+  }
+
+  /** Place a marker at the current stitch (or `opts.at`). */
+  function addMarker(projectId, partId, opts) {
+    var proj = project(projectId);
+    var prt = part(proj, partId);
+    if (!proj || !prt) return null;
+    opts = opts || {};
+    var cur = ownedMarkers(prt);
+    if (cur.list.length >= KNIT_MARKERS_MAX) return null;
+    var at = opts.at !== undefined ? clampInt(opts.at, 0, 99999, prt.stitch) : prt.stitch;
+    var name = str(opts.name, '').replace(/\s+/g, ' ').trim().slice(0, KNIT_MARKER_NAME_MAX);
+    if (isBorName(name) && cur.list.some(function (m) { return isBorName(m.name); })) return null;
+    snapshot(proj);
+    var m = { id: uid(), name: name, at: isBorName(name) ? 0 : at };
+    cur.list.push(m);
+    var target = usableCount(currentTarget(prt));
+    writeMarkers(proj, prt, cur.list, cur.list.length === 1 ? target : (cur.total || target));
+    touch(proj);
+    return part(proj, partId).markers.filter(function (x) { return x.id === m.id; })[0] || null;
+  }
+
+  function renameMarker(projectId, partId, markerId, name) {
+    var proj = project(projectId);
+    var prt = part(proj, partId);
+    if (!proj || !prt) return null;
+    var cur = ownedMarkers(prt);
+    var info = markerInfo(prt);
+    var idx = -1;
+    for (var i = 0; i < info.markers.length; i++) if (info.markers[i].id === markerId) idx = i;
+    if (idx < 0) return null;
+    var nm = str(name, '').replace(/\s+/g, ' ').trim().slice(0, KNIT_MARKER_NAME_MAX);
+    if (isBorName(nm) && cur.list.some(function (m, j) { return j !== idx && isBorName(m.name); })) return null;
+    snapshot(proj);
+    cur.list[idx].name = nm;
+    if (isBorName(nm)) cur.list[idx].at = 0;
+    var keepId = cur.list[idx].id;
+    writeMarkers(proj, prt, cur.list, cur.total);
+    touch(proj);
+    return prt.markers.filter(function (x) { return x.id === keepId; })[0] || null;
+  }
+
+  function removeMarker(projectId, partId, markerId) {
+    var proj = project(projectId);
+    var prt = part(proj, partId);
+    if (!proj || !prt) return false;
+    var cur = ownedMarkers(prt);
+    var info = markerInfo(prt);
+    var idx = -1;
+    for (var i = 0; i < info.markers.length; i++) if (info.markers[i].id === markerId) idx = i;
+    if (idx < 0) return false;
+    snapshot(proj);
+    cur.list.splice(idx, 1);
+    writeMarkers(proj, prt, cur.list, cur.total);
+    touch(proj);
+    return true;
+  }
+
+  /** Replace the part's markers (`[]` clears them: the pattern's show again). */
+  function setMarkers(projectId, partId, list, total) {
+    var proj = project(projectId);
+    var prt = part(proj, partId);
+    if (!proj || !prt) return null;
+    snapshot(proj);
+    writeMarkers(proj, prt, Array.isArray(list) ? list : [], total === undefined ? usableCount(currentTarget(prt)) : total);
+    touch(proj);
+    return prt.markers;
+  }
+
+  /* ---- cables ---------------------------------------------------------- */
+
+  // C6F, C4B, T3R, T2L, C2R... and the slash family: 1/1 RC, 2/2 LC, 2/1 RPC
+  var CABLE_TOKEN_RE = /(?:^|[^A-Za-z0-9])(?:[CT]\d{1,2}(?:[FB]|[LR]P?)|\d\/\d(?:\/\d)?\s*[LR]P?[CT])(?![A-Za-z0-9])/i;
+
+  function isCableLine(l) {
+    if (!l) return false;
+    if (CABLE_TOKEN_RE.test(str(l.text, ''))) return true;
+    return Array.isArray(l.stitches) && l.stitches.some(function (s) { return s && s.t === 'cable'; });
+  }
+
+  /**
+   * "Cable in 3": the rows until the next crossing, read by walking the rows
+   * ahead through the part's repeat and the pattern's own repeat sentences,
+   * else from a stated cadence (`Line.cable.every`). null when there is none.
+   * @returns {{inRows:number, every:number|null, nextRow:number, name:string|null,
+   *   source:'pattern'|'stated'}|null}
+   */
+  var knitCableCache = Object.create(null);
+
+  function cableInfo(prt) {
+    if (!prt || !isKnitPart(prt)) return null;
+    var entry = partLines(prt);
+    if (!entry.lines.length) return null;
+    // per tap this is a cache hit: the walk ahead runs once per row
+    var key = entry.version + ':' + prt.row + ':' + JSON.stringify(prt.repeat || null);
+    var hit = knitCableCache[prt.id];
+    if (hit && hit.key === key) return hit.out;
+    var out = cableScan(prt, entry.lines);
+    knitCableCache[prt.id] = { key: key, out: out };
+    return out;
+  }
+
+  function cableScan(prt, lines) {
+    var stated = null, any = false;
+    for (var i = 0; i < lines.length; i++) {
+      var l = lines[i];
+      if (l && l.cable && l.cable.every >= 2 && (!stated || (l.row || 0) <= prt.row + 1)) stated = l;
+      if (!any && isCableLine(l)) any = true;
+    }
+    if (!any && !stated) return null;
+    var W = prt.row + 1;
+    var hits = [];
+    if (any) {
+      for (var d = 0; d < KNIT_LOOKAHEAD && hits.length < 2; d++) {
+        var pr = patternRowOf(prt, W + d);
+        var ul = underlyingLine(prt, pr);
+        if (!ul) { if (d > 0 && !hasRepeatLine(lines)) break; continue; }
+        if (isCableLine(ul)) hits.push(d);
+      }
+    }
+    var name = stated && stated.cable.name ? str(stated.cable.name, '') : null;
+    if (hits.length) {
+      var every = hits.length >= 2 ? hits[1] - hits[0] : (stated ? Math.floor(stated.cable.every) : null);
+      return { inRows: hits[0], every: every, nextRow: W + hits[0], name: name, source: 'pattern' };
+    }
+    if (stated) {
+      // "cross the cable every 8th row", counted from the line that says so
+      var ev = Math.floor(stated.cable.every);
+      var anchor = stated.row >= 1 ? stated.row : null;
+      if (!anchor || W < anchor) return { inRows: anchor ? anchor - W : null, every: ev, nextRow: anchor, name: name, source: 'stated' };
+      var k = (ev - ((W - anchor) % ev)) % ev;
+      return { inRows: k, every: ev, nextRow: W + k, name: name, source: 'stated' };
+    }
+    return null;
+  }
+
+  /* ---- "until it measures 32 cm" --------------------------------------- */
+
+  var FROM_START_RE = /\bfrom\s+(?:the\s+)?(?:cast[\s-]*on(?:\s+edge)?|co\b|beg(?:inning)?\b\.?|start\b|lower\s+edge|bottom\s+edge|hem\b)/i;
+  var FROM_ANY_RE = /\bfrom\s+(?:the\s+)?[a-z]/i;
+
+  function untilOf(l) {
+    var u = l && l.until && typeof l.until === 'object' ? l.until : null;
+    if (!u || !(u.value > 0)) return null;
+    return u;
+  }
+
+  /**
+   * The length a part is being worked to, as rows: "32 cm ≈ 118 rows, not
+   * 110" - through the measured row gauge, else the pattern's. Never a hard
+   * target: `targetRow` is the row it comes to (≈), `fromRow` the row the
+   * length is measured from (0 = the start of the part).
+   */
+  function untilInfo(prt, rowNumber) {
+    if (!prt) return null;
+    var lines = linesFor(prt);
+    if (!lines.length) return null;
+    var W = typeof rowNumber === 'number' ? rowNumber : prt.row + 1;
+    var PW = patternRowOf(prt, W);
+    var own = null, fromRow = null, i, l;
+    var at = lineForRow(prt, PW);
+    if (at && untilOf(at)) {
+      own = at;
+      if (at.row >= 1) {
+        fromRow = at.row - 1;
+      } else {
+        // a "work even until..." sentence: it starts after the rows written before it
+        var before = 0, ix = lines.indexOf(at);
+        for (i = 0; i < ix; i++) {
+          l = lines[i];
+          if (isRowLine(l) && l.kind !== 'repeat') before = Math.max(before, l.rowEnd >= l.row ? l.rowEnd : l.row);
+          // "Rep Rows 1-8 4 more times" wrote rows 9-40
+          if (l && l.repeatTo >= 1 && !untilOf(l)) before = Math.max(before, l.repeatTo);
+        }
+        fromRow = before || (at.repeatFrom >= 1 ? at.repeatFrom - 1 : null);
+      }
+    } else if (!at || at.approxRow) {
+      // an unnumbered "work even until..." after the last written row before
+      // this one (rows numbered after it are only ≈, so it may still own them)
+      var prevEnd = 0, cand = null, candFrom = 0;
+      for (i = 0; i < lines.length; i++) {
+        l = lines[i];
+        if (isRowLine(l) && l.kind !== 'repeat') {
+          if (l.row >= PW) break;
+          prevEnd = Math.max(prevEnd, l.rowEnd >= l.row ? l.rowEnd : l.row);
+          if (!l.approxRow) cand = null;
+          continue;
+        }
+        if (untilOf(l)) { cand = l; candFrom = prevEnd; continue; }
+        if (l && l.repeatTo >= 1) {
+          if (l.repeatFrom >= PW) break;
+          prevEnd = Math.max(prevEnd, l.repeatTo);
+        }
+      }
+      if (cand) { own = cand; fromRow = candFrom; }
+    }
+    if (!own) return null;
+    var u = untilOf(own);
+    var text = str(own.text, '');
+    // "until piece measures 32 cm" is the whole piece; "... from underarm"
+    // is measured from where this stretch began; "from cast-on" the start
+    var mIdx = text.search(/\bmeasures?\b|\blength\b/i);
+    var tail = mIdx >= 0 ? text.slice(mIdx) : text;
+    // wave H (knit-qa): "for a further 2"" and "until ribbing measures 2""
+    // are measured from where THIS stretch began, not from the cast-on (the
+    // Bernat body's 2" of rib said "≈ row 9" when it starts at round 2)
+    var stretchOnly = !!u.relative || /\b(?:a\s+)?further\b/i.test(text) ||
+      /\b(?:rib(?:bing)?|border|band|hem|cuff|edging|garter\s+(?:st(?:itch)?\s+)?(?:section|border))\s+measures?\b/i.test(text);
+    if (!(stretchOnly && fromRow !== null) && (FROM_START_RE.test(tail) || !FROM_ANY_RE.test(tail))) fromRow = 0;
+    var out = {
+      kind: u.kind === 'rows' ? 'rows' : 'length', value: u.value, unit: u.unit || null,
+      endOn: normalizeKnitSide(u.endOn), line: own, fromRow: fromRow,
+      rows: null, patternRows: null, gaugeSource: null, targetRow: null, approx: true
+    };
+    if (out.kind === 'rows') {
+      out.rows = Math.round(u.value);
+      out.approx = false;
+    } else {
+      var proj = projectOfPart(prt);
+      var g = gaugeOf(proj);
+      out.patternRows = lengthToRows(g, u.value, u.unit, 'pattern');
+      var mineRows = lengthToRows(g, u.value, u.unit, 'swatch');
+      out.rows = mineRows || out.patternRows;
+      out.gaugeSource = mineRows ? 'swatch' : out.patternRows ? 'pattern' : null;
+    }
+    if (out.rows && fromRow !== null) {
+      var t = fromRow + out.rows;
+      if (out.endOn && t >= 1) {
+        var s = patternSideAt(prt, t);
+        if (s.side && s.side !== out.endOn) t += 1;
+      }
+      out.targetRow = t;
+    }
+    return out;
+  }
+
+  /* ---- glossary -------------------------------------------------------- */
+
+  // [abbr, meaning, regex source that finds it in a pattern]. The profile
+  // table (contract §2 vocabulary), for when Knits.glossary is not loaded.
+  var KNIT_GLOSSARY = [
+    ['k', 'knit', '\\bk\\d*\\b'],
+    ['p', 'purl', '\\bp\\d*\\b'],
+    ['st(s)', 'stitch(es)', '\\bsts?\\b'],
+    ['RS', 'right side (the side that shows)', '\\bRS\\b'],
+    ['WS', 'wrong side', '\\bWS\\b'],
+    ['rnd(s)', 'round(s) - worked in the round, no turning', '\\brnds?\\b'],
+    ['CO', 'cast on', '\\bCO\\b|\\bcast\\s+on\\b'],
+    ['BO', 'bind off (UK: cast off)', '\\bBO\\b|\\bbind\\s+off\\b'],
+    ['yo', 'yarn over: wrap the yarn over the needle, makes a stitch and a hole', '\\byo\\b'],
+    ['k2tog', 'knit 2 together (right-leaning decrease)', '\\bk2\\s*tog\\b'],
+    ['p2tog', 'purl 2 together', '\\bp2\\s*tog\\b'],
+    ['k3tog', 'knit 3 together (double decrease)', '\\bk3\\s*tog\\b'],
+    ['ssk', 'slip, slip, knit: slip 2 knitwise one at a time, knit them together (left-leaning decrease)', '\\bssk\\b'],
+    ['ssp', 'slip, slip, purl (left-leaning decrease on the WS)', '\\bssp\\b'],
+    ['sssk', 'slip 3 knitwise one at a time, knit them together', '\\bsssk\\b'],
+    ['skp', 'slip 1, knit 1, pass the slipped stitch over', '\\bskp\\b'],
+    ['sk2p', 'slip 1, k2tog, pass the slipped stitch over (double decrease)', '\\bsk2p\\b'],
+    ['cdd', 'centred double decrease: slip 2 together knitwise, k1, pass the 2 slipped sts over', '\\bcdd\\b|\\bs2kp2?\\b'],
+    ['psso', 'pass the slipped stitch over', '\\bp2?sso\\b'],
+    ['m1', 'make 1: lift the bar between stitches and knit it', '\\bm1\\b'],
+    ['m1L', 'make 1 left-leaning: lift the bar from the front, knit it through the back loop', '\\bm1\\s*l\\b'],
+    ['m1R', 'make 1 right-leaning: lift the bar from the back, knit it through the front loop', '\\bm1\\s*r\\b'],
+    ['m1p', 'make 1 purlwise', '\\bm1\\s*p\\b'],
+    ['kfb', 'knit into the front and back of the same stitch (1 st becomes 2)', '\\bk1?fb\\b'],
+    ['pfb', 'purl into the front and back of the same stitch', '\\bp1?fb\\b'],
+    ['sl', 'slip a stitch from the left needle to the right without working it', '\\bsl\\d*\\b'],
+    ['wyif / wyib', 'with yarn in front / with yarn in back', '\\bwy[if]b?\\b|\\bwyi[fb]\\b'],
+    ['tbl', 'through the back loop', '\\btbl\\b'],
+    ['pm', 'place marker', '\\bpm\\b'],
+    ['sm', 'slip marker', '\\bsm\\b'],
+    ['rm', 'remove marker', '\\brm\\b'],
+    ['BOR', 'beginning of round (its marker)', '\\bBOR\\b|\\bbeg(?:inning)?\\s+of\\s+(?:the\\s+)?r(?:ou)?nd\\b'],
+    ['w&t', 'wrap and turn: a short row - wrap the next stitch, turn the work', 'w\\s*&\\s*t\\b|\\bwrap\\s+and\\s+turn\\b'],
+    ['turn', 'turn the work before the end of the row (a short row)', '\\bturn\\b'],
+    ['GSR / DS', 'German short row / double stitch', '\\bGSR\\b|\\bDS\\b'],
+    ['C4F / C6F', 'cable front: slip half the sts to a cable needle held in front, knit the rest, knit those from the cable needle (crosses to the left)', '\\bC\\d{1,2}F\\b'],
+    ['C4B / C6B', 'cable back: the same with the cable needle held at the back (crosses to the right)', '\\bC\\d{1,2}B\\b'],
+    ['T3R / T3L', 'twist: a cable crossing knit over purl, to the right / left', '\\bT\\d{1,2}[LR]\\b'],
+    ['1/1 RC / LC', 'right / left cross (cable notation: sts held / sts crossed)', '\\b\\d\\/\\d\\s*[LR]P?C\\b'],
+    ['cn', 'cable needle', '\\bcn\\b'],
+    ['St st', 'stockinette (stocking) stitch: knit RS rows, purl WS rows; knit every round in the round', '\\bst(?:ocking|ockinette)?\\.?\\s*st(?:itch)?\\b'],
+    ['garter st', 'knit every row (purl alternate rounds in the round)', '\\bgarter\\b'],
+    ['rib', 'ribbing, e.g. k2, p2 rib: knit the knits and purl the purls', '\\brib(?:bing)?\\b'],
+    ['patt', 'pattern', '\\bpatt?\\b'],
+    ['rep', 'repeat', '\\brep\\b'],
+    ['beg', 'beginning', '\\bbeg\\b'],
+    ['rem', 'remain(ing)', '\\brem\\b'],
+    ['inc', 'increase(d)', '\\binc\\b'],
+    ['dec', 'decrease(d)', '\\bdec\\b'],
+    ['tog', 'together', '\\btog\\b'],
+    ['foll', 'following', '\\bfoll\\b'],
+    ['cont', 'continue', '\\bcont\\b'],
+    ['LH / RH', 'left-hand / right-hand needle', '\\b[LR]H\\b'],
+    ['dpn', 'double-pointed needle', '\\bdpns?\\b'],
+    ['MC / CC', 'main colour / contrast colour', '\\b[MC]C\\d?\\b']
+  ];
+
+  /** The pattern text of a project or part, for the glossary. */
+  function glossaryText(projOrPart) {
+    if (!projOrPart) return '';
+    if (typeof projOrPart === 'string') return projOrPart;
+    if (Array.isArray(projOrPart.parts)) {
+      var bits = projOrPart.parts.map(function (p) { return str(p.patternText, ''); });
+      bits.push(str(projOrPart.notes, ''));
+      return bits.join('\n');
+    }
+    return str(projOrPart.patternText, '');
+  }
+
+  /**
+   * [{abbr, meaning, fromPattern, used}] - `Knits.glossary` when it is
+   * loaded (the pattern's own abbreviation block + its profile table), else
+   * the table above. `used` = the abbreviation appears in this pattern.
+   */
+  function glossaryFor(projOrPart) {
+    var text = glossaryText(projOrPart);
+    var list = null;
+    var api = null;
+    try { api = parserFor(projOrPart && typeof projOrPart === 'object' ? projOrPart : KNIT_CRAFT); } catch (e) { api = null; }
+    if (api && typeof api.glossary === 'function') {
+      try {
+        var got = api.glossary(text);
+        if (Array.isArray(got)) {
+          list = got.filter(function (g) { return g && str(g.abbr, '').trim() && str(g.meaning, '').trim(); })
+            .map(function (g) {
+              return { abbr: str(g.abbr, '').trim(), meaning: str(g.meaning, '').trim(), fromPattern: !!g.fromPattern, used: !!g.fromPattern };
+            });
+        }
+      } catch (e2) { list = null; }
+    }
+    var table = KNIT_GLOSSARY.map(function (row) {
+      var used = false;
+      try { used = !!text && new RegExp(row[2], 'i').test(text); } catch (e3) { used = false; }
+      return { abbr: row[0], meaning: row[1], fromPattern: false, used: used };
+    });
+    if (!list) return table;
+    // a parser's entry that the table also has: mark it used when the text has it
+    list.forEach(function (g) {
+      if (g.used) return;
+      var key = g.abbr.toLowerCase();
+      table.forEach(function (t) { if (t.used && t.abbr.toLowerCase().split(/\s*\/\s*/).indexOf(key) >= 0) g.used = true; });
+    });
+    return list;
+  }
+
+  /* ---- charts ---------------------------------------------------------- */
+
+  function chartKey(name) {
+    // "Chart A" = "A", "Henley chart" = "Henley"
+    return str(name, '').toLowerCase().replace(/\bcharts?\b/g, '').replace(/[^a-z0-9]+/g, '');
+  }
+
+  /**
+   * `Project.craftData.chartPages` (defined here, filled by the importer):
+   * [{ page, name, key?, chart? }] - the PDF page a chart is printed on, its
+   * name as the pattern calls it ("Chart A"), the BlobStore key of the page
+   * image (default 'p:<projectId>:chartpage:<page>') and, when
+   * `KnitChart.fromHandle` read it, the chart itself.
+   */
+  function chartPagesOf(proj) {
+    var cd = proj && proj.craftData && typeof proj.craftData === 'object' ? proj.craftData : null;
+    var raw = cd && Array.isArray(cd.chartPages) ? cd.chartPages : [];
+    // `craftData.charts` (contract change from knit-chart): the charts
+    // KnitChart read at import time, [{page, name, rows, cols, cells|null,
+    // legend, repeatBox, ...}], so the counter never opens the PDF again
+    var read = cd && Array.isArray(cd.charts) ? cd.charts.filter(function (c) { return c && typeof c === 'object'; }) : [];
+    function readFor(page, name) {
+      var k = chartKey(name), byPage = null;
+      for (var i = 0; i < read.length; i++) {
+        if (clampInt(read[i].page, 0, 9999, 0) !== page) continue;
+        if (!k || chartKey(read[i].name) === k) return read[i];
+        if (!byPage) byPage = read[i];
+      }
+      return byPage;
+    }
+    var out = [];
+    raw.forEach(function (c) {
+      if (!c || typeof c !== 'object') return;
+      var page = clampInt(c.page, 1, 9999, 0);
+      if (!page) return;
+      var name = str(c.name, '').trim();
+      out.push({
+        page: page,
+        name: name,
+        key: str(c.key, '').trim() || ('p:' + proj.id + ':chartpage:' + page),
+        scale: c.scale > 0 ? Number(c.scale) : null,
+        chart: c.chart && typeof c.chart === 'object' ? c.chart : readFor(page, name)
+      });
+    });
+    // a chart that was read but whose page image was not kept still counts
+    read.forEach(function (c) {
+      var page = clampInt(c.page, 1, 9999, 0);
+      if (!page || out.some(function (o) { return o.chart === c; })) return;
+      out.push({ page: page, name: str(c.name, '').trim(), key: null, chart: c, noImage: true });
+    });
+    return out;
+  }
+
+  /**
+   * "Chart row 7 of 16" for the row being worked: the chart the line names
+   * (`Line.chart`), the page it is printed on, and the row written out when
+   * the chart was read (`KnitChart.rowText`).
+   */
+  function chartInfo(prt) {
+    if (!prt || !isKnitPart(prt)) return null;
+    var proj = projectOfPart(prt);
+    var sr = shortRowInfo(prt);
+    // the pattern row being worked, through a back-reference to the row it re-works
+    var prow = sr ? (sr.numbered ? sr.patternRow : null) : repeatInfo(prt).patternRow;
+    var line = sr ? sr.line : lineForRow(prt, prow);
+    var from = backRefFrom(line);
+    if (from && prow >= from) {
+      var u = line.repeatOf[(prow - from) % line.repeatOf.length];
+      var ul = typeof u === 'number' ? lineForRow(prt, u) : null;
+      if (ul && !backRefFrom(ul)) { line = ul; prow = u; }
+    }
+    var ch = line && line.chart && typeof line.chart === 'object' ? line.chart : null;
+    var gapRow = null;
+    if (!ch && !sr && prow >= 1) {
+      // "Work Rows 1-61 of Lace chart" written as a sentence, not as numbered
+      // rows (the Interweave hat): the rows after the last written one are
+      // that chart's rows, one for one, as far as the sentence reaches
+      var gap = chartGapLine(prt, prow);
+      if (gap) { line = gap.line; ch = gap.line.chart; gapRow = gap.row; }
+    }
+    if (!ch) return null;
+    var row = gapRow || clampInt(ch.row, 1, 9999, 0) || null;
+    // "Rows 3-16: work rows 3-16 of Chart A": row 7 is chart row 7
+    var chEnd = clampInt(ch.rowEnd, 1, 9999, 0) || null;
+    if (!gapRow && row && chEnd && chEnd > row && line.row >= 1 && prow > line.row) row = Math.min(chEnd, row + (prow - line.row));
+    var name = str(ch.name, '').trim() || 'Chart';
+    if (/^[A-Z0-9]{1,3}$/i.test(name)) name = 'Chart ' + name;
+    var pages = chartPagesOf(proj);
+    var KC = window.KnitChart;
+    var key = chartKey(name), page = null, i;
+    // KnitChart.find knows "Chart A" = "A" and "Leg chart" = "Leg"
+    if (KC && typeof KC.find === 'function') {
+      try {
+        var hit = KC.find(pages.map(function (pg) { return pg.chart; }).filter(Boolean), str(ch.name, ''));
+        for (i = 0; hit && i < pages.length; i++) if (pages[i].chart === hit) { page = pages[i]; break; }
+      } catch (e0) { page = null; }
+    }
+    for (i = 0; !page && i < pages.length; i++) if (chartKey(pages[i].name) === key) page = pages[i];
+    // a chart of that name read off the page (the page entry may be unnamed)
+    for (i = 0; !page && i < pages.length; i++) if (pages[i].chart && chartKey(pages[i].chart.name) === key) page = pages[i];
+    if (!page && pages.length === 1) page = pages[0];
+    var chart = page && page.chart ? page.chart : null;
+    var of = null;
+    if (chart) {
+      // with rowStep 2 only the odd rows are drawn: the last charted row number
+      var nos = Array.isArray(chart.rowNos) ? chart.rowNos.filter(function (n) { return n > 0; }) : [];
+      of = nos.length ? Math.max.apply(null, nos) : (chart.rows > 0 ? Math.floor(chart.rows) : null);
+    }
+    if (!of) {
+      // the highest row of this chart any line names
+      linesFor(prt).forEach(function (l) {
+        if (!l || !l.chart || chartKey(l.chart.name) !== key) return;
+        var top = Math.max(l.chart.row || 0, l.chart.rowEnd || 0);
+        if (top > (of || 0)) of = Math.floor(top);
+      });
+    }
+    var text = null, repeat = null;
+    if (chart && chart.cells && !chart.image && row && KC && typeof KC.rowText === 'function') {
+      try {
+        // null in the round, 'rs' / 'ws' flat, left out when the side is not known
+        var side = sideInfo(prt, proj);
+        var sideArg = side.inRound ? null : (side.side || undefined);
+        repeat = chartRepeatFor(chart, proj, prt);
+        var t = repeat === null ? KC.rowText(chart, row, sideArg) : KC.rowText(chart, row, sideArg, { repeat: repeat });
+        if (typeof t === 'string' && t.trim()) text = t.trim();
+      } catch (e) { text = null; }
+    }
+    return { name: name, row: row, of: of, page: page, chart: chart, text: text, repeat: repeat, line: line };
+  }
+
+  /**
+   * An unnumbered line naming a range of chart rows ("Work Rows 1-61 of Lace
+   * chart") that owns pattern row `prow`: it sits after the last written row
+   * before `prow`, and `prow` falls within the range it names.
+   * @returns {{line:Object, row:number}|null} row = the chart row
+   */
+  function chartGapLine(prt, prow) {
+    var lines = linesFor(prt);
+    var prevEnd = 0, cand = null, candFrom = 0, forCand = null;
+    // wave H (knit-qa): "See Chart E for Rows 3-15" names the PATTERN's rows
+    // (the Icelandic border's pick-up "counts as Row 1"): row 3 is chart row
+    // 3, rows 1-2 are no chart row, and the written rows inside the range do
+    // not end it. "Work Rows 1-61 of Lace chart" counts from where it is worked.
+    var FOR_ROWS_RE = /\bfor\s+(?:rows?|rnds?|rounds?)\s+\d/i;
+    for (var i = 0; i < lines.length; i++) {
+      var l = lines[i];
+      if (!l) continue;
+      if (isRowLine(l) && l.kind !== 'repeat') {
+        if (l.row >= prow) break;
+        prevEnd = Math.max(prevEnd, l.rowEnd >= l.row ? l.rowEnd : l.row);
+        cand = null;
+        continue;
+      }
+      var c = l.chart;
+      if (c && c.row >= 1 && c.rowEnd > c.row) {
+        if (FOR_ROWS_RE.test(str(l.text, ''))) forCand = l;
+        else { cand = l; candFrom = prevEnd; }
+      }
+    }
+    if (!cand && forCand) {
+      return prow >= forCand.chart.row && prow <= forCand.chart.rowEnd ? { line: forCand, row: prow } : null;
+    }
+    if (!cand) return null;
+    var r = cand.chart.row + (prow - candFrom - 1);
+    return r >= cand.chart.row && r <= cand.chart.rowEnd ? { line: cand, row: r } : null;
+  }
+
+  /**
+   * Several repeat boxes (a sock chart's "60 sts" / "68 sts"): the one for
+   * this knitter. By stitch count first (the part's row total, else the
+   * setup row's), then by the project's size name in the box label, then by
+   * the size index when there is one box per size. null = the chart's own.
+   */
+  function chartRepeatFor(chart, proj, prt) {
+    var reps = Array.isArray(chart.repeats) ? chart.repeats : [];
+    if (reps.length < 2) return null;
+    var sts = usableCount(currentTarget(prt));
+    if (!sts) {
+      var setup = setupLine(prt);
+      sts = setup ? usableCount(setup.count) : null;
+    }
+    var i;
+    if (sts) for (i = 0; i < reps.length; i++) if (reps[i] && reps[i].sizeSts === sts) return i;
+    var label = proj && proj.size ? str(proj.size.label, '').toLowerCase() : '';
+    if (label) {
+      for (i = 0; i < reps.length; i++) {
+        var l = str(reps[i] && reps[i].label, '').toLowerCase();
+        if (l && (' ' + l.replace(/[^a-z0-9/]+/g, ' ') + ' ').indexOf(' ' + label + ' ') >= 0) return i;
+      }
+    }
+    if (proj && proj.size && Array.isArray(proj.sizes) && proj.sizes.length === reps.length) return proj.size.index;
+    return null;
+  }
+
+  /** The importer's door for `craftData.chartPages` (one Undo with the rest of an import if `undo:false`). */
+  function setChartPages(projectId, list, opts) {
+    return updateCraftData(projectId, function (cd) {
+      var good = (Array.isArray(list) ? list : []).filter(function (c) { return c && typeof c === 'object' && c.page >= 1; });
+      cd.chartPages = good.filter(function (c) { return !c.noImage; }).map(function (c) {
+        var o = { page: Math.floor(c.page), name: str(c.name, '').trim() };
+        if (c.key) o.key = str(c.key, '');
+        // px per PDF point of the kept image, for the crop to chart.bbox
+        if (c.scale > 0) o.scale = Number(c.scale);
+        return o;
+      });
+      var charts = [];
+      good.forEach(function (c) {
+        if (!c.chart || typeof c.chart !== 'object') return;
+        var ch = jsonObject(c.chart);
+        ch.page = Math.floor(c.page);
+        if (!ch.name) ch.name = str(c.name, '').trim();
+        charts.push(ch);
+      });
+      if (charts.length) cd.charts = charts;
+      else delete cd.charts;
+    }, opts);
+  }
+
+  function installKnitApi(api) {
+    // fields + writers
+    api.KNIT_CRAFT = KNIT_CRAFT;
+    api.gaugeOf = gaugeOf;
+    api.setGauge = setGauge;
+    api.normalizeGauge = normalizeGauge;
+    api.lengthToRows = lengthToRows;
+    api.gaugeCompare = gaugeCompare;
+    api.sideInfo = sideInfo;
+    api.patternSideAt = patternSideAt;
+    api.setSide = setSide;
+    api.flipSide = flipSide;
+    api.markerInfo = markerInfo;
+    api.addMarker = addMarker;
+    api.renameMarker = renameMarker;
+    api.removeMarker = removeMarker;
+    api.setMarkers = setMarkers;
+    api.linkParts = linkParts;
+    api.unlinkPart = unlinkPart;
+    api.splitTwoAtATime = splitTwoAtATime;
+    api.linkedPart = function (projOrId, prt) {
+      var pr = projOrId && typeof projOrId === 'object' ? projOrId : project(projOrId);
+      return linkedPart(pr, prt);
+    };
+    api.linkedLabel = function (projOrId, prt) {
+      var pr = projOrId && typeof projOrId === 'object' ? projOrId : project(projOrId);
+      return pr ? linkedLabel(pr, prt) : '';
+    };
+    api.shortRowInfo = shortRowInfo;
+    api.endShortRows = endShortRows;
+    api.cableInfo = cableInfo;
+    api.untilInfo = untilInfo;
+    api.glossary = glossaryFor;
+    api.chartInfo = chartInfo;
+    api.chartPages = function (projOrId) {
+      var pr = projOrId && typeof projOrId === 'object' ? projOrId : project(projOrId);
+      return pr ? chartPagesOf(pr) : [];
+    };
+    api.setChartPages = setChartPages;
+    return api;
+  }
+
+  /**
+   * "Done with short rows": the knitter ends the run by hand (the pattern
+   * said "until all heel sts are worked", or they stopped early). The short
+   * rows finished so far (n - 1) are kept; a numbered run lands on the row
+   * after them.
+   */
+  function endShortRows(projectId, partId) {
+    var proj = project(projectId);
+    var prt = part(proj, partId);
+    if (!proj || !prt) return { event: 'none' };
+    var info = shortRowInfo(prt);
+    if (!info) return { event: 'none' };
+    snapshot(proj);
+    var done = Math.max(0, info.n - 1);
+    var res;
+    if (info.numbered && done >= 1) {
+      prt.shortRows = null;
+      prt.row = Math.max(0, info.base + done - 1);
+      res = completeRow(proj, prt);
+      prt.shortRows = { active: false, n: done, of: done, row: prt.row, base: info.base, numbered: true };
+      res.shortRowsDone = done;
+    } else {
+      prt.stitch = 0;
+      prt.shortRows = { active: false, n: Math.max(1, done), of: done || null, row: prt.row, base: info.base, numbered: !!info.numbered };
+      res = { event: 'shortRowsDone', n: done, of: done, row: prt.row, partName: prt.name };
+    }
+    touch(proj);
+    return res;
+  }
+
+  /* ------------------------------------------------------------------ *
    * Public API
    * ------------------------------------------------------------------ */
 
@@ -6125,6 +8445,10 @@
 
     // crafts (the plugin contract — docs/CRAFTS.md)
     registerCraft: registerCraft,
+    // wave H: one parser per craft (crochet → Patterns, knitting → Knits)
+    registerCraftParser: registerCraftParser,
+    parserFor: parserFor,
+    craftOf: craftKeyOf,
     crafts: craftIds,
     craftDef: craftDef,
     updateCraftData: updateCraftData,
@@ -6235,6 +8559,8 @@
     currentTargetInfo: currentTargetInfo,
     patternSummary: patternSummary,
     splitSections: splitSections,
+    // wave H (knit-qa): the gauge an import would write (preview), never writing
+    gaugeFromText: gaugeFromText,
     sizeCount: sizeCount,
     setupLine: setupLine,
     countOf: countOf,
@@ -6319,4 +8645,7 @@
       return KEY;
     }
   };
+  // wave H (knit-counter): gauge, side, markers, two at a time, short rows,
+  // cables, lengths, glossary, charts - see "Knitting" above
+  installKnitApi(window.Store);
 })();

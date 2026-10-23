@@ -540,6 +540,199 @@ step(function () {
   });
 });
 
+/* ===================================================================== *
+ * Wave H (knitting): docs/wave-h/pdftext-knit.md
+ * ===================================================================== */
+function js(o) { return JSON.stringify(o); }
+function glyphs(s) {
+  return s.split('').map(function (c) { return { unicode: c, width: 500, isSpace: c === ' ' }; });
+}
+
+step(function () {
+  group('Hidden text: clipped, covered, placed twice (textVisibility / dropHiddenItems)');
+  var O = window.pdfjsLib && window.pdfjsLib.OPS;
+  if (!O) return skip('hidden text units', 'pdf.js not loaded');
+  var V = window.PdfText;
+  var ol = { fnArray: [], argsArray: [] };
+  function op(fn, args) { ol.fnArray.push(fn); ol.argsArray.push(args || null); }
+  function rect(x, y, w, h) { op(O.constructPath, [[O.rectangle], [x, y, w, h], [x, x + w, y, y + h]]); }
+  function text(s, x, y) { op(O.setTextMatrix, [10, 0, 0, 10, x, y]); op(O.showText, [glyphs(s)]); }
+  op(O.save); rect(0, 0, 300, 100); op(O.clip); op(O.endPath);
+  op(O.beginText); op(O.setFont, ['f', 1]);
+  text('Seen in its frame', 10, 50);
+  text('Clipped off the frame', 10, 300);
+  text('SSSK clipped', 10, 400);
+  op(O.endText); op(O.restore);
+  op(O.beginText); op(O.setFont, ['f', 1]);
+  text('chart for your size', 10, 400);
+  text('Painted over', 400, 50);
+  text('Over the box', 400, 200);
+  op(O.endText);
+  rect(390, 40, 150, 30); op(O.fill);
+  op(O.save); op(O.setGState, [[['ca', 0.5]]]); rect(390, 190, 150, 30); op(O.fill); op(O.restore);
+  var runs = V._textVisibility(ol, O);
+  var its = [item('Seen in its frame', 10, 50), item('Clipped off the frame', 10, 300), item('SSSK clipped', 10, 400),
+    item('chart for your size', 10, 400), item('Painted over', 400, 50), item('Over the box', 400, 200)];
+  eq(V._dropHiddenItems(its, runs).map(function (i) { return i.str; }),
+    ['Seen in its frame', 'chart for your size', 'Over the box'],
+    'text outside its clip and text under a later opaque box are dropped; a half-transparent box hides nothing');
+  ok(runs.filter(function (r) { return r.hidden; }).length === 3, 'three runs are hidden', js(runs));
+  ok(V._dropHiddenItems(its, runs).some(function (i) { return i.str === 'chart for your size'; }),
+    'a visible run starting exactly where a hidden one does keeps its line (socks p6 "SSSK" over "chart for your size")');
+  // text set as outlines on top of itself (a filled path with many points) is no box
+  var ol2 = { fnArray: [O.beginText, O.setFont, O.setTextMatrix, O.showText, O.endText, O.constructPath, O.fill],
+    argsArray: [null, ['f', 1], [10, 0, 0, 10, 50, 50], [glyphs('the square')], null,
+      [[O.moveTo, O.lineTo, O.lineTo, O.lineTo, O.lineTo, O.closePath], [50, 48, 60, 53, 70, 53, 80, 53, 100, 50], [50, 100, 48, 58]], null] };
+  ok(!V._textVisibility(ol2, O)[0].hidden, 'an outline path over words (not a box) does not hide them (weaving p2)');
+  // an image covers only where its pixels are opaque, and never an OCR layer
+  var ol3 = { fnArray: [O.beginText, O.setFont, O.setTextMatrix, O.showText, O.setTextRenderingMode, O.setTextMatrix, O.showText, O.endText,
+    O.save, O.transform, O.paintImageXObject, O.restore],
+    argsArray: [null, ['f', 1], [10, 0, 0, 10, 20, 20], [glyphs('under a photo')], [3], [10, 0, 0, 10, 20, 60], [glyphs('ocr words')], null,
+      null, [200, 0, 0, 200, 0, 0], ['img_1', 10, 10], null] };
+  var opaque = function () { return 255; }, clear = function () { return 0; };
+  var r3 = V._textVisibility(ol3, O, opaque);
+  eq([r3[0].hidden, r3[1].hidden], [true, false], 'an opaque photo painted over text hides it; an OCR layer (render mode 3) under its scan stays');
+  eq(V._textVisibility(ol3, O, clear)[0].hidden, false, 'a transparent image (a logo\'s clear ground) hides nothing');
+  eq(V._textVisibility(ol3, O)[0].hidden, false, 'without the image\'s pixels nothing is hidden by it');
+  // when to look at all
+  var twin = [];
+  ['Jennifer updated a stitch pattern', 'ate a new twist in simple lace', 'in many vintage patterns, but'].forEach(function (s, k) {
+    twin.push(item(s, 173, 753 - k * 15, 12));
+    twin.push(item(s, 173, 728 - k * 15, 12));
+  });
+  ok(V._overlaySuspect(twin), 'a page placed twice at a constant offset is suspect (socks p4)');
+  var list = [];
+  for (var k = 0; k < 8; k++) list.push(item('Rnd ' + k + ': sc in next st around', 40, 700 - k * 14));
+  for (k = 0; k < 8; k++) list.push(item('sc in next st, inc', 40, 500 - k * 14));
+  ok(!V._overlaySuspect(list), 'a list repeating the same instruction down the page is not');
+  eq(V._crossPageSuspects([{ lines: [], keys: ['Removing old beg-of-rnd m when you', 'come to it, work Rows 1-12 of Leg', 'chart for your size 5 times, working'] },
+    { lines: [], keys: ['an unrelated page of its own text'] },
+    { lines: [], keys: ['Removing old beg-of-rnd m when you', 'come to it, work Rows 1-12 of Leg', 'chart for your size 5 times, working'] }]),
+  [0, 2], 'two pages sharing several long runs (and only they) are both checked (socks p6 / p9)');
+});
+
+step(function () {
+  group('Columns per band of rows, spreads, initials, adverts');
+  // a three-column block over a two-column block, a blank between them
+  var its = [], i;
+  for (i = 0; i < 12; i++) {
+    its.push(item('first column of prose words here ' + i, 40, 740 - i * 12, 10, 150));
+    its.push(item('second column of prose words here ' + i, 220, 740 - i * 12, 10, 150));
+    its.push(item('third column of prose words here ' + i, 400, 740 - i * 12, 10, 150));
+  }
+  for (i = 0; i < 12; i++) {
+    its.push(item('lower left block words ' + i, 40, 560 - i * 12, 10, 240));
+    its.push(item('lower right block words ' + i, 320, 560 - i * 12, 10, 240));
+  }
+  var got = lines(its);
+  eq([got[0], got[12], got[24], got[36], got[48]],
+    ['first column of prose words here 0', 'second column of prose words here 0', 'third column of prose words here 0', 'lower left block words 0', 'lower right block words 0'],
+    'a three-column band over a two-column band: each band read with its own columns (socks p20, lace p31)');
+  ok(got.every(function (l) { return !/words \d+ .*words/.test(l); }), '...and no line mixes two columns');
+  // a full-width block over two columns whose rows do not share baselines
+  its = [];
+  for (i = 0; i < 6; i++) its.push(item('a full width note that runs right across the region ' + i, 220, 740 - i * 12, 9.5, 340));
+  for (i = 0; i < 9; i++) {
+    its.push(item('leg column line ' + i, 220, 640 - i * 12, 9.5, 160));
+    its.push(item('heel column line ' + i, 398, 636 - i * 12, 9.5, 160));
+  }
+  got = lines(its);
+  eq(got.indexOf('heel column line 0') - got.indexOf('leg column line 0'), 9,
+    'notes across the top, then two columns read one after the other (socks p15)');
+  // a two-column table inside a band stays row by row
+  its = [];
+  for (i = 0; i < 14; i++) its.push(item('body text of the page that runs on ' + i, 40, 760 - i * 12, 10, 520));
+  ['Magic Ring', 'Chain', 'Slip Stitch', 'Increase', 'Single Crochet', 'Double Crochet', 'Treble Crochet'].forEach(function (t, k) {
+    its.push(item(t, 40, 560 - k * 12, 10, 90));
+    its.push(item(t + ' UK', 300, 560 - k * 12, 10, 110));
+  });
+  ok(lines(its).indexOf('Chain Chain UK') >= 0, 'a short two-column table in a band is still read row by row (bee p2 US/UK terms)');
+  // a spread: two pages side by side, too few rows for columns
+  its = [item('Booklet', 189, 681, 9, 30), item('Booklet', 1086, 681, 9, 30), item('5', 96, 676, 15, 9), item('3', 992, 676, 15, 9),
+    item('0216EN', 188, 671, 10, 31), item('0216EN', 1085, 671, 10, 31), item('Model 1', 72, 661, 9, 29), item('Model 2', 968, 661, 9, 30)];
+  eq(window.PdfText._pageLines(its, 1190.55, 841.89, 0).lines.map(function (l) { return l.text; }),
+    ['Booklet', '5', '0216EN', 'Model 1', 'Booklet', '3', '0216EN', 'Model 2'],
+    'a two-page spread is read left page, then right page (knit-sandnes-0216)');
+  // small-caps initials and drop caps
+  var row = { items: [{ x: 220, end: 228, h: 10, str: 'N' }, { x: 228, end: 228, h: 10, str: ' ' }, { x: 228, end: 246, h: 7, str: 'otes' }] };
+  eq(window.PdfText._rowText(row), 'Notes', 'a small-caps initial run keeps its word ("N otes", socks p15)');
+  row = { items: [{ x: 34, end: 50, h: 27.5, str: 'T' }, { x: 50, end: 50, h: 27.5, str: ' ' }, { x: 52, end: 197, h: 9, str: 'sock, knit from the top' }] };
+  eq(window.PdfText._rowText(row), 'T sock, knit from the top', 'a drop cap two lines tall is not glued to the line it sits on');
+  row = { items: [{ x: 40, end: 80, h: 10, str: 'Row 1:' }, { x: 80, end: 80, h: 10, str: ' ' }, { x: 82, end: 120, h: 10, str: '(RS) K1' }] };
+  eq(window.PdfText._rowText(row), 'Row 1: (RS) K1', 'an ordinary zero-width word space is still a space');
+});
+
+step(function () {
+  group('Knitting fixtures (wave H): columns, hidden layers, the advert');
+  var S = 'knit-interweave-8-socks.pdf';
+  function next(f, p, a) { var l = pageLines(f, p), i = l.indexOf(a); return i >= 0 ? l[i + 1] : undefined; }
+  return withFixture(S, 'socks', function (f) {
+    // (1) three-column pages
+    eq(next(f, 15, 'CO 60 (68) sts and distribute evenly over 2'), 'cir needles. Needle 1 holds the heel sts and',
+      'p15 the Leg column reads down its own column');
+    eq(next(f, 15, 'Linen stitch heel:'), 'Row 1: (RS) Sl 1, *k1, sl 1 with yarn in', 'p15 ...and so does the heel column');
+    ok(pageLines(f, 15).indexOf('Notes') >= 0 && pageLines(f, 15).indexOf('Leg') >= 0, 'p15 the "Notes" and "Leg" headings are whole words');
+    ok(!pageLines(f, 15).some(function (l) { return /Work Rnds 1.44 of chart Rows 2 and 4/.test(l); }), 'p15 no line mixes the two columns');
+    eq(next(f, 20, 'Rnd 1: Work in patt to end of Needle 3,'), 'then use the M1 method to inc 1 st at end',
+      'p20 the third column follows the second (Rnd 1 runs on)');
+    eq(next(f, 20, 'Sssp'), 'Slip three sts knitwise, one at', 'p20 the Sssp sidebar under the columns is read on its own');
+    ok(lineIndex(f, 20, 'necessary.') < lineIndex(f, 20, 'Sssp') && lineIndex(f, 20, 'Sssp') < lineIndex(f, 20, 'Eastern Cast-On'),
+      'p20 columns first, then the two sidebars, left then right');
+    // (2) text printed twice / hidden layers
+    var p4 = String(f.pages[4] || '');
+    eq([(p4.match(/every day socks\./g) || []).length, (p4.match(/JENNIFER CROWLEY RAYMOND/g) || []).length,
+      (p4.match(/FINISHED SIZE/g) || []).length], [1, 1, 1], 'p4 a page placed twice comes out once');
+    ok(hasLine(f, 4, 'time') && hasLine(f, 4, 'traveler') && p4.indexOf('to create a new twist') >= 0,
+      'p4 the title column is read apart from the intro, and "cre-" / "ate" joins');
+    ok(String(f.pages[6] || '').indexOf('SSSK') < 0 && String(f.pages[6] || '').indexOf('TURKISH CAST-ON') < 0,
+      'p6 the glossary clipped out of view is not read');
+    eq(next(f, 6, 'come to it, work Rows 1–12 of Leg'), 'chart for your size 5 times, working', 'p6 the Leg paragraph is whole again');
+    ok(String(f.pages[9] || '').indexOf('Removing old beg-of-rnd') < 0 && hasLine(f, 9, 'SSSK (DOUBLE DECREASE)'),
+      'p9 the pattern text covered by the glossary box is not read; the glossary is');
+    ok(!pageLines(f, 8).some(function (l) { return /back,1 \(Figure|the4$|wrap:6 /.test(l); }), 'p8 hidden figure numbers stay out of the lines');
+    // (3) the advert
+    eq(next(f, 5, 'times, pm, insert right needle into wrap'), 'then kwise into wrapped st and sl both',
+      'p5 the heel-flap row runs on across the column break');
+    ok(lineIndex(f, 5, 'interweaveknits.com') > lineIndex(f, 5, 'removing 2 heel m.'), 'p5 the advert is read after the page text');
+    // (5) found on the way
+    eq(next(f, 30, '45'), '43', 'p30 the Albus Argyle chart\'s top row label "45" (in the top margin) is not taken for a page number');
+  }).then(function () {
+    return withFixture('knit-interweave-lace.pdf', 'lace', function (f) {
+      eq(next(f, 31, 'Rnds 1 and 3: *K2, k2tog, dbl yo, ssk, k2, p2; rep from *'), 'around (7 times).',
+        'p31 the continuation lines stay with their rounds');
+      ok(lineIndex(f, 31, 'Woman\'s medium to fit a 7–8" hand.') < lineIndex(f, 31, 'Cuff (Make both gloves the same way)'),
+        'p31 the spinning table (three columns) is read before the rounds (two columns)');
+      eq(next(f, 31, 'around.'), 'Rnd 2: *K3, k1f&b, k3, p2; rep from * around.', 'p31 the cuff shaping reads in order');
+    });
+  }).then(function () {
+    return withFixture('knit-sandnes-0216.pdf', 'sandnes', function (f) {
+      ok(!pageLines(f, 3).some(function (l) { return /Booklet Booklet|0216EN 0216EN/.test(l); }),
+        'p3 the two info boxes of a spread are not zipped together');
+      ok(lineIndex(f, 3, 'Model 1 -- 2-12 years') < lineIndex(f, 3, 'yarn: duo'), 'p3 left page, then right page');
+    });
+  }).then(function () {
+    return withFixture('crochet-stylecraft-guide.pdf', 'stylecraft guide', function (f) {
+      eq((String(f.pages[5] || '').match(/adjustable ring/g) || []).length, 1,
+        'p5 the charts key placed once per cell (all but one clipped away) is read once');
+    });
+  }).then(function () {
+    return withFixture('sew-freespirit-harmony-quilt.pdf', 'freespirit', function (f) {
+      ok(!/Finished Finished/.test(f.res.text), '"Finished Finished Block Sizes:" (two layouts over each other) is no longer doubled');
+    });
+  }).then(function () {
+    return withFixture('cardigan.pdf', 'cardigan', function (f) {
+      ok(lineIndex(f, 22, 'Wheat Stitch Trees') < lineIndex(f, 22, 'Autumn Wheat Sweater'),
+        'p22 the three adverts are read top to bottom');
+    });
+  }).then(function () {
+    return withFixture('crochet-apl-priscilla-filet2.pdf', 'priscilla filet (OCR)', function (f) {
+      var t = String(f.res.text);
+      ok(t.indexOf('17th roic--Work to within 2 sp of motif and make 19 d,\n9 sp, 19 d ; r e peat around.') >= 0,
+        'an OCR page with a narrow drifting gutter is read column by column (wave E residual)');
+    });
+  });
+});
+
 chain.then(function () {
   var el = document.getElementById('summary');
   el.textContent = passed + ' passed, ' + failed + ' failed' + (skipped ? ', ' + skipped + ' skipped' : '');

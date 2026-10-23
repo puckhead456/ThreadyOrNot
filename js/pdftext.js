@@ -639,6 +639,29 @@
     return runs > 0 && long;
   }
 
+  /* A drop cap or a small-caps initial is its own run: the Interweave
+   * books set "N" + "otes", "L" + "eg", "K" + "NITS", with a zero-width
+   * space run between them, and the space came out in the word ("N otes",
+   * "L eg": a part heading the knitting reader could not name). A space run
+   * with no width between a lone capital and a run that touches it, set
+   * at a different size from it, is not a word break. */
+  var INITIAL_GAP = 0.12;
+  var INITIAL_SIZE = 0.05;    // ...and the initial is set at its own size
+  var INITIAL_MAX_RATIO = 1.6;
+
+  function isInitialSpace(items, i) {
+    var sp = items[i];
+    if (sp.str.replace(/\s/g, '') || sp.end - sp.x > 0.5) return false;
+    var a = items[i - 1], b = items[i + 1];
+    if (!a || !b || !/^[A-Z]$/.test(a.str) || !/^[A-Za-z]/.test(b.str)) return false;
+    var h = Math.max(a.h, b.h, 1);
+    if (Math.abs(a.h - b.h) < h * INITIAL_SIZE) return false;
+    // a drop cap two or more lines tall belongs to the line above
+    if (a.h > b.h * INITIAL_MAX_RATIO) return false;
+    var gap = b.x - a.end;
+    return gap > -1 && gap < INITIAL_GAP * h;
+  }
+
   function rowText(row, deglyph) {
     if (!deglyph && rowIsTracked(row)) deglyph = true;
     var out = '';
@@ -648,6 +671,7 @@
       var it = row.items[i];
       var str = it.str;
       if (deglyph && SPACED_ITEM_RE.test(str)) str = str.replace(/ /g, '');
+      if (isInitialSpace(row.items, i)) continue;
       var lig = LIGATURES.test(str.trim());
       if (prev) {
         var glued =
@@ -677,6 +701,382 @@
       prev = { str: str, x: it.x, end: it.end, h: it.h, script: it.script, turned: it.turned };
     }
     return fixLigatures(collapse(out));
+  }
+
+  /* ================================================================== *
+   * 3a. Hidden text (text the page carries but nobody can see)
+   *
+   * Magazine PDFs place whole source pages into frames. The text layer
+   * then holds everything on the placed page, including what the frame
+   * clips away and what a later box is painted over, and pdf.js hands all
+   * of it back with no visibility flag. knit-interweave-8-socks p4 places
+   * the same page twice, 24 pt apart (every line came out twice: the first
+   * copy's title is clipped off and its body is painted over by the
+   * materials box of the second), p6 carries the clipped-off glossary that
+   * p9 shows, p9 carries the covered-up pattern text of p6, and p8 the
+   * figure numbers of drawings that are clipped out of view.
+   *
+   * Visibility is read from the page's operator list: a run of text is
+   * hidden when (almost) none of its box lies inside the clip in force when
+   * it is drawn, or when something opaque painted later covers its box: a
+   * plain box fill (full alpha, normal blending, no soft mask, outside any
+   * transparency group), or an image whose own pixels are opaque there
+   * (sampled; never over text in render mode 3, which is an OCR layer
+   * lying on top of its scan by design). The operator
+   * list is not free (the worker decodes the page's images for it), so it
+   * is only read for a page that shows the symptoms (see overlaySuspect and
+   * crossPageSuspects).
+   * ================================================================== */
+  var HIDE_CLIP_SHARE = 0.25;    // hidden when less than this share is inside the clip
+  var HIDE_COVER_SHARE = 0.9;    // ...or a later opaque fill covers this share of it
+
+  function mulM(m, n) {
+    return [m[0] * n[0] + m[2] * n[1], m[1] * n[0] + m[3] * n[1],
+      m[0] * n[2] + m[2] * n[3], m[1] * n[2] + m[3] * n[3],
+      m[0] * n[4] + m[2] * n[5] + m[4], m[1] * n[4] + m[3] * n[5] + m[5]];
+  }
+  function applyM(m, x, y) { return [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]]; }
+  /** Page-space box [x0, y0, x1, y1] of a box given in the space of `m`. */
+  function boxM(m, x0, y0, x1, y1) {
+    var p = [applyM(m, x0, y0), applyM(m, x1, y0), applyM(m, x0, y1), applyM(m, x1, y1)];
+    var b = [Infinity, Infinity, -Infinity, -Infinity];
+    p.forEach(function (q) {
+      if (q[0] < b[0]) b[0] = q[0];
+      if (q[1] < b[1]) b[1] = q[1];
+      if (q[0] > b[2]) b[2] = q[0];
+      if (q[1] > b[3]) b[3] = q[1];
+    });
+    return b;
+  }
+  function boxCut(a, b) {
+    if (!a) return b ? b.slice() : null;
+    if (!b) return a.slice();
+    return [Math.max(a[0], b[0]), Math.max(a[1], b[1]), Math.min(a[2], b[2]), Math.min(a[3], b[3])];
+  }
+  function boxArea(b) {
+    return b ? Math.max(0, b[2] - b[0]) * Math.max(0, b[3] - b[1]) : 0;
+  }
+
+  /* Only a BOX hides what is under it. A fill's bounding box says nothing
+   * about how much of it is ink: text set as outlines on top of the same
+   * text (other-weaving-handwoven p2, "= the 'you are here' square") has a
+   * bounding box over the words and almost no ink. A box is one rectangle,
+   * or a short path (a rounded rectangle) whose every point lies on the
+   * edge of its bounding box. */
+  var BOX_MAX_OPS = 12;
+
+  function pathIsBox(ops, coords, mm, OPS) {
+    if (!ops || !coords || !mm) return false;
+    var w = mm[1] - mm[0], h = mm[3] - mm[2];
+    if (!(w > 0 && h > 0)) return false;
+    var rects = 0, other = 0;
+    for (var i = 0; i < ops.length; i++) {
+      if (ops[i] === OPS.rectangle) rects++;
+      else if (ops[i] !== OPS.closePath) other++;
+    }
+    if (rects) return rects === 1 && !other;
+    if (other > BOX_MAX_OPS) return false;
+    var slack = Math.max(1, Math.min(w, h) * 0.12);
+    for (var k = 0; k + 1 < coords.length; k += 2) {
+      var x = coords[k], y = coords[k + 1];
+      var dx = Math.min(Math.abs(x - mm[0]), Math.abs(x - mm[1]));
+      var dy = Math.min(Math.abs(y - mm[2]), Math.abs(y - mm[3]));
+      if (dx > slack && dy > slack) return false;
+    }
+    return true;
+  }
+
+  /**
+   * Every text run of an operator list with its page-space box and whether
+   * a reader can see it.
+   * @param {{fnArray:number[], argsArray:Array}} ol  page.getOperatorList()
+   * @param {Object} OPS  pdfjsLib.OPS
+   * @param {function(string, number, number):?number} [imageAlpha] alpha
+   *   (0-255) of image `id` at unit-square point (u, v), null if unknown
+   * @returns {Array<{sx:number, sy:number, ex:number, ey:number,
+   *                  box:number[], hidden:boolean}>}
+   */
+  function textVisibility(ol, OPS, imageAlpha) {
+    var fns = (ol && ol.fnArray) || [], args = (ol && ol.argsArray) || [];
+    var gs = { ctm: [1, 0, 0, 1, 0, 0], clip: null, ca: 1, normal: true, smask: false,
+      fs: 10, cs: 0, ws: 0, hs: 1, lead: 0, rise: 0, mode: 0, group: 0 };
+    var stack = [];
+    var tm = [1, 0, 0, 1, 0, 0], tlm = [1, 0, 0, 1, 0, 0];
+    var lastPath = null, lastIsBox = false;
+    var runs = [], fills = [];
+    var copy = function (g) {
+      var o = {};
+      for (var k in g) o[k] = g[k];
+      return o;
+    };
+    var moveText = function (x, y) {
+      tlm = [tlm[0], tlm[1], tlm[2], tlm[3], tlm[4] + x * tlm[0] + y * tlm[2], tlm[5] + x * tlm[1] + y * tlm[3]];
+      tm = tlm.slice();
+    };
+    var show = function (glyphs) {
+      if (!glyphs || !glyphs.length) return;
+      var adv = 0, txt = '';
+      for (var i = 0; i < glyphs.length; i++) {
+        var gl = glyphs[i];
+        if (typeof gl === 'number') { adv -= gl * gs.fs / 1000 * gs.hs; continue; }
+        if (!gl) continue;
+        var w = typeof gl.width === 'number' ? gl.width : 500;
+        adv += (w * gs.fs / 1000 + gs.cs + (gl.isSpace ? gs.ws : 0)) * gs.hs;
+        if (typeof gl.unicode === 'string') txt += gl.unicode;
+      }
+      var m = mulM(gs.ctm, tm);
+      var s = applyM(m, 0, gs.rise), e = applyM(m, adv, gs.rise);
+      var box = boxM(m, Math.min(0, adv), gs.rise - 0.2 * gs.fs, Math.max(0, adv), gs.rise + 0.8 * gs.fs);
+      var hidden = false;
+      if (gs.clip) {
+        var a = boxArea(box);
+        var inside = boxArea(boxCut(box, gs.clip));
+        // a run with no extent (a lone space) is judged by its start
+        hidden = a > 0 ? inside < a * HIDE_CLIP_SHARE
+          : (s[0] < gs.clip[0] || s[0] > gs.clip[2] || s[1] < gs.clip[1] || s[1] > gs.clip[3]);
+      }
+      // Render mode 3 (invisible) is NOT hidden text: it is how every OCR
+      // layer lies over its scan, and the scan shows those very words.
+      runs.push({ sx: s[0], sy: s[1], ex: e[0], ey: e[1], box: box, text: txt, hidden: hidden,
+        why: hidden ? 'clip' : '', ocr: gs.mode === 3 || gs.mode === 7, at: fills.length });
+      tm = [tm[0], tm[1], tm[2], tm[3], tm[4] + adv * tm[0], tm[5] + adv * tm[1]];
+    };
+    for (var i = 0; i < fns.length; i++) {
+      var fn = fns[i], a = args[i] || [];
+      switch (fn) {
+        case OPS.save: stack.push(copy(gs)); break;
+        case OPS.restore: if (stack.length) gs = stack.pop(); break;
+        case OPS.transform: gs.ctm = mulM(gs.ctm, a); break;
+        case OPS.paintFormXObjectBegin:
+          stack.push(copy(gs));
+          if (a[0] && a[0].length === 6) gs.ctm = mulM(gs.ctm, a[0]);
+          if (a[1] && a[1].length === 4) gs.clip = boxCut(gs.clip, boxM(gs.ctm, a[1][0], a[1][1], a[1][2], a[1][3]));
+          break;
+        case OPS.paintFormXObjectEnd: if (stack.length) gs = stack.pop(); break;
+        case OPS.beginGroup:
+          stack.push(copy(gs));
+          gs.group++;
+          break;
+        case OPS.endGroup: if (stack.length) gs = stack.pop(); break;
+        case OPS.setGState:
+          (a[0] || []).forEach(function (kv) {
+            if (!kv) return;
+            if (kv[0] === 'ca') gs.ca = kv[1];
+            else if (kv[0] === 'BM') gs.normal = !kv[1] || kv[1] === 'source-over' || kv[1] === 'Normal';
+            else if (kv[0] === 'SMask') gs.smask = !!kv[1];
+            else if (kv[0] === 'Font' && kv[1] && typeof kv[1][1] === 'number') gs.fs = kv[1][1];
+          });
+          break;
+        case OPS.constructPath:
+          var mm = a[2];
+          lastPath = mm && mm.length === 4 && isFinite(mm[0]) ? boxM(gs.ctm, mm[0], mm[2], mm[1], mm[3]) : null;
+          lastIsBox = !!lastPath && pathIsBox(a[0], a[1], mm, OPS);
+          break;
+        case OPS.clip:
+        case OPS.eoClip:
+          if (lastPath) gs.clip = boxCut(gs.clip, lastPath);
+          break;
+        case OPS.fill:
+        case OPS.eoFill:
+        case OPS.fillStroke:
+        case OPS.eoFillStroke:
+        case OPS.closeFillStroke:
+        case OPS.closeEOFillStroke:
+          if (lastPath && lastIsBox && gs.ca >= 1 && gs.normal && !gs.smask && !gs.group) {
+            var fb = boxCut(lastPath, gs.clip);
+            if (boxArea(fb) > 0) fills.push({ box: fb });
+          }
+          break;
+        case OPS.paintImageXObject:
+          // the unit square under the CTM; only outside transparency
+          if (gs.ca >= 1 && gs.normal && !gs.smask && !gs.group && typeof a[0] === 'string') {
+            var ib = boxCut(boxM(gs.ctm, 0, 0, 1, 1), gs.clip);
+            var det = gs.ctm[0] * gs.ctm[3] - gs.ctm[1] * gs.ctm[2];
+            if (boxArea(ib) > 0 && det) {
+              var c = gs.ctm;
+              var inv = [c[3] / det, -c[1] / det, -c[2] / det, c[0] / det,
+                (c[2] * c[5] - c[3] * c[4]) / det, (c[1] * c[4] - c[0] * c[5]) / det];
+              fills.push({ box: ib, img: a[0], inv: inv });
+            }
+          }
+          break;
+        case OPS.beginText: tm = [1, 0, 0, 1, 0, 0]; tlm = tm.slice(); break;
+        case OPS.setFont: if (typeof a[1] === 'number') gs.fs = a[1]; break;
+        case OPS.setCharSpacing: gs.cs = +a[0] || 0; break;
+        case OPS.setWordSpacing: gs.ws = +a[0] || 0; break;
+        case OPS.setHScale: gs.hs = (+a[0] || 100) / 100; break;
+        case OPS.setLeading: gs.lead = +a[0] || 0; break;
+        case OPS.setTextRise: gs.rise = +a[0] || 0; break;
+        case OPS.setTextRenderingMode: gs.mode = +a[0] || 0; break;
+        case OPS.setTextMatrix: tm = a.slice(0, 6); tlm = tm.slice(); break;
+        case OPS.moveText: moveText(+a[0] || 0, +a[1] || 0); break;
+        case OPS.setLeadingMoveText: gs.lead = -(+a[1] || 0); moveText(+a[0] || 0, +a[1] || 0); break;
+        case OPS.nextLine: moveText(0, -gs.lead); break;
+        case OPS.showText:
+        case OPS.showSpacedText: show(a[0]); break;
+        case OPS.nextLineShowText: moveText(0, -gs.lead); show(a[0]); break;
+        case OPS.nextLineSetSpacingShowText:
+          gs.ws = +a[0] || 0; gs.cs = +a[1] || 0; moveText(0, -gs.lead); show(a[2]); break;
+        default: break;
+      }
+    }
+    // Covered: a box or an opaque image painted AFTER the run that hides
+    // (nearly) all of it. An image only covers where its own pixels are
+    // opaque (a logo with a transparent ground covers nothing): its alpha
+    // is sampled at five points of the run, when the caller can read it.
+    var opaqueAt = function (f, r) {
+      if (!f.img) return true;
+      if (r.ocr) return false;
+      if (typeof imageAlpha !== 'function' || !f.inv) return false;
+      var b = r.box, w = b[2] - b[0], h = b[3] - b[1];
+      var pts = [[0.5, 0.5], [0.1, 0.2], [0.9, 0.2], [0.1, 0.8], [0.9, 0.8]];
+      for (var q = 0; q < pts.length; q++) {
+        var uv = applyM(f.inv, b[0] + w * pts[q][0], b[1] + h * pts[q][1]);
+        var al = imageAlpha(f.img, uv[0], uv[1]);
+        if (!(al >= 250)) return false;
+      }
+      return true;
+    };
+    runs.forEach(function (r) {
+      if (r.hidden) return;
+      var area = boxArea(r.box);
+      if (!(area > 0)) return;
+      for (var k = r.at; k < fills.length; k++) {
+        if (boxArea(boxCut(r.box, fills[k].box)) >= area * HIDE_COVER_SHARE && opaqueAt(fills[k], r)) {
+          r.hidden = true;
+          r.why = (fills[k].img ? 'image ' : 'fill ') + fills[k].box.map(Math.round).join(',');
+          return;
+        }
+      }
+    });
+    runs.forEach(function (r) { delete r.at; });
+    return runs;
+  }
+
+  /** Does a text item say what a run says (its first glyphs)? */
+  function sameText(itemStr, runText) {
+    var a = String(itemStr || '').replace(/\s+/g, ''), b = String(runText || '').replace(/\s+/g, '');
+    if (!a || !b) return true;                 // no letters to compare: position decides
+    return b.indexOf(a.slice(0, 6)) >= 0 || a.indexOf(b.slice(0, 6)) >= 0;
+  }
+
+  /**
+   * Drop the text items that only hidden runs account for. An item is
+   * matched to the runs whose baseline segment its start lies on and that
+   * say the same thing; an item no run accounts for, or that any visible
+   * run accounts for, is kept.
+   */
+  function dropHiddenItems(items, runs) {
+    if (!runs || !runs.length || !runs.some(function (r) { return r.hidden; })) return items;
+    return items.filter(function (it) {
+      if (!it || !it.transform || typeof it.str !== 'string') return true;
+      var x = it.transform[4], y = it.transform[5];
+      var seen = false;
+      for (var i = 0; i < runs.length; i++) {
+        var r = runs[i];
+        var dx = r.ex - r.sx, dy = r.ey - r.sy, len2 = dx * dx + dy * dy;
+        var t = len2 > 0 ? ((x - r.sx) * dx + (y - r.sy) * dy) / len2 : 0;
+        if (t < -0.05 || t > 1.05) {
+          if (len2 > 0 || Math.abs(x - r.sx) > 1 || Math.abs(y - r.sy) > 1) continue;
+        }
+        var px = r.sx + Math.max(0, Math.min(1, t)) * dx, py = r.sy + Math.max(0, Math.min(1, t)) * dy;
+        if ((px - x) * (px - x) + (py - y) * (py - y) > 2.25) continue;
+        // ...and says the same thing: a hidden run can lie exactly on a
+        // visible line (socks p6: the clipped glossary's "SSSK (DOUBLE
+        // DECREASE)" starts on the point where "chart for your size" does)
+        if (!sameText(it.str, r.text)) continue;
+        if (!r.hidden) return true;
+        seen = true;
+      }
+      return !seen;
+    });
+  }
+
+  /* When to read the operator list. A page placed twice prints the same
+   * runs again at a constant offset; covered or clipped text lies on top
+   * of other text (pdf.js reports both on one baseline). Either is cheap to
+   * see in the text content. */
+  var OVERLAY_MIN_TWINS = 3;
+  var OVERLAY_MIN_CHARS = 10;
+  var OVERLAY_OCR_WORDS = 0.8;
+
+  function overlaySuspect(items) {
+    var ink = [];
+    (items || []).forEach(function (it) {
+      if (!it || typeof it.str !== 'string' || !it.transform) return;
+      var s = it.str.replace(/\s+/g, ' ').trim();
+      if (s.length >= 1) ink.push({ s: s, x: it.transform[4], y: it.transform[5], w: it.width || 0 });
+    });
+    // (a) several long runs, each printed exactly twice, the second copy at
+    //     the same x and the same vertical offset as the others' (a list
+    //     repeating "sc in next st" down the page is not a second layer)
+    var byText = Object.create(null), offsets = Object.create(null), twins = 0;
+    ink.forEach(function (r) {
+      if (r.s.length < OVERLAY_MIN_CHARS) return;
+      (byText[r.s] = byText[r.s] || []).push(r);
+    });
+    Object.keys(byText).forEach(function (s) {
+      var two = byText[s];
+      if (two.length !== 2) return;
+      var dy = Math.round(two[0].y - two[1].y);
+      if (Math.abs(two[0].x - two[1].x) > 1 || Math.abs(dy) <= Y_TOLERANCE) return;
+      offsets[dy] = (offsets[dy] || 0) + 1;
+      if (offsets[dy] > twins) twins = offsets[dy];
+    });
+    if (twins >= OVERLAY_MIN_TWINS) return true;
+    // (b) runs lying on other runs of the same baseline: two layers. Not
+    //     on an OCR layer, where the words of a tilted scan overlap all the
+    //     time (and reading the operator list would decode the scan): OCR
+    //     hands back one word per run.
+    var words = 0;
+    ink.forEach(function (r) { if (!/\s/.test(r.s)) words++; });
+    if (ink.length >= 40 && words > ink.length * OVERLAY_OCR_WORDS) return false;
+    var lying = 0;
+    for (var i = 0; i < ink.length; i++) {
+      var a = ink[i];
+      if (!(a.w > 0) || !/\S/.test(a.s)) continue;
+      for (var k = i + 1; k < ink.length; k++) {
+        var b = ink[k];
+        if (!(b.w > 0) || Math.abs(a.y - b.y) > Y_TOLERANCE || a.s === b.s) continue;
+        var over = Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x);
+        if (over > Math.min(a.w, b.w) * 0.6 && over > 2) { lying++; break; }
+      }
+      if (lying >= OVERLAY_MIN_TWINS) return true;
+    }
+    return false;
+  }
+
+  /* Text placed on one page and shown on another (p6 / p9 of the socks
+   * book): several long lines that two pages, and only those two, share. */
+  var CROSS_MIN_LINES = 3;
+  var CROSS_MIN_CHARS = 20;
+
+  function crossPageSuspects(pages) {
+    var where = Object.create(null);
+    pages.forEach(function (p, pi) {
+      var seen = Object.create(null);
+      // the page's text runs, not its lines: how the runs are joined into
+      // lines depends on the very columns the hidden text upsets
+      (p.keys || p.lines.map(function (l) { return l.text; })).forEach(function (t) {
+        var k = String(t || '').replace(/\s+/g, ' ').trim().toLowerCase();
+        if (k.length < CROSS_MIN_CHARS || seen[k]) return;
+        seen[k] = true;
+        (where[k] = where[k] || []).push(pi);
+      });
+    });
+    var pair = Object.create(null);
+    Object.keys(where).forEach(function (k) {
+      var w = where[k];
+      if (w.length !== 2) return;
+      var key = w[0] + ':' + w[1];
+      pair[key] = (pair[key] || 0) + 1;
+    });
+    var out = {};
+    Object.keys(pair).forEach(function (key) {
+      if (pair[key] < CROSS_MIN_LINES) return;
+      key.split(':').forEach(function (pi) { out[pi] = true; });
+    });
+    return Object.keys(out).map(Number);
   }
 
   /* ================================================================== *
@@ -911,9 +1311,9 @@
    *
    * @returns {number[]} split positions, best first
    */
-  function findGaps(rows, x0, x1) {
+  function findGaps(rows, x0, x1, minLines) {
     var width = x1 - x0;
-    if (!(width > 0) || rows.length < MIN_LINES_FOR_COLUMNS) return [];
+    if (!(width > 0) || rows.length < (minLines || MIN_LINES_FOR_COLUMNS)) return [];
 
     var buckets = Math.ceil(width) + 1;
     if (buckets < MIN_GAP_WIDTH * 2) return [];
@@ -960,6 +1360,16 @@
     strict.slice().sort(widest).forEach(function (run) {
       if (run.mid >= lo && run.mid <= hi) push(run.mid, false);
     });
+    // A2 - in a band (a block of a few rows, measured on its own ink) a
+    //     band nothing bridges may sit well off the middle: a narrow title
+    //     column beside a wide intro (knit-interweave-8-socks p4 "time
+    //     traveler"), a two-line FINISHING column beside CUFF (p6).
+    if ((minLines || MIN_LINES_FOR_COLUMNS) < MIN_LINES_FOR_COLUMNS) {
+      strict.slice().sort(widest).forEach(function (run) {
+        if (run.start <= x0 + 1 || run.end >= x1 - 1) return;     // a margin
+        if (run.mid >= x0 + width * BAND_EDGE && run.mid <= x1 - width * BAND_EDGE) push(run.mid, false);
+      });
+    }
     // B - the same, allowing up to MAX_CROSSING of the lines to bridge it.
     //     Flagged NOISY: the caller only takes it when both sides are wide
     //     enough to be columns, because the other thing that leaves a band
@@ -1290,13 +1700,212 @@
     return { left: li, right: ri };
   }
 
-  function columnize(rows, x0, x1, budget) {
-    if (budget.left <= 0 || rows.length < MIN_LINES_FOR_COLUMNS) {
+  /* Columns are decided per BAND of rows, not per page. A magazine page
+   * stacks blocks with different column grids: three columns of pattern
+   * over a two-column sidebar (knit-interweave-8-socks p20), a three-column
+   * spinning table over two columns of rounds (knit-interweave-lace p31), a
+   * full-width "Notes" block over two columns (socks p15). One gutter for
+   * the whole region either does not exist (the blocks bridge each other's
+   * gutters, so lines came out mixed column by column) or is wrong for one
+   * of the blocks. A band is a run of rows with no full-width blank between
+   * them taller than BAND_CUT_GAP body lines; the bands are read top to
+   * bottom, each with its own columns, but only when they DISAGREE: one
+   * band bridges the region's gutter on a good share of its rows, or the
+   * region has no gutter and a band has one. Bands that agree keep the
+   * region's gutter, so a page of two columns still flows down its gutter
+   * across a blank that both columns happen to share. */
+  var BAND_CUT_GAP = 2.2;     // a blank this many body heights tall separates bands
+  var BAND_CUT_INK = 1.6;     // ...and this many heights of the line below it
+  var BAND_MIN_LINES = 5;     // a band this short may still hold columns
+  var BAND_SIDE_LINES = 2;    // ...and a side this short across a clean gutter
+  var BAND_EDGE = 0.1;        // ...which may sit anywhere but this close to an edge
+  var BAND_MIN_CROSS = 2;     // a band disagrees when this many of its rows...
+  var BAND_CROSS_SHARE = 0.3; // ...and this share of them bridge the gutter
+
+  function horizontalBands(rows) {
+    if (!rows.length) return [];
+    var bodyH = dominantHeight(rows) || 10;
+    var out = [[rows[0]]];
+    for (var i = 1; i < rows.length; i++) {
+      var gap = rows[i].order - rows[i - 1].order;
+      var h = rowInkHeight(rows[i]) || bodyH;
+      if (gap > bodyH * BAND_CUT_GAP && gap > h * BAND_CUT_INK) out.push([rows[i]]);
+      else out[out.length - 1].push(rows[i]);
+    }
+    return out;
+  }
+
+  var GRID_SINGLES = 0.5;     // a region whose words are mostly one glyph is a chart
+
+  function isSymbolGrid(rows) {
+    var words = 0, singles = 0;
+    rows.forEach(function (row) {
+      row.items.forEach(function (it) {
+        it.str.split(/\s+/).forEach(function (w) {
+          if (!w) return;
+          words++;
+          if (w.length === 1) singles++;
+        });
+      });
+    });
+    return words > 0 && singles > words * GRID_SINGLES;
+  }
+
+  /* A band is measured on its own ink: a block of two columns beside an
+   * empty photo area (crochet-bernat-basketweave p1's abbreviations box)
+   * has its gutter far off the middle of the page, where findGaps never
+   * looks, but in the middle of the block. */
+  function bandSpan(band, x0, x1) {
+    var lo = Infinity, hi = -Infinity;
+    band.forEach(function (row) {
+      row.items.forEach(function (it) {
+        if (!it.str.replace(/\s/g, '')) return;
+        if (it.x < lo) lo = it.x;
+        if (it.end > hi) hi = it.end;
+      });
+    });
+    if (!isFinite(lo) || !(hi > lo)) return { lo: x0, hi: x1 };
+    return { lo: Math.max(x0, lo - 1), hi: Math.min(x1, hi + 1) };
+  }
+
+  /* A band of table rows (most rows three or more short cells, or mostly
+   * figures) never makes its band disagree with the region, and in a page
+   * read band by band it is read as a region of its own would be, with the
+   * usual line minimum: a size chart read row by row stays row by row
+   * (sew-peppermint-bronte-bathers p5, knit-bernat-topdown-pullover "To fit
+   * chest | Finished chest"), and the craft parsers that zip column-split
+   * keys back (see tableEnds) see what they always saw. */
+  var TABLE_FIGURES = 0.6;
+
+  function isTableBand(band) {
+    var cells = 0, ink = 0;
+    for (var t = 0; t < band.length; t++) {
+      var n = cellCount(band[t]);
+      if (n) ink++;
+      // cells of a word or three: three prose columns side by side are
+      // three "cells" of whole lines (see isTableRow)
+      var nw = rowText(band[t]).split(/\s+/).filter(Boolean).length;
+      if (n >= TABLE_MIN_CELLS && nw <= n * TABLE_CELL_WORDS) cells++;
+    }
+    if (ink > 0 && cells * 2 > ink) return true;
+    // ...or a grid of figures: a size chart whose cells are set too tight
+    // to count (bronte p5: "9X 142 56 126 50")
+    var words = 0, figures = 0;
+    band.forEach(function (row) {
+      row.items.forEach(function (it) {
+        it.str.split(/\s+/).forEach(function (w) {
+          if (!w) return;
+          words++;
+          if (/\d/.test(w) && !/[a-z]{3}/i.test(w)) figures++;
+        });
+      });
+    });
+    return words > 0 && figures > words * TABLE_FIGURES;
+  }
+
+  var PAIRED_SHARE = 0.7;   // rows with ink on both sides of the gutter
+  var PAIRED_WORDS = 4;       // ...each side a cell of at most this many words (median)
+  var PAIRED_LABEL = 3;       // ...or the left side labels of at most this many
+
+  function isPairedTable(rows, mid) {
+    var both = 0, lw = [], rw = [];
+    var text = function (items) { return items.map(function (it) { return it.str; }).join(' '); };
+    rows.forEach(function (row) {
+      var parts = splitRow(row, mid);
+      var lt = text(parts.left), rt = text(parts.right);
+      var l = lt.split(/\s+/).filter(Boolean).length, r = rt.split(/\s+/).filter(Boolean).length;
+      if (!l || !r) return;
+      both++;
+      lw.push(l);
+      rw.push(r);
+    });
+    if (both < rows.length * PAIRED_SHARE) return false;
+    var med = function (a) { a.sort(function (x, y) { return x - y; }); return a[Math.floor(a.length / 2)]; };
+    // short cells both sides, or a column of labels ("Colour used | A White
+    // 1001, B Cloud Blue 1019,", crochet-stylecraft-hood p2) beside values
+    var l = med(lw), r = med(rw);
+    return l <= PAIRED_LABEL || (l <= PAIRED_WORDS && r <= PAIRED_WORDS);
+  }
+
+  function bandsDisagree(bands, res, x0, x1) {
+    for (var b = 0; b < bands.length; b++) {
+      var band = bands[b];
+      if (band.length < BAND_MIN_LINES) continue;
+      // A table the gutter runs through keeps the split it always had: the
+      // craft parsers zip those blocks back themselves (see tableEnds).
+      if (isTableBand(band)) continue;
+      var sp = bandSpan(band, x0, x1);
+      if (res.split) {
+        var n = 0, cross = [];
+        for (var r = 0; r < band.length; r++) {
+          cross.push(bridgesGutter(band[r], res.mid, 0));
+          if (cross[r]) n++;
+        }
+        if (n < BAND_MIN_CROSS) continue;
+        // Only rows that bridge the gutter IN THE MIDDLE of the band count:
+        // lines at its top or bottom edge are a full-width note or a header
+        // that fullWidthBands reads in place (the "X = Cross Stitch" legend
+        // and the "Stitches Length" header of the xs-tinymodernist-halloween
+        // key). A good share of them, or a few plus a gutter of the band's
+        // own somewhere else (lace p31: the spinning table's long lines poke
+        // across the gutter of the rounds below it), is a disagreement.
+        var lo = 0, hi = band.length - 1;
+        while (lo <= hi && cross[lo]) lo++;
+        while (hi >= lo && cross[hi]) hi--;
+        var inner = 0;
+        for (r = lo; r <= hi; r++) if (cross[r]) inner++;
+        if (inner < BAND_MIN_CROSS) continue;
+        if (inner >= band.length * BAND_CROSS_SHARE) return true;
+        var own = columnizeAt(band, sp.lo, sp.hi, { left: 1 }, BAND_MIN_LINES);
+        if (own.split && Math.abs(own.mid - res.mid) > MIN_GAP_WIDTH) return true;
+      } else if (columnizeAt(band, sp.lo, sp.hi, { left: 1 }, BAND_MIN_LINES).split) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function columnize(rows, x0, x1, budget, minLines) {
+    minLines = minLines || MIN_LINES_FOR_COLUMNS;
+    if (budget.left <= 0 || rows.length < minLines) {
       return { columns: [rows], split: false };
     }
-    var gaps = preferRecordGaps(rows, findGaps(rows, x0, x1));
+    var trial = { left: budget.left };
+    var res = columnizeAt(rows, x0, x1, trial, minLines);
+    // A symbol chart is a grid, not a page of blocks: its blank rows are
+    // not band breaks (xs-pokemon: a chart cut into bands loses its rows).
+    var bands = isSymbolGrid(rows) ? [rows] : horizontalBands(rows);
+    if (bands.length >= 2 && bandsDisagree(bands, res, x0, x1)) {
+      var cols = [], split = false;
+      bands.forEach(function (band) {
+        // a table band is read as a region of its own would be, with the
+        // usual line minimum: a short size table stays row by row
+        // (knit-bernat-topdown-pullover "To fit chest | Finished chest")
+        if (isTableBand(band)) {
+          var tsub = columnize(band, x0, x1, { left: budget.left });
+          cols = cols.concat(tsub.columns);
+          if (tsub.split) split = true;
+          return;
+        }
+        var span = bandSpan(band, x0, x1);
+        var sub = columnize(band, span.lo, span.hi, { left: budget.left }, BAND_MIN_LINES);
+        cols = cols.concat(sub.columns);
+        if (sub.split) split = true;
+      });
+      return { columns: cols, split: split };
+    }
+    budget.left = trial.left;
+    return res;
+  }
+
+  function columnizeAt(rows, x0, x1, budget, minLines) {
+    if (budget.left <= 0 || rows.length < minLines) {
+      return { columns: [rows], split: false };
+    }
+    var gaps = preferRecordGaps(rows, findGaps(rows, x0, x1, minLines));
     // Only a real two-column page, please: both sides need actual content.
     var share = Math.max(MIN_COLUMN_LINES, Math.ceil(rows.length * MIN_COLUMN_SHARE));
+    var band = minLines < MIN_LINES_FOR_COLUMNS;
 
     for (var g = 0; g < gaps.length; g++) {
       var mid = gaps[g].x;
@@ -1308,13 +1917,20 @@
         if (parts.left.length) left.push({ y: row.y, order: row.order, items: parts.left });
         if (parts.right.length) right.push({ y: row.y, order: row.order, items: parts.right });
       });
-      if (left.length < share || right.length < share) continue;
+      var need = band && !noisy ? BAND_SIDE_LINES : share;
+      if (left.length < need || right.length < need) continue;
       var wLeft = extentOf(left), wRight = extentOf(right);
       if (wLeft < MIN_COLUMN_WIDTH || wRight < MIN_COLUMN_WIDTH) continue;
       if (noisy && (x1 - x0) > 0 &&
           (wLeft < (x1 - x0) * NOISY_COLUMN_SHARE || wRight < (x1 - x0) * NOISY_COLUMN_SHARE)) {
         continue;                  // a table's cell wall, not a gutter
       }
+      // In a band (few rows), two sides paired line for line in short cells
+      // are a two-column table ("Single Crochet | Double Crochet", bee p2's
+      // US / UK terms; the Yarnspirations abbreviation box "Alt = Alternate |
+      // P = Purl", which the glossary readers take two to a line), read row
+      // by row as before, not as a pair of columns.
+      if (minLines < MIN_LINES_FOR_COLUMNS && isPairedTable(rows, mid)) continue;
 
       budget.left -= 1;
       var bands = fullWidthBands(rows, mid, x1 - x0);
@@ -1334,17 +1950,17 @@
               return c;
             };
           };
-          if (bl.length) cols = cols.concat(columnize(bl, x0, mid, budget).columns.map(tag('L')));
-          if (br.length) cols = cols.concat(columnize(br, mid, x1, budget).columns.map(tag('R')));
+          if (bl.length) cols = cols.concat(columnize(bl, x0, mid, budget, minLines).columns.map(tag('L')));
+          if (br.length) cols = cols.concat(columnize(br, mid, x1, budget, minLines).columns.map(tag('R')));
         });
-        return { columns: cols, split: true };
+        return { columns: cols, split: true, mid: mid };
       }
       var out = [];
-      var sub = columnize(left, x0, mid, budget);
+      var sub = columnize(left, x0, mid, budget, minLines);
       out = out.concat(sub.columns);
-      sub = columnize(right, mid, x1, budget);
+      sub = columnize(right, mid, x1, budget, minLines);
       out = out.concat(sub.columns);
-      return { columns: out, split: true };
+      return { columns: out, split: true, mid: mid };
     }
     return { columns: [rows], split: false };
   }
@@ -1425,6 +2041,112 @@
     });
   }
 
+  /* A two-page spread is two pages. A landscape sheet with nothing crossing
+   * its centre line is read left page, then right page, however few lines
+   * it holds: knit-sandnes-0216 prints one model's info box on each page of
+   * a spread ("Booklet / 5½ / 0216EN / 15 | 10 / Model 1"), and with fewer
+   * rows than a page of columns needs, the two boxes came out zipped line
+   * by line ("Booklet Booklet / 5 3 / 0216EN 0216EN"). */
+  var SPREAD_ASPECT = 1.35;      // two portrait pages side by side (letter landscape is 1.29)
+  var SPREAD_CLEAR = 2;           // points either side of the centre line
+
+  function spreadHalves(rows, pageWidth, pageHeight) {
+    if (rows.sideways || !(pageWidth > pageHeight * SPREAD_ASPECT) || isSymbolGrid(rows)) return null;
+    var mid = pageWidth / 2, left = [], right = [];
+    for (var r = 0; r < rows.length; r++) {
+      var l = [], rt = [];
+      for (var i = 0; i < rows[r].items.length; i++) {
+        var it = rows[r].items[i];
+        if (!it.str.replace(/\s/g, '')) {
+          ((it.x + it.end) / 2 < mid ? l : rt).push(it);
+          continue;
+        }
+        if (it.x < mid + SPREAD_CLEAR && it.end > mid - SPREAD_CLEAR) return null;
+        (it.end <= mid ? l : rt).push(it);
+      }
+      if (l.length) left.push({ y: rows[r].y, order: rows[r].order, items: l });
+      if (rt.length) right.push({ y: rows[r].y, order: rows[r].order, items: rt });
+    }
+    var ink = function (side) {
+      return side.some(function (row) { return row.items.some(function (it) { return it.str.replace(/\s/g, ''); }); });
+    };
+    if (!ink(left) || !ink(right)) return null;
+    var cols = columnize(left, 0, mid, { left: MAX_COLUMNS - 1 }).columns
+      .concat(columnize(right, mid, pageWidth, { left: MAX_COLUMNS - 1 }).columns);
+    return { columns: cols, split: true };
+  }
+
+  /* An advert at the head of a column. Reading order puts whatever starts
+   * a column right after the end of the column before it, so a magazine
+   * ad box set above the third column landed inside a row that runs on
+   * from the second column to the third (knit-interweave-8-socks p5:
+   * "Row 1 (RS) Knit to wrapped st, ... insert right needle into wrap" /
+   * "K NITS / Interweave Knits IS A MUST HAVE ..." / "then kwise into
+   * wrapped st ..."). Two signals together, neither a word list:
+   *  - the block is set in its own type: no glyph on any of its lines is
+   *    near the page's body size (the ad's 4.5 pt small print and 33 pt
+   *    logo), and
+   *  - it interrupts a sentence: the line before it, the last of the
+   *    previous column, does not end one, and the line after it, its own
+   *    column's next line, starts in lower case.
+   * The block is not dropped (it is real, visible text) but moved after the
+   * page's text, out of the row it split. */
+  var AD_MAX_LINES = 6;
+  var AD_MIN_WORDS = 3;         // words in its small print
+  var AD_BODY_LO = 0.75;        // a line whose glyphs are all under this share
+  var AD_BODY_HI = 1.4;         // ...or over this share of the body size is off-body
+
+  function offBody(row, bodyH) {
+    var any = false;
+    for (var i = 0; i < row.items.length; i++) {
+      var it = row.items[i];
+      if (!it.str.replace(/\s/g, '')) continue;
+      any = true;
+      if (it.h >= bodyH * AD_BODY_LO && it.h <= bodyH * AD_BODY_HI) return false;
+    }
+    return any;
+  }
+
+  function moveInterruptions(lines, bodyH) {
+    if (!(bodyH > 0) || lines.length < 3) return lines;
+    for (var i = 1; i < lines.length; i++) {
+      if (lines[i].col === lines[i - 1].col || !lines[i].row) continue;      // a column's first line
+      var j = i;
+      while (j < lines.length && j - i < AD_MAX_LINES && lines[j].col === lines[i].col && offBody(lines[j].row, bodyH)) j++;
+      if (j === i || j >= lines.length || lines[j].col !== lines[i].col) continue;
+      // an ad carries small print; a block of big type alone is a heading
+      // in words (a chart's grid of symbols or figure labels is no ad)
+      var fine = 0;
+      for (var q = i; q < j; q++) {
+        lines[q].row.items.forEach(function (it) {
+          if (it.h < bodyH * AD_BODY_LO) fine += (it.str.match(/[A-Za-z]{3,}/g) || []).length;
+        });
+      }
+      if (fine < AD_MIN_WORDS) continue;
+      if (/[.:;!?)\]"]\s*$/.test(lines[i - 1].text) || !/^[a-z]/.test(lines[j].text)) continue;
+      var moved = lines.splice(i, j - i);
+      lines = lines.concat(moved);
+      break;
+    }
+    return lines;
+  }
+
+  /* A bare number in the margin is a page number, unless it heads a run of
+   * row numbers down the side of a chart: the next number on, a line or so
+   * away in its column, counts on from it (the Albus Argyle leg chart's top
+   * label "45" sits in the top 8% of knit-interweave-8-socks p30, over 43,
+   * 41, 39 ...). */
+  function inNumberRun(rows, ri, text) {
+    var n = parseInt(text, 10), h = rowInkHeight(rows[ri]) || 10;
+    for (var d = -1; d <= 1; d += 2) {
+      var o = rows[ri + d];
+      if (!o || Math.abs(o.order - rows[ri].order) > h * 4) continue;
+      var t = rowText(o);
+      if (BARE_NUMBER_RE.test(t) && t !== text && Math.abs(parseInt(t, 10) - n) <= 2) return true;
+    }
+    return false;
+  }
+
   /* A side heading: capitals only, three letters at least ("NOTIONS", "FABRIC
    * REQUIREMENTS"). */
   var SIDE_HEADING_RE = /^(?=(?:[^A-Za-z]*[A-Z]){3})[A-Z0-9 &'’\/:,.()-]+$/;
@@ -1448,7 +2170,7 @@
     var budget = { left: MAX_COLUMNS - 1 };
     var sideways = !!rows.sideways;
     var span = sideways ? rows.span : { lo: 0, hi: pageWidth > 0 ? pageWidth : 612 };
-    var res = columnize(rows, span.lo, span.hi, budget);
+    var res = spreadHalves(rows, pageWidth, pageHeight) || columnize(rows, span.lo, span.hi, budget);
     // On a page set sideways the margins are the LEFT and RIGHT edges of the
     // sheet, which is what the row key measures there.
     // On a page set sideways the margins are the two edges the row key runs
@@ -1467,13 +2189,14 @@
     // vouch for it as a heading.
     var perCol = res.columns.map(function (col) {
       var kept = [];
-      col.slice().sort(function (a, b) { return a.order - b.order; }).forEach(function (row) {
+      var sorted = col.slice().sort(function (a, b) { return a.order - b.order; });
+      sorted.forEach(function (row, ri) {
         var text = rowText(row, deglyph);
         // judged without control codes: "I\u001f I" is a row of diagram letters
         if (!text || isFurniture(text.replace(INVISIBLE_RE, ''))) return;
         var at0 = row.y - keyLo;
         var inMargin = at0 >= h * (1 - MARGIN_BAND) || at0 <= h * MARGIN_BAND;
-        if (inMargin && BARE_NUMBER_RE.test(text)) return;     // a page number
+        if (inMargin && BARE_NUMBER_RE.test(text) && !inNumberRun(sorted, ri, text)) return;     // a page number
         kept.push({ row: row, text: text });
       });
       return kept;
@@ -1523,9 +2246,12 @@
         // Baselines live in PDF space: high Y is the top of the page.
         var at = k.row.y - keyLo;
         var margin = at >= h * (1 - MARGIN_BAND) || at <= h * MARGIN_BAND;
-        lines.push({ text: k.text, margin: margin, edge: h > 0 ? Math.min(at, h - at) / h : 1, pos: h > 0 ? at / h : 0.5 });
+        lines.push({ text: k.text, margin: margin, edge: h > 0 ? Math.min(at, h - at) / h : 1, pos: h > 0 ? at / h : 0.5,
+          col: ci, row: k.row });
       });
     });
+    lines = moveInterruptions(lines, bodyH);
+    lines.forEach(function (l) { delete l.col; delete l.row; });
     pageBodyH = 0;
     return { lines: lines, split: res.split };
   }
@@ -1966,6 +2692,7 @@
     var pages = [];
     var columnsDetected = 0;
     var rawSample = '';
+    var checked = {};
     var chain = Promise.resolve();
 
     var makeStep = function (p) {
@@ -1975,10 +2702,15 @@
           try { onProgress(p, total); } catch (e) { /* UI errors are not our problem */ }
         }
         return doc.getPage(p).then(function (page) {
-          return page.getTextContent().then(function (tc) {
+          return visibleItems(page, null).then(function (vis) {
             var size = pageSize(page);
-            var res = pageLines(tc.items || [], size.width, size.height, page.rotate);
+            var res = pageLines(vis.items, size.width, size.height, page.rotate);
             if (res.split) columnsDetected++;
+            checked[p] = vis.checked;
+            var keys = [];
+            vis.items.forEach(function (it) {
+              if (it && typeof it.str === 'string' && it.str.length >= CROSS_MIN_CHARS) keys.push(it.str);
+            });
             // The garble verdict is taken here, on the RAW line text: the
             // control codes that give a broken subset font away are about
             // to be stripped out by normUnicode.
@@ -1986,6 +2718,7 @@
               if (rawSample.length < GARBLE_SAMPLE) rawSample += l.text + '\n';
             });
             pages.push({
+              keys: keys,
               number: p,
               lines: res.lines.map(function (l) {
                 return { text: normUnicode(l.text), margin: l.margin, edge: l.edge, pos: l.pos };
@@ -1999,7 +2732,31 @@
 
     for (var p = 1; p <= total; p++) chain = chain.then(makeStep(p));
 
-    return chain.then(function () {
+    // Text placed on one page and shown on another: re-read both pages
+    // with their hidden runs removed (see section 3a).
+    var recheck = function () {
+      var again = Promise.resolve();
+      crossPageSuspects(pages).forEach(function (pi) {
+        var pg = pages[pi];
+        if (!pg || checked[pg.number]) return;
+        again = again.then(function () {
+          if (isCancelled(signal)) throw abortError();
+          return doc.getPage(pg.number).then(function (page) {
+            return visibleItems(page, true).then(function (vis) {
+              var size = pageSize(page);
+              var res = pageLines(vis.items, size.width, size.height, page.rotate);
+              pg.lines = res.lines.map(function (l) {
+                return { text: normUnicode(l.text), margin: l.margin, edge: l.edge, pos: l.pos };
+              });
+              if (typeof page.cleanup === 'function') page.cleanup();
+            });
+          });
+        });
+      });
+      return again;
+    };
+
+    return chain.then(recheck).then(function () {
       if (isCancelled(signal)) throw abortError();
       var cleaned = dropRunningFurniture(pages);
       var numbers = pages.map(function (pg) { return pg.number; });
@@ -2108,6 +2865,58 @@
    * HANDOFF item 14.
    * ================================================================== */
 
+  /**
+   * imageAlpha(id, u, v) for textVisibility: the alpha (0-255) of the
+   * page's decoded image `id` at unit-square point (u, v), or null when it
+   * cannot be read (not decoded yet, no canvas). An RGB image is opaque.
+   */
+  function imageAlphaOf(page) {
+    var probe = null;
+    return function (id, u, v) {
+      var o = null;
+      try { o = (id.indexOf('g_') === 0 ? page.commonObjs : page.objs).get(id); } catch (e) { return null; }
+      if (!o || !(o.width > 0) || !(o.height > 0)) return null;
+      if (u < 0 || u > 1 || v < 0 || v > 1) return 0;
+      var px = Math.min(o.width - 1, Math.floor(u * o.width));
+      var py = Math.min(o.height - 1, Math.floor((1 - v) * o.height));
+      if (o.data && (o.kind === 1 || o.kind === 2)) return 255;
+      if (o.data && o.kind === 3) return o.data[(py * o.width + px) * 4 + 3];
+      if (!o.bitmap || typeof document === 'undefined') return null;
+      try {
+        if (!probe) {
+          probe = document.createElement('canvas');
+          probe.width = 1;
+          probe.height = 1;
+        }
+        var g = probe.getContext('2d');
+        g.clearRect(0, 0, 1, 1);
+        g.drawImage(o.bitmap, px, py, 1, 1, 0, 0, 1, 1);
+        return g.getImageData(0, 0, 1, 1).data[3];
+      } catch (e) {
+        return null;
+      }
+    };
+  }
+
+  /**
+   * A page's text items with the hidden runs removed when the page shows
+   * the symptoms of hidden text (or `force`). -> {items, checked}
+   */
+  function visibleItems(page, force) {
+    return page.getTextContent().then(function (tc) {
+      var items = tc.items || [];
+      var OPS = window.pdfjsLib && window.pdfjsLib.OPS;
+      if (!OPS || typeof page.getOperatorList !== 'function' || !(force || overlaySuspect(items))) {
+        return { items: items, checked: false };
+      }
+      return page.getOperatorList().then(function (ol) {
+        return { items: dropHiddenItems(items, textVisibility(ol, OPS, imageAlphaOf(page))), checked: true };
+      }, function () {
+        return { items: items, checked: true };
+      });
+    });
+  }
+
   function pageSize(page) {
     var size = { width: 612, height: 792 };
     try {
@@ -2178,9 +2987,9 @@
             return Promise.resolve('');
           }
           return doc.getPage(n).then(function (page) {
-            return page.getTextContent().then(function (tc) {
+            return visibleItems(page, null).then(function (vis) {
               var size = pageSize(page);
-              var res = pageLines(tc.items || [], size.width, size.height, page.rotate);
+              var res = pageLines(vis.items, size.width, size.height, page.rotate);
               if (typeof page.cleanup === 'function') page.cleanup();
               return res.lines
                 .map(function (l) { return l.text; })
@@ -2318,6 +3127,16 @@
     _dropOverprint: dropOverprint,
     _fullWidthBands: fullWidthBands,
     _readsAsProse: readsAsProse,
-    _rowIsTracked: rowIsTracked
+    _rowIsTracked: rowIsTracked,
+    _textVisibility: textVisibility,
+    _imageAlphaOf: imageAlphaOf,
+    _horizontalBands: horizontalBands,
+    _columnizeAt: function (rows, x0, x1, minLines) { return columnizeAt(rows, x0, x1, { left: MAX_COLUMNS - 1 }, minLines || MIN_LINES_FOR_COLUMNS); },
+    _bridgesGutter: bridgesGutter,
+    _cellCount: cellCount,
+    _isTableBand: isTableBand,
+    _dropHiddenItems: dropHiddenItems,
+    _overlaySuspect: overlaySuspect,
+    _crossPageSuspects: crossPageSuspects
   };
 })();

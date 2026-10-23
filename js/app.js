@@ -1401,12 +1401,28 @@
   /** The project screen currently painted by a craft module, if any. */
   var activeCraft = null;
 
+  /**
+   * Wave H (docs/wave-h/CONTRACT.md §1) adds three optional fields:
+   *   usesCounter: true      the project renders #screen-project, the crochet
+   *                          counter, with every crochet feature (knitting)
+   *   parser: 'Knits' | api  that craft's pattern parser, registered with
+   *                          Store.registerCraftParser (parserExtras rides along)
+   *   settingsFields(body, ctx)  the craft's section in Settings
+   * plus `label` as an alias of `name`, `faq: [{q, a}]` for Settings → Help
+   * and `menuItems(p)` / `tourId` honoured on a counter craft's ⋯ menu too.
+   */
   function registerCraft(def) {
     if (!def || typeof def !== 'object') return null;
     var id = typeof def.id === 'string' ? def.id.trim() : '';
     if (!id || id === CROCHET.id) return null;
+    if (!def.name && typeof def.label === 'string') def.name = def.label;
     if (!craftDefs[id]) craftOrder.push(id);
     craftDefs[id] = def;
+    if (def.parser && window.Store && typeof Store.registerCraftParser === 'function') {
+      try { Store.registerCraftParser(id, def.parser, def.parserExtras || null); } catch (e) { /* no parser: a plain counter */ }
+    }
+    // wave H: `faq: [{q, a}]` joins Settings → Help (same as ctx.addFaq)
+    if (Array.isArray(def.faq)) def.faq.forEach(function (it) { addFaq(it); });
     // Registering after boot (a late module, a console experiment) still shows
     // up straight away.
     if (booted) {
@@ -1448,8 +1464,34 @@
     return craftOrder.length > 0;
   }
 
+  /**
+   * Wave H: crochet, or a craft registered with `usesCounter` (knitting) —
+   * its projects are counted on #screen-project like crochet's.
+   */
+  function counterCraft(id) {
+    var key = id || CROCHET.id;
+    if (key === CROCHET.id) return true;
+    var d = craftDefs[key];
+    return !!(d && d.usesCounter);
+  }
+
+  /** The registered definition of a counter craft other than crochet, or null. */
+  function counterCraftDef(id) {
+    var d = id && id !== CROCHET.id ? craftDefs[id] : null;
+    return d && d.usesCounter ? d : null;
+  }
+
+  /** The pattern parser a project / part / probe / craft id is read with. */
+  function parserOf(x) {
+    if (typeof Store.parserFor === 'function') {
+      try { return Store.parserFor(x); } catch (e) { return null; }
+    }
+    return window.Patterns || null;
+  }
+
+  /** A project a craft MODULE paints (#screen-craft) — not crochet, not a counter craft. */
   function isCraftProject(p) {
-    return !!(p && p.craft && p.craft !== CROCHET.id);
+    return !!(p && p.craft && p.craft !== CROCHET.id && !counterCraft(p.craft));
   }
 
   /** The registered module for a project, or null (crochet, or not loaded). */
@@ -1584,6 +1626,7 @@
       els.home.hidden = true;
       els.project.hidden = false;
       renderProject(p);
+      syncCraftNotice(p);
     } else {
       destroyCraftProject();
       if (els.craft) els.craft.hidden = true;
@@ -1594,6 +1637,23 @@
       renderHome();
     }
     syncWakeLock();
+  }
+
+  /**
+   * Wave H: a counter craft (knitting) whose parser is not loaded still
+   * counts — rows, stitches, parts, everything typed by hand — but reads no
+   * pattern text. One line under the part tabs says so; crochet never sees it.
+   */
+  function syncCraftNotice(p) {
+    var n = document.getElementById('craft-notice');
+    if (!n) return;
+    var def = counterCraftDef(p && p.craft);
+    var missing = !!(def && def.parser && !parserOf(p));
+    n.hidden = !missing;
+    n.textContent = missing
+      ? craftInfo(p.craft).emoji + ' The ' + craftInfo(p.craft).name.toLowerCase() +
+        ' pattern reader did not load, so this is a plain counter for now — your counts are safe.'
+      : '';
   }
 
   /* ================================================================== *
@@ -1758,9 +1818,22 @@
     return strip;
   }
 
+  /**
+   * wave H (knit-qa): a knitting project's groups are the patterns of a book
+   * (the sock ebook's eight socks), not sizes: "Remove this pattern",
+   * "Speed Bump Socks" (not "Speed Bump Socks size").
+   */
+  function groupNoun(p) {
+    return p && p.craft === 'knitting' ? 'pattern' : 'size';
+  }
+
+  function groupLabel(p, name) {
+    return groupNoun(p) === 'pattern' ? name : name + ' size';
+  }
+
   function sizeTabLabel(p, name) {
     var prog = Store.groupProgress(p.id, name);
-    var s = name + ' size';
+    var s = groupLabel(p, name);
     if (prog && prog.done) s += ', done';
     else if (prog && prog.started) s += ', ' + prog.partsDone + ' of ' + plural(prog.parts, 'part') + ' done';
     return s;
@@ -1769,7 +1842,7 @@
   function pickSizeTab(p, name, focus) {
     Store.setActiveGroup(p.id, name);
     render();
-    announce(name + ' size');
+    announce(groupLabel(p, name));
     if (focus) {
       var t = els.sizeTabs ? els.sizeTabs.querySelector('[data-focus-key="size-tab:' + name.replace(/"/g, '') + '"]') : null;
       if (t) { try { t.focus({ preventScroll: true }); } catch (e) { t.focus(); } }
@@ -1796,6 +1869,7 @@
     }
     var strip = ensureSizeTabs();
     strip.hidden = false;
+    strip.setAttribute('aria-label', groupNoun(p) === 'pattern' ? 'Patterns' : 'Sizes');
     clear(strip);
     var active = p.activeGroup || groups[0].name;
     var tabs = [];
@@ -1829,7 +1903,7 @@
       tabs.push(t);
       strip.appendChild(t);
     });
-    var more = button('size-tab-more', '⋯', active + ' size: options');
+    var more = button('size-tab-more', '⋯', groupLabel(p, active) + ': options');
     more.setAttribute('aria-haspopup', 'dialog');
     more.setAttribute('data-focus-key', 'size-tab-more');
     on(more, 'click', function () { openSizeMenu(p.id, active); });
@@ -1856,7 +1930,7 @@
     var prog = Store.groupProgress(p.id, name);
     openSheet({
       subject: projectId,
-      title: name + ' size',
+      title: groupLabel(p, name),
       build: function (body, api) {
         if (prog) {
           var line = prog.done ? 'Every part done ✓'
@@ -1867,7 +1941,7 @@
         var list = el('div', 'list');
         var mk = button('menu-item');
         mk.appendChild(el('span', 'menu-icon', '🧵'));
-        mk.appendChild(el('span', null, 'Make this size a template'));
+        mk.appendChild(el('span', null, 'Make this ' + groupNoun(p) + ' a template'));
         on(mk, 'click', function () {
           api.close();
           var draft = Store.templateFromProject(p.id, { group: name });
@@ -1876,16 +1950,16 @@
         list.appendChild(mk);
         var rm = button('menu-item danger-item');
         rm.appendChild(el('span', 'menu-icon', '✂️'));
-        rm.appendChild(el('span', null, 'Remove this size'));
+        rm.appendChild(el('span', null, 'Remove this ' + groupNoun(p)));
         var others = projectGroups(p).length > 1 || p.parts.some(function (q) { return !q.group; });
         rm.disabled = !others;
-        if (!others) rm.setAttribute('title', 'The last size cannot be removed');
+        if (!others) rm.setAttribute('title', 'The last ' + groupNoun(p) + ' cannot be removed');
         on(rm, 'click', function () {
           if (!others) return;
           api.close();
           var n = p.parts.filter(function (q) { return q.group === name; }).length;
           confirmSheet({
-            title: 'Remove the ' + name + ' size?',
+            title: 'Remove ' + (groupNoun(p) === 'pattern' ? name : 'the ' + name + ' size') + '?',
             message: 'Its ' + plural(n, 'part') + ' and their counts go from this project. Undo puts them back.',
             confirmText: 'Remove',
             danger: true
@@ -1894,11 +1968,11 @@
             var res = Store.removeGroup(p.id, name);
             if (!res) return;
             render();
-            announce(name + ' size removed');
-            toast(name + ' size removed', {
+            announce(groupLabel(p, name) + ' removed');
+            toast(groupLabel(p, name) + ' removed', {
               ms: 6000,
               actionText: 'Undo',
-              onAction: function () { Store.undo(); render(); announce(name + ' size back'); }
+              onAction: function () { Store.undo(); render(); announce(groupLabel(p, name) + ' back'); }
             });
           });
         });
@@ -1915,6 +1989,8 @@
     var openSize = renderSizeTabs(p);
     p.parts.forEach(function (prt) {
       if (openSize && prt.group && prt.group !== openSize) return;
+      // wave H: two parts knitted two at a time share one tab
+      if (knitPairTab(p, prt, openSize)) return;
       var isActive = prt.id === p.activePartId;
       var tab = button('tab' + (isActive ? ' active' : ''));
       // Its label changes when it becomes the current part; the key does not.
@@ -2040,10 +2116,11 @@
     var s = String(text || '');
     var marks = [];
     var names = proj ? Store.sizeNames(proj) : [];
-    if (names.length >= 2 && window.Patterns && typeof window.Patterns.sizeMarks === 'function') {
+    var sp = parserOf(proj || prt);   // wave H: the project's own craft's parser
+    if (names.length >= 2 && sp && typeof sp.sizeMarks === 'function') {
       try {
         var n = proj && proj.sizes && proj.sizes.length >= 2 ? proj.sizes.length : 0;
-        marks = window.Patterns.sizeMarks(s, prt ? prt.sizeIndex || 0 : 0, n) || [];
+        marks = sp.sizeMarks(s, prt ? prt.sizeIndex || 0 : 0, n) || [];
       } catch (e) {
         marks = [];
       }
@@ -2067,8 +2144,9 @@
   function yarnHex(proj, name) {
     if (!name) return null;
     if (proj && Store.hasYarnColor(proj, name)) return Store.yarnColorFor(proj, name);
-    if (window.Patterns && typeof window.Patterns.colorHex === 'function') {
-      try { return window.Patterns.colorHex(name) || null; } catch (e) { return null; }
+    var cp = parserOf(proj);   // wave H
+    if (cp && typeof cp.colorHex === 'function') {
+      try { return cp.colorHex(name) || null; } catch (e) { return null; }
     }
     return null;
   }
@@ -2547,6 +2625,9 @@
         syncDiagramInsets();
       }
     }
+
+    // wave H: RS/WS, cable ring, short rows, markers, chart, length, pair
+    updateKnitWidgets(p, prt);
   }
 
   function updateBottomBar(p, prt) {
@@ -2683,7 +2764,8 @@
       title: left.length ? 'Finish ' + p.name + '?' : 'All parts done! 🎉',
       build: function (body) {
         if (!left.length) {
-          body.appendChild(el('p', null, p.name + ' is off the hook. Time for assembly.'));
+          // wave H (knit-qa): knitting comes off the needles, not the hook
+          body.appendChild(el('p', null, p.name + (p.craft === 'knitting' ? ' is off the needles.' : ' is off the hook.') + ' Time for assembly.'));
         } else {
           body.appendChild(
             el('p', null, 'These parts are not finished yet:')
@@ -2735,10 +2817,12 @@
     });
     openSheet({
       subject: p.id,
-      title: name + ' size done! 🎉',
+      title: groupLabel(p, name) + ' done! 🎉',
       build: function (body, api) {
-        body.appendChild(el('p', null, 'Every ' + name + ' part is off the hook.' +
-          (next ? ' The other sizes are still in this project.' : '')));
+        // wave H (knit-qa): a knitting book's group is a pattern, off the needles
+        var knitG = groupNoun(p) === 'pattern';
+        body.appendChild(el('p', null, 'Every ' + name + ' part is off the ' + (knitG ? 'needles.' : 'hook.') +
+          (next ? (knitG ? ' The other patterns are still in this project.' : ' The other sizes are still in this project.') : '')));
         var fin = button('btn primary block big', 'Finish the project');
         on(fin, 'click', function () {
           var res = Store.finishProject(p.id, { force: true });
@@ -2776,6 +2860,11 @@
     var p = currentProject();
     if (!p) return;
     var prt = Store.activePart(p);
+    // wave H: a short row is not a row
+    if (knitBeforeResult(res, p, prt)) {
+      if (els.btnUndo) els.btnUndo.disabled = !Store.canUndo();
+      return;
+    }
 
     switch (res.event) {
       // 13 #6: the part is already finished, so nothing moved. Say so once
@@ -2878,8 +2967,1006 @@
         updateCounters(p, prt);
         pushDiagram('none');
     }
+    // wave H: the side of the next row, the other piece of a pair
+    knitAfterResult(res, p);
     // The fast paths above skip updateBottomBar; a tap is undoable at once.
     if (els.btnUndo) els.btnUndo.disabled = !Store.canUndo();
+  }
+
+  /* ================================================================== *
+   * 14b. Knitting on the counter (wave H, knit-counter; CONTRACT §3)
+   *
+   * Knitting renders #screen-project like crochet. Everything here is
+   * knitting-only and built lazily (index.html is not this section's): the
+   * RS/WS chip and cable ring in the row label, the short-row strip under
+   * the row counter, the chart / length / partner chips under the pattern
+   * line, the marker strip under the stitch readout, "+ marker" in the
+   * stitch actions, the two-at-a-time tab, the part editor's Knitting card
+   * (gauge, two at a time, markers) and the glossary sheet. A crochet
+   * project never gets any of it: every entry point returns at isKnit().
+   * ================================================================== */
+
+  var KNIT_ID = 'knitting';
+  var knitEls = { short: null, extra: null, markers: null, addMarker: null };
+  var KNIT_HOLD_MS = 550;
+
+  function isKnit(p) {
+    return !!(p && p.craft === KNIT_ID && typeof Store.sideInfo === 'function');
+  }
+
+  function knitSideWord(s) {
+    return s === 'rs' ? 'right side' : s === 'ws' ? 'wrong side' : '';
+  }
+
+  function knitNum(v) {
+    if (v === null || v === undefined || v === '') return '';
+    var n = Math.round(Number(v) * 100) / 100;
+    return isFinite(n) ? String(n) : '';
+  }
+
+  function knitDecimalInput(value, placeholder, label) {
+    var i = numInput(value == null ? '' : value, 0, 999, placeholder);
+    i.inputMode = 'decimal';
+    i.step = 'any';
+    if (label) i.setAttribute('aria-label', label);
+    return i;
+  }
+
+  /** Remove every knitting widget (a crochet project, or no part). */
+  function hideKnitWidgets() {
+    ['short', 'extra', 'markers', 'addMarker'].forEach(function (k) {
+      if (knitEls[k]) knitEls[k].hidden = true;
+    });
+  }
+
+  /** One widget, made once; the caller puts it in place while it has no parent. */
+  function ensureKnitEl(key, cls) {
+    var n = knitEls[key];
+    if (n) return n;
+    n = el(key === 'addMarker' ? 'button' : 'div', cls);
+    if (key === 'addMarker') n.type = 'button';
+    n.hidden = true;
+    knitEls[key] = n;
+    return n;
+  }
+
+  /** Called at the end of updateCounters: paint the knitting widgets. */
+  function updateKnitWidgets(p, prt) {
+    if (!isKnit(p) || !prt) { hideKnitWidgets(); return; }
+    var finished = partFinished(prt);
+    var sr = null, si = null, ci = null;
+    try { sr = Store.shortRowInfo(prt); } catch (e) { sr = null; }
+    try { si = Store.sideInfo(prt, p); } catch (e2) { si = null; }
+    try { ci = Store.cableInfo(prt); } catch (e3) { ci = null; }
+    var mate = Store.linkedPart(p, prt);
+
+    /* ---- the row label: "Sleeve 1+2 · ROW · RS · cable in 3" ---- */
+    if (mate && els.rowLabel) {
+      var tag = el('span', 'row-group-tag knit-pair-tag', Store.linkedLabel(p, prt) + ' · ');
+      els.rowLabel.insertBefore(tag, els.rowLabel.firstChild);
+    }
+    if (sr && els.rowLabel && !finished) {
+      els.rowLabel.appendChild(el('span', 'knit-short-tag', ' · SHORT ROWS'));
+    }
+    if (si && !si.inRound && !finished && els.rowLabel) {
+      var chip = button('knit-side-chip ' + (si.side || 'unknown') + (si.source === 'you' ? ' mine' : ''),
+        si.side ? si.side.toUpperCase() : 'RS?');
+      chip.setAttribute('data-tour', 'knit-side');
+      var why = si.side
+        ? knitSideWord(si.side) + (si.source === 'you' ? ' (set by you)' : si.source === 'parity' ? ' (counted from the pattern)' : ' (the pattern says so)')
+        : 'side not known';
+      chip.setAttribute('aria-label', 'This ' + (sr ? 'short row' : 'row') + ' is on the ' + why + '. Tap to switch sides');
+      chip.title = why.charAt(0).toUpperCase() + why.slice(1) + ' — tap to switch';
+      on(chip, 'click', function (e) {
+        e.stopPropagation();
+        var cur = currentProject();
+        var cp = cur ? Store.activePart(cur) : null;
+        if (!cur || !cp) return;
+        var res = Store.flipSide(cur.id, cp.id);
+        fb('tap');
+        updateCounters(cur, Store.activePart(cur));
+        updateBottomBar(cur, Store.activePart(cur));
+        if (res && res.side) announce('Now on the ' + knitSideWord(res.side));
+      });
+      els.rowLabel.appendChild(document.createTextNode(' '));
+      els.rowLabel.appendChild(chip);
+    }
+    if (ci && ci.inRows !== null && ci.inRows !== undefined && !finished && els.rowLabel) {
+      var ring = el('span', 'knit-cable' + (ci.inRows === 0 ? ' now' : ''));
+      var fill = ci.every ? Math.max(0, Math.min(1, 1 - ci.inRows / ci.every)) : 0;
+      if (ci.inRows === 0) fill = 1;
+      ring.style.setProperty('--knit-fill', String(Math.round(fill * 360)) + 'deg');
+      ring.appendChild(el('span', 'knit-cable-ring'));
+      ring.appendChild(el('span', 'knit-cable-text', ci.inRows === 0 ? 'cable row' : 'cable in ' + ci.inRows));
+      ring.setAttribute('role', 'img');
+      ring.setAttribute('aria-label', ci.inRows === 0
+        ? 'Cable crossing on this row' + (ci.name ? ': ' + ci.name : '')
+        : 'Cable crossing in ' + ci.inRows + ' ' + (ci.inRows === 1 ? 'row' : 'rows') + (ci.every ? ', every ' + ci.every : ''));
+      els.rowLabel.appendChild(document.createTextNode(' '));
+      els.rowLabel.appendChild(ring);
+    }
+    var plus = document.getElementById('row-plus');
+    if (plus) plus.setAttribute('aria-label', sr ? 'Short row done (turn)' : 'Complete row');
+
+    /* ---- short rows: "Short row 3 of 8" under the row counter ---- */
+    var short = ensureKnitEl('short', 'knit-short');
+    if (!short.parentNode) {
+      var card0 = els.rowNumber ? els.rowNumber.closest('.counter-card') : null;
+      if (card0 && card0.parentNode) card0.parentNode.insertBefore(short, card0.nextSibling);
+    }
+    if (short.parentNode) {
+      clear(short);
+      if (sr && !finished) {
+        short.hidden = false;
+        short.appendChild(el('span', 'knit-short-icon', '↩'));
+        var txt = 'Short row ' + sr.n + (sr.of ? ' of ' + sr.of : '');
+        short.appendChild(el('span', 'knit-short-text', txt));
+        short.appendChild(el('span', 'knit-short-sub', sr.numbered
+          ? 'rows ' + (sr.base + 1) + (sr.of ? '–' + (sr.base + sr.of) : '+') + ' · the row moves on after them'
+          : 'not rows · ' + partRowWord(p, prt).toLowerCase() + ' stays at ' + prt.row));
+        var end = button('linkish knit-short-end', 'Done', 'Done with short rows');
+        on(end, 'click', function () {
+          var cur = currentProject();
+          var cp = cur ? Store.activePart(cur) : null;
+          if (!cur || !cp) return;
+          var r = Store.endShortRows(cur.id, cp.id);
+          fb('row');
+          render();
+          if (r && r.event !== 'none') {
+            announce('Short rows done' + (r.shortRowsDone ? ', ' + partRowWord(cur, cp).toLowerCase() + ' ' + Store.activePart(cur).row + ' done' : ''));
+          }
+        });
+        short.appendChild(end);
+        short.setAttribute('role', 'status');
+        // the line the short row is worked from, in the pattern line
+        if (sr.line && sr.line.text && els.patternLine) {
+          els.patternLine.hidden = false;
+          els.patternTag.textContent = 'Short row ' + sr.n;
+          fillSizeMarked(els.patternText, sr.line.text, prt, p);
+          if (els.patternNotes) els.patternNotes.hidden = true;
+        }
+      } else {
+        short.hidden = true;
+      }
+    }
+
+    /* ---- under the pattern line: chart · length · the other piece ---- */
+    var extra = ensureKnitEl('extra', 'knit-extra');
+    if (!extra.parentNode && els.patternLine && els.patternLine.parentNode) {
+      els.patternLine.parentNode.insertBefore(extra, els.patternLine.nextSibling);
+    }
+    if (extra.parentNode) {
+      clear(extra);
+      var any = false;
+      var chi = null, ui = null;
+      try { chi = finished ? null : Store.chartInfo(prt); } catch (e4) { chi = null; }
+      try { ui = finished || sr ? null : Store.untilInfo(prt); } catch (e5) { ui = null; }
+      if (chi) {
+        var cb = button('knit-chip knit-chart-chip', '▦ ' + chi.name + (chi.row ? ' · row ' + chi.row + (chi.of ? ' of ' + chi.of : '') : ''));
+        cb.setAttribute('aria-label', chi.name + ', chart row ' + (chi.row || 'unknown') + (chi.of ? ' of ' + chi.of : '') + '. Open the chart');
+        on(cb, 'click', function () { openKnitChartSheet(p.id, prt.id); });
+        extra.appendChild(cb);
+        any = true;
+      }
+      if (ui) {
+        var ub = button('knit-chip knit-until-chip', untilChipText(ui, p));
+        ub.setAttribute('aria-label', untilSentence(ui, p, prt) + ' Open the gauge');
+        on(ub, 'click', function () { openPartEditor(p.id, prt.id); });
+        extra.appendChild(ub);
+        any = true;
+      }
+      if (mate) {
+        var mb = button('knit-chip knit-mate-chip', '⇄ ' + mate.name + ' · ' + partShortRowWord(p, mate) + ' ' + (mate.row + 1));
+        mb.setAttribute('aria-label', 'Worked two at a time with ' + mate.name + ', on ' +
+          partRowWord(p, mate).toLowerCase() + ' ' + (mate.row + 1) + '. Switch to it');
+        on(mb, 'click', function () {
+          Store.setActivePart(p.id, mate.id);
+          fb('tap');
+          render();
+          announce(mate.name);
+        });
+        extra.appendChild(mb);
+        any = true;
+      }
+      extra.hidden = !any;
+    }
+
+    /* ---- the marker strip under the stitch readout ---- */
+    var strip = ensureKnitEl('markers', 'knit-markers');
+    if (!strip.parentNode && els.stitchReadout && els.stitchReadout.parentNode) {
+      els.stitchReadout.parentNode.insertBefore(strip, els.stitchReadout.nextSibling);
+    }
+    if (strip.parentNode) paintMarkers(strip, p, prt, finished);
+
+    /* ---- "+ marker" in the stitch actions ---- */
+    var add = ensureKnitEl('addMarker', 'btn ghost knit-add-marker');
+    if (!add.parentNode && els.stitchActions) {
+      add.textContent = '+ marker';
+      var resetBtn = document.getElementById('stitch-reset');
+      if (resetBtn && resetBtn.parentNode === els.stitchActions) els.stitchActions.insertBefore(add, resetBtn);
+      else els.stitchActions.appendChild(add);
+      on(add, 'click', function () {
+        var cur = currentProject();
+        var cp = cur ? Store.activePart(cur) : null;
+        if (!cur || !cp) return;
+        var m = Store.addMarker(cur.id, cp.id, {});
+        if (!m) { toast('That marker could not be placed'); return; }
+        fb('tap');
+        updateCounters(cur, Store.activePart(cur));
+        updateBottomBar(cur, Store.activePart(cur));
+        announce('Marker placed after stitch ' + m.at);
+        toast('Marker placed after stitch ' + m.at, { actionText: 'Undo', onAction: function () { Store.undo(); render(); } });
+      });
+    }
+    if (add) {
+      add.hidden = finished;
+      add.setAttribute('aria-label', 'Place a marker after stitch ' + prt.stitch);
+    }
+  }
+
+  function untilChipText(ui, p) {
+    var len = ui.kind === 'length' ? knitNum(ui.value) + ' ' + (ui.unit || '') : null;
+    if (ui.kind === 'rows') return '↕ ' + ui.rows + ' rows';
+    if (!ui.rows) return '📏 ' + len + ' · add your gauge';
+    var s = '📏 ' + len + ' ≈ ' + ui.rows + ' rows';
+    if (ui.gaugeSource === 'swatch' && ui.patternRows && ui.patternRows !== ui.rows) s += ', not ' + ui.patternRows;
+    if (ui.targetRow) s += ' · ≈ ' + rowWord(p).toLowerCase() + ' ' + ui.targetRow;
+    return s;
+  }
+
+  function untilSentence(ui, p, prt) {
+    if (ui.kind === 'rows') return 'Work ' + ui.rows + ' rows.';
+    var len = knitNum(ui.value) + ' ' + (ui.unit || '');
+    if (!ui.rows) return 'Work until it measures ' + len + '. Add the gauge to turn this into rows.';
+    var s = len + ' is about ' + ui.rows + ' rows at ' +
+      (ui.gaugeSource === 'swatch' ? 'your measured gauge' : 'the pattern’s gauge');
+    if (ui.gaugeSource === 'swatch' && ui.patternRows && ui.patternRows !== ui.rows) s += ' (' + ui.patternRows + ' at the pattern’s)';
+    s += '.';
+    if (ui.targetRow) {
+      s += ' Counted from ' + (ui.fromRow ? partRowWord(p, prt).toLowerCase() + ' ' + ui.fromRow : 'the start') +
+        ', that is about ' + partRowWord(p, prt).toLowerCase() + ' ' + ui.targetRow +
+        (ui.endOn ? ', a ' + knitSideWord(ui.endOn) + ' row' : '') + '.';
+    }
+    return s + ' Measure to be sure.';
+  }
+
+  /* ---- markers ---- */
+
+  function paintMarkers(strip, p, prt, finished) {
+    var mi = null;
+    try { mi = Store.markerInfo(prt); } catch (e) { mi = null; }
+    clear(strip);
+    strip.setAttribute('data-tour', 'knit-markers');
+    if (!mi || !mi.markers.length || finished) { strip.hidden = true; return; }
+    strip.hidden = false;
+    var row = el('div', 'knit-marker-row');
+    row.setAttribute('role', 'group');
+    row.setAttribute('aria-label', 'Stitch markers' + (mi.source === 'pattern' ? ' from the pattern' : ''));
+    var nextId = mi.next && mi.next.marker ? mi.next.marker.id : null;
+    mi.markers.forEach(function (m) {
+      var bor = m.name === 'BOR';
+      var label = bor ? '▲ BOR' : '● ' + (m.name || m.at);
+      var b = button('knit-marker' + (m.id === nextId ? ' next' : '') + (mi.atMarker && mi.atMarker.id === m.id ? ' here' : ''), label);
+      b.setAttribute('aria-label', (bor ? 'Beginning of round marker' : 'Marker ' + (m.name || '') + ' after stitch ' + m.at) +
+        '. Tap to rename, hold (or press Delete) to remove');
+      bindMarkerPress(b, p, prt, m);
+      row.appendChild(b);
+    });
+    strip.appendChild(row);
+    var say = '';
+    if (mi.shifted) {
+      say = 'Markers set on a ' + mi.basis + '-st row · this row makes ' + mi.total;
+    } else if (mi.atMarker) {
+      say = 'Slip marker' + (mi.atMarker.name ? ' ' + mi.atMarker.name : '') + (mi.next ? ' · ' + mi.next.in + ' → ' + (mi.next.end ? 'end' : 'next') : '');
+    } else if (mi.next) {
+      say = mi.next.in + ' → ' + (mi.next.end ? 'end' : (mi.next.marker.name && mi.next.marker.name !== 'BOR' ? mi.next.marker.name : 'marker'));
+    }
+    // one line under the chips: "10 → m2 · 3 | 12 | 30 | 12 | 3"
+    var info = el('div', 'knit-marker-info');
+    if (say) info.appendChild(el('span', 'knit-marker-next', say));
+    strip.appendChild(info);
+    if (mi.segments && mi.segments.length > 1) {
+      if (say) info.appendChild(el('span', 'knit-seg-dot', ' · '));
+      var segs = el('span', 'knit-segments');
+      segs.setAttribute('aria-label', 'Stitches between markers: ' + mi.segments.map(function (n) { return n === null ? 'unknown' : n; }).join(', '));
+      mi.segments.forEach(function (n, i) {
+        if (i) segs.appendChild(el('span', 'knit-seg-bar', '|'));
+        segs.appendChild(el('span', 'knit-seg' + (i === mi.segIndex ? ' on' : ''), n === null ? '…' : String(n)));
+      });
+      info.appendChild(segs);
+    }
+    if (!info.firstChild) strip.removeChild(info);
+  }
+
+  function bindMarkerPress(b, p, prt, m) {
+    var timer = null, held = false;
+    function cancel() { if (timer) { clearTimeout(timer); timer = null; } }
+    on(b, 'pointerdown', function () {
+      held = false;
+      cancel();
+      timer = setTimeout(function () {
+        timer = null;
+        held = true;
+        removeMarkerNow(p.id, prt.id, m);
+      }, KNIT_HOLD_MS);
+    });
+    on(b, 'pointerup', cancel);
+    on(b, 'pointerleave', cancel);
+    on(b, 'pointercancel', cancel);
+    on(b, 'contextmenu', function (e) { e.preventDefault(); });
+    on(b, 'click', function () {
+      if (held) { held = false; return; }
+      openMarkerSheet(p.id, prt.id, m);
+    });
+    on(b, 'keydown', function (e) {
+      if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); removeMarkerNow(p.id, prt.id, m); }
+    });
+  }
+
+  function removeMarkerNow(projectId, partId, m) {
+    if (!Store.removeMarker(projectId, partId, m.id)) return;
+    fb('undo');
+    render();
+    var what = m.name === 'BOR' ? 'Beginning-of-round marker' : 'Marker' + (m.name ? ' ' + m.name : '');
+    announce(what + ' removed');
+    toast(what + ' removed', { actionText: 'Undo', onAction: function () { Store.undo(); render(); } });
+  }
+
+  function openMarkerSheet(projectId, partId, m) {
+    var input;
+    openSheet({
+      subject: projectId,
+      title: m.name === 'BOR' ? 'Beginning of round' : 'Marker after stitch ' + m.at,
+      build: function (body) {
+        input = textInput(m.name || '', 'heel, raglan, BOR…');
+        input.maxLength = 24;
+        body.appendChild(field('Name', input, 'Call it BOR for the beginning of the round. Hold a marker on the counter to remove it.'));
+      },
+      footer: [
+        {
+          text: 'Remove', cls: 'btn danger', onClick: function (api) {
+            api.close();
+            removeMarkerNow(projectId, partId, m);
+          }
+        },
+        {
+          text: 'Save', cls: 'btn primary', onClick: function (api) {
+            var res = Store.renameMarker(projectId, partId, m.id, input.value);
+            if (!res) { toast(/^\s*bor\s*$/i.test(input.value) ? 'There is already a BOR marker' : 'That name could not be saved'); return; }
+            api.close();
+            render();
+          }
+        }
+      ]
+    });
+  }
+
+  /* ---- two at a time: one tab for the pair ---- */
+
+  /**
+   * Called from renderTabs for every part. A linked pair is painted once,
+   * as one tab "Sleeve 1 | +2" (each half picks its piece), at the place of
+   * its first part; returns true when the part was handled here.
+   */
+  function knitPairTab(p, prt, openSize) {
+    if (!isKnit(p)) return false;
+    var mate = Store.linkedPart(p, prt);
+    if (!mate) return false;
+    if (openSize && mate.group && mate.group !== openSize) return false;
+    var first = p.parts.indexOf(prt) < p.parts.indexOf(mate) ? prt : mate;
+    if (first !== prt) return true;          // painted with its partner
+    var second = mate;
+    var label = Store.linkedLabel(p, prt);
+    var wrap = el('div', 'tab-pair');
+    wrap.setAttribute('role', 'group');
+    wrap.setAttribute('aria-label', label + ', worked two at a time');
+    [first, second].forEach(function (q, i) {
+      var isActive = q.id === p.activePartId;
+      var text = i === 0 ? q.name : (label.indexOf(first.name) === 0 && label.length > first.name.length
+        ? label.slice(first.name.length) : '+' + q.name);
+      var tab = button('tab tab-half' + (isActive ? ' active' : ''));
+      tab.setAttribute('data-focus-key', 'part-tab:' + q.id);
+      tab.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+      tab.setAttribute('aria-label', q.name + (isActive ? ' (current part — tap to edit)' : ''));
+      tab.title = q.name;
+      tab.appendChild(el('span', 'tab-name', text));
+      if (q.makeCount > 1) {
+        tab.appendChild(document.createTextNode(' '));
+        tab.appendChild(el('span', 'tab-badge', q.piecesDone + '/' + q.makeCount));
+      }
+      if (q.piecesDone >= q.makeCount && q.targetRows) tab.appendChild(document.createTextNode(' ✓'));
+      on(tab, 'click', function () {
+        if (isActive) openPartEditor(p.id, q.id);
+        else { Store.setActivePart(p.id, q.id); render(); }
+      });
+      wrap.appendChild(tab);
+    });
+    els.tabs.appendChild(wrap);
+    return true;
+  }
+
+  /* ---- results the counter gets back ---- */
+
+  /** Before applyResult's switch: the short-row events. True = handled. */
+  function knitBeforeResult(res, p, prt) {
+    if (!res || !isKnit(p)) return false;
+    if (res.event === 'shortRow') {
+      fb('row');
+      render();
+      var si = Store.sideInfo(Store.activePart(p), p);
+      announce('Short row ' + res.n + (res.of ? ' of ' + res.of : '') + (si && si.side ? ', ' + knitSideWord(si.side) : ''));
+      knitLinkedSay(res);
+      return true;
+    }
+    if (res.event === 'shortRowsDone') {
+      fb('row');
+      render();
+      announce('Short rows done. Back to ' + partRowWord(p, prt).toLowerCase() + ' ' + (Store.activePart(p).row + 1));
+      knitLinkedSay(res);
+      return true;
+    }
+    return false;
+  }
+
+  function knitLinkedSay(res) {
+    if (res && res.linked && res.linked.event && res.linked.event !== 'none' && res.linked.event !== 'alreadyDone') {
+      announce(res.linked.partName + ' too');
+    }
+  }
+
+  /** After applyResult's switch: the side of the next row, the other piece. */
+  function knitAfterResult(res, p) {
+    if (!res || !isKnit(p)) return;
+    var prt = Store.activePart(p);
+    if (res.event === 'row' || res.event === 'rowAuto') {
+      if (res.shortRowsDone) announce('Short rows done');
+      var si = null;
+      try { si = prt ? Store.sideInfo(prt, p) : null; } catch (e) { si = null; }
+      if (si && si.side && !si.inRound) announce('Next: ' + knitSideWord(si.side));
+    }
+    knitLinkedSay(res);
+    if (res.switchedTo) {
+      render();
+      announce(res.switchedTo.partName + ' next');
+      toast(res.switchedTo.partName + ' next', { ms: 2200 });
+    } else if (res.linked) {
+      renderTabs(p);
+    }
+  }
+
+  /** The row-minus announcement in short rows ("Back to short row 3"). */
+  function knitBackText(p, prt, res) {
+    if (!isKnit(p) || !res) return '';
+    if (res.event === 'shortRow') return 'Back to short row ' + res.n + (res.of ? ' of ' + res.of : '');
+    return '';
+  }
+
+  /* ---- the part editor's Knitting card ---- */
+
+  /**
+   * Gauge (the project's, printed vs measured, and what that does to this
+   * part's "until it measures" lines), two at a time, markers. The gauge is
+   * saved with the part's Save, in the same Undo; the pair and marker
+   * buttons act at once (each one Undo, with a toast).
+   * @returns {{node:Element, commit:Function}|null}
+   */
+  function knitEditorCard(p, prt, api, patternArea) {
+    if (!isKnit(p)) return null;
+    var g = Store.gaugeOf(p) || {};
+    var card = el('div', 'knit-card');
+    card.appendChild(el('div', 'knit-card-title', '🧣 Knitting'));
+
+    /* gauge */
+    var unit = g.unit === 'in' ? 'in' : 'cm';
+    var sts = knitDecimalInput(knitNum(g.sts), '22', 'Pattern stitches');
+    var rows = knitDecimalInput(knitNum(g.rows), '30', 'Pattern rows');
+    var over = knitDecimalInput(knitNum(g.over), unit === 'in' ? '4' : '10', 'Over');
+    var mySts = knitDecimalInput(knitNum(g.swatch && g.swatch.sts), '', 'Your stitches');
+    var myRows = knitDecimalInput(knitNum(g.swatch && g.swatch.rows), '', 'Your rows');
+    var needle = textInput(g.needle || '', '4 mm');
+    var unitSeg = segmented([{ id: 'cm', label: 'cm' }, { id: 'in', label: 'in' }], unit, function (u) {
+      if (!over.value || over.value === (u === 'in' ? '10' : '4')) over.value = u === 'in' ? '4' : '10';
+      syncGauge();
+    });
+    unitSeg.node.setAttribute('aria-label', 'Gauge measured in');
+
+    var pRow = el('div', 'row-flex knit-gauge-row');
+    pRow.appendChild(field('Sts', sts));
+    pRow.appendChild(field('Rows', rows));
+    pRow.appendChild(field('Over', over));
+    var gWrap = el('div', 'field');
+    gWrap.appendChild(el('div', 'field-label', 'Pattern gauge (whole project)'));
+    gWrap.appendChild(pRow);
+    gWrap.appendChild(unitSeg.node);
+    card.appendChild(gWrap);
+    var mRow = el('div', 'row-flex knit-gauge-row');
+    mRow.appendChild(field('Your sts', mySts));
+    mRow.appendChild(field('Your rows', myRows));
+    var mWrap = el('div', 'field');
+    mWrap.appendChild(el('div', 'field-label', 'Your swatch, over the same'));
+    mWrap.appendChild(mRow);
+    card.appendChild(mWrap);
+    card.appendChild(field('Needle', needle));
+    var result = el('div', 'knit-gauge-result');
+    result.setAttribute('aria-live', 'polite');
+    card.appendChild(result);
+
+    function draftGauge() {
+      return {
+        sts: sts.value, rows: rows.value, over: over.value, unit: unitSeg.get(), needle: needle.value,
+        swatch: { sts: mySts.value, rows: myRows.value }
+      };
+    }
+
+    function syncGauge() {
+      clear(result);
+      var d = Store.normalizeGauge(draftGauge());
+      if (!d) return;
+      var bits = [];
+      if (d.rows && d.swatch.rows) {
+        var pct = Math.round((d.swatch.rows / d.rows - 1) * 100);
+        bits.push('Rows: ' + (pct === 0 ? 'on gauge' : Math.abs(pct) + '% ' + (pct > 0 ? 'tight (shorter rows)' : 'loose (taller rows)')));
+      }
+      if (d.sts && d.swatch.sts) {
+        var spct = Math.round((d.swatch.sts / d.sts - 1) * 100);
+        bits.push('Stitches: ' + (spct === 0 ? 'on gauge' : Math.abs(spct) + '% ' + (spct > 0 ? 'tight' : 'loose')));
+      }
+      if (bits.length) result.appendChild(el('div', 'field-hint', bits.join(' · ')));
+      // this part's "until it measures" lines, through the gauge in the boxes
+      var lines = [];
+      try {
+        var pa = typeof patternArea === 'function' ? patternArea() : patternArea;
+        var probe = { id: prt.id + ':knitprobe', patternText: pa ? pa.value : prt.patternText, sizeIndex: prt.sizeIndex || 0, craft: KNIT_ID };
+        lines = Store.linesFor(probe) || [];
+      } catch (e) { lines = []; }
+      var shown = 0;
+      lines.forEach(function (l) {
+        if (shown >= 4 || !l || !l.until || l.until.kind !== 'length' || !(l.until.value > 0)) return;
+        shown++;
+        var mine = Store.lengthToRows(d, l.until.value, l.until.unit, 'swatch');
+        var theirs = Store.lengthToRows(d, l.until.value, l.until.unit, 'pattern');
+        var len = knitNum(l.until.value) + ' ' + (l.until.unit || d.unit);
+        var say = !mine && !theirs ? len + ': add a row gauge to count it in rows'
+          : len + ' ≈ ' + (mine || theirs) + ' rows' + (mine && theirs && mine !== theirs ? ', not ' + theirs : '') +
+            (mine ? '' : ' (pattern gauge)');
+        var item = el('div', 'knit-until-item');
+        item.appendChild(el('span', 'knit-until-say', say));
+        item.appendChild(el('span', 'knit-until-line', '“' + String(l.text).slice(0, 90) + (String(l.text).length > 90 ? '…' : '') + '”'));
+        result.appendChild(item);
+      });
+      if (shown) result.appendChild(el('div', 'field-hint', 'An estimate for the counter (≈), never a set target: measure to be sure.'));
+    }
+    [sts, rows, over, mySts, myRows].forEach(function (i) { on(i, 'input', syncGauge); });
+    syncGauge();
+
+    /* two at a time */
+    var mate = Store.linkedPart(p, prt);
+    var pairWrap = el('div', 'field');
+    pairWrap.appendChild(el('div', 'field-label', 'Two at a time'));
+    if (mate) {
+      pairWrap.appendChild(el('div', 'field-hint', 'Worked with ' + mate.name + ': one row tap moves both (' + Store.linkedLabel(p, prt) + ').'));
+      var unl = button('btn block', 'Stop working them together');
+      on(unl, 'click', function () {
+        Store.unlinkPart(p.id, prt.id);
+        api.close();
+        render();
+        toast('Unlinked', { actionText: 'Undo', onAction: function () { Store.undo(); render(); } });
+      });
+      pairWrap.appendChild(unl);
+    } else {
+      var others = p.parts.filter(function (q) { return q.id !== prt.id && (!prt.group || !q.group || q.group === prt.group); });
+      if (prt.makeCount === 2 && prt.piecesDone === 0) {
+        var split = button('btn block', 'Knit both at once (' + prt.name.replace(/([^s])s$/i, '$1') + ' 1+2)');
+        on(split, 'click', function () {
+          var res = Store.splitTwoAtATime(p.id, prt.id);
+          if (!res) return;
+          api.close();
+          render();
+          toast(Store.linkedLabel(p.id, res.a) + ': one row tap moves both', { actionText: 'Undo', onAction: function () { Store.undo(); render(); } });
+        });
+        pairWrap.appendChild(split);
+      }
+      if (others.length) {
+        var sel = document.createElement('select');
+        sel.setAttribute('aria-label', 'Work two at a time with');
+        var none = document.createElement('option');
+        none.value = '';
+        none.textContent = 'Work with…';
+        sel.appendChild(none);
+        others.forEach(function (q) {
+          var o = document.createElement('option');
+          o.value = q.id;
+          o.textContent = q.name;
+          sel.appendChild(o);
+        });
+        on(sel, 'change', function () {
+          if (!sel.value) return;
+          var other = Store.part(p, sel.value);
+          if (!Store.linkParts(p.id, prt.id, sel.value)) return;
+          api.close();
+          render();
+          toast(prt.name + ' and ' + (other ? other.name : 'that part') + ' together', { actionText: 'Undo', onAction: function () { Store.undo(); render(); } });
+        });
+        pairWrap.appendChild(sel);
+      }
+      if (!others.length && !(prt.makeCount === 2 && prt.piecesDone === 0)) {
+        pairWrap.appendChild(el('div', 'field-hint', 'Set How many to 2, or add a second part, to work two at a time.'));
+      }
+    }
+    card.appendChild(pairWrap);
+
+    /* markers */
+    var mi = Store.markerInfo(prt);
+    if (mi.source === 'part') {
+      var mWrap2 = el('div', 'field');
+      mWrap2.appendChild(el('div', 'field-label', 'Markers'));
+      mWrap2.appendChild(el('div', 'field-hint', mi.markers.length + ' marker' + (mi.markers.length === 1 ? '' : 's') + ' placed by you.'));
+      var clr = button('btn block', 'Clear my markers');
+      on(clr, 'click', function () {
+        Store.setMarkers(p.id, prt.id, []);
+        api.close();
+        render();
+        toast('Markers cleared', { actionText: 'Undo', onAction: function () { Store.undo(); render(); } });
+      });
+      mWrap2.appendChild(clr);
+      card.appendChild(mWrap2);
+    }
+
+    return {
+      node: card,
+      /** Inside the part's Save (after updatePart snapshotted): one Undo for both. */
+      commit: function () {
+        var d = Store.normalizeGauge(draftGauge());
+        var cur = Store.gaugeOf(p.id);
+        if (!d || JSON.stringify(d) === JSON.stringify(cur)) return;
+        Store.setGauge(p.id, d, { undo: false });
+      }
+    };
+  }
+
+  /* ---- the glossary sheet (⋯ → Glossary) ---- */
+
+  function openGlossarySheet(projectId) {
+    var p = Store.project(projectId);
+    if (!p) return;
+    var list = [];
+    try { list = Store.glossary(p) || []; } catch (e) { list = []; }
+    openSheet({
+      subject: projectId,
+      title: 'Glossary',
+      build: function (body) {
+        var search = textInput('', 'Find k2tog, ssk, w&t…');
+        search.type = 'search';
+        search.setAttribute('aria-label', 'Find an abbreviation');
+        body.appendChild(search);
+        var host = el('div', 'knit-glossary');
+        body.appendChild(host);
+        function row(g) {
+          var r = el('div', 'knit-gloss-row');
+          r.appendChild(el('span', 'knit-gloss-abbr', g.abbr));
+          r.appendChild(el('span', 'knit-gloss-meaning', g.meaning));
+          if (g.fromPattern) r.appendChild(el('span', 'knit-gloss-src', 'this pattern'));
+          return r;
+        }
+        function paint() {
+          clear(host);
+          var q = search.value.trim().toLowerCase();
+          var hits = list.filter(function (g) {
+            return !q || g.abbr.toLowerCase().indexOf(q) >= 0 || g.meaning.toLowerCase().indexOf(q) >= 0;
+          });
+          var used = hits.filter(function (g) { return g.used || g.fromPattern; });
+          var rest = hits.filter(function (g) { return !(g.used || g.fromPattern); });
+          if (used.length) {
+            host.appendChild(el('div', 'parts-group-head', 'In this pattern'));
+            used.forEach(function (g) { host.appendChild(row(g)); });
+          }
+          if (rest.length) {
+            if (q || !used.length) {
+              host.appendChild(el('div', 'parts-group-head', used.length ? 'Other abbreviations' : 'Knitting abbreviations'));
+              rest.forEach(function (g) { host.appendChild(row(g)); });
+            } else {
+              var more = document.createElement('details');
+              more.className = 'knit-gloss-more';
+              var sum = document.createElement('summary');
+              sum.textContent = 'Other abbreviations (' + rest.length + ')';
+              more.appendChild(sum);
+              rest.forEach(function (g) { more.appendChild(row(g)); });
+              host.appendChild(more);
+            }
+          }
+          if (!hits.length) host.appendChild(el('div', 'field-hint', 'Nothing called that. Try the first letters (“ss”).'));
+        }
+        on(search, 'input', paint);
+        paint();
+      }
+    });
+  }
+
+  /* ---- chart pages, kept at import ---- *
+   * A knitting PDF read in a drop zone is also scanned by KnitChart (once,
+   * on the open handle) and each chart page is drawn to a JPEG. When the
+   * import then lands in a project, the images go to BlobStore
+   * ('p:<id>:chartpage:<n>', as sewing keeps diagrams) and the charts to
+   * `craftData.charts` / `chartPages`, so the counter never opens the PDF
+   * again. Crochet and every other craft never get an onPages handler.
+   */
+
+  var KNIT_CHART_PAGES_MAX = 12;
+  var KNIT_CAPTURE_MS = 30 * 60 * 1000;
+  var knitCapture = null;
+  var KNIT_CHART_KEYS = ['name', 'source', 'image', 'drawn', 'cols', 'rows', 'cells', 'spans', 'legend', 'noStitch',
+    'readRS', 'startRow', 'rowStep', 'rowNos', 'labelSide', 'repeatBox', 'repeats', 'unknown', 'bbox', 'pageBox',
+    'turned', 'pitch', 'legendFromPage'];
+
+  /** A drop zone's options with `onPages` present only while the craft is knitting. */
+  function knitZoneOpts(opts, craftOf) {
+    try {
+      Object.defineProperty(opts, 'onPages', {
+        configurable: true,
+        enumerable: true,
+        get: function () {
+          var c = typeof craftOf === 'function' ? craftOf() : craftOf;
+          var KC = window.KnitChart;
+          return c === KNIT_ID && KC && typeof KC.scan === 'function' ? knitCaptureCharts : undefined;
+        }
+      });
+    } catch (e) { /* an old engine: no chart pages, the text still reads */ }
+    return opts;
+  }
+
+  function slimChart(c) {
+    var o = {};
+    KNIT_CHART_KEYS.forEach(function (k) { if (c && c[k] !== undefined) o[k] = c[k]; });
+    try { return JSON.parse(JSON.stringify(o)); } catch (e) { return { name: c && c.name, rows: c && c.rows, cols: c && c.cols }; }
+  }
+
+  /** onPages for a knitting drop zone: remember the open handle; nothing is read yet. */
+  function knitCaptureCharts(handle) {
+    knitCapture = { at: Date.now(), handle: handle };
+  }
+
+  // page images for charts: 2 px per PDF point, so `chart.bbox` (points)
+  // maps straight onto the picture for the crop
+  var KNIT_CHART_SCALE = 2;
+
+  /**
+   * After an import into a knitting project: read its PDF's charts once, in
+   * the background (KnitChart.scan, 2-4 s), draw each chart page, and keep
+   * both with the project. The import itself never waits for this.
+   */
+  /**
+   * wave H (knit-qa): the imported text of a project made from a pattern
+   * BOOK (its parts carry a `group`), else null (one pattern: every chart in
+   * the PDF is its own).
+   */
+  function knitImportedText(projectId) {
+    var p = Store.project(projectId);
+    if (!p || !p.parts.some(function (q) { return !!q.group; })) return null;
+    return p.parts.map(function (q) { return String(q.patternText || '') + '\n' + String(q.placementNotes || ''); }).join('\n');
+  }
+
+  /** Does `text` name the chart: "Back and Sleeve Lace", "Chart B" / "B chart"? */
+  function knitChartMentioned(name, text) {
+    var n = String(name || '').replace(/,?\s*sizes?\b[\s\S]*$/i, '').replace(/\s+/g, ' ').trim();
+    if (!n) return false;
+    var esc = function (s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); };
+    var t = String(text || '');
+    var m = /^chart\s+([a-z0-9]+)$/i.exec(n);
+    // "Chart B", and a one-word name ("Lace", "Foot"): only next to "chart"
+    var one = m ? m[1] : (n.indexOf(' ') < 0 ? n : null);
+    if (one) return new RegExp('\\bchart\\s+' + esc(one) + '\\b|\\b' + esc(one) + '\\s+chart\\b', 'i').test(t);
+    return new RegExp('\\b' + esc(n).replace(/ /g, '\\s+') + '\\b', 'i').test(t);
+  }
+
+  function knitAttachCharts(projectId) {
+    var cap = knitCapture;
+    knitCapture = null;
+    var p = Store.project(projectId);
+    var KC = window.KnitChart;
+    if (!cap || !cap.handle || !isKnit(p) || Date.now() - cap.at > KNIT_CAPTURE_MS ||
+        typeof Store.setChartPages !== 'function' || !KC || typeof KC.scan !== 'function') return;
+    var handle = cap.handle;
+    var found = [], blobs = {};
+    Promise.resolve().then(function () {
+      return KC.scan(handle, { signal: { cancelled: false } });
+    }).then(function (pages) {
+      var work = Promise.resolve(), drawn = 0, seen = {};
+      // wave H (knit-qa): a pattern book imports ONE pattern (or a few); the
+      // charts kept are those its own text names, not the book's other
+      // patterns' (the lace book's Sophia shrug came with the Icelandic
+      // shawl's Charts A-F and the Henley's laces)
+      var mentionText = knitImportedText(projectId);
+      (pages || []).forEach(function (pg) {
+        (pg && pg.charts || []).forEach(function (c) {
+          if (!c) return;
+          if (mentionText !== null && !knitChartMentioned(c.name, mentionText)) return;
+          found.push({ page: pg.page, name: String(c.name || ''), chart: slimChart(c) });
+          if (seen[pg.page] || drawn >= KNIT_CHART_PAGES_MAX) return;
+          seen[pg.page] = true;
+          drawn++;
+          work = work.then(function () {
+            return handle.renderPage(pg.page, { scale: KNIT_CHART_SCALE }).then(function (canvas) {
+              return new Promise(function (res) {
+                try { canvas.toBlob(function (b) { res(b); }, 'image/jpeg', 0.85); } catch (e) { res(null); }
+              });
+            }).then(function (blob) { if (blob) blobs[pg.page] = blob; }, function () { /* no image: the chart still counts */ });
+          });
+        });
+      });
+      return work;
+    }).then(function () {
+      if (!found.length || !Store.project(projectId)) return;
+      var B = window.BlobStore;
+      var puts = [];
+      var entries = found.map(function (f) {
+        var has = !!blobs[f.page];
+        var key = 'p:' + projectId + ':chartpage:' + f.page;
+        if (has && !puts.some(function (x) { return x.key === key; })) puts.push({ key: key, value: blobs[f.page] });
+        return { page: f.page, name: f.name, key: has ? key : undefined, scale: has ? KNIT_CHART_SCALE : undefined, noImage: !has, chart: f.chart };
+      });
+      var stored = puts.length && B && typeof B.putMany === 'function' ? B.putMany(puts) : Promise.resolve(0);
+      return stored.then(function () {
+        if (!Store.project(projectId)) return;
+        var pages = entries.map(function (e) { return e.page; });
+        var keep = Store.chartPages(projectId).filter(function (c) { return pages.indexOf(c.page) < 0; });
+        Store.setChartPages(projectId, keep.concat(entries), { undo: false });
+        var cur = currentProject();
+        if (cur && cur.id === projectId) render();
+        toast(plural(entries.length, 'chart') + ' read and kept with the project', { ms: 2400 });
+      });
+    }).then(null, function () { /* the pattern imported; only the charts are missing */ });
+  }
+
+  /**
+   * The chart's rectangle on the kept page image, in image pixels: its box
+   * in PDF points (y up from the bottom of the page) times the image's px
+   * per point, with a margin. `pageBox` on a turned chart (its `bbox` is in
+   * the turned frame). `y(imageHeight)` flips the box onto the picture.
+   * null when the box or the image scale is missing.
+   */
+  function knitChartCrop(chi) {
+    var c = chi && chi.chart;
+    var s = chi && chi.page && chi.page.scale;
+    var b = c ? (c.pageBox && (c.turned || !c.bbox) ? c.pageBox : c.bbox) : null;
+    if (!b || !(s > 0) || !(b.x1 > b.x0) || !(b.y1 > b.y0)) return null;
+    var pad = 10;
+    return {
+      x: (b.x0 - pad) * s,
+      w: (b.x1 - b.x0 + 2 * pad) * s,
+      h: (b.y1 - b.y0 + 2 * pad) * s,
+      y: function (imageHeight) { return imageHeight - (b.y1 + pad) * s; }
+    };
+  }
+
+  /* ---- the chart sheet: the page image, and the row written out ---- */
+
+  function openKnitChartSheet(projectId, partId) {
+    var p = Store.project(projectId);
+    var prt = Store.part(p, partId);
+    if (!p || !prt) return;
+    var chi = Store.chartInfo(prt);
+    if (!chi) return;
+    var url = null;
+    var zoom = 100;
+    openSheet({
+      subject: projectId,
+      title: chi.name + (chi.row ? ' · row ' + chi.row + (chi.of ? ' of ' + chi.of : '') : ''),
+      cls: 'sheet-knit-chart',
+      onClose: function () { if (url) { try { URL.revokeObjectURL(url); } catch (e) { /* ignore */ } } },
+      build: function (body) {
+        var si = Store.sideInfo(prt, p);
+        if (chi.text) {
+          var dir = si.inRound ? 'read right to left' : si.side === 'ws' ? 'WS, read left to right' : si.side === 'rs' ? 'RS, read right to left' : '';
+          var w = el('div', 'knit-chart-row');
+          w.appendChild(el('div', 'field-label', 'Row ' + chi.row + (dir ? ' (' + dir + ')' : '')));
+          w.appendChild(el('div', 'knit-chart-text', chi.text));
+          body.appendChild(w);
+        } else if (chi.page && chi.page.chart && chi.page.chart.cells) {
+          // KnitChart returns null for a row with a symbol it does not know:
+          // the page says it, a guess never does
+          var pc = chi.page.chart;
+          var notDrawn = chi.row && Array.isArray(pc.rowNos) && pc.rowNos.length && pc.rowNos.indexOf(chi.row) < 0;
+          body.appendChild(el('div', 'field-hint', notDrawn
+            ? 'Row ' + chi.row + ' is not drawn on the chart: work it as the pattern says.'
+            : 'This row could not be written out from the chart; read it from the page.'));
+        }
+        // what was read off the chart even when its cells were not
+        var rc = chi.page && chi.page.chart ? chi.page.chart : null;
+        if (rc) {
+          var facts = [];
+          if (rc.rows > 0) facts.push(rc.rows + ' rows');
+          if (rc.cols > 0) facts.push(rc.cols + ' sts wide');
+          if (rc.repeatBox && rc.repeatBox.c1 >= rc.repeatBox.c0) facts.push('repeat ' + (rc.repeatBox.c1 - rc.repeatBox.c0 + 1) + ' sts');
+          if (facts.length) body.appendChild(el('div', 'field-hint', chi.name + ': ' + facts.join(' · ')));
+          var legend = Array.isArray(rc.legend) ? rc.legend.filter(function (l) { return l && (l.meaning || l.text); }) : [];
+          if (legend.length) {
+            var key = document.createElement('details');
+            key.className = 'knit-gloss-more';
+            var ks = document.createElement('summary');
+            ks.textContent = 'Key (' + legend.length + ')';
+            key.appendChild(ks);
+            legend.slice(0, 40).forEach(function (l) {
+              var r = el('div', 'knit-gloss-row');
+              r.appendChild(el('span', 'knit-gloss-abbr', String(l.stitch || l.text || l.sym || '').slice(0, 14)));
+              r.appendChild(el('span', 'knit-gloss-meaning', String(l.meaning || l.text || '')));
+              key.appendChild(r);
+            });
+            body.appendChild(key);
+          }
+        }
+        var stage = el('div', 'knit-chart-stage');
+        body.appendChild(stage);
+        if (!chi.page || !chi.page.key) {
+          stage.appendChild(el('div', 'field-hint', 'The page this chart is printed on is not kept with the project. ' +
+            'Import the PDF again (⋯ → Import pattern) to keep its chart pages.'));
+          return;
+        }
+        var B = window.BlobStore;
+        if (!B || typeof B.get !== 'function') {
+          stage.appendChild(el('div', 'field-hint', 'Page images are not available in this browser.'));
+          return;
+        }
+        var img = document.createElement('img');
+        img.className = 'knit-chart-img';
+        img.alt = chi.name + ', page ' + chi.page.page;
+        stage.appendChild(el('div', 'field-hint', 'Loading page ' + chi.page.page + '…'));
+        var tools = el('div', 'row-flex knit-chart-tools');
+        var minus = button('btn ghost', '−', 'Zoom out');
+        var plusB = button('btn ghost', '+', 'Zoom in');
+        function setZoom(z) { zoom = Math.max(100, Math.min(400, z)); img.style.width = zoom + '%'; }
+        on(minus, 'click', function () { setZoom(zoom - 50); });
+        on(plusB, 'click', function () { setZoom(zoom + 50); });
+        tools.appendChild(minus);
+        tools.appendChild(plusB);
+        B.get(chi.page.key).then(function (blob) {
+          clear(stage);
+          if (!blob) {
+            stage.appendChild(el('div', 'field-hint', 'Page ' + chi.page.page + ' is not on this device any more. Import the PDF again to keep it.'));
+            return;
+          }
+          url = URL.createObjectURL(blob);
+          body.insertBefore(tools, stage);
+          // the chart itself, cropped out of the page by its box in PDF
+          // points (pageBox on a sideways chart); "Whole page" shows the rest
+          var crop = knitChartCrop(chi);
+          if (!crop) {
+            img.src = url;
+            stage.appendChild(img);
+            return;
+          }
+          var whole = button('btn ghost', 'Whole page', 'Show the whole page');
+          tools.insertBefore(whole, tools.firstChild);
+          var full = false;
+          img.onload = function () {
+            if (full) return;
+            var cv = document.createElement('canvas');
+            var sx = Math.max(0, crop.x), sy = Math.max(0, crop.y(img.naturalHeight));
+            var sw = Math.min(img.naturalWidth - sx, crop.w), sh = Math.min(img.naturalHeight - sy, crop.h);
+            if (!(sw > 4 && sh > 4)) { stage.appendChild(img); return; }
+            cv.width = Math.round(sw);
+            cv.height = Math.round(sh);
+            try {
+              cv.getContext('2d').drawImage(img, sx, sy, sw, sh, 0, 0, sw, sh);
+              cv.toBlob(function (b) {
+                if (!b) { stage.appendChild(img); return; }
+                var u2 = URL.createObjectURL(b);
+                img.onload = null;
+                img.dataset.cropUrl = u2;
+                img.src = u2;
+                stage.appendChild(img);
+              }, 'image/png');
+            } catch (e) { stage.appendChild(img); }
+          };
+          on(whole, 'click', function () {
+            full = !full;
+            img.onload = null;
+            img.src = full ? url : (img.dataset.cropUrl || url);
+            whole.textContent = full ? 'Just the chart' : 'Whole page';
+          });
+          img.src = url;
+        });
+      }
+    });
   }
 
   /* ================================================================== *
@@ -3566,6 +4653,20 @@
   function shapeName(cls, corners) {
     if (!cls) return 'Piece';
     var k = corners || cls.corners || 0;
+    // wave H (knit-qa): a knitted piece in the words a knitter uses. A yoke
+    // or a sock comes from what DiagramGeo bent or widened (`cls.knit`); an
+    // open knitted ring is never a crochet "Flat circle" (that starts from a
+    // closed centre): it is a cone when it widens, a band when it does not.
+    if (cls.knit && cls.mode !== 'rows') {
+      if (cls.knit.yoke) return 'Raglan yoke';
+      if ((cls.knit.bends && cls.knit.bends.length) || cls.knit.toeUp) return 'Sock';
+      if (!cls.closedTop && !cls.closedBottom && (cls.aspect || 0) < 0.38) {
+        var kr = cls.rounds.filter(function (r) { return !r.empty; });
+        var kGrew = kr.length > 1 && (kr[kr.length - 1].radius || 0) > (kr[0].radius || 0) * 1.3;
+        return kGrew ? 'Cone' : 'Band';
+      }
+    }
+    if (cls.knit && cls.mode === 'rows' && cls.knit.chevron) return 'Triangle';
     if (cls.mode === 'rows') {
       if (cls.anchor === 'spine') return 'Triangle';
       if (cls.anchor === 'left' || cls.anchor === 'right') return 'Shaped panel';
@@ -3919,6 +5020,8 @@
         dialectRow.appendChild(dialectLabel);
         dialectRow.appendChild(dialectSeg.node);
         dialectRow.appendChild(dialectHintEl);
+        // wave H: UK / US stitch names are crochet's question, not knitting's
+        if (isKnit(p)) dialectRow.hidden = true;
         bar.appendChild(dialectRow);
         viewer.dialectSeg = dialectSeg;
         viewer.dialectHint = dialectHintEl;
@@ -4090,9 +5193,10 @@
     var sheetApi = null;
     var pdf = null;
 
-    /* Rows/Rounds and the stitch group size only mean something to crochet. */
+    /* Rows/Rounds and the stitch group size only mean something to crochet
+       (and, wave H, to a counter craft such as knitting). */
     function syncCraftOnlyFields() {
-      var crochet = chosenCraft === 'crochet';
+      var crochet = counterCraft(chosenCraft);
       if (modeField) modeField.hidden = !crochet;
       if (groupField) groupField.hidden = !crochet;
       // The crochet PDF block (sections, "From this PDF", save as template)
@@ -4136,7 +5240,7 @@
       if (craftZone && craftZone.destroy) craftZone.destroy();
       craftZone = null;
       clear(craftPdfWrap);
-      var def = chosenCraft === 'crochet' ? null : craftDefs[chosenCraft];
+      var def = counterCraft(chosenCraft) ? null : craftDefs[chosenCraft];
       craftPdfWrap.hidden = !(def && typeof def.openImportSheet === 'function');
       if (craftPdfWrap.hidden) return;
       var accept = Array.isArray(def.importAccept) && def.importAccept.length ? def.importAccept : ['.pdf'];
@@ -4204,6 +5308,8 @@
               chosenCraft,
               function (id) {
                 chosenCraft = id;
+                // wave H: a text already read is re-read by the new craft's parser
+                if (pdf && pdf.recraft) pdf.recraft();
                 syncCraftOnlyFields();
                 mountCraftFields();
                 if (typeof renderTemplatePicker === 'function') renderTemplatePicker();
@@ -4229,7 +5335,7 @@
             // synthetic template at the front, and picked by default. Any real
             // template can still be chosen — the sections are then added on top
             // of that template's parts.
-            var pdfSecs = pdf && chosenCraft === 'crochet' ? pdf.checkedSections() : [];
+            var pdfSecs = pdf && counterCraft(chosenCraft) ? pdf.checkedSections() : [];
             if (pdfSecs.length) {
               var pdfCard = button('tpl-card' + (chosenTemplate === PDF_TEMPLATE_ID ? ' on' : ''));
               pdfCard.setAttribute('data-tour', 'new-pdf-card');
@@ -4304,7 +5410,8 @@
               chosenTemplate = PDF_TEMPLATE_ID;
               renderTemplatePicker();
             },
-            function () { return modeSeg ? rowWord({ countMode: modeSeg.get() }) : 'Row'; }
+            function () { return modeSeg ? rowWord({ countMode: modeSeg.get() }) : 'Row'; },
+            function () { return chosenCraft; }
           );
           body.appendChild(pdfWrap);
 
@@ -4389,7 +5496,7 @@
 
             // A PDF read in this sheet: its sections become parts right after
             // the project exists, on top of whatever the template made.
-            var secs = pdf && chosenCraft === 'crochet' ? pdf.checkedSections() : [];
+            var secs = pdf && counterCraft(chosenCraft) ? pdf.checkedSections() : [];
             // Wave F (03 #1): a multi-size pattern is read at the size picked
             // here, so it is picked before anything is made.
             if (secs.length && pdf.needsSize && pdf.needsSize()) {
@@ -4418,6 +5525,7 @@
               });
               importRes = res;
               var extra = addChecklistItems(created.id, pdf.checkedChecklist());
+              knitAttachCharts(created.id);   // wave H: the PDF's chart pages
               var fresh = Store.project(created.id);
               bits.push(plural(fresh ? fresh.parts.length : secs.length, 'part'));
               if (res && res.sizeSet) bits.push('size ' + res.sizeSet);
@@ -4445,7 +5553,7 @@
                     emoji: patch.emoji,
                     countMode: fresh ? fresh.countMode : patch.countMode,
                     groupSize: patch.groupSize,
-                    craft: 'crochet',
+                    craft: chosenCraft,
                     parts: secs.map(function (s) {
                       var made = madeFor(s);
                       var tp = {
@@ -4498,7 +5606,7 @@
    * @param {Function} onRead       a PDF was read: pick "From this PDF"
    * @param {Function} rowWordFn    'Row' or 'Round', read fresh on every render
    */
-  function newProjectPdfBlock(host, nameInput, onChange, onRead, rowWordFn) {
+  function newProjectPdfBlock(host, nameInput, onChange, onRead, rowWordFn, craftFn) {
     var fileBase = '';
     var tplTouched = false;
     var picker, tplField, tplName, wantsTemplate = false;
@@ -4519,7 +5627,8 @@
       if (onChange) onChange();
     }
 
-    var dropZone = pdfDropZone({
+    // wave H: a knitting PDF's chart pages are kept too (knitZoneOpts)
+    var dropZone = pdfDropZone(knitZoneOpts({
       tour: 'new-pdf',
       ariaLabel: 'Choose a pattern PDF',
       label: 'Drop a pattern PDF here, or choose a file',
@@ -4537,7 +5646,7 @@
         refreshExtras();
         announce('Read ' + plural(res.pages, 'page') + ' from the PDF');
       }
-    });
+    }, function () { return typeof craftFn === 'function' ? craftFn() : 'crochet'; }));
     host.appendChild(dropZone);
 
     /* The paste route, folded away so the sheet stays short. */
@@ -4565,6 +5674,8 @@
       rowWord: typeof rowWordFn === 'function' ? rowWordFn : 'row',
       hideWhenEmpty: true,
       sectionsHint: 'Each ticked section becomes a part of the new project.',
+      // wave H: the craft picked above decides which parser reads the text
+      craft: typeof craftFn === 'function' ? craftFn : null,
       onChange: refreshExtras
     });
     host.appendChild(picker.node);
@@ -4601,6 +5712,8 @@
       /** Pasted text gets the same card, under an honest name. */
       sourceLabel: function () { return fileBase ? 'From this PDF' : 'From this pattern'; },
       rerender: function () { picker.rerender(); },
+      /** wave H: the craft changed — read the same text again with its parser */
+      recraft: function () { if (picker.getText()) picker.setText(picker.getText()); },
       noTargets: picker.noTargets,
       // wave F: size-once
       size: picker.size,
@@ -4660,10 +5773,11 @@
       subject: projectId,
       title: 'Add a part',
       build: function (body) {
-        nameInput = textInput('', 'Wing');
+        nameInput = textInput('', (Store.project(projectId) || {}).craft === 'knitting' ? 'Sleeve' : 'Wing');
         body.appendChild(field('Name', nameInput));
         countStep = stepper(1, 1, 20, 'make count');
-        body.appendChild(field('How many', countStep.node, 'Wings ×2, legs ×4 — the counter tracks each piece.'));
+        var knitP = (Store.project(projectId) || {}).craft === 'knitting';
+        body.appendChild(field('How many', countStep.node, knitP ? 'Sleeves ×2, socks ×2 — the counter tracks each piece.' : 'Wings ×2, legs ×4 — the counter tracks each piece.'));
       },
       footer: [
         { text: 'Cancel', cls: 'btn ghost', onClick: function (api) { api.close(); } },
@@ -4698,6 +5812,7 @@
     var repeatMode = prt.repeat.mode === 'untilRows' ? 'untilRows' : 'times';
     var repModeSeg = null, repUntil = null, repTimesField = null, repUntilField = null;
     var targetTyped = false;
+    var knitEditor = null;   // wave H: the Knitting card (gauge, two at a time)
 
     /** A part-shaped object so the Store can parse the unsaved textarea. */
     function previewPart() {
@@ -4997,6 +6112,8 @@
         dialectWrap.appendChild(el('div', 'field-label', 'Terms'));
         dialectWrap.appendChild(dialectSeg.node);
         dialectWrap.appendChild(dialectHintEl);
+        // wave H: UK / US stitch names are crochet's question, not knitting's
+        if (isKnit(p)) dialectWrap.hidden = true;
         body.appendChild(dialectWrap);
 
         syncDialectHint = function () {
@@ -5007,6 +6124,10 @@
         targetInput = numInput(prt.targetRows == null ? '' : prt.targetRows, 1, 999999, 'e.g. 40');
         on(targetInput, 'input', function () { targetTyped = true; });
         body.appendChild(field('Target ' + partRowWord(p, prt).toLowerCase() + 's', targetInput, 'Leave blank for open-ended.'));
+
+        // wave H: knitting's gauge card, two at a time, markers
+        knitEditor = knitEditorCard(p, prt, api, function () { return patternArea; });
+        if (knitEditor) body.appendChild(knitEditor.node);
 
         // Repeat
         var repWrap = el('div', 'field');
@@ -5140,6 +6261,7 @@
           // One undo step: the part's edits and the project's size together.
           if (!targetTyped) delete patch.targetRows;
           var both = Store.updatePartWithProjectSize(p.id, prt.id, patch, sizeIndex);
+          if (knitEditor) knitEditor.commit();   // wave H: same Undo
           sizeRes = both ? both.size : null;
           api.close();
           render();
@@ -5154,6 +6276,7 @@
           if (now && was !== null && prt.targetRows === was) patch.targetRows = now;
         }
         Store.updatePart(p.id, prt.id, patch);
+        if (knitEditor) knitEditor.commit();   // wave H: same Undo
         api.close();
         render();
         if (sizeRes) toast('Size ' + sizeRes.label + ' for the whole project' +
@@ -5531,14 +6654,14 @@
           field('Stitch group size', groupStep.node, 'New projects start with this group size. Set it to 0 to turn grouping off.');
         body.appendChild(groupField);
 
-        // Rows/Rounds and group size are crochet-only.
-        if (templateCraft !== 'crochet') {
+        // Rows/Rounds and group size are crochet's (and a counter craft's).
+        if (!counterCraft(templateCraft)) {
           modeField.hidden = true;
           groupField.hidden = true;
         }
 
         partsWrap = el('div', 'tpl-parts-edit');
-        body.appendChild(field('Parts', partsWrap, 'Wings ×2, legs ×4 — each piece is counted separately.'));
+        body.appendChild(field('Parts', partsWrap, templateCraft === 'knitting' ? 'Sleeves ×2, socks ×2 — each piece is counted separately.' : 'Wings ×2, legs ×4 — each piece is counted separately.'));
         renderParts();
 
         checkWrap = el('div', 'tpl-check-edit');
@@ -5628,20 +6751,24 @@
     'No rows found yet. Paste the instruction part of your pattern ' +
     '(e.g. “Rnd 1: 6 sc in MR (6)”).';
 
-  function sectionRowInfo(text, seq, size, sizeCount) {
+  function sectionRowInfo(text, seq, size, sizeCount, craft) {
     var sz = typeof size === 'number' && size >= 0 ? size : 0;
     var n = typeof sizeCount === 'number' ? sizeCount : 0;
-    var probe = { id: 'import:' + seq, patternText: text, sizeIndex: sz, sizeCount: n };
+    // wave H: the probe names its craft, so every Store read below uses that
+    // craft's parser (knitting → Knits)
+    var crf = craft || 'crochet';
+    var probe = { id: 'import:' + seq, patternText: text, sizeIndex: sz, sizeCount: n, craft: crf };
     var s = Store.patternSummary(probe);
-    var tgt = typeof Store.targetRowsFromText === 'function' ? Store.targetRowsFromText(text, sz, n) : null;
+    var tgt = typeof Store.targetRowsFromText === 'function' ? Store.targetRowsFromText(text, sz, n, crf) : null;
     probe.targetRows = tgt;
     // Wave E: rounds or rows is the SECTION's own reading, not the project's
     // Count segment — the panda's seven parts were listed as "20 rows" while
     // every line reads "Rnd 1: …" and the import itself flips the project to
     // rounds. Null when the text does not say.
     var mode = null;
-    if (window.Patterns && typeof window.Patterns.workMode === 'function') {
-      try { mode = window.Patterns.workMode(text); } catch (e) { mode = null; }
+    var parser = parserOf(crf);
+    if (parser && typeof parser.workMode === 'function') {
+      try { mode = parser.workMode(text); } catch (e) { mode = null; }
     }
     return {
       rows: s.rows,
@@ -6153,6 +7280,20 @@
    *           sectionCount, destroy }
    * ================================================================== */
 
+  /**
+   * wave H (knit-qa): "Gauge 12 sts × 17 rows = 4 in · 6 mm (US 10)", the
+   * gauge an import reads, as printed (no conversion).
+   */
+  function gaugeChipText(g) {
+    var parts = [];
+    var nums = [];
+    if (g.sts) nums.push(g.sts + ' sts');
+    if (g.rows) nums.push(g.rows + ' rows');
+    if (nums.length) parts.push('Gauge ' + nums.join(' × ') + ' = ' + (g.over || (g.unit === 'in' ? 4 : 10)) + ' ' + (g.unit === 'in' ? 'in' : 'cm'));
+    if (g.needle) parts.push((nums.length ? '' : 'Needle ') + g.needle);
+    return parts.join(' · ');
+  }
+
   function importPicker(opts) {
     opts = opts || {};
     /** 'Round' / 'Row', or a function for a sheet where it can still change. */
@@ -6183,6 +7324,10 @@
     var groupNames = [];
     var groupTicks = {};
     var openGroup = null;
+    /** wave H (knit-qa): the knitter has ticked or unticked a pattern by hand. */
+    var ticksTouched = false;
+    /** wave H (knit-qa): the gauge the import will write, or null. */
+    var gaugeRead = null;
 
     var node = el('div', 'imp-picker');
 
@@ -6236,17 +7381,44 @@
       if (typeof opts.onChange === 'function') opts.onChange();
     }
 
+    /** Wave H: the craft whose parser reads the text (`opts.craft`, a value or a function). */
+    function craftKey() {
+      var c = typeof opts.craft === 'function' ? opts.craft() : opts.craft;
+      return typeof c === 'string' && c ? c : 'crochet';
+    }
+
+    /**
+     * wave H (knit-qa): a knitting book's groups are PATTERNS (the sock
+     * ebook's eight), not sizes of one toy: they are worded as patterns, only
+     * the first is ticked to start with, and the size chips are the sizes of
+     * the first pattern being imported.
+     */
+    function groupsArePatterns() {
+      return craftKey() === 'knitting';
+    }
+
+    /** The first ticked pattern's sections (all of them when there are no groups). */
+    function sizeSections(secs) {
+      var first = null;
+      secs.forEach(function (s) {
+        if (first === null && s.group && groupTicks[s.group]) first = s.group;
+      });
+      if (first === null) return secs;
+      return secs.filter(function (s) { return s.group === first; });
+    }
+
     /** The document's size names, else "Size 1".."Size N" from its longest list. */
-    function findSizes(secs) {
+    function findSizes(secs, ofText) {
       var names = null;
-      if (window.Patterns && typeof window.Patterns.detectSizes === 'function') {
-        try { names = window.Patterns.detectSizes(text); } catch (e) { names = null; }
+      var parser = parserOf(craftKey());
+      if (parser && typeof parser.detectSizes === 'function') {
+        try { names = parser.detectSizes(typeof ofText === 'string' ? ofText : text); } catch (e) { names = null; }
       }
       sizeDocCount = names && names.length >= 2 ? names.length : 0;
       if (sizeDocCount) return names.slice();
       var n = 0;
       secs.forEach(function (sec, i) {
-        var c = Store.sizeCount({ id: 'import-size:' + i, patternText: sec.text, sizeIndex: 0, sizeCount: 0 });
+        var c = Store.sizeCount({ id: 'import-size:' + i, patternText: sec.text, sizeIndex: 0, sizeCount: 0, craft: craftKey() });
         if (c > n) n = c;
       });
       var out = [];
@@ -6255,15 +7427,31 @@
     }
 
     function buildRows() {
-      var secs = Store.splitSections(text);
+      var secs = Store.splitSections(text, craftKey());
       var prevNames = sizeNames.join('|');
-      sizeNames = findSizes(secs);
+      var pat = groupsArePatterns();
+      if (pat) {
+        // patterns: the first one is ticked to start with, a tick the
+        // knitter changed survives a re-read
+        var seenG = [];
+        secs.forEach(function (s) { if (s.group && seenG.indexOf(s.group) < 0) seenG.push(s.group); });
+        var was0 = groupTicks;
+        groupTicks = {};
+        seenG.forEach(function (n, gi) { groupTicks[n] = was0[n] === undefined ? gi === 0 : was0[n]; });
+      }
+      var sizeSecs = pat ? sizeSections(secs) : secs;
+      var sizeText = sizeSecs === secs ? null : sizeSecs.map(function (s) { return s.text; }).join('\n');
+      sizeNames = sizeText === null ? findSizes(secs) : findSizes(sizeSecs, sizeText);
+      // wave H (knit-qa): the gauge the import will write (the imported
+      // pattern's own in a book), shown in the preview
+      gaugeRead = craftKey() !== 'crochet' && typeof Store.gaugeFromText === 'function'
+        ? Store.gaugeFromText(sizeText === null ? text : sizeText, craftKey()) : null;
       // a different document's sizes are a different question
       if (sizeNames.join('|') !== prevNames && prevNames) sizeChoice = null;
       if (sizeChoice !== null && sizeChoice > sizeNames.length - 1) sizeChoice = null;
       var prev = rows;
       rows = secs.map(function (sec, i) {
-        var info = sectionRowInfo(sec.text, i, sizeChoice === null ? 0 : sizeChoice, sizeDocCount);
+        var info = sectionRowInfo(sec.text, i, sizeChoice === null ? 0 : sizeChoice, sizeDocCount, craftKey());
         var old = prev[i];
         var keep = old && old.parserName === sec.name;
         return {
@@ -6286,8 +7474,9 @@
         };
       });
       dialect = null;
-      if (window.Patterns && typeof window.Patterns.dialectHints === 'function') {
-        try { dialect = window.Patterns.dialectHints(text); } catch (e) { dialect = null; }
+      var dp = parserOf(craftKey());
+      if (dp && typeof dp.dialectHints === 'function') {
+        try { dialect = dp.dialectHints(text); } catch (e) { dialect = null; }
       }
       // wave G: the sizes, in document order; every one ticked by default,
       // a tick the maker took off survives a re-read of the same document
@@ -6295,7 +7484,9 @@
       rows.forEach(function (r) { if (r.group && r.rows > 0 && names.indexOf(r.group) < 0) names.push(r.group); });
       var was = groupTicks;
       groupTicks = {};
-      names.forEach(function (n) { groupTicks[n] = was[n] === undefined ? true : was[n]; });
+      names.forEach(function (n) { groupTicks[n] = was[n] === undefined ? !pat : was[n]; });
+      // wave H (knit-qa): a book with nothing ticked (the first one had no rows) imports the first with rows
+      if (pat && !ticksTouched && names.length && !names.some(function (n) { return groupTicks[n]; })) groupTicks[names[0]] = true;
       groupNames = names.length >= 2 ? names : [];
       if (groupNames.indexOf(openGroup) < 0) openGroup = groupNames.length ? groupNames[0] : null;
     }
@@ -6305,6 +7496,11 @@
       var any = false;
       if (dialect && dialect.uk && !dialect.us) {
         chips.appendChild(el('span', 'imp-chip', 'Looks like UK terms'));
+        any = true;
+      }
+      // wave H (knit-qa): what the knitting import reads into the gauge card
+      if (gaugeRead && (gaugeRead.sts || gaugeRead.rows || gaugeRead.needle)) {
+        chips.appendChild(el('span', 'imp-chip imp-gauge', gaugeChipText(gaugeRead)));
         any = true;
       }
       chips.hidden = !any;
@@ -6435,9 +7631,10 @@
     function rowsFromOf(r) {
       if (r.rowsFrom !== undefined) return r.rowsFrom;
       r.rowsFrom = null;
-      if (r.mode !== 'rounds' || !window.Patterns || typeof window.Patterns.parse !== 'function') return null;
+      var rp = parserOf(craftKey());
+      if (r.mode !== 'rounds' || !rp || typeof rp.parse !== 'function') return null;
       try {
-        var ls = window.Patterns.parse(r.text);
+        var ls = rp.parse(r.text);
         for (var k = 0; k < ls.length; k++) {
           if (ls[k].kind === 'row' && ls[k].workedIn === 'rows') { r.rowsFrom = ls[k].row; break; }
         }
@@ -6453,7 +7650,8 @@
     function renderGroupTabs() {
       var strip = el('div', 'size-tabs imp-size-tabs');
       strip.setAttribute('role', 'tablist');
-      strip.setAttribute('aria-label', 'Sizes in this pattern');
+      var pat = groupsArePatterns();
+      strip.setAttribute('aria-label', pat ? 'Patterns in this book' : 'Sizes in this pattern');
       var uid0 = 'imp-size-' + Math.random().toString(36).slice(2, 8);
       var selId = '';
       groupNames.forEach(function (g, gi) {
@@ -6468,7 +7666,7 @@
         t.tabIndex = sel ? 0 : -1;
         t.appendChild(el('span', 'size-tab-name', g));
         if (!groupTicks[g]) t.appendChild(el('span', 'size-tab-skip', ' · skipped'));
-        t.setAttribute('aria-label', g + ' size' + (groupTicks[g] ? '' : ', not imported'));
+        t.setAttribute('aria-label', g + (pat ? '' : ' size') + (groupTicks[g] ? '' : ', not imported'));
         var go = function (to, focus) {
           openGroup = groupNames[to];
           renderList();
@@ -6496,16 +7694,20 @@
       panel.setAttribute('role', 'tabpanel');
       panel.setAttribute('aria-labelledby', selId);
       var tickRow = el('div', 'imp-targets imp-size-tick');
-      var tick = button('check', '✓', 'Import the ' + openGroup + ' size');
+      var tick = button('check', '✓', pat ? 'Import ' + openGroup : 'Import the ' + openGroup + ' size');
       tick.setAttribute('role', 'checkbox');
       tick.setAttribute('aria-checked', groupTicks[openGroup] ? 'true' : 'false');
       tick.setAttribute('data-focus-key', 'imp-size-tick');
       on(tick, 'click', function () {
         groupTicks[openGroup] = !groupTicks[openGroup];
-        preserveFocus(renderList);
+        ticksTouched = true;
+        // wave H (knit-qa): a pattern's sizes are its own, so the chips follow
+        // the first ticked pattern
+        if (pat) preserveFocus(function () { buildRows(); renderChips(); renderList(); });
+        else preserveFocus(renderList);
         changed();
       });
-      var tickLabel = el('span', 'imp-targets-label', 'Import this size');
+      var tickLabel = el('span', 'imp-targets-label', pat ? 'Import this pattern' : 'Import this size');
       on(tickLabel, 'click', function () { tick.click(); });
       tickRow.appendChild(tick);
       tickRow.appendChild(tickLabel);
@@ -6520,7 +7722,7 @@
     function buildChecks() {
       var found = [];
       try {
-        found = Store.suggestChecklist(text) || [];
+        found = Store.suggestChecklist(text, craftKey()) || [];
       } catch (e) {
         found = [];
       }
@@ -6598,7 +7800,9 @@
     return {
       node: node,
       setText: function (t) {
-        text = typeof t === 'string' ? t : '';
+        var nt = typeof t === 'string' ? t : '';
+        if (nt !== text) ticksTouched = false;
+        text = nt;
         refresh();
       },
       getText: function () { return text; },
@@ -6676,7 +7880,8 @@
     /* ---------------- PDF drop zone (the shared builder) ---------------- */
 
     function buildZone(body) {
-      dropZone = pdfDropZone({
+      // wave H: a knitting project keeps the PDF's chart pages (knitZoneOpts)
+      dropZone = pdfDropZone(knitZoneOpts({
         tour: 'import-drop',
         ariaLabel: 'Choose a pattern PDF',
         label: 'Drop a pattern PDF here, or choose a file',
@@ -6694,7 +7899,7 @@
           refresh();
           announce('Read ' + plural(res.pages, 'page') + ' from the PDF');
         }
-      });
+      }, p.craft || 'crochet'));
       body.appendChild(dropZone);
     }
 
@@ -6715,7 +7920,9 @@
           tourList: 'import-list',
           tourChecklist: 'import-checklist',
           // wave F: a re-import keeps the size already picked for the project
-          initialSize: p.size ? p.size.index : null
+          initialSize: p.size ? p.size.index : null,
+          // wave H: the project's craft reads it (knitting → Knits)
+          craft: p.craft || 'crochet'
         });
         body.appendChild(picker.node);
 
@@ -6747,6 +7954,7 @@
               { mode: 'active', text: area.value, noTargets: picker.noTargets(), size: picker.size() }
             );
             var extra = addChecklistItems(p.id, picker.checkedChecklist());
+            knitAttachCharts(p.id);   // wave H: the PDF's chart pages
             api.close();
             render();
             toast('Pattern saved into ' + activeName + checklistSuffix(extra), { ms: extra ? 3200 : 2600 });
@@ -6771,6 +7979,7 @@
               mode: 'parts', text: area.value, noTargets: picker.noTargets(), size: picker.size()
             });
             var extra = addChecklistItems(p.id, picker.checkedChecklist());
+            knitAttachCharts(p.id);   // wave H: the PDF's chart pages
             api.close();
             render();
             var msg;
@@ -6874,9 +8083,10 @@
           }
 
           var mine = null;
-          if (sizeInfo.names.length >= 2 && window.Patterns && typeof window.Patterns.sizeScope === 'function') {
+          var scp = parserOf(p);   // wave H: the project's craft's parser
+          if (sizeInfo.names.length >= 2 && scp && typeof scp.sizeScope === 'function') {
             var sc = null;
-            try { sc = window.Patterns.sizeScope(line.text, sizeInfo.names); } catch (eS) { sc = null; }
+            try { sc = scp.sizeScope(line.text, sizeInfo.names); } catch (eS) { sc = null; }
             if (sc) {
               mine = !sc.indices || sc.indices.indexOf(sizeInfo.index) >= 0;
               scopeMine = sc.label ? mine : null;
@@ -7415,6 +8625,29 @@
     return items;
   }
 
+  /** Wave H: a counter craft's own ⋯ entries (`def.menuItems(p)`), checked. */
+  function counterMenuExtras(p) {
+    var def = counterCraftDef(p && p.craft);
+    if (!def || typeof def.menuItems !== 'function') return [];
+    var extra = [];
+    try { extra = def.menuItems(p, ctx) || []; } catch (e) { extra = []; }
+    if (!Array.isArray(extra)) return [];
+    return extra.filter(function (it) { return it && typeof it.run === 'function' && it.label; })
+      .map(function (it) { return { icon: it.icon || '•', label: it.label, run: it.run }; });
+  }
+
+  /** Wave H: the counter tour, or the counter craft's own when it registered one. */
+  function counterTourId(p) {
+    var def = counterCraftDef(p && p.craft);
+    var want = def ? def.tourId || def.id : null;
+    if (want && tourAvailable()) {
+      try {
+        if (window.Tour.list().some(function (t) { return t.id === want; })) return want;
+      } catch (e) { /* the counter tour */ }
+    }
+    return 'counter';
+  }
+
   function openMenuSheet(projectId) {
     var p = Store.project(projectId);
     if (!p) return;
@@ -7435,10 +8668,13 @@
           openTemplateEditor({ draft: draft });
         }
       },
-      { icon: '❓', label: 'Show me around', run: function () { startTour('counter'); } }
+      { icon: '❓', label: 'Show me around', run: function () { startTour(counterTourId(p)); } }
     ];
     if (!isCraftProject(p)) {
       var at = items.length - 1;
+      // Wave H: a counter craft's own entries (knitting's Glossary) sit
+      // above the file items, below Save as template.
+      counterMenuExtras(p).forEach(function (it) { items.splice(at++, 0, it); });
       fileMenuItems(p).forEach(function (it) { items.splice(at++, 0, it); });
     }
     openSheet({
@@ -8237,6 +9473,22 @@
             el('div', 'field-hint', 'Pick the craft when you start a project — it cannot be changed later.')
           );
           body.appendChild(craftField);
+          // Wave H: a craft's own settings (`registerCraft({ settingsFields(body, ctx) })`),
+          // one section each, under the craft's name.
+          craftOrder.forEach(function (cid) {
+            var cdef = craftDefs[cid];
+            if (!cdef || typeof cdef.settingsFields !== 'function') return;
+            var sec = el('div', 'field craft-settings');
+            sec.setAttribute('data-craft-settings', cid);
+            var cinfo = craftInfo(cid);
+            sec.appendChild(el('div', 'field-label', cinfo.emoji + ' ' + cinfo.name));
+            try {
+              cdef.settingsFields(sec, ctx);
+            } catch (e) {
+              return;   // a broken module never breaks Settings
+            }
+            body.appendChild(sec);
+          });
         }
 
         /* ---- About ---- */
@@ -8328,7 +9580,8 @@
       fb('undo');
       render();
       var back = Store.activePart(p);
-      announce('Back to ' + partRowWord(p, back).toLowerCase() + ' ' + (back.row + 1));
+      // wave H: "Back to short row 3"
+      announce(knitBackText(p, back, res) || ('Back to ' + partRowWord(p, back).toLowerCase() + ' ' + (back.row + 1)));
     });
 
     // Pattern line
@@ -8482,6 +9735,11 @@
     // Crafts (docs/CRAFTS.md)
     registerCraft: registerCraft,
     crafts: craftList,
+    // wave H: crochet or a usesCounter craft (knitting) → #screen-project
+    craftUsesCounter: counterCraft,
+    parserOf: parserOf,
+    // wave H (knit-counter): ⋯ → Glossary for a knitting project
+    openGlossarySheet: openGlossarySheet,
     ctx: ctx,
     pdfDropZone: pdfDropZone,
     version: APP_VERSION,
@@ -8490,7 +9748,15 @@
     /** QA only: run a File through Settings → Import backup without a picker. */
     __importBackupFile: importBackupFile,
     /** QA only: the .thready (or JSON fallback) the backup buttons would save. */
-    __buildBackupFile: buildBackupFile
+    __buildBackupFile: buildBackupFile,
+    /** QA only (wave H, knit-qa): the pure helpers test/knit-counter.test.html asserts. */
+    __knitQa: {
+      gaugeChipText: gaugeChipText,
+      chartMentioned: knitChartMentioned,
+      groupNoun: groupNoun,
+      groupLabel: groupLabel,
+      shapeName: shapeName
+    }
   };
 
   if (document.readyState === 'loading') {

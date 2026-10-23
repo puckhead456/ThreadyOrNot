@@ -1266,6 +1266,238 @@ group('wave G: size groups - progress, finish and "Remove this size" per group')
     'wave G: load rebuilds Project.groups from the parts and repairs an unknown activeGroup');
 })();
 
+/* ====================================================================== */
+group('Wave H. One parser per craft (Store.registerCraftParser / parserFor)');
+/* ====================================================================== */
+
+(function () {
+  fresh();
+  assertEqual(typeof Store.registerCraftParser, 'function', 'wave H: Store.registerCraftParser exists');
+  assertEqual(typeof Store.parserFor, 'function', 'wave H: Store.parserFor exists');
+
+  // A fake parser that answers every row with a count crochet would never give.
+  var calls = { split: 0, sizes: 0 };
+  function fakeLines() {
+    var ls = [
+      { index: 0, text: 'fake row 1', kind: 'row', row: 1, rowEnd: 1, section: 0, count: 42, computed: null, countSource: 'explicit', notes: [], fake: true },
+      { index: 1, text: 'fake row 2', kind: 'row', row: 2, rowEnd: 2, section: 0, count: 43, computed: null, countSource: 'explicit', notes: [], fake: true }
+    ];
+    ls.meta = { sections: [] };
+    return ls;
+  }
+  var FAKE = {
+    parse: function () { return fakeLines(); },
+    lineFor: function (lines, row) { return lines[row - 1] || null; },
+    targetFor: function (lines, row) { return lines[row - 1] ? lines[row - 1].count : null; },
+    summary: function (lines) { return { rows: lines.length, maxRow: 2, hasTargets: true, computedOnly: false, sections: [] }; },
+    splitSections: function (t) { calls.split++; return [{ name: 'Fake Back', makeCount: 1, text: t }]; },
+    detectSizes: function () { calls.sizes++; return ['S', 'M', 'L']; },
+    workMode: function () { return 'rows'; },
+    dialectHints: function () { return { dialect: null }; },
+    gauge: function () {
+      return { stsPer10cm: 22, rowsPer10cm: 30, stsPer4in: 22.35, rowsPer4in: 30.48,
+        stitch: null, source: '22 sts and 30 rows = 10 cm in St st', estimated: false };
+    }
+  };
+
+  var CROCHET_TEXT = 'Rnd 1: 6 sc in MR (6)\nRnd 2: inc x6 (12)\nRnd 3: (sc, inc) x6 (18)';
+
+  // crochet is unchanged: window.Patterns, the same lines as a direct parse
+  var c = Store.createProject({ name: 'H crochet', templateId: 'blank' });
+  Store.updatePart(c.id, c.parts[0].id, { patternText: CROCHET_TEXT });
+  c = Store.project(c.id);
+  assertTrue(Store.parserFor(c) === window.Patterns && Store.parserFor(c.parts[0]) === window.Patterns &&
+    Store.parserFor('crochet') === window.Patterns && Store.parserFor(null) === window.Patterns,
+    'wave H: crochet projects, parts and the bare id read through window.Patterns');
+  var direct = window.Patterns.parse(CROCHET_TEXT, { size: 0, sizeCount: 0 });
+  assertEqual(Store.linesFor(c.parts[0]).map(function (l) { return [l.row, l.count]; }),
+    direct.map(function (l) { return [l.row, l.count]; }), 'wave H: a crochet part parses exactly as Patterns.parse does');
+  assertEqual([Store.targetFor(c.parts[0], 1), Store.targetFor(c.parts[0], 3)], [6, 18], 'wave H: crochet targets unchanged');
+  assertEqual(Store.registerCraftParser('crochet', FAKE), false, 'wave H: crochet cannot be re-pointed');
+  assertEqual(Store.registerCraftParser('', FAKE), false, 'wave H: a nameless craft is refused');
+
+  // a fake craft's parser is used for its craft
+  assertEqual(Store.registerCraftParser('zzfake', FAKE), true, 'wave H: a craft parser registers');
+  var f = Store.createProject({ name: 'H fake', templateId: 'blank', craft: 'zzfake' });
+  Store.updatePart(f.id, f.parts[0].id, { patternText: CROCHET_TEXT });
+  f = Store.project(f.id);
+  assertTrue(Store.parserFor(f) === FAKE && Store.parserFor(f.parts[0]) === FAKE && Store.parserFor('zzfake') === FAKE,
+    'wave H: parserFor(project / part / craft id) is the craft\'s own parser');
+  assertEqual(Store.craftOf(f.parts[0]), 'zzfake', 'wave H: Store.craftOf(part) is its project\'s craft');
+  var fl = Store.linesFor(f.parts[0]);
+  assertEqual([fl.length, fl[0] && fl[0].fake], [2, true], 'wave H: linesFor reads a fake-craft part with the fake parser');
+  assertEqual([Store.targetFor(f.parts[0], 1), Store.targetFor(f.parts[0], 2)], [42, 43], 'wave H: targetFor follows the craft parser');
+  assertEqual(Store.currentTargetInfo(f.parts[0]).value, 42, 'wave H: currentTargetInfo follows the craft parser');
+  assertEqual((Store.lineForRow(f.parts[0], 2) || {}).text, 'fake row 2', 'wave H: lineForRow follows the craft parser');
+  assertEqual(Store.patternSummary(f.parts[0]).maxRow, 2, 'wave H: patternSummary follows the craft parser');
+  assertEqual(Store.targetFor(c.parts[0], 1), 6, 'wave H: ...and the crochet part beside it still reads 6');
+
+  // the cache key includes the craft: one id, one text, two crafts
+  var probeC = { id: 'h-probe', patternText: CROCHET_TEXT };
+  var probeF = { id: 'h-probe', patternText: CROCHET_TEXT, craft: 'zzfake' };
+  var a1 = Store.linesFor(probeC);
+  var b1 = Store.linesFor(probeF);
+  var a2 = Store.linesFor(probeC);
+  assertEqual([a1.length, !!(b1[0] && b1[0].fake), a2.length, !!(a2[0] && a2[0].fake)], [3, true, 3, false],
+    'wave H: the partLines cache keys on the craft (same id + text: crochet, fake, crochet)');
+
+  // text-only entry points take the craft
+  calls.split = 0;
+  var secs = Store.splitSections('anything at all', 'zzfake');
+  assertEqual([calls.split, secs.length, secs[0].name], [1, 1, 'Fake Back'], 'wave H: splitSections(text, craft) uses the craft parser');
+  Store.splitSections(CROCHET_TEXT);
+  assertEqual(calls.split, 1, 'wave H: splitSections(text) is still crochet\'s');
+  assertEqual(Store.targetRowsFromText('x', 0, 0, 'zzfake'), 2, 'wave H: targetRowsFromText(…, craft) reads the craft parser');
+  assertEqual(Store.targetRowsFromText(CROCHET_TEXT, 0, 0), 3, 'wave H: targetRowsFromText(text) is still crochet\'s');
+  assertEqual(Store.countReport({ id: 'h-cr', patternText: 'x', craft: 'zzfake' }).rows, 0,
+    'wave H: countReport of a craft probe asks that craft\'s parser (no countReport → the empty report)');
+
+  // an unknown craft (no parser registered) falls back to Patterns
+  var u = Store.createProject({ name: 'H unknown', templateId: 'blank', craft: 'zzunknown' });
+  Store.updatePart(u.id, u.parts[0].id, { patternText: CROCHET_TEXT });
+  u = Store.project(u.id);
+  assertTrue(Store.parserFor(u.parts[0]) === window.Patterns, 'wave H: a part of an unknown craft falls back to Patterns');
+  assertEqual(Store.targetFor(u.parts[0], 2), 12, 'wave H: ...and reads crochet counts');
+
+  // registered by global name: a missing global = no parse at all (a plain counter), never crochet's reading
+  window.ZZLazyParser = undefined;
+  Store.registerCraftParser('zzlazy', 'ZZLazyParser');
+  var z = Store.createProject({ name: 'H lazy', templateId: 'blank', craft: 'zzlazy' });
+  Store.updatePart(z.id, z.parts[0].id, { patternText: CROCHET_TEXT });
+  z = Store.project(z.id);
+  assertEqual([Store.parserFor(z), Store.linesFor(z.parts[0]).length, Store.targetFor(z.parts[0], 1)], [null, 0, null],
+    'wave H: a craft whose parser global is missing gets no parse (plain counter)');
+  window.ZZLazyParser = FAKE;
+  assertEqual([Store.parserFor(z) === FAKE, Store.targetFor(z.parts[0], 1)], [true, 42],
+    'wave H: the global is looked up per call, and the cache re-reads when it appears');
+  window.ZZLazyParser = undefined;
+
+  // suggestChecklist is craft-dispatched
+  var FIN = 'Finishing\nGraft the toe stitches together with Kitchener stitch.\nWeave in all ends.';
+  Store.registerCraftParser('zzknit', window.Patterns, { checklistStart: /^(?:graft|weave in|block)\b/i });
+  var knitSteps = Store.suggestChecklist(FIN, 'zzknit').map(function (s) { return s.text; });
+  assertTrue(knitSteps.some(function (t) { return /^Graft the toe/.test(t); }),
+    'wave H: suggestChecklist(text, craft) uses the craft\'s finishing verbs (Graft)', JSON.stringify(knitSteps));
+  assertEqual(Store.suggestChecklist('Graft the toe stitches together.').length, 0,
+    'wave H: crochet\'s verbs are unchanged (a lone Graft line is not a crochet step)');
+
+  // import: sizes and gauge through the project's craft
+  calls.sizes = 0;
+  var GAUGE_DOC = 'GAUGE\n22 sts and 30 rows = 10 cm in St st\nNEEDLES: 4 mm (US 6) circular needle\nRow 1: k all';
+  var res = Store.importPatternSections(f.id, [{ name: 'Fake Back', makeCount: 1, text: 'Row 1: k all' }],
+    { mode: 'parts', text: GAUGE_DOC });
+  f = Store.project(f.id);
+  // (knit-qa: partLines also asks the craft's detectSizes for a part's own sizes, so >= 1)
+  assertEqual([calls.sizes >= 1, f.sizes], [true, ['S', 'M', 'L']], 'wave H: import reads sizes with the project\'s craft parser');
+  var hasField = Object.prototype.hasOwnProperty.call(f, 'gauge');
+  var g = hasField ? f.gauge : (f.craftData && f.craftData.gauge);
+  assertEqual(g && [g.sts, g.rows, g.over, g.unit, g.needle], [22, 30, 10, 'cm', '4 mm (US 6)'],
+    'wave H: gauge + needle lines land on the project gauge (' + (hasField ? 'Project.gauge' : 'craftData.gauge') + '), not in a part');
+  assertEqual(res.gauge, true, 'wave H: the import reports gauge: true');
+  Store.updateProject(f.id, {});
+  g.sts = 20;
+  Store.importPatternSections(f.id, [{ name: 'Fake Back', makeCount: 1, text: 'Row 1: k all' }], { mode: 'parts', text: GAUGE_DOC });
+  f = Store.project(f.id);
+  g = hasField ? f.gauge : (f.craftData && f.craftData.gauge);
+  assertEqual(g && g.sts, 20, 'wave H: a gauge the knitter already has is never overwritten by a re-import');
+  var c2 = Store.createProject({ name: 'H crochet gauge', templateId: 'blank' });
+  var DOC2 = 'GAUGE\n16 sc and 18 rows = 10 cm\nHook 4 mm\n' + CROCHET_TEXT;
+  Store.importPatternSections(c2.id, Store.splitSections(DOC2), { mode: 'parts', text: DOC2 });
+  c2 = Store.project(c2.id);
+  assertTrue(!(c2.craftData && c2.craftData.gauge) && !(c2.gauge && c2.gauge.sts),
+    'wave H: a crochet import writes no gauge (crochet unchanged)');
+
+  // the gauge's own needle: "with larger needles" is the largest size listed
+  Store.registerCraftParser('zzneedle', {
+    gauge: function () {
+      return { stsPer10cm: 11.81, rowsPer10cm: 16.73, stsPer4in: 12, rowsPer4in: 17, stitch: null,
+        source: '12 sts and 17 rows = 4" [10 cm] in stocking st with larger', estimated: false };
+    }
+  });
+  var nd = Store.createProject({ name: 'H needles', templateId: 'blank', craft: 'zzneedle' });
+  var NDOC = 'Sizes U.S. 8 (5 mm) and U.S. 10 (6 mm) circular\nknitting needle 24" [61 cm] long. Set of 4 sizes U.S. 9 (5.5 mm)\n' +
+    'and U.S. 10 (6 mm) double-pointed knitting needles\nGAUGE\n12 sts and 17 rows = 4" [10 cm] in stocking st with larger\nneedles.';
+  Store.importPatternSections(nd.id, [{ name: 'Body', makeCount: 1, text: 'Rnd 1: knit' }], { mode: 'parts', text: NDOC });
+  nd = Store.project(nd.id);
+  var ng = Object.prototype.hasOwnProperty.call(nd, 'gauge') ? nd.gauge : nd.craftData.gauge;
+  assertEqual(ng && [ng.sts, ng.rows, ng.over, ng.unit, ng.needle], [12, 17, 4, 'in', '6 mm (US 10)'],
+    'wave H: the gauge as printed (first unit: 4in [10 cm]), on the LARGER needle the gauge line names (Bernat pullover, research §1)');
+  Store.setCraftSetting('zzneedle', 'unit', 'in');
+  var nd2 = Store.createProject({ name: 'H needles in', templateId: 'blank', craft: 'zzneedle' });
+  Store.importPatternSections(nd2.id, [{ name: 'Body', makeCount: 1, text: 'Rnd 1: knit' }], { mode: 'parts', text: NDOC });
+  nd2 = Store.project(nd2.id);
+  ng = Object.prototype.hasOwnProperty.call(nd2, 'gauge') ? nd2.gauge : nd2.craftData.gauge;
+  assertEqual(ng && [ng.sts, ng.rows, ng.over, ng.unit], [12, 17, 4, 'in'], 'wave H: ...whatever unit the knitter measures in (the gauge card converts)');
+  Store.registerCraftParser('zzneedle', null);
+
+  // The 3D worker's case: a part with no craft of its own, inside a knitting
+  // project, parses AND expands with the knitting parser - never parsed as
+  // crochet and expanded as knitting.
+  (function () {
+    var seen = { parse: 0, expand: 0, crochetParse: 0 };
+    function kLines() {
+      var ls = [1, 2].map(function (r) {
+        return { index: r - 1, text: 'Rnd ' + r + ': knit', kind: 'row', row: r, rowEnd: r, section: 0, count: 4,
+          computed: null, countSource: 'explicit', notes: [], side: null, knit: true };
+      });
+      ls.meta = { sections: [] };
+      return ls;
+    }
+    var KN = {
+      parse: function () { seen.parse++; return kLines(); },
+      lineFor: function (lines, row) { return lines[row - 1] || null; },
+      targetFor: function (lines, row) { return lines[row - 1] ? 4 : null; },
+      summary: function (lines) { return { rows: lines.length, maxRow: 2, hasTargets: true, computedOnly: false, sections: [] }; },
+      workMode: function () { return 'rounds'; },
+      expand: function () {
+        seen.expand++;
+        var st = [];
+        for (var i = 0; i < 4; i++) st.push({ t: 'k', c: null, h: 0.75, w: 1 });
+        return { stitches: st, color: null, height: 0.75, width: 4, state: null, inc: 0, dec: 0 };
+      }
+    };
+    var realParse = window.Patterns.parse;
+    window.Patterns.parse = function () { seen.crochetParse++; return realParse.apply(window.Patterns, arguments); };
+    try {
+      Store.registerCraftParser('zzknit3d', KN);
+      // a project the caller hands in (not in the store) - the project wins
+      var loose = { id: 'zz-loose-proj', craft: 'zzknit3d', countMode: 'rounds', parts: [] };
+      var lp = { id: 'zz-loose-part', name: 'Sock', patternText: 'Rnd 1: knit\nRnd 2: knit', row: 2, stitch: 0,
+        makeCount: 1, piecesDone: 0, rowStitches: [], workMode: 'auto', orientation: 'auto', dialect: 'auto' };
+      loose.parts.push(lp);
+      Store.diagramModel(lp, loose);
+      assertEqual([seen.parse > 0, seen.expand > 0, seen.crochetParse], [true, true, 0],
+        'wave H: diagramModel(part, knitting project) parses AND expands a craftless part with the knitting parser');
+      assertTrue(Store.parserFor(lp) === KN && Store.craftOf(lp) === 'zzknit3d' && (Store.linesFor(lp)[0] || {}).knit === true,
+        'wave H: ...and every later read of that part (parserFor, craftOf, linesFor) agrees with the project');
+      // the same through a project in the store
+      seen.parse = 0; seen.expand = 0; seen.crochetParse = 0;
+      var kp = Store.createProject({ name: 'H knit 3D', templateId: 'blank', craft: 'zzknit3d' });
+      Store.updatePart(kp.id, kp.parts[0].id, { patternText: 'Rnd 1: knit\nRnd 2: knit' });
+      kp = Store.project(kp.id);
+      var part0 = kp.parts[0];
+      assertEqual(typeof part0.craft, 'undefined', 'wave H: (the stored part names no craft of its own)');
+      Store.diagramModel(part0, kp);
+      Store.diagramModel(part0);
+      assertEqual([seen.parse > 0, seen.expand > 0, seen.crochetParse, Store.parserFor(part0) === Store.parserFor(kp)],
+        [true, true, 0, true], 'wave H: a stored knitting part parses and expands with the project\'s parser, with or without the project passed');
+      // a part's OWN craft still wins over the project's
+      var own = { id: 'zz-own', craft: 'crochet', patternText: 'Rnd 1: 6 sc in MR (6)' };
+      Store.diagramModel(own, loose);
+      assertTrue(Store.parserFor(own) === window.Patterns, 'wave H: a part that names its own craft keeps it');
+    } finally {
+      window.Patterns.parse = realParse;
+      Store.registerCraftParser('zzknit3d', null);
+    }
+  })();
+
+  // unregister
+  Store.registerCraftParser('zzfake', null);
+  Store.registerCraftParser('zzknit', null);
+  Store.registerCraftParser('zzlazy', null);
+  assertTrue(Store.parserFor(f) === window.Patterns, 'wave H: registerCraftParser(id, null) unregisters (back to Patterns)');
+})();
+
 /* ---------------------------------------------------------------------- */
 
 wipe();

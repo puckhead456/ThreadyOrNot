@@ -1,0 +1,575 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>KnitChart tests</title>
+<style>
+  body { font: 13px/1.4 Menlo, Consolas, monospace; background:#111; color:#eee; padding:16px; }
+  .pass { color:#7bd389; }
+  .fail { color:#ff6b6b; background:#2a1414; }
+  .skip { color:#888; }
+  .group { margin-top:18px; font-weight:bold; color:#9cf; border-bottom:1px solid #333; padding-bottom:4px; }
+  #summary { margin-top:20px; font-size:18px; font-weight:bold; }
+  #summary.ok { color:#7bd389; }
+  #summary.bad { color:#ff6b6b; }
+</style>
+</head>
+<body>
+<h1>KnitChart tests <span class="skip">(the fixture half reads ../tmp-pdf at runtime and skips what is
+not there; nothing copyrighted is committed)</span></h1>
+<p class="skip">Unit tests on key meanings and row writing, a synthetic glyph chart and a synthetic
+drawn chart behind fake PdfText handles, then the real charts in the Interweave lace and sock
+ebooks, compared with the rows the patterns write out.</p>
+<div id="out"></div>
+<div id="summary">running…</div>
+
+<script src="../js/vendor/pdf.min.js"></script>
+<script src="../js/pdftext.js"></script>
+<script src="../js/knit-chart.js"></script>
+<script>
+'use strict';
+
+(function () {
+  if (!window.pdfjsLib || !window.pdfjsLib.GlobalWorkerOptions) return;
+  var src = '../js/vendor/pdf.worker.min.js';
+  try {
+    Object.defineProperty(window.pdfjsLib.GlobalWorkerOptions, 'workerSrc', {
+      get: function () { return src; }, set: function () {}
+    });
+  } catch (e) { window.pdfjsLib.GlobalWorkerOptions.workerSrc = src; }
+})();
+
+var out = document.getElementById('out');
+var passed = 0, failed = 0, skipped = 0;
+var KC = window.KnitChart;
+
+function line(cls, text) {
+  var div = document.createElement('div');
+  div.className = cls;
+  div.textContent = text;
+  out.appendChild(div);
+}
+function log(okk, label, detail) {
+  if (okk) passed++; else failed++;
+  line(okk ? 'pass' : 'fail', (okk ? 'PASS' : 'FAIL') + ' - ' + label + (detail ? '  (' + detail + ')' : ''));
+}
+function skip(label, why) { skipped++; line('skip', 'SKIP - ' + label + ' (' + why + ')'); }
+function group(title) { line('group', title); }
+function eq(actual, expected, label) {
+  var a = JSON.stringify(actual), e = JSON.stringify(expected);
+  log(a === e, label, a === e ? '' : 'expected ' + e + ' got ' + a);
+}
+function ok(cond, label, detail) { log(!!cond, label, cond ? '' : detail); }
+
+/* ================================================================ *
+ * 1. Key meanings
+ * ================================================================ */
+function unitMeanings() {
+  group('Key meanings -> stitches');
+  var m = KC.parseMeaning('k on RS; p on WS');
+  eq([m.kind, m.rs.stitch, m.ws.stitch], ['stitch', 'k', 'p'], 'side-dependent "k on RS; p on WS"');
+  m = KC.parseMeaning('p on RS; k on WS');
+  eq([m.rs.stitch, m.ws.stitch], ['p', 'k'], 'side-dependent "p on RS; k on WS"');
+  eq(KC.parseMeaning('yo').stitch, 'yo', 'yo');
+  eq([KC.parseMeaning('k2tog').stitch, KC.parseMeaning('ssk').stitch, KC.parseMeaning('k3tog').stitch], ['k2tog', 'ssk', 'k3tog'], 'decreases');
+  m = KC.parseMeaning('sl 1, k2tog, psso');
+  eq([m.stitch, m.text, m.consumes, m.produces], ['sk2p', 'sl 1, k2tog, psso', 3, 1], 'sl 1, k2tog, psso keeps its wording, 3 -> 1');
+  m = KC.parseMeaning('sl 2 sts as if to k2tog, k1, pass 2 slipped sts over');
+  eq([m.stitch, m.consumes, m.produces], ['cdd', 3, 1], 'centred double decrease');
+  m = KC.parseMeaning('sl 2 sts to cn, hold in back, k2, k2 from cn');
+  eq([m.stitch, m.text, m.cross, m.w, m.consumes, m.produces], ['cable', 'C4B', 'B', 4, 4, 4], 'plain cable -> C4B');
+  m = KC.parseMeaning('sl 2 sts to cn, hold in front k2, k2 from cn');
+  eq([m.text, m.consumes], ['C4F', 4], 'cable without the comma -> C4F');
+  m = KC.parseMeaning('sl 2 sts to cn, hold in front k2, k1 from cn, ssk (rem st on cn with next st on LH needle)');
+  eq([m.stitch, m.text.charAt(0)], ['cable', '['], 'a cable with a decrease is written as the key words it');
+  m = KC.parseMeaning('[k1,p1,k1] in next st');
+  eq([m.consumes, m.produces], [1, 3], '[k1,p1,k1] in next st: 1 -> 3');
+  m = KC.parseMeaning('p1, k2, ppso (See Abbreviations)');
+  eq([m.text, m.consumes, m.produces], ['p1, k2, ppso', 3, 2], 'p1, k2, ppso: "(See ...)" dropped, 3 -> 2');
+  m = KC.parseMeaning('With MC, k2tog');
+  eq([m.stitch, m.color], ['k2tog', 'MC'], 'colourwork "With MC, k2tog"');
+  m = KC.parseMeaning('CC1');
+  eq([m.stitch, m.color], ['k', 'CC1'], 'colour-only key "CC1" is a knit in CC1');
+  eq(KC.parseMeaning('no stitch').kind, 'nostitch', 'no stitch');
+  m = KC.parseMeaning('Pattern repeat: for sizes worked over 60 sts');
+  eq([m.kind, m.only, m.sizeSts], ['repeat', true, 60], 'size-only repeat box');
+  eq(KC.parseMeaning('Set-up rows; work once for all sizes').kind, 'setup', 'set-up rows');
+  eq(KC.parseMeaning('center back').kind, 'note', 'a note is not a stitch');
+  eq(KC._countSequence('sl 1, k1, psso'), { c: 2, p: 1 }, 'count: sl 1, k1, psso');
+  eq(KC._countSequence('k2, p1 from cn'), { c: 2, p: 3 }, 'count: from cn adds stitches without consuming');
+  eq(KC._countSequence('return st on RH needle to LH needle'), null, 'count: unknown wording -> null, not a guess');
+}
+
+/* ================================================================ *
+ * 2. Row writing on hand-built charts
+ * ================================================================ */
+function handChart(rows, legend, extra) {
+  var c = { name: 'T', source: 'vector', cols: rows[0].length, rows: rows.length, startRow: 1, rowStep: 1,
+    rowNos: rows.map(function (r, i) { return i + 1; }), labelSide: {}, spans: [], repeats: [], repeatBox: null, marks: [], unknown: [],
+    legend: legend, cells: rows.map(function (s) { return s.split('').map(function (ch) { return ch === ' ' ? null : ch; }); }) };
+  for (var k in (extra || {})) c[k] = extra[k];
+  return c;
+}
+function L(sym, meaning) {
+  var p = KC.parseMeaning(meaning);
+  var e = { sym: sym, meaning: p.meaning, stitch: p.stitch, text: p.text, kind: p.kind, consumes: p.consumes, produces: p.produces, color: p.color, w: 1 };
+  if (p.run) e.run = p.run;
+  if (p.rs) e.rs = { stitch: p.rs.stitch, text: p.rs.text, run: p.rs.run, consumes: p.rs.consumes, produces: p.rs.produces };
+  if (p.ws) e.ws = { stitch: p.ws.stitch, text: p.ws.text, run: p.ws.run, consumes: p.ws.consumes, produces: p.ws.produces };
+  return e;
+}
+var KEY = [L('.', 'k on RS; p on WS'), L('-', 'p on RS; k on WS'), L('o', 'yo'), L('/', 'k2tog'), L('\\', 'ssk'), L('^', 'sl 1, k2tog, psso'), L('x', 'no stitch')];
+
+function unitRows() {
+  group('rowText: reading order, compression, sides');
+  // row 1 drawn left to right as written below; RS reads it right to left
+  var c = handChart(['..o/....\\o..', '...--.......'], KEY);
+  eq(KC.rowText(c, 1, 'rs'), 'k2, yo, ssk, k4, k2tog, yo, k2', 'RS row reads right to left, runs compressed');
+  eq(KC.rowText(c, 2, 'ws'), 'p3, k2, p7', 'WS row reads left to right, "k on RS; p on WS" is a purl');
+  eq(KC.rowText(c, 2, 'rs'), 'k7, p2, k3', 'the same row read as RS');
+  eq(KC.rowText(c, 1, null), 'k2, yo, ssk, k4, k2tog, yo, k2', 'in the round reads right to left');
+  eq(KC.rowText(c, 2), 'p3, k2, p7', 'side left out: even row of an unlabelled chart is WS');
+  eq(KC.rowText(c, 3, 'rs'), null, 'a row not on the chart -> null');
+  var c2 = handChart(['.\\\\//oo.'], KEY);
+  eq(KC.rowText(c2, 1, 'rs'), 'k1, yo, yo, k2tog twice, ssk twice, k1', 'repeated decreases "twice"; yo is never folded into "yo twice"');
+  var info = KC.rowInfo(c, 1, 'rs');
+  eq([info.consumes, info.produces], [12, 12], 'rowInfo counts stitches consumed and produced');
+  var c3 = handChart(['.x^x.'], KEY);
+  eq(KC.rowText(c3, 1, 'rs'), 'k1, sl 1, k2tog, psso, k1', '"no stitch" cells are skipped');
+
+  group('rowText: repeat boxes');
+  var r = handChart(['...o^xo^xo^x...'], KEY.concat([L('#', 'p1, k2, ppso')]));
+  r.cells = [r.cells[0].map(function (s) { return s === '^' ? '#' : s; })];
+  r.repeats = [{ kind: 'repeat', c0: 3, c1: 5, r0: 0, r1: 0 }];
+  r.repeatBox = r.repeats[0];
+  eq(KC.rowText(r, 1, 'rs'), 'k3, *p1, k2, ppso, yo; rep from * to last 3 sts, k3',
+    'copies of the box drawn beside it fold into one repeat (Icelandic Chart E Row 3 shape)');
+  eq(KC.rowText(r, 1, 'rs', { repeat: false }), 'k3, p1, k2, ppso, yo, p1, k2, ppso, yo, p1, k2, ppso, yo, k3', 'repeat: false writes every stitch');
+  var w = handChart(['o/..o/..'], KEY, { repeats: [{ kind: 'repeat', c0: 0, c1: 7, r0: 0, r1: 0 }] });
+  eq(KC.rowText(w, 1, null), '*k2, k2tog, yo; rep from * around', 'a whole-row box in the round: the smallest repeat, "around"');
+  var only = handChart(['-....-....-'], KEY, { repeats: [{ kind: 'repeat', c0: 1, c1: 9, r0: 0, r1: 0, only: true }] });
+  eq(KC.rowText(only, 1, null), '*k4, p1, k4; rep from * around', 'a size-only box writes only its own stitches');
+  var flat = handChart(['.......'], KEY, { repeats: [{ kind: 'repeat', c0: 2, c1: 4, r0: 0, r1: 0 }] });
+  eq(KC.rowText(flat, 1, 'rs'), 'k7', 'a box of one plain stitch is not a repeat');
+
+  group('rowText: never a guess');
+  var u = handChart(['..?1..'], KEY);
+  u.cells = [['.', '.', '?1', '.', '.']];
+  u.legend = KEY.concat([{ sym: '?1', kind: 'unknown', meaning: null, stitch: null, text: null, consumes: null, produces: null, w: 1 }]);
+  eq(KC.rowText(u, 1, 'rs'), null, 'a symbol not in the key -> null');
+  eq(KC.rowText(u, 1, 'rs', { partial: true }), 'k2, [?], k2', 'opts.partial marks it "[?]"');
+  eq(KC.rowInfo(u, 1, 'rs').consumes, null, 'and the stitch count is unknown, not guessed');
+  var s = KC.settle([{ source: 'vector', cells: [['?1', '?1', '.']], legend: KEY.concat([{ sym: '?1', kind: 'unknown', w: 1 }]), unknown: [{ sym: '?1', count: 2 }], spans: [] }]);
+  eq([s[0].cells, s[0].drawn, s[0].unread], [null, true, 'symbols not in the key'], 'settle: mostly unknown symbols -> cells null, drawn');
+  s = KC.settle([{ source: 'vector', cells: [['A']], legend: [{ sym: 'A', kind: 'unknown' }], unknown: [{ sym: 'A', count: 1 }], spans: [] }]);
+  eq(s[0].unread, 'no key', 'settle: no key on the page -> cells null');
+  s = KC.settle([handChart(['..'], KEY)], { cells: false });
+  eq([s[0].cells, s[0].unread, s[0].rows], [null, 'not asked', 1], 'opts.cells: false keeps name/rows, drops cells');
+
+  group('find');
+  var list = [{ name: 'Chart A' }, { name: 'Chart B' }, { name: 'Leg, size 7"' }, { name: 'Cable Pattern' }];
+  eq(KC.find(list, 'Chart B').name, 'Chart B', 'exact');
+  eq(KC.find(list, 'A').name, 'Chart A', '"A" finds Chart A');
+  eq(KC.find(list, 'leg').name, 'Leg, size 7"', '"leg" finds the Leg chart');
+  eq(KC.find(list, 'Chart C'), null, 'no Chart C');
+}
+
+/* ================================================================ *
+ * 3. Fake handles: a glyph chart and a drawn chart
+ * ================================================================ */
+function textItem(str, x, y, size, font, w) {
+  return { str: str, transform: [size, 0, 0, size, x, y], width: w == null ? str.length * size * 0.5 : w, height: size, fontName: font };
+}
+function fakeHandle(pages) {
+  return {
+    numPages: pages.length,
+    doc: {
+      numPages: pages.length,
+      getPage: function (n) {
+        var p = pages[n - 1];
+        return Promise.resolve({
+          getViewport: function () { return { width: 612, height: 792 }; },
+          getTextContent: function () { return Promise.resolve({ items: p.items, styles: {} }); },
+          getOperatorList: function () { return Promise.resolve({ fnArray: p.fn || [], argsArray: p.args || [] }); },
+          cleanup: function () {},
+          objs: null, commonObjs: null
+        });
+      }
+    }
+  };
+}
+
+/*
+ * A 12 x 8 lace chart set in a symbol font, as a StitchMastery export would:
+ * one glyph per cell (row 5 is one text run), a cable glyph four cells wide,
+ * row numbers RS at the right / WS at the left, the key below.
+ */
+var GLYPH_ROWS = [            // bottom (row 1) first, left to right
+  'aao/aaaa\\oaa',            // 1 RS
+  'aaabbaaaaaaa',             // 2 WS: p3, k2, p7
+  'aaao/aa\\oaaa',            // 3 RS
+  'aaaaaaaaaaaa',             // 4 WS
+  'aaaaCaaaa',                // 5 RS: C is one glyph four cells wide
+  'aaaaaaaaaaaa',             // 6 WS
+  'aao^oaao^oaa',             // 7 RS
+  'aaaaaaaaaaaa'              // 8 WS
+];
+function glyphPage() {
+  var items = [], P = 10, X0 = 100, Y0 = 400, F = 'g_sym', B = 'g_body';
+  GLYPH_ROWS.forEach(function (row, r) {
+    var y = Y0 + r * P + 2;
+    if (r === 4) {
+      // a run of glyphs set as text items: "aaaa", the wide cable, "aaaa"
+      items.push(textItem('aaaa', X0, y, 9, F, 4 * P));
+      items.push(textItem('C', X0 + 4 * P, y, 9, F, 4 * P));
+      items.push(textItem('aaaa', X0 + 8 * P, y, 9, F, 4 * P));
+    } else {
+      row.split('').forEach(function (ch, c) { items.push(textItem(ch, X0 + c * P + 2, y, 9, F, 6)); });
+    }
+    var n = String(r + 1);
+    if (r % 2 === 0) items.push(textItem(n, X0 + 12 * P + 4, y, 7, B, 4));     // RS numbers right
+    else items.push(textItem(n, X0 - 4 - n.length * 4, y, 7, B, n.length * 4)); // WS numbers left
+  });
+  items.push(textItem('Chart A', X0, Y0 + 8 * P + 8, 12, B, 44));
+  var key = [['a', 'k on RS; p on WS'], ['b', 'p on RS; k on WS'], ['o', 'yo'], ['/', 'k2tog'], ['\\', 'ssk'],
+    ['^', 'sl 1, k2tog, psso'], ['C', 'sl 2 sts to cn, hold in front, k2, k2 from cn']];
+  key.forEach(function (k, i) {
+    var y = 340 - i * 14;
+    var w = k[0] === 'C' ? 4 * P : 6;
+    items.push(textItem(k[0], 100, y, 9, F, w));
+    items.push(textItem(k[1], 100 + w + 8, y, 8, B, k[1].length * 4));
+  });
+  items.push(textItem('Work the chart once.', 100, 200, 10, B, 100));
+  return { items: items };
+}
+
+function testGlyphChart() {
+  group('Glyph chart (symbol font) behind a fake handle');
+  return KC.fromHandle(fakeHandle([glyphPage()]), 1).then(function (charts) {
+    eq(charts.length, 1, 'one chart');
+    var c = charts[0];
+    if (!c) return;
+    eq([c.source, c.name, c.cols, c.rows, c.startRow, c.rowStep], ['glyph', 'Chart A', 12, 8, 1, 1], 'grid 12 x 8, rows 1-8, titled');
+    eq([c.labelSide[1], c.labelSide[2]], ['right', 'left'], 'RS numbers right, WS numbers left');
+    var m = {};
+    c.legend.forEach(function (e) { m[e.sym] = e.stitch; });
+    eq([m.a, m.b, m.o, m['/'], m['\\'], m['^'], m.C], ['k', 'p', 'yo', 'k2tog', 'ssk', 'sk2p', 'cable'], 'key read from the glyphs beside the meanings');
+    eq(c.unknown, [], 'every cell is in the key');
+    eq(c.spans, [{ r: 4, c0: 4, c1: 7, sym: 'C' }], 'the wide cable glyph spans four cells');
+    eq(KC.rowText(c, 1), 'k2, yo, ssk, k4, k2tog, yo, k2', 'Row 1 (RS) right to left');
+    eq(KC.rowText(c, 2), 'p3, k2, p7', 'Row 2: WS read left to right (side from the left-hand number)');
+    eq(KC.rowText(c, 3), 'k3, yo, ssk, k2, k2tog, yo, k3', 'Row 3');
+    eq(KC.rowText(c, 4), 'p12', 'Row 4 all purl on the WS');
+    eq(KC.rowText(c, 5), 'k4, C4F, k4', 'Row 5: the cable once, not four times');
+    eq(KC.rowInfo(c, 5).consumes, 12, 'Row 5 still 12 sts');
+    eq(KC.rowText(c, 7), 'k2, yo, sl 1, k2tog, psso, yo, k2, yo, sl 1, k2tog, psso, yo, k2', 'Row 7');
+    eq([KC.rowInfo(c, 7).consumes, KC.rowInfo(c, 7).produces], [12, 12], 'Row 7 balanced 12 -> 12');
+    eq(KC.rowText(c, 7, 'ws'), 'p2, yo, sl 1, k2tog, psso, yo, p2, yo, sl 1, k2tog, psso, yo, p2', 'Row 7 read as WS when the caller says so');
+    eq(KC.rowNumbers(c), [1, 2, 3, 4, 5, 6, 7, 8], 'rowNumbers');
+  });
+}
+
+/* A drawn chart: grid lines, dot = purl, ring = yo, slash = k2tog, a cable
+ * drawn as two parallelograms over four cells, a red repeat box, key boxes. */
+function drawnPage(opts) {
+  opts = opts || {};
+  var O = window.pdfjsLib.OPS;
+  var fn = [], args = [], items = [];
+  var P = 10, X0 = 200, Y0 = 400, COLS = 8, ROWS = 4;
+  function op(f, a) { fn.push(f); args.push(a); }
+  function path(ops, coords) { op(O.constructPath, [ops, coords, null]); }
+  function stroke(r, g, b, lw) { op(O.setStrokeRGBColor, [r, g, b]); op(O.setLineWidth, [lw || 0.5]); }
+  function fillc(r, g, b) { op(O.setFillRGBColor, [r, g, b]); }
+  function lineP(x0, y0, x1, y1) { path([O.moveTo, O.lineTo], [x0, y0, x1, y1]); op(O.stroke, []); }
+  function rect(x, y, w, h, kind) { path([O.rectangle], [x, y, w, h]); op(kind || O.stroke, []); }
+  function circle(cx, cy, r, kind) {
+    var k = 0.5523 * r;
+    path([O.moveTo, O.curveTo, O.curveTo, O.curveTo, O.curveTo, O.closePath],
+      [cx + r, cy, cx + r, cy + k, cx + k, cy + r, cx, cy + r, cx - k, cy + r, cx - r, cy + k, cx - r, cy, cx - r, cy - k, cx - k, cy - r, cx, cy - r, cx + k, cy - r, cx + r, cy - k, cx + r, cy]);
+    op(kind, []);
+  }
+  function para(x, y, w, h, rising, fill) {
+    // a strand over w cells: rising "/" or falling "\"
+    var pts = rising ? [x, y, x + w / 2, y, x + w, y + h, x + w / 2, y + h] : [x + w / 2, y, x + w, y, x + w / 2, y + h, x, y + h];
+    fillc(fill[0], fill[1], fill[2]);
+    path([O.moveTo, O.lineTo, O.lineTo, O.lineTo, O.closePath], pts);
+    op(O.fillStroke, []);
+  }
+  // symbols, drawn by kind at (x, y) cell origin, box size s
+  function sym(kind, x, y, s) {
+    stroke(0, 0, 0, 0.6);
+    if (kind === 'p') { fillc(0, 0, 0); circle(x + s / 2, y + s / 2, s * 0.12, O.fillStroke); }
+    else if (kind === 'yo') circle(x + s / 2, y + s / 2, s * 0.25, O.stroke);
+    else if (kind === 'k2tog') lineP(x + 0.3 * s, y + 0.3 * s, x + 0.7 * s, y + 0.7 * s);
+  }
+  function cable(x, y, w, h) { stroke(0, 0, 0, 0.6); para(x, y, w, h, false, [255, 255, 255]); para(x, y, w, h, true, [255, 255, 255]); }
+
+  // the grid
+  stroke(0, 0, 0, 0.5);
+  for (var c = 0; c <= COLS; c++) lineP(X0 + c * P, Y0, X0 + c * P, Y0 + ROWS * P);
+  for (var r = 0; r <= ROWS; r++) lineP(X0, Y0 + r * P, X0 + COLS * P, Y0 + r * P);
+  // rows bottom first, left to right: k = blank
+  var layout = [
+    ['k', 'p', 'k', 'yo', 'k2tog', 'k', 'p', 'k'],
+    ['k', 'p', 'k', 'k', 'k', 'k', 'p', 'k'],
+    ['k', 'p', 'C', 'C', 'C', 'C', 'p', 'k'],
+    ['k', 'p', 'k', 'k', 'k', 'k', 'p', 'k']
+  ];
+  layout.forEach(function (row, rr) {
+    row.forEach(function (s, cc) { if (s !== 'C' && s !== 'k') sym(s, X0 + cc * P, Y0 + rr * P, P); });
+  });
+  cable(X0 + 2 * P, Y0 + 2 * P, 4 * P, P);
+  // red repeat box over columns 1..6
+  stroke(237, 27, 36, 1.8);
+  rect(X0 + P, Y0, 6 * P, ROWS * P);
+  // row numbers at the right, title above
+  for (r = 0; r < ROWS; r++) items.push(textItem(String(r + 1), X0 + COLS * P + 4, Y0 + r * P + 2, 7, 'g_n', 4));
+  items.push(textItem('Cable Panel', X0, Y0 + ROWS * P + 8, 10, 'g_t', 50));
+  // key: a box with the symbol, meaning to the right
+  var key = [['k', 'knit'], ['p', 'purl'], ['yo', 'yo'], ['k2tog', 'k2tog'], ['C', 'sl 2 sts to cn, hold in front, k2, k2 from cn'], ['rep', 'pattern repeat']];
+  if (opts.dropKey) key = key.filter(function (k) { return k[0] !== opts.dropKey; });
+  key.forEach(function (k, i) {
+    var y = 340 - i * 18, s = 12, x = 100;
+    if (k[0] === 'C') {
+      stroke(0, 0, 0, 0.6);
+      para(x - 3 * s, y, 4 * s, s, false, [255, 255, 255]);
+      para(x - 3 * s, y, 4 * s, s, true, [255, 255, 255]);
+    } else if (k[0] === 'rep') {
+      stroke(237, 27, 36, 1.8); rect(x, y, s, s);
+    } else {
+      stroke(0, 0, 0, 0.5); rect(x, y, s, s);
+      sym(k[0], x, y, s);
+    }
+    items.push(textItem(k[1], x + s + 8, y + 2, 8, 'g_k', k[1].length * 4));
+  });
+  return { items: items, fn: fn, args: args };
+}
+
+function testDrawnChart() {
+  group('Drawn chart (vector paths) behind a fake handle');
+  if (!window.pdfjsLib || !window.pdfjsLib.OPS) { skip('drawn chart', 'pdf.js not loaded'); return Promise.resolve(); }
+  return KC.fromHandle(fakeHandle([drawnPage()]), 1).then(function (charts) {
+    eq(charts.length, 1, 'one chart');
+    var c = charts[0];
+    if (!c) return;
+    eq([c.source, c.name, c.cols, c.rows, c.startRow], ['vector', 'Cable Panel', 8, 4, 1], 'grid 8 x 4 from the gridlines');
+    var m = {};
+    c.legend.forEach(function (e) { m[e.meaning] = e.count; });
+    eq([m.knit, m.purl, m.yo, m.k2tog, m['sl 2 sts to cn, hold in front, k2, k2 from cn']], [18, 8, 1, 1, 1], 'cells matched to the key samples (the cable counts once)');
+    eq(c.unknown, [], 'nothing unknown');
+    eq(c.repeatBox && [c.repeatBox.c0, c.repeatBox.c1, c.repeatBox.label], [1, 6, 'pattern repeat'], 'red box -> repeatBox columns 1-6, labelled from the key');
+    eq(KC.rowText(c, 1, null), 'k1, *p1, k1, k2tog, yo, k1, p1; rep from * to last st, k1', 'Row 1 in the round, folded on the box');
+    eq(KC.rowText(c, 1, null, { repeat: false }), 'k1, p1, k1, k2tog, yo, k1, p1, k1', 'Row 1 without the box');
+    eq(KC.rowText(c, 3, null, { repeat: false }), 'k1, p1, C4F, p1, k1', 'Row 3: the cable spans four cells and reads once');
+    eq(KC.rowInfo(c, 3, null).consumes, 8, 'Row 3 consumes 8');
+  }).then(function () {
+    return KC.fromHandle(fakeHandle([drawnPage({ dropKey: 'k2tog' })]), 1).then(function (charts) {
+      var c = charts[0];
+      var unk = c && c.unknown[0];
+      ok(unk && unk.count === 1 && /^\?\d+$/.test(unk.sym), 'no-guess: with the k2tog sample removed its cell is "?n"', JSON.stringify(c && c.unknown));
+      eq(KC.rowText(c, 1, null), null, 'no-guess: that row -> null');
+      eq(KC.rowText(c, 2, null, { repeat: false }), 'k1, p1, k4, p1, k1', 'rows without it still read');
+    });
+  }).then(function () {
+    return KC.fromHandle(fakeHandle([drawnPage()]), 1, { cells: false }).then(function (charts) {
+      var c = charts[0];
+      eq([c.cells, c.drawn, c.name, c.rows, c.cols, c.rowNos], [null, true, 'Cable Panel', 4, 8, [1, 2, 3, 4]], 'opts.cells: false -> name, rows, width and row numbers, no cells');
+      ok(c.legend.some(function (e) { return e.meaning === 'purl'; }), 'and the key meanings');
+    });
+  }).then(function () {
+    return KC.fromHandle(fakeHandle([{ items: [textItem('Knit every row.', 100, 500, 10, 'g', 80)] }]), 1).then(function (charts) {
+      eq(charts, [], 'a page with no chart -> []');
+    });
+  });
+}
+
+/* ================================================================ *
+ * 4. The real charts (dev fixtures)
+ * ================================================================ */
+var handles = {};
+function openFixture(name) {
+  if (handles[name] !== undefined) return Promise.resolve(handles[name]);
+  return fetch('../tmp-pdf/' + name, { cache: 'no-store' }).then(function (r) { return r.ok ? r.blob() : null; }, function () { return null; })
+    .then(function (blob) {
+      if (!blob) { handles[name] = null; return null; }
+      return window.PdfText.open(blob).then(function (h) { handles[name] = h; return h; }, function () { handles[name] = null; return null; });
+    });
+}
+function withFixture(name, fn) {
+  return openFixture(name).then(function (h) {
+    if (!h) { skip(name, 'fixture not in tmp-pdf'); return; }
+    return fn(h);
+  });
+}
+function rowsBalanced(c, side) {
+  var bad = [];
+  c.rowNos.forEach(function (n) {
+    var i = KC.rowInfo(c, n, side);
+    if (!i || i.consumes !== c.cols || i.produces !== c.cols) bad.push(n);
+  });
+  return bad;
+}
+/** The written rows as the book prints them, put in rowText's words. */
+function norm(s) {
+  return s.toLowerCase().replace(/\s+/g, ' ').replace(/until (\d+) sts rem/g, 'to last $1 sts')
+    .replace(/\[k1, p1, k1\] into next st/g, '[k1,p1,k1] in next st').replace(/\*;/g, ';').trim();
+}
+
+function testLace() {
+  return withFixture('knit-interweave-lace.pdf', function (h) {
+    group('Lace ebook p9: Henley Perfected, five drawn charts');
+    return KC.fromHandle(h, 9).then(function (charts) {
+      var names = charts.map(function (c) { return c.name; }).sort();
+      eq(names, ['Back and Sleeve Lace', 'Left-Front Lace, sizes 32 1/2 (39, 51)"', 'Left-Front Lace, sizes 35 (42 1/2, 46 1/2)"',
+        'Right-Front Lace, sizes 32 1/2 (39, 51)"', 'Right-Front Lace, sizes 35 (42 1/2, 46 1/2)"'], 'five charts, titles with sizes');
+      var widths = {};
+      charts.forEach(function (c) {
+        widths[c.name] = c.cols;
+        ok(c.cells && !c.unknown.length, c.name + ': every cell matched to the key');
+        eq([c.rows, c.startRow, c.rowStep, c.rowNumbersGuessed], [20, 1, 1, false], c.name + ': rows 1-20 from the printed numbers');
+        ok(c.repeatBox && c.repeatBox.c1 - c.repeatBox.c0 === 7 && c.repeatBox.label === 'pattern repeat', c.name + ': red 8-st repeat box', JSON.stringify(c.repeatBox));
+        eq(rowsBalanced(c), [], c.name + ': every row consumes and makes ' + c.cols + ' sts');
+        var means = c.legend.map(function (e) { return e.meaning; });
+        ok(['k on RS; p on WS', 'yo', 'k2tog', 'ssk', 'sl 1, k2tog, psso'].every(function (x) { return means.indexOf(x) >= 0; }), c.name + ': key meanings', means.join(' | '));
+      });
+      eq([widths['Right-Front Lace, sizes 35 (42 1/2, 46 1/2)"'], widths['Back and Sleeve Lace']], [22, 21], 'widths 22 and 21');
+      var rf = KC.find(charts, 'Right-Front Lace, sizes 35');
+      eq(KC.rowText(rf, 1, 'rs', { repeat: false }), 'k8, ssk, yo, k6, ssk, yo, k4', 'Right-Front 35 Row 1 as drawn');
+      eq(KC.rowText(rf, 2), 'p22', 'Row 2 (WS, unnumbered) purls back');
+      eq(KC.rowText(rf, 19, 'rs', { repeat: false }), 'k1, ssk, k2, yo, k1, yo, k2, sl 1, k2tog, psso, k2, yo, k1, yo, k2, sl 1, k2tog, psso, k2, yo, k1', 'Row 19 as drawn');
+    }).then(function () {
+      // the no-guess rule on the real page: take the word "k2tog" out of the key
+      return h.doc.getPage(9).then(function (page) { return KC.readPage(page); }).then(function (data) {
+        data.texts = data.texts.filter(function (t) { return t.str !== 'k2tog'; });
+        var rf = KC.find(KC.settle(KC.fromPageData(data, { page: 9 })), 'Right-Front Lace, sizes 35');
+        var unk = rf && rf.unknown;
+        ok(unk && unk.length === 1 && unk[0].count === 4, 'no-guess (real page): k2tog cells without their key become "?n"', JSON.stringify(unk));
+        eq([KC.rowText(rf, 3, 'rs'), KC.rowText(rf, 9, 'rs')], [null, null], 'no-guess: the rows holding them -> null');
+        ok(KC.rowText(rf, 1, 'rs') !== null && KC.rowText(rf, 2) === 'p22', 'rows without them still read');
+      });
+    }).then(function () {
+      group('Lace ebook p15: Icelandic shawl Charts A-F against the written rows');
+      return KC.fromHandle(h, 15);
+    }).then(function (charts) {
+      var dims = charts.map(function (c) { return [c.name, c.cols, c.rows, c.startRow, c.rowStep]; }).sort();
+      eq(dims, [['Chart A', 12, 6, 2, 2], ['Chart B', 46, 12, 14, 2], ['Chart C', 30, 10, 38, 2], ['Chart D', 19, 4, 58, 2],
+        ['Chart E', 15, 7, 3, 2], ['Chart F', 38, 8, 17, 2]], 'six charts, right-side rows only (step 2), numbered as printed');
+      ok(charts.every(function (c) { return !c.unknown.length; }), 'every cell matched, including the "#" and "2" glyphs mixed into drawn cells');
+      var A = KC.find(charts, 'Chart A'), B = KC.find(charts, 'Chart B'), C = KC.find(charts, 'Chart C'), D = KC.find(charts, 'Chart D'), E = KC.find(charts, 'Chart E');
+      var written = [
+        [A, 6, 'Row 6: Change to gray-beige, k3, *p1, k2, ppso (see Abbreviations in Glossary), yo; rep from * until 3 sts rem, k3.', 'k3, *p1, k2, ppso, yo; rep from * until 3 sts rem, k3'],
+        [A, 8, 'Row 8: K1, *yo, p1, k2, ppso; rep from * until 2 sts rem, k2.', 'k1, *yo, p1, k2, ppso; rep from * until 2 sts rem, k2'],
+        [E, 3, 'Row 3: K3, *p1, k2, ppso, yo; rep from * until 3 sts rem, k3.', 'k3, *p1, k2, ppso, yo; rep from * until 3 sts rem, k3'],
+        [E, 5, 'Row 5: K1, *yo, p1, k2, ppso; rep from * until 2 sts rem, k2.', 'k1, *yo, p1, k2, ppso; rep from * until 2 sts rem, k2'],
+        [C, 42, 'Row 42: ... k1, k2tog, k1, *p1, k2, ppso, yo; rep from * until 3 sts rem, ssk, k1', 'k1, k2tog, k1, *p1, k2, ppso, yo; rep from * until 3 sts rem, ssk, k1'],
+        [C, 44, 'Row 44: K1, k2tog, k1, *p1, k2, ppso, yo; rep from * until 4 sts rem, k1, ssk, k1', 'k1, k2tog, k1, *p1, k2, ppso, yo; rep from * until 4 sts rem, k1, ssk, k1']
+      ];
+      written.forEach(function (w) { eq(KC.rowText(w[0], w[1], 'rs'), norm(w[3]), w[0].name + ' ' + w[2]); });
+      // half charts (B, D) show the first half up to the centre stitch
+      eq(KC.rowText(B, 14, 'rs'), norm('k1, *k3tog, k3, yo, k2, yo, k3; rep from * until 3 sts rem, k3tog'),
+        'Chart B Row 14: "K1, * k3tog, k3, yo, k2, yo, k3*; rep ... k3tog" (first half, to the centre k3tog)');
+      eq(KC.rowText(D, 58, 'rs'), norm('k1, *k3tog, [k1, p1, k1] into next st; rep from * until 3 sts rem, k3tog'),
+        'Chart D Row 58: "K1, *k3tog, [k1, p1, k1] into next st; rep ..." (first half to the centre)');
+      eq(KC.rowText(D, 60, 'rs'), norm('ssk, *k3tog, [k1, p1, k1] into next st; rep from * until 4 sts rem, k3tog, k1'),
+        'Chart D Row 60: "Ssk, *k3tog, [k1, p1, k1] into next st*; ..., k3tog, k1"');
+      eq(KC.rowText(E, 11, 'rs'), 'k2, *yo, k2tog; rep from * to last st, k1', 'Chart E Row 11: "K2, *yo, k2tog; rep from * to last st, k1"');
+      eq(KC.rowText(C, 38, 'rs'), 'k1, k2tog, p26, ssk, k1', 'Chart C Row 38: "K1, k2tog, purl to last 3 sts, ssk, k1"');
+    }).then(function () {
+      group('Lace ebook: Oriel p7, hat p27, image chart p29, chartless pages');
+      return Promise.all([KC.fromHandle(h, 7), KC.fromHandle(h, 27), KC.fromHandle(h, 29), KC.fromHandle(h, 8), KC.fromHandle(h, 14)]);
+    }).then(function (r) {
+      var o = r[0][0];
+      eq(o && [o.name, o.cols, o.rows, o.unknown.length], ['Oriel', 13, 28, 0], 'Oriel: 13 x 28, fully read (overprinted title read once)');
+      var hat = r[1][0];
+      eq(hat && [hat.name, hat.cols, hat.rows, hat.unknown.length], ['Lace', 24, 61, 0], 'hat Lace chart: 24 x 61 ("Rows 1-61 of Lace chart")');
+      var img = r[2][0];
+      eq(img && [img.source, img.image, img.cells, img.mentions], ['image', true, null, ['Chart 1', 'Chart 2']], 'p29: the shawl charts are a picture -> image, cells null, names mentioned');
+      eq([r[3].length, r[4].length], [0, 0], 'pattern text pages -> []');
+    });
+  });
+}
+
+function testSocks() {
+  return withFixture('knit-interweave-8-socks.pdf', function (h) {
+    group('Sock ebook p16: cable chart');
+    return KC.fromHandle(h, 16).then(function (charts) {
+      var c = charts[0];
+      eq(c && [c.name, c.cols, c.rows, c.startRow, c.unknown.length], ['Cable Pattern', 34, 44, 1, 0], 'Cable Pattern 34 x 44, every cell matched');
+      var cables = c.legend.filter(function (e) { return e.stitch === 'cable'; });
+      eq(cables.length, 5, 'five cable symbols in the key, told apart by which strand is on top and its fill');
+      eq(c.legend.filter(function (e) { return e.text === 'C4B'; }).map(function (e) { return e.count; }).concat(c.legend.filter(function (e) { return e.text === 'C4F'; }).map(function (e) { return e.count; })), [14, 23], 'C4B x14, C4F x23');
+      eq(c.repeats.map(function (r) { return [r.c0, r.c1, !!r.only]; }), [[2, 31, true], [0, 33, true]], 'two size repeats: 30 sts (60-st socks) and 34 sts (68-st socks)');
+      ok(c.marks.some(function (m) { return m.kind === 'setup' && m.r0 === 0 && m.r1 === 3; }), 'green set-up rows 1-4', JSON.stringify(c.marks));
+      eq(KC.rowText(c, 1, null), '*p1, k4, p1, k4, p3, k4, p3, k4, p1, k4, p1; rep from * around', 'Rnd 1 for 60 sts: the 30-st box around');
+      eq(KC.rowText(c, 3, null, { repeat: 1 }), '*k1, p2, C4F, p1, C4F, p3, C4F, p3, C4B, p1, C4B, p2, k1; rep from * around', 'Rnd 3 for 68 sts: the 34-st box around');
+      eq(KC.rowInfo(c, 3, null).consumes, 34, 'Rnd 3 consumes 34');
+      ok(/^\*p1, \[sl 1 st to RH needle/.test(KC.rowText(c, 15, null)) === false && /\[sl 1 st to RH needle, sl 2 sts to cn, hold in front/.test(KC.rowText(c, 15, null)), 'Rnd 15: the cable-with-decrease is written as the key words it');
+    }).then(function () {
+      group('Sock ebook p6-7: Foot and Leg charts, sideways charts on p7 with p6\'s key');
+      return KC.scan(h, { pages: [6, 7] });
+    }).then(function (res) {
+      var p6 = res[0].charts, p7 = res[1].charts;
+      var foot = KC.find(p6, 'Foot'), leg = KC.find(p6, 'Leg');
+      eq(foot && [foot.cols, foot.rows, foot.unknown.length], [32, 12, 0], 'Foot 32 sts x 12 rnds');
+      eq(foot && rowsBalanced(foot, null), [], 'every Foot round 32 -> 32');
+      eq(leg && [leg.name, leg.rows, KC.rowInfo(leg, 1, null).consumes], ['Leg, size 7"', 12, 51], 'Leg, size 7": 12 rnds of 51 sts');
+      eq(leg && [KC.rowInfo(leg, 6, null).consumes, KC.rowInfo(leg, 10, null).consumes], [50, 52], 'Rnds 6 and 10 ("* Work as given in directions") move the start by one');
+      eq(p7.map(function (c) { return [c.name, c.turned, c.legendFromPage, KC.rowInfo(c, 1, null).consumes, c.unknown.length]; }).sort(),
+        [['Leg, size 8½"', 3, 6, 63, 0], ['Leg, size 9½"', 3, 6, 75, 0]], 'p7: two charts printed sideways, read turned, key borrowed from p6: 63 and 75 sts');
+    }).then(function () {
+      group('Sock ebook: colourwork p23, p30-31, p34');
+      return Promise.all([KC.fromHandle(h, 23), KC.fromHandle(h, 30), KC.fromHandle(h, 31), KC.fromHandle(h, 34)]);
+    }).then(function (r) {
+      var A = KC.find(r[0], 'Chart A'), B = KC.find(r[0], 'Chart B');
+      eq(A && [A.cols, A.rows, A.unknown.length], [6, 21, 0], 'Chart A 6 x 21, every cell matched (colour fills + symbols)');
+      eq(A && A.legend.map(function (e) { return e.meaning; }).sort(), ['CC1', 'CC2', 'MC', 'pattern repeat'], 'Chart A key MC / CC1 / CC2');
+      eq(A && KC.rowText(A, 1, null), '*k1 CC1, k5 MC; rep from * around', 'Chart A Rnd 1');
+      ok(B && B.cols === 6 && B.rows === 5, 'Chart B 6 x 5');
+      eq(B && KC.rowText(B, 1, null), '*k1 CC1, k5 MC; rep from * around', 'Chart B Rnd 1');
+      var argyle = r[1].concat(r[2]).map(function (c) { return [c.name, c.cols, c.rows]; }).sort();
+      eq(argyle, [['Large, size 11 1/4"', 90, 45], ['Medium, size 9 1/4"', 74, 37], ['Small, size 8"', 64, 31]], 'argyle charts 64x31, 74x37, 90x45');
+      var leg = KC.find(r[3], 'Leg'), instep = KC.find(r[3], 'Instep');
+      eq(instep && [instep.cols, instep.rows, instep.unknown.length], [31, 26, 0], 'Instep 31 x 26 fully read');
+      eq(leg && [leg.cols, leg.rows], [28, 84], 'Leg 28 x 84 (narrowing chart)');
+      eq(leg && KC.rowInfo(leg, 1, null).consumes, 28, 'Leg Rnd 1: 28 sts');
+    }).then(function () {
+      return Promise.all([KC.fromHandle(h, 17), KC.fromHandle(h, 29)]);
+    }).then(function (r) {
+      eq([r[0].length, r[1].length], [0, 0], 'abbreviation page and photo page -> [] (a magazine cover is not an image chart)');
+    });
+  });
+}
+
+function testOthers() {
+  group('Other knitting fixtures carry no charts');
+  return withFixture('knit-sandnes-0216.pdf', function (h) {
+    return Promise.all([KC.fromHandle(h, 11), KC.fromHandle(h, 2)]).then(function (r) {
+      eq([r[0].length, r[1].length], [0, 0], 'Sandnes: gauge icons and zigzag ornaments are not charts');
+    });
+  }).then(function () {
+    return withFixture('knit-bernat-topdown-pullover.pdf', function (h) {
+      return KC.scan(h).then(function (res) {
+        eq(res.reduce(function (n, r) { return n + r.charts.length; }, 0), 0, 'Bernat pullover: no charts on any page');
+      });
+    });
+  });
+}
+
+/* ================================================================ */
+function run() {
+  try { unitMeanings(); unitRows(); } catch (e) { log(false, 'unit tests threw', e && e.stack); }
+  var steps = [testGlyphChart, testDrawnChart, testLace, testSocks, testOthers];
+  var p = Promise.resolve();
+  steps.forEach(function (s) {
+    p = p.then(s).then(null, function (e) { log(false, s.name + ' threw', e && (e.stack || e.message || e)); });
+  });
+  p.then(function () {
+    var el = document.getElementById('summary');
+    el.textContent = passed + ' passed, ' + failed + ' failed' + (skipped ? ' (+' + skipped + ' skipped)' : '');
+    el.className = failed ? 'bad' : 'ok';
+  });
+}
+run();
+</script>
+</body>
+</html>

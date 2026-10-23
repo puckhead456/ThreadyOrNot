@@ -1,17 +1,29 @@
 # Crafts: the plugin contract
 
 Thready or Not started as a crochet counter. From September 2026 it also serves
-**cross-stitch** and **sewing**. Each craft is a module in its own files that
-plugs into the existing shell (home screen, project header, sheets, themes,
-export/import, service worker). The crochet code paths stay exactly as they are;
-a project with `craft: 'crochet'` (the default, and what every old save
-migrates to) renders through the existing `#screen-project` and never touches
-anything in this document.
+**cross-stitch** and **sewing**, and from October 2026 (wave H) **knitting**. Each
+craft is a module in its own files that plugs into the existing shell (home
+screen, project header, sheets, themes, export/import, service worker). The
+crochet code paths stay exactly as they are; a project with `craft: 'crochet'`
+(the default, and what every old save migrates to) renders through the existing
+`#screen-project` and never touches anything in this document.
+
+There are three kinds of craft module:
+
+- a **chart craft** (cross-stitch) and a **steps craft** (sewing) paint their own
+  project screen inside `#screen-craft` (`renderProject`), keep their state in
+  `craftData` and bring their own importer (`openImportSheet`) — most of this
+  document;
+- a **counter craft** (knitting) paints nothing of its own: its projects open on
+  the crochet counter (`#screen-project`) with every crochet feature, and the
+  craft brings a pattern **parser** that fills the same `Line` records crochet's
+  does, plus whatever widgets it adds to the counter. See "Counter crafts" below.
 
 This document is the contract between the **shell** (`js/store.js`, `js/app.js`,
 `index.html`, `css/app.css`) and the **craft modules**. Per-craft data models and
-screens live in `docs/research/cross-stitch.md` and `docs/research/sewing.md`
-(research + proposed specs) and, once built, in SPEC.md sections for each craft.
+screens live in `docs/research/cross-stitch.md`, `docs/research/sewing.md` and
+`docs/research/knitting.md` (research + proposed specs; knitting's is the
+fixtures' ground truth) and, once built, in SPEC.md sections for each craft.
 
 Ground rules that still apply: plain HTML/CSS/JS, **no build step, no ES
 modules**, one `window` global per file from an IIFE with `'use strict'`,
@@ -29,13 +41,21 @@ css/xstitch.css
 js/sewing.js            # window.Sewing     – sewing pure logic: instruction-booklet parser
 js/app-sewing.js        # sewing UI; calls App.registerCraft(...)
 css/sewing.css
+js/knits.js             # window.Knits      – knitting parser: Patterns.createParser(knitting profile) (wave H)
+js/knit-chart.js        # window.KnitChart  – knitting charts read off a PDF page (wave H, no DOM)
+js/app-knitting.js      # window.AppKnitting – registers knitting as a counter craft (wave H; no CSS
+                        #   file: its counter widgets live in css/app.css "Wave H — knitting on the counter")
 test/xstitch.test.html, test/sewing.test.html, test/blobstore.test.html
+test/knits.test.html, test/knits.fixtures.html, test/knit-counter.test.html, test/knit-chart.test.html
 ```
 
 Script order in `index.html` (after the existing tags, in this order):
 `blobstore.js`, `zip.js` (the shell's `.thready` backup container, wave F),
 `xstitch.js`, `xstitch-photo.js`, `sewing.js`, then `app.js`
-as today, then `app-xstitch.js`, `app-sewing.js`. Craft UI files register at
+as today, then `app-knitting.js`, `app-xstitch.js`, `app-sewing.js`. Knitting's
+pure files load earlier, beside the files they build on: `knits.js` right after
+`patterns.js` (it calls `Patterns.createParser` at script time) and
+`knit-chart.js` right after `pdftext.js`. Craft UI files register at
 script-evaluation time; `App.init` runs on `DOMContentLoaded`, after all of
 them, so registration order never matters. Every new file is precached in
 `sw.js` and `CACHE_VERSION` is bumped on release. `css/xstitch.css` and
@@ -49,9 +69,9 @@ and falls back to a friendly "This project needs the <name> module" card.
 ## Store (shell side)
 
 ```js
-Project.craft: 'crochet' | 'crossstitch' | 'sewing'   // default 'crochet' (old saves migrate to it)
+Project.craft: 'crochet' | 'knitting' | 'crossstitch' | 'sewing'   // default 'crochet' (old saves migrate to it)
 Project.craftData: object                              // opaque to the shell; owned by the craft module
-Template.craft: 'crochet' | 'crossstitch' | 'sewing'   // default 'crochet'
+Template.craft: 'crochet' | 'knitting' | 'crossstitch' | 'sewing'   // default 'crochet'
 Template.craftData: object|null                        // seed craftData for projects made from it (deep-copied)
 ```
 
@@ -65,18 +85,22 @@ Template.craftData: object|null                        // seed craftData for pro
   failed to load).
 - `Store.crafts() → string[]` registered ids, in registration order.
 - `Store.createProject(opts)` accepts `craft` and `craftData`; the template's
-  `craft` wins when `opts.craft` is missing. For non-crochet crafts `parts` is
+  `craft` wins when `opts.craft` is missing. For chart and steps crafts `parts` is
   still created (one part named `Main`) so nothing in the shell that expects
-  `parts.length >= 1` breaks, but the craft UI may ignore parts entirely.
-- **`Part.workMode`, `Part.orientation` and `Part.dialect` are crochet-only**
-  (added by the 3D diagram work; see SPEC.md). They are normalised on load for
+  `parts.length >= 1` breaks, but the craft UI may ignore parts entirely. A
+  counter craft's template parts are real parts, made exactly as crochet's are.
+- **`Part.workMode`, `Part.orientation` and `Part.dialect` belong to the counter**
+  (added by the 3D diagram work; see SPEC.md): crochet's, and a counter craft's,
+  which runs the same counter (knitting uses Worked in and Orientation; it hides
+  Terms, because dialect is crochet's). They are normalised on load for
   every project whatever its craft, because `Part` is one shape shell-wide and a
   missing field would be `undefined` rather than `'auto'` — but nothing outside
-  the crochet paths reads them: they only feed `Store.diagramModel` /
+  the counter paths reads them: they only feed `Store.diagramModel` /
   `DiagramGeo`, and the part editor's chips for them (Worked in, Orientation,
-  Terms) sit with the other crochet-only fields the craft UIs hide. A
-  craft module must not repurpose
-  them; per-craft state belongs in `craftData`.
+  Terms) sit with the other counter-only fields the chart and steps craft UIs
+  hide. A craft module must not repurpose them; per-craft state belongs in
+  `craftData` (a counter craft may also add its own `Part` fields, normalised on
+  load and carried by other crafts only when set, as knitting's are).
 - `Store.templates(craft?)` filters by craft when given. Built-in templates
   for the new crafts are declared by the craft module via
   `Store.registerCraft({ ..., templates: Template[] })` and seeded with the same
@@ -185,7 +209,15 @@ def = {
   freeUpSpace(projectId, ctx),
   // Accept list for this craft's drop zone in the New project sheet. Optional, default ['.pdf'];
   // cross-stitch: ['.pdf', '.oxs', '.xml'].
-  importAccept: string[]
+  importAccept: string[],
+  // --- wave H (see "Counter crafts"); every one optional ---------------------
+  usesCounter: boolean,              // true: no #screen-craft; the project runs on the crochet counter
+  parser: 'Knits' | api,             // the craft's pattern parser (a window global's NAME, or the object)
+  parserExtras: { checklistStart: RegExp, checklistSections: RegExp },
+  settingsFields(body, ctx),         // the craft's own section in Settings → Crafts (any craft)
+  faq: [{ q, a }],                   // Settings → Help entries (same as ctx.addFaq in onInit)
+  tourId: string,                    // counter craft: the tour "Show me around" starts
+  label: string                      // alias of `name`
 }
 ctx = {
   // the shell's helpers, so craft UIs look identical to the rest of the app
@@ -239,10 +271,13 @@ ctx = {
   code for this beyond building its drop zone synchronously in `openImportSheet`.
 - The **home card** shows `Store.summaryFor(p)` and a small craft emoji badge
   when more than one craft is registered.
-- The **⋯ menu** for a non-crochet project: `Import pattern` → `def.openImportSheet`;
+- The **⋯ menu** for a chart or steps craft's project: `Import pattern` → `def.openImportSheet`;
   `Parts`, `Yarn colours` and `Save as template` are hidden (v1); `def.menuItems`
   are inserted above `Notes`; `Checklist`, `Notes`, `History`, `Status`,
-  `Export backup`, `Show me around` stay.
+  `Export backup`, `Show me around` stay. A counter craft's project keeps
+  crochet's whole menu (Parts, Import pattern, Yarn colours, Save as template …)
+  with `def.menuItems(p, ctx)` above the file items, and "Show me around" starts
+  `def.tourId` (see "Counter crafts").
 - `App.registerCraft` is also exported as `App.crafts()` → `[{ id, name, emoji, tagline }]`
   for settings/help copy.
 - Settings gains a **Crafts** line under Help & tours listing the registered
@@ -252,7 +287,7 @@ ctx = {
   the same `{ id, title, blurb, steps }` shape as the built-in four) so a craft
   can ship its own walkthrough; `Tour.list()` then includes it in Settings →
   Help & tours automatically. Optional for v1.
-- Craft identity emojis: crochet `🧶`, **cross-stitch `🧵`**, **sewing `🪡`**
+- Craft identity emojis: crochet `🧶`, **knitting `🧣`** (wave H), **cross-stitch `🧵`**, **sewing `🪡`**
   (the research flagged `❌` as ugly on some platforms; `🪡` is Unicode 13 and
   renders on every phone this app targets).
 
@@ -302,6 +337,69 @@ instead of waiting for the page in progress.
 `Tour.register(def)`: `def.steps` must be a **function** returning the step
 array (the built-in tours are declared that way so targets are resolved late),
 not a plain array.
+
+## Counter crafts (wave H)
+
+A craft whose work is counted in rows and stitches like crochet (knitting is the
+first) does not build a screen. It registers with `usesCounter: true` and brings a parser, and the shell
+does the rest. The shell half of this (the dispatch, the store readers, the
+import) is SPEC.md → "Crafts" → "Counter crafts and the parser slot".
+
+**What `usesCounter` gives.** `isCraftProject(p)` is false for the craft, so
+`render()` shows `#screen-project` rather than `#screen-craft`, and the project
+gets everything crochet has: part tabs, make-counts, rows / rounds, the stitch
+button with targets and auto-advance, repeats, alerts, placing notes, history,
+the pattern line and sheet, size-once and size groups, the colour strip, the
+count-confidence badge, templates with parts, the 3D button and viewer
+(Worked in and Orientation chips), the New project drop zone and import picker
+(sections, sizes, "From this PDF", "Also save as a template", checklist
+suggestions), and crochet's ⋯ menu. `App.craftUsesCounter(id)` answers whether a
+craft works this way; `App.parserOf(x)` gives the parser a project reads with.
+Nothing crochet-only may break: crochet is never registered, and every hook a
+counter craft adds is a no-op for crochet.
+
+**What the parser must return.** Register it with `parser: 'Name'` (the name of
+its `window` global, looked up on every call, so script order never matters) or
+the object itself; `Store.registerCraftParser(id, api, parserExtras)` is called
+for you. It must expose **every name `window.Patterns` exposes, with the same
+arity** (`parse`, `targetFor`, `lineFor`, `summary`, `splitSections`, `placement`,
+`detectSizes`, `sizeMarks`, `sizeScope`, `countReport`, `dialectHints`, `gauge`,
+`evaluate`, `colors`, `colorHex`, `expand`, `startHint`, `workMode`,
+`stuffingHint`, `glossary`, `craft`, `version`), and `parse` must return the
+**`Line` contract** in SPEC.md → "Patterns API v2" → "The `Line` contract":
+the crochet fields every reader relies on, plus any of the craft additions it
+can fill honestly (`null` when it cannot; never a guess). The cheap way to get
+all of that is `Patterns.createParser(profile)`: a profile overrides the
+vocabulary, regexes and the hooks it needs and inherits the rest of the crochet
+engine (SPEC.md → "Wave H: the craft-profile engine"). A parser that is
+registered but did not load gives a plain counter and one line under the part
+tabs ("the … pattern reader did not load"), never crochet's reading of the text.
+`parserExtras.checklistStart` / `checklistSections` are the craft's finishing
+verbs and section names for `Store.suggestChecklist` ("Graft toes", "Block").
+
+**`settingsFields(body, ctx)`** (any craft) renders a section
+`[data-craft-settings="<id>"]` under Settings → Crafts with the shell's `ctx`
+helpers; read and write it through `Store.craftSettings(id)` /
+`Store.setCraftSetting(id, key, value)`.
+
+**Templates with parts.** A counter craft's built-ins are declared with
+`Store.registerCraft({ id, templates })` (no `normalize` or `summary` needed:
+the counter's home card line is crochet's) and are ordinary crochet-shaped
+templates — `parts: [{ name, makeCount, patternText, workMode? }]`, `checklist`,
+`countMode`, `groupSize` — so `createProject` makes real parts with their text,
+targets read by the craft's parser. Give every built-in pattern text whose
+counts were worked by hand; a row the text cannot count (a short row) must print
+no count. The template editor shows Count / group size for counter crafts.
+
+**Its own counter state and widgets** live in the shell files, in marked
+regions, with Edit only (knitting's: "Knitting (wave H, knit-counter; …)" in
+`js/store.js`, "14b. Knitting on the counter" in `js/app.js`, "Wave H — knitting
+on the counter" in `css/app.css`). Rules: every entry point returns at once for
+another craft; new `Part` / `Project` fields are normalised on load for the
+craft and carried by others only when set, so a crochet save is byte for byte
+what it was; every writer is one undo snapshot; templates and backups carry the
+fields. A craft that reads the 3D model sets `Model.craft` and gets its own path
+in `DiagramGeo` / `Diagram` (SPEC.md → "Live 3D diagram" → "2c. Knitting").
 
 ## Shared UI pieces crafts should reuse (from `css/app.css`)
 
@@ -499,6 +597,55 @@ What the sewist sees, the pane checks and what is left: `docs/wave-f/sewing.md`
   `rawAmounts`. Amounts are spread per size only when a size chart's labels tile the
   groups; otherwise the Fabric sheet shows a chip per group as printed.
 
+## Knitting (`js/knits.js`, `js/knit-chart.js`, `js/app-knitting.js`, wave H)
+
+The binding names: `docs/wave-h/CONTRACT.md`. What each area built, checked and
+left: `docs/wave-h/shell.md`, `knits-parser.md`, `knit-counter.md`, `knit-3d.md`,
+`knit-chart.md`, `knit-research.md`. The fixtures' ground truth, hard line by
+hard line: `docs/research/knitting.md`. The contract-level detail is in SPEC.md
+("Knitting", "The `Line` contract", "Wave H: the craft-profile engine", "2c.
+Knitting"); this section is the craft's shape.
+
+- **Registration** (`js/app-knitting.js`, `window.AppKnitting`):
+  `App.registerCraft({ id: 'knitting', name: 'Knitting', emoji: '🧣',
+  usesCounter: true, parser: 'Knits', parserExtras, sectionNames,
+  settingsFields, menuItems, tourId: 'knitting', faq, onInit })` and
+  `Store.registerCraft({ id: 'knitting', templates })`. `AppKnitting.settings()`
+  → `{ unit, needleSystem }` (default cm / metric, inches for an en-US browser,
+  and US needles whenever the unit is inches), `AppKnitting.needleLabel(mm, system)` ('4 mm' / 'US 6' / 'UK 8'; mm
+  when a system has no size), `AppKnitting.needleSizes`,
+  `AppKnitting.sectionNames` (the garment nouns: Back, Front, Left / Right Front,
+  Sleeve, Yoke, Body, Collar, Cuff, Neckband, Button Band, Hood, Pocket, Heel,
+  Heel Flap, Gusset, Foot, Toe, Leg, Brim, Crown, Border, Edging),
+  `AppKnitting.templates`.
+- **Templates**: `knit-blank` Single piece, `knit-sweater` Sweater (Back, Front,
+  Sleeves ×2), `knit-socks` Socks (Sock ×2), `knit-hat` Hat, `knit-shawl` Shawl,
+  `knit-blanket` Blanket, each with a checklist (Block, Seam, Set in sleeves,
+  Graft toes, Weave in ends …) and pattern text whose every bracketed count was
+  worked through by hand (a 64-st top-down heel-flap sock numbered continuously
+  rnds 1–56 / rows 57–103 / rnds 104–182; the heel turn prints no count).
+- **Settings**: `Settings.crafts.knitting = { unit: 'cm'|'in', needleSystem:
+  'metric'|'us'|'uk' }`, shown as Settings → 🧣 Knitting ("Measure in",
+  "Needle sizes"). The unit is the default for an imported gauge whose unit is
+  not printed and for a new project's empty gauge.
+- **Parser** (`window.Knits` = `Patterns.createParser(KNIT_PROFILE)`): every
+  `Patterns` name plus `readInstruction`, `until`, `profile`; the knitting `Line`
+  fields (`side`, `delta`, `until`, `markers`, `shortRow`, `chart`, `cable`,
+  `rowList`, `workedIn`, `sizeSkip`) and knitting `expand` records.
+- **Counter**: the RS / WS chip, short rows, markers, two at a time, the cable
+  ring, the length chip, the chart chip and sheet, the part editor's 🧣 Knitting
+  card and ⋯ → 📖 Glossary, on `Project.gauge`, `Part.side / markers /
+  markerTotal / linked / shortRows` and `craftData.charts / chartPages` (chart
+  page images under `p:<id>:chartpage:<n>`, so the backup, Keep-both rekey and
+  orphan sweep find them).
+- **Charts** (`window.KnitChart`, no DOM, no app wiring): read from the page's
+  vector drawing, matched to the page's own key, never guessed; `scan` runs once
+  in the background after a knitting import. The no-guess rule is the craft's
+  rule everywhere: a chart row with an unknown symbol, a row a column-mixed page
+  scrambled, a size list that does not fit, a short row — each shows nothing
+  rather than a number the pattern does not support.
+- Wave H2 polish (see `docs/wave-h/knit-parser-polish.md`): 19 of the 23 KNOWN knitting fixture lines are closed (4 remain: Bernat neck/yoke names, T7, T9, R5); Tunisian crochet is a vocabulary pack on the crochet profile, not a craft.
+
 ## Testing and verification (every craft)
 
 - `test/<craft>.test.html`: parser unit tests on committed synthetic snippets
@@ -514,6 +661,14 @@ What the sewist sees, the pane checks and what is left: `docs/wave-f/sewing.md`
   under a private key (`Store.__setKeyForTests('<own key>')`, test-only) and clean up
   your `p:<id>:` images afterwards; page renders stall while the pane is hidden (see
   `HANDOFF.md`).
+- A counter craft built on `Patterns.createParser` shares the crochet engine:
+  a change to either `js/patterns.js` or the craft's profile re-runs both
+  crafts' parser suites (crochet's patterns 1037 / patterns.fixtures 829 are
+  the gate that nothing crochet moved), plus `test/store-safety.test.html`,
+  `test/templates.test.html`, `test/crafts.test.html` and
+  `test/diagram-model.test.html`. Fixture assertions are named after the
+  research file's hard-line IDs, and a line the parser is known to miss is
+  listed as KNOWN with its cause rather than loosened.
 - Performance: a stitch tap or "mark done" must update the DOM in < 5 ms; chart
   pan/zoom must hold 60 fps on a 200×250 chart (canvas, not DOM cells).
 

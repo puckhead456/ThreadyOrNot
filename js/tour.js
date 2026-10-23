@@ -618,8 +618,15 @@
   function ensureProject(ctx) {
     // The counter tour points at the crochet screen, so only a crochet
     // project will do: a cross-stitch or sewing project renders #screen-craft
-    // and every step's target would be missing.
-    function isCrochet(proj) { return !!proj && (proj.craft || 'crochet') === 'crochet'; }
+    // and every step's target would be missing. Wave H: a counter craft
+    // (knitting) renders the same screen, so its projects will do too.
+    function isCrochet(proj) {
+      if (!proj) return false;
+      var c = proj.craft || 'crochet';
+      if (c === 'crochet') return true;
+      var fn = app('craftUsesCounter');
+      return !!(fn && fn(c));
+    }
     var p = openProject();
     if (isCrochet(p)) return p;
     var all = window.Store.projects().filter(isCrochet);

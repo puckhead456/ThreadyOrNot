@@ -1,0 +1,748 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Knits.js tests</title>
+<style>
+  body { font: 14px/1.4 Menlo, Consolas, monospace; background:#111; color:#eee; padding:16px; }
+  .pass { color:#7bd389; }
+  .fail { color:#ff6b6b; background:#2a1414; }
+  .group { margin-top:18px; font-weight:bold; color:#9cf; border-bottom:1px solid #333; padding-bottom:4px; }
+  #summary { margin-top:20px; font-size:18px; font-weight:bold; }
+  #summary.ok { color:#7bd389; }
+  #summary.bad { color:#ff6b6b; }
+</style>
+</head>
+<body>
+<h1>Knits.js test suite</h1>
+<div id="out"></div>
+<div id="summary"></div>
+
+<script src="../js/patterns.js"></script>
+<script>
+  // until the shell adds js/knits.js to index.html, the page loads it itself
+  if (!window.Knits) document.write('<script src="../js/knits.js"><\/script>');
+</script>
+<script>
+'use strict';
+
+var out = document.getElementById('out');
+var passed = 0, failed = 0;
+var K = window.Knits, P = window.Patterns;
+
+function log(ok, label, detail) {
+  if (ok) passed++; else failed++;
+  var div = document.createElement('div');
+  div.className = ok ? 'pass' : 'fail';
+  div.textContent = (ok ? 'PASS' : 'FAIL') + ' - ' + label + (detail ? '  (' + detail + ')' : '');
+  out.appendChild(div);
+  if (!ok) console.error(div.textContent);
+}
+function group(title) {
+  var div = document.createElement('div');
+  div.className = 'group';
+  div.textContent = title;
+  out.appendChild(div);
+}
+function deepEqual(a, b) { return JSON.stringify(a) === JSON.stringify(b); }
+function eq(actual, expected, label) {
+  var ok = deepEqual(actual, expected);
+  log(ok, label, ok ? '' : 'expected ' + JSON.stringify(expected) + ' got ' + JSON.stringify(actual));
+}
+function ok(cond, label, detail) { log(!!cond, label, cond ? '' : detail); }
+function pick(o, keys) { var r = {}; keys.forEach(function (k) { r[k] = o ? o[k] : undefined; }); return r; }
+function lineWith(lines, sub) {
+  for (var i = 0; i < lines.length; i++) if (String(lines[i].text).indexOf(sub) >= 0) return lines[i];
+  return null;
+}
+function rowLine(lines, n) {
+  for (var i = 0; i < lines.length; i++) {
+    var l = lines[i];
+    if (l.row !== null && l.row >= 1 && (l.rowList ? l.rowList.indexOf(n) >= 0 : (n >= l.row && n <= l.rowEnd))) return l;
+  }
+  return null;
+}
+
+try {
+
+// -----------------------------------------------------------------------
+group('API: every Patterns function, same name and arity');
+// -----------------------------------------------------------------------
+ok(K && typeof K === 'object', 'window.Knits exists');
+Object.keys(P).forEach(function (k) {
+  if (k === 'createParser' || k === 'profile') return;
+  var v = P[k];
+  if (typeof v === 'function') {
+    ok(typeof K[k] === 'function' && K[k].length === v.length, 'Knits.' + k + ' is a function of ' + v.length,
+      typeof K[k] + '/' + (K[k] && K[k].length));
+  } else {
+    ok(K[k] !== undefined, 'Knits.' + k + ' is present');
+  }
+});
+eq(K.craft, 'knitting', 'Knits.craft');
+eq(P.craft, 'crochet', 'Patterns.craft');
+ok(/knitting/.test(K.version) && /crochet/.test(P.version) && K.version !== P.version, 'version names the craft');
+ok(typeof K.glossary === 'function', 'Knits.glossary');
+ok(typeof P.createParser === 'function', 'Patterns.createParser');
+
+// -----------------------------------------------------------------------
+group('engine: VOCAB entries may be functions of the match');
+// -----------------------------------------------------------------------
+var TP = P.createParser({ vocab: [['zz(\\d+)', function (m) { return +m[1]; }, function (m) { return +m[1]; }], ['sc', 1, 1]] });
+eq(TP.evaluate('zz6, sc', null), 7, 'a function-valued entry counts its digits (zz6 = 6)');
+eq(TP.evaluate('2 sc, zz4', null), 6, 'and still works beside a plain entry');
+eq(P.evaluate('6 sc in magic ring'), 6, 'the crochet instance is unchanged');
+
+// -----------------------------------------------------------------------
+group('the twelve lines (lens §1.3)');
+// -----------------------------------------------------------------------
+// 1
+var t1 = 'CO 60 sts.\nRow 1 (RS): K2, *yo, k2tog, k3; rep from * to last 3 sts, k3. (60 sts)';
+var L1 = rowLine(K.parse(t1), 1);
+eq(pick(L1, ['kind', 'row', 'side', 'count', 'countSource', 'computed']),
+  { kind: 'row', row: 1, side: 'rs', count: 60, countSource: 'explicit', computed: 60 },
+  '#1 row 1 RS, asterisk group + 3-st remainder, 60 explicit (and computed 60)');
+eq(K.evaluate('K2, *yo, k2tog, k3; rep from * to last 3 sts, k3.', 62), null,
+  '#1 trap: a remainder that does not fit the stitches is not guessed (62 = 2 + 5n + 3 has no n)');
+eq(K.evaluate('K2, *yo, k2tog, k3; rep from * to last 3 sts, k3.', 65), 65, '#1 with 65 sts: 12 repeats');
+
+// 2
+var t2 = t1 + '\nRows 2, 4, 6 and 8 (WS): Purl.\nRows 3, 5 and 7 (RS): Knit.';
+var p2 = K.parse(t2);
+var L2 = lineWith(p2, 'Rows 2, 4');
+eq(pick(L2, ['kind', 'row', 'rowEnd', 'rowList', 'side', 'computed']),
+  { kind: 'row', row: 2, rowEnd: 8, rowList: [2, 4, 6, 8], side: 'ws', computed: 60 },
+  '#2 four rows (not a range), WS, computed = prev');
+eq(K.lineFor(p2, 3).text, 'Rows 3, 5 and 7 (RS): Knit.', '#2 lineFor(3) is the odd-row line, not the even enumeration');
+eq(K.lineFor(p2, 6).text, 'Rows 2, 4, 6 and 8 (WS): Purl.', '#2 lineFor(6) is the even enumeration');
+eq(K.summary(p2).rows, 8, '#2 summary counts 1 + 4 + 3 = 8 rows');
+eq(K.parse(t2).meta.sections.length, 1, '#2 the interleaved enumerations stay one section');
+eq(K.countReport(p2).rows, 8, '#2 countReport counts the listed rows');
+
+// 3
+var t3 = 'Sizes XS (S, M, L, XL)\nCO 60 (66, 72, 78, 84) sts. Join to work in the rnd.\nRnds 1-12: Knit.\n' +
+  'Rnd 13: K1, m1L, knit to last st, m1R, k1 — 62 (68, 74, 80, 86) sts.';
+var L3 = lineWith(K.parse(t3), 'Rnd 13');
+eq(pick(L3, ['row', 'side', 'count', 'countSource', 'computed', 'sizes']),
+  { row: 13, side: null, count: 62, countSource: 'explicit', computed: 62, sizes: [62, 68, 74, 80, 86] },
+  '#3 row 13 in the round, em-dash multi-size count, computed agrees');
+var L3b = lineWith(K.parse(t3, { size: 3 }), 'Rnd 13');
+eq(pick(L3b, ['count', 'computed']), { count: 80, computed: 80 }, '#3 size L resolves to 80 (78 + 2)');
+
+// 4
+var t4 = 'Set-up row (WS): P3, pm, p12, pm, p30, pm, p12, pm, p3.';
+var L4 = K.parse(t4)[0];
+eq(pick(L4, ['kind', 'row', 'count', 'side']), { kind: 'setup', row: 0, count: 60, side: 'ws' }, '#4 set-up row, count 60, WS');
+eq((L4.markers || []).map(function (m) { return m.at; }), [3, 15, 45, 57], '#4 four markers at 3/15/45/57');
+
+// 5
+var t5 = 'CO 100 sts, pm for beg of rnd and join to work in the rnd.\nRnd 1: Knit.\n' +
+  'Raglan inc rnd: *K1, m1L, knit to 1 st before marker, m1R, k1, sm; rep from * 3 more times — 8 sts inc.';
+var p5 = K.parse(t5);
+var L5 = lineWith(p5, 'Raglan inc');
+eq(pick(L5, ['kind', 'row', 'delta', 'count', 'computed']), { kind: 'row', row: 2, delta: 8, count: 108, computed: 108 },
+  '#5 delta +8, count = prev + 8, marker-relative fill is not null');
+ok(L5.stitches === null, '#5 "8 sts inc" is not read as a total of 8');
+eq(lineWith(p5, 'CO 100').markers, [{ name: 'BOR', at: 0 }], '#5 the cast-on line places the BOR marker');
+
+// 6
+var t6 = 'Sizes XS (S, M, L, XL)\nCO 120 (136, 152, 168, 184) sts. Join to work in the rnd.\n' +
+  'Rnds 1-12: Knit.\nRnd 13: *K1, m1, knit to marker, sm; rep from * 3 more times — 4 sts inc.\nRnd 14: Knit.\n' +
+  'Repeat Rnds 13–14 a further 9 (11, 13, 15, 17) times — 160 (184, 208, 232, 256) sts.';
+var p6 = K.parse(t6);
+var L6 = lineWith(p6, 'Repeat Rnds');
+eq(pick(L6, ['kind', 'repeatOf', 'repeatTimes', 'repeatMore', 'count']),
+  { kind: 'repeat', repeatOf: [13, 14], repeatTimes: 10, repeatMore: true, count: 160 },
+  '#6 repeat of rnds 13-14, "a further 9" = 9 more (times 10 counts the written one), size-resolved count');
+var s6 = K.summary(p6).suggestions.repeat;
+eq(s6, { startRow: 13, endRow: 14, times: 10, untilRows: null }, '#6 summary suggestion {startRow:13,endRow:14,times}');
+var p6b = K.parse(t6, { size: 2 });
+eq(pick(lineWith(p6b, 'Repeat Rnds'), ['repeatTimes', 'count']), { repeatTimes: 14, count: 208 }, '#6 size M: 13 more, 208 sts');
+eq(K.summary(p6).maxRow, 32, '#6 the piece runs to rnd 32 (14 + 9 x 2): a counted repeat grows rows');
+eq([K.targetFor(p6, 15), K.targetFor(p6, 16), K.targetFor(p6, 29), K.targetFor(p6, 32)], [128, 128, 156, 160],
+  '#6 every repeated rnd has its own count: the shaping keeps going, the printed total is the last');
+
+// 7 + 8
+var t7 = 'Sizes S (L)\nHeel flap: CO 36 (40) sts.\nRow 1 (RS): *Sl 1, k1; rep from * to end.\nRow 2 (WS): Sl 1, purl to end.\n' +
+  'Heel turn Row 1 (RS): Sl1, k17 (19), ssk, k1, turn.\nRow 2 (WS): Sl1, p to one st before the gap, p2tog, p1, turn.\n' +
+  'Row 3 (RS): Sl1, k to 1 st before gap, ssk, k1, turn.';
+var p7 = K.parse(t7);
+var L7 = lineWith(p7, 'Heel turn Row 1');
+eq(pick(L7, ['kind', 'row', 'side', 'stitches', 'shortRow', 'computed']),
+  { kind: 'row', row: 1, side: 'rs', stitches: null, shortRow: true, computed: 35 },
+  '#7 (19) is an in-segment size, not a total; turn = short row; 36 - 1 on the needles');
+ok(K.parse(t7).meta.sections.some(function (s) { return s.name === 'Heel Turn'; }), '#7 the label names the part (Heel Turn)');
+var L7b = lineWith(K.parse(t7, { size: 1 }), 'Heel turn Row 1');
+eq(pick(L7b, ['stitches', 'computed']), { stitches: null, computed: 39 }, '#7 size L: k19, 40 - 1');
+var L8 = lineWith(p7, 'Row 2 (WS): Sl1, p to one');
+eq(pick(L8, ['row', 'side', 'computed', 'count', 'shortRow']), { row: 2, side: 'ws', computed: null, count: null, shortRow: true },
+  '#8 gap-relative: computed null - never guess');
+eq(lineWith(p7, 'Row 3 (RS): Sl1, k to 1').computed, null, '#8 ...and the row after it is not counted from a stale number');
+
+// 9
+var t9 = 'CO 96 sts. Join.\nRnds 1-24: Knit.\nRnd 25: [K6, C6F] 8 times. (96 sts)';
+var L9 = lineWith(K.parse(t9), 'Rnd 25');
+eq(pick(L9, ['row', 'count', 'countSource', 'computed']), { row: 25, count: 96, countSource: 'explicit', computed: 96 },
+  '#9 bracket x8, C6F = 6 for 6, explicit 96');
+eq(K.evaluate('[K6, C6F] 8 times.', null), 96, '#9 C6F counts its 6 stitches');
+eq(K.evaluate('*P2, C4B; rep from * to end', 36), 36, '#9 C4B in an asterisk repeat');
+eq(K.evaluate('k2, 2/2 RC, k2', 8), 8, '#9 2/2 RC = 4 stitches');
+
+// 10
+var t10 = 'Sizes S (M, L, XL)\nCO 80 (88, 96, 104) sts.\nRow 1: Knit.\nRow 2: Purl.\n' +
+  'Work even in St st until piece measures 32 (33, 34, 35) cm / 12½ (13, 13½, 13¾)" from underarm, ending with a WS row.';
+var p10 = K.parse(t10, { size: 1 });
+var L10 = lineWith(p10, 'Work even');
+eq(L10.until, { kind: 'length', value: 33, unit: 'cm', endOn: 'ws' }, '#10 until 33 cm (size M), end on WS');
+ok(L10.row === null, '#10 no row number');
+eq(K.summary(p10).suggestions.targetRows, null, '#10 never a targetRows suggestion');
+ok(!(L10.repeatTo >= 1) && !(L10.repeatRows >= 1), '#10 the length grows no rows');
+
+// 11
+var t11 = 'CO 60 sts.\nRow 1 (WS): Purl.\nNext row (RS): BO 4 sts, work to end — 56 sts rem.';
+var L11 = lineWith(K.parse(t11), 'Next row');
+eq(pick(L11, ['row', 'side', 'count', 'countSource', 'computed']), { row: 2, side: 'rs', count: 56, countSource: 'explicit', computed: 56 },
+  '#11 Next row = prev + 1, BO 4 = -4, "56 sts rem" explicit');
+
+// 12
+var t12 = 'Sizes S (M, L, XL)\nCO 40 (44, 48, 52) sts.\nRow 1: Purl.\nSizes S (M, L) only: K2tog at each end of next row.\nRow 3: Purl.';
+[0, 1, 2].forEach(function (sz) {
+  var l = lineWith(K.parse(t12, { size: sz }), 'Sizes S (M, L) only');
+  ok(l && l.kind === 'row' && !l.sizeSkip, '#12 kept for size ' + sz, l && (l.kind + '/' + l.sizeSkip));
+});
+var l12 = lineWith(K.parse(t12, { size: 0 }), 'Sizes S (M, L) only');
+eq(pick(l12, ['row', 'computed']), { row: 2, computed: 38 }, '#12 ...as next row, a k2tog at each end: -2');
+var l12x = lineWith(K.parse(t12, { size: 3 }), 'Sizes S (M, L) only');
+ok(l12x && l12x.kind === 'note' && l12x.sizeSkip === true, '#12 dropped for size XL', l12x && l12x.kind);
+eq(K.sizeScope('Sizes S (M, L) only:', ['S', 'M', 'L', 'XL']), { indices: [0, 1, 2], label: true }, '#12 sizeScope reads "S (M, L)"');
+
+// -----------------------------------------------------------------------
+group('traps');
+// -----------------------------------------------------------------------
+var tCo = 'Sizes S (M, L)\nCO 60 (66, 72) sts.\nRow 1: Knit.';
+eq(pick(K.parse(tCo, { size: 1 })[1], ['kind', 'count', 'sizes']), { kind: 'setup', count: 66, sizes: [60, 66, 72] },
+  'CO 60 (66, 72) sts: an in-segment size list, size M = 66');
+eq(K.evaluate('CO 60 (66, 72) sts', null), 60, 'evaluate on the cast-on alone (size 0)');
+var tHead = 'Cast On\nCO 20 sts.\nRow 1: Knit.\nRow 2: Purl.\nBind Off\nBO all sts.';
+var sec = K.splitSections(tHead).map(function (s) { return s.name; });
+ok(sec.indexOf('Cast On') < 0 && sec.indexOf('Bind Off') < 0, '"Cast On" / "Bind Off" never part headers', JSON.stringify(sec));
+var tHead2 = 'BACK\nCast On\nCO 20 sts.\nRow 1: Knit.\nBind Off\nBO all sts.\nFRONT\nCO 20 sts.\nRow 1: Knit.';
+eq(K.splitSections(tHead2).map(function (s) { return s.name; }), ['Back', 'Front'], '...and the parts around them keep their names');
+eq(K.detectSizes('34 (38, 42, 46)'), ['34', '38', '42', '46'], 'numeric size line "34 (38, 42, 46)" detected');
+eq(K.detectSizes('To fit chest 34 (38, 42, 46)" \nCO 20 sts.'), ['34"', '38"', '42"', '46"'], 'numeric size line with a label and unit');
+eq(P.detectSizes('34 (38, 42, 46)'), null, '(crochet still refuses a numeric size line)');
+var tG = 'GAUGE\n22 sts and 30 rows = 4" (10 cm) in St st.\nCO 60 sts.\nRow 1: Knit.';
+var pG = K.parse(tG);
+eq(pG.filter(function (l) { return l.kind === 'setup'; }).map(function (l) { return l.text; }), ['CO 60 sts.'],
+  'the gauge line is never a setup row; the cast-on is');
+eq(lineWith(pG, '22 sts and 30 rows').count, null, 'the gauge line has no count');
+var tG2 = 'Gauge: 22 sts = 10 cm\nNeedles: 4 mm (US 6)\nCO 30 sts.\nRow 1: Knit.';
+eq(K.parse(tG2).filter(function (l) { return l.kind === 'setup'; }).length, 1, 'gauge/needle lines: one setup (the cast-on)');
+
+// -----------------------------------------------------------------------
+group('in-segment sizes');
+// -----------------------------------------------------------------------
+eq(K.evaluate('K4 (4-4-4-6-6). PM. K2.', null), 6, 'hyphen lists, size 0 (Yarnspirations)');
+var tH = 'Sizes XS/S (M-L-XL-2/3XL-4/5XL)\nCast on 36 (38-38-40-44-46) sts.\n' +
+  '1st row:(RS). K1. PM. K2. PM. K4 (4-4-4-6-6). PM. K2. PM. K18 (20-20-22-22-24). PM. K2. PM. K4 (4-4-4-6-6). PM. K2. PM. K1.';
+[0, 4].forEach(function (sz) {
+  var l = lineWith(K.parse(tH, { size: sz }), '1st row');
+  var want = [36, 38, 38, 40, 44, 46][sz];
+  eq(pick(l, ['row', 'side', 'computed', 'stitches']), { row: 1, side: 'rs', computed: want, stitches: null },
+    'Bernat 1st row, size ' + sz + ': computed ' + want + ', no phantom total');
+});
+eq(lineWith(K.parse(tH), '1st row').markers.map(function (m) { return m.at; }), [1, 3, 7, 9, 27, 29, 33, 35], 'Bernat 1st row: 8 markers (XS/S)');
+eq(lineWith(K.parse(tH, { size: 4 }), '1st row').markers.map(function (m) { return m.at; }), [1, 3, 9, 11, 33, 35, 41, 43], '...and at 2/3XL');
+eq(K.evaluate('Sl1, k17 (19, 21), ssk, k1, turn.', 40), 39, 'a three-size list resolves (size 0)');
+ok(K.evaluate('K17 (19, 21), k2tog', 40) === null, 'a row that stops short of the end without turning is not a total');
+var tMis = 'Sizes S (M, L)\nCO 40 (44, 48) sts.\nRow 1: K17 (19), knit to end.';
+eq(lineWith(K.parse(tMis, { size: 1 }), 'Row 1').computed, null, 'a 2-number list in a 3-size document says nothing');
+eq(K.parse('Sizes S (M, L)\nRow 1: Sl1, k17 (19), ssk, k1, turn. (36 sts)', { size: 0 })[1].stitches, 36,
+  'a real total after an in-segment list still reads');
+
+// -----------------------------------------------------------------------
+group('asterisk repeats');
+// -----------------------------------------------------------------------
+eq(K.evaluate('*K2, p2; rep from * to end.', 40), 40, 'rib to end');
+eq(K.evaluate('*K2, p2; rep from * to end.', 42), null, '42 does not divide by 4: null, never a guess');
+eq(K.evaluate('K1, *k2tog, yo; rep from * to last st, k1.', 30), 30, 'lace eyelets to last st');
+eq(K.evaluate('*K2tog; rep from * to end.', 30), 15, 'k2tog to end halves');
+eq(K.evaluate('K2tog to end.', 30), 15, '"K2tog to end" is a fill');
+eq(K.evaluate('*K1, k2tog; rep from * around.', 30), 20, 'rep from * around');
+eq(K.evaluate('K1, *yo, p2tog; rep from * to end, yo', 51), 52, 'Time Traveler eyelet rnd: 51 -> 52');
+eq(K.evaluate('K1. *M1. SM. K2. SM. M1. K4. M1. SM. K2. SM. M1.** Knit to next marker. Rep from * to ** once more. K1.', 36), 44,
+  'Bernat 3rd row: * to ** once more = +8');
+eq(K.evaluate('Knit to first marker. *M1. SM. K2. SM. M1. Knit to next marker. M1. SM. K2. SM. M1.** Knit to next marker. Rep from * to ** once more. Knit to end of row.', 44), 52,
+  'Bernat 5th row: +8 with three marker fills');
+eq(K.evaluate('Knit to next marker. *M1. SM. K2. SM. M1.** Knit to next marker. Rep from * twice more, then from * to ** once. Knit to end of rnd.', 76), 84,
+  'Bernat 2nd rnd: "twice more, then from * to ** once" = 4 workings, +8');
+eq(K.evaluate('*K1, ssk, knit to 3 sts before m, k2tog, k1; rep from * once more', 56), 52, 'sock toe: -4');
+eq(K.evaluate('(Knit to next marker. M1. SM. K2. SM. Knit to next marker. SM. K2. SM. M1) twice. Knit to end of rnd.', 252), 256,
+  'parenthesised group x twice');
+eq(K.evaluate('*K1tbl. P1. Rep from * around.', 120), 120, 'twisted rib around');
+eq(K.evaluate('*K2, p2; rep from * 3 more times.', 16), 16, 'N more times');
+eq(K.evaluate('*k3, p1; rep from * to marker, sm, knit to end', 50), 50, 'a neutral repeat to a marker still counts');
+eq(K.evaluate('*k2tog; rep from * to marker, knit to end', 50), null, 'a shaping repeat to a marker cannot be counted');
+
+// -----------------------------------------------------------------------
+group('stitch vocabulary');
+// -----------------------------------------------------------------------
+[
+  ['k2tog, ssk, k3tog, sssk, cdd', 13, 5],
+  ['yo, m1, m1L, m1R, m1p, kfb, pfb', 2, 9],
+  ['sl1, k1, psso', 2, 1],
+  ['sl 1, k2tog, psso', 3, 1],
+  ['s2kp', 3, 1],
+  ['k1tbl, p1tbl, k2tog tbl', 4, 3],
+  ['Sl 1 pwise wyb, k1', 2, 2],
+  ['sl 1 kwise with yarn in back (wyb), k16, ssk, turn', 19, 18],
+  ['C4F, C4B, T3R, 1/1 LC', 13, 13],
+  ['MB, k3', 4, 4],
+  ['pick up and knit 16 sts along edge of heel flap', 0, 16],
+  ['BO 4 sts, k to end', 20, 16]
+].forEach(function (c) {
+  var r = K.readInstruction(c[0], c[1]);
+  eq(r.count, c[2], '"' + c[0] + '" from ' + c[1]);
+});
+eq(K.evaluate('Purl.', 24), 24, '"Purl." is the whole row');
+eq(K.evaluate('Knit.', null), null, '"Knit." with nothing to go on is not a count');
+eq(K.evaluate('Work even.', 30), 30, '"Work even."');
+eq(K.evaluate('Work in patt to m, sl m, knit to m, M1, sl m, knit to m, sl m, M1, knit to end', 64), 66, 'gusset inc rnd +2');
+eq(K.evaluate('K2tog. Knit to last 2 sts. ssk.', 46), 44, 'Bernat sleeve dec');
+eq(K.evaluate('Cast on 16 (18-18-20-20-22) st (center front). Join to beg working in rnds.', 60), 76,
+  'casting on in a row adds to it (+16)');
+
+// -----------------------------------------------------------------------
+group('markers, short rows, charts, cables, until, delta');
+// -----------------------------------------------------------------------
+eq(K.readInstruction('K1, pm, k10, pm, k1', null).markers, [{ name: 'm1', at: 1 }, { name: 'm2', at: 11 }], 'pm positions');
+eq(K.readInstruction('K11, remove m, k10, remove m, k11, pm for end of instep, knit to end', 56).markers,
+  [{ name: 'end of instep', at: 32 }], '"pm for end of instep" is named');
+eq(K.readInstruction('Knit to m, remove m, knit to last 7 sts, pm for new beg of rnd.', 51).markers,
+  [{ name: 'BOR', at: 0 }], 'a new beginning-of-round marker is BOR');
+var tSR = 'Short-row 1 (RS) K25 (32, 37), wrap next st, turn.\nShort-row 2 (WS) P16 (18, 22), wrap next st, turn.';
+var pSR = K.parse(tSR);
+eq(pSR.map(function (l) { return pick(l, ['row', 'side', 'shortRow']); }),
+  [{ row: 1, side: 'rs', shortRow: true }, { row: 2, side: 'ws', shortRow: true }], 'Short-row N lines are rows with shortRow');
+ok(lineWith(K.parse('Row 1: K5, w&t.'), 'Row 1').shortRow, 'w&t is a short row');
+ok(!lineWith(K.parse('Row 1: Knit to end.'), 'Row 1').shortRow, 'a full row is not');
+eq(lineWith(K.parse('Rnd 5: K0 (1, 3), work Row 1 of Foot chart over 32 sts, k0 (1, 3), sl m, knit to end.'), 'Rnd 5').chart,
+  { name: 'Foot', row: 1 }, 'chart: "Row 1 of Foot chart"');
+eq(lineWith(K.parse('Row 7: work row 7 of Chart A.'), 'Row 7').chart, { name: 'A', row: 7 }, 'chart: "row 7 of Chart A"');
+eq(K.parse('Removing old beg-of-rnd m when you come to it, work Rows 1–12 of Leg chart for your size 5 times.')[0].chart,
+  { name: 'Leg', row: 1, rowEnd: 12 }, 'chart: a range of chart rows on a note');
+eq(lineWith(K.parse('Row 1: Work Chart B to end.'), 'Row 1').chart, { name: 'B', row: null }, 'chart: "Work Chart B"');
+eq(K.parse('Cont in patt, working C6F every 8th row.')[0].cable, { every: 8, name: 'C6F' }, 'cable cadence: C6F every 8th row');
+eq(K.parse('Cross the cable every 6 rnds as established.')[0].cable, { every: 6, name: null }, 'cable cadence: every 6 rnds');
+eq(K.parse('Row 3: P2, C4B, p2.')[0].cable, null, 'a cable with no cadence stated: null');
+eq(K.until('Work in k1, p1 rib for about 1½ (1½, 2)" (3.8 [3.8, 5] cm), or desired cuff length', 2),
+  { kind: 'length', value: 2, unit: 'in', endOn: null }, 'until: "for about 1½ (1½, 2)"" size 2');
+eq(K.until('Rep last rnd (K1tbl. P1) ribbing for a further 2" [5 cm].', 0),
+  { kind: 'length', value: 2, unit: 'in', endOn: null, relative: true }, 'until: "for a further 2"" is relative');
+eq(K.until('Knit even in rnds until work from sleeve divide measures 3 (3-2½-2½-1-1)" [7.5 (7.5-6.5-6.5-2.5-2.5) cm].', 2),
+  { kind: 'length', value: 2.5, unit: 'in', endOn: null }, 'until: hyphen list with ½');
+eq(K.until('Work until 40 rnds have been completed.', 0), { kind: 'rows', value: 40, unit: 'rnds', endOn: null }, 'until: rows');
+eq(K.until('Knit 5 (5-5-5-3-3) rnds even.', 4), { kind: 'rows', value: 3, unit: 'rnds', endOn: null }, 'until: "Knit 5 (...) rnds even"');
+eq(K.until('Knit to end.', 0), null, 'until: none');
+eq(lineWith(K.parse('CO 20 sts.\nRow 1: Knit.\nRow 2: K1, kfb, knit to end—1 st inc\'d.'), 'Row 2').delta, 1, "delta: \"1 st inc'd\"");
+eq(lineWith(K.parse('CO 20 sts.\nRow 1: Knit.\nRow 2: (dec rnd) knit to last 2 sts, k2tog—2 sts dec\'d.'), 'Row 2').delta, -2,
+  "delta: \"2 sts dec'd\" is negative");
+eq(lineWith(K.parse('Sizes S (M)\nCO 20 (24) sts.\nRow 1: Knit.\nRow 2: knit to end—2 (4) sts inc\'d.', { size: 1 }), 'Row 2').delta, 4,
+  'delta: size-resolved');
+
+// -----------------------------------------------------------------------
+group('sides and parity');
+// -----------------------------------------------------------------------
+var tPar = 'CO 30 sts.\nRow 1 (RS): Knit.\nRow 2: Purl.\nRow 3: Knit.\nRow 4 (WS): Purl.\nRow 5: Knit.';
+eq(K.parse(tPar).filter(function (l) { return l.kind === 'row'; }).map(function (l) { return l.side; }),
+  ['rs', 'ws', 'rs', 'ws', null], 'untagged rows between two tags that agree take their parity; after the last tag: unknown');
+eq(K.parse('CO 30 sts.\nRow 1: Knit.\nRow 2 (WS): Purl.\nRow 3: Knit.').filter(function (l) { return l.kind === 'row'; })
+  .map(function (l) { return l.side; }), [null, 'ws', null], 'one tag: the rows around it are not guessed');
+eq(K.parse('CO 30 sts.\nRow 1: Knit.\nRow 2: Purl.').filter(function (l) { return l.kind === 'row'; })
+  .map(function (l) { return l.side; }), [null, null], 'no tag anywhere: unknown (null), never assumed');
+eq(K.parse('CO 30 sts. Join.\nRnd 1 (RS): Knit.\nRnd 2: Knit.').filter(function (l) { return l.kind === 'row'; })
+  .map(function (l) { return l.side; }), [null, null], 'rounds have no side');
+eq(lineWith(K.parse('1st row:(RS). K1. PM. K2.'), '1st row').side, 'rs', 'side after the colon: "1st row:(RS)."');
+eq(lineWith(K.parse('CO 10 sts.\n8th row: (WS). Cast on 16 st (center front).'), '8th row').side, 'ws', '"8th row: (WS)."');
+var tAlt = 'CO 36 sts.\n1st row:(RS). Knit.\n2nd and alt rows: Purl.\n3rd row: K1, m1, knit to last st, m1, k1.\n5th row: As 3rd row.\n' +
+  '7th row: As 3rd row.\n8th row: (WS). Cast on 16 st (center front). Join to beg working in rnds. 58 sts.';
+var pAlt = K.parse(tAlt);
+eq(lineWith(pAlt, '2nd and alt').rowList, [2, 4, 6], '"2nd and alt rows" answers for 2, 4, 6 (8 is written out)');
+eq(K.lineFor(pAlt, 4).text, '2nd and alt rows: Purl.', 'lineFor(4) is the alt-rows line');
+eq(K.lineFor(pAlt, 8).text.slice(0, 9), '8th row: ', 'lineFor(8) is its own row');
+eq([3, 5, 7].map(function (r) { return K.lineFor(pAlt, r).side; }), ['rs', 'rs', 'rs'], 'odd rows RS by parity');
+eq(K.targetFor(pAlt, 7), 42, 'targetFor(7): 36 + 2 + 2 + 2');
+
+var tTwo = 'CO 30 sts.\nRow 1 (RS): Knit.\nRow 2 (WS): Purl.\nRow 3: Knit.\nRow 4: Purl.\nRow 5 (WS): Knit.';
+eq(K.parse(tTwo).filter(function (l) { return l.kind === 'row'; }).map(function (l) { return l.side; }),
+  ['rs', 'ws', null, null, 'ws'], 'tags that disagree by parity (2 WS, 5 WS) leave the rows between them unknown');
+eq(lineWith(K.parse('CO 30 sts.\nRows 1, 3, and 5: (Wrong side facing) Knit.'), 'Rows 1').side, 'ws',
+  '"(Wrong side facing)" is a side tag (Icelandic shawl: odd rows WS)');
+eq(lineWith(K.parse('CO 64 sts.\nRow 1: RS (Set-up row) Join CC1, k32, turn.'), 'Row 1').side, 'rs', '"Row 1: RS (Set-up row)"');
+eq(lineWith(K.parse('Next row: (RS, Row 1 of patt) K2, yo, sl m, knit to end.'), 'Next row').side, 'rs', '"(RS, Row 1 of patt)"');
+[['Rnd 1: (dec rnd) Knit to m, ssk, knit to end.', 'Rnd 1'], ['Row 12: (turning ridge) *K1tbl; rep from * across.', 'Row 12'],
+ ['Rnd 4 (dec): *K3, k1f&b, k3, p2tog; rep from * around.', 'Rnd 4']].forEach(function (c) {
+  eq(lineWith(K.parse('CO 63 sts.\n' + c[0]), c[1]).side, null, c[1] + ': a label in the side slot is not a side');
+});
+
+eq(lineWith(K.parse('CO 60 sts.\nRow 2: Purl.\nRow 3: Knit.'), 'Row 2').computed, null,
+  'a part whose first written row is Row 2 does not count it from the cast-on (row 1 was not read)');
+
+// -----------------------------------------------------------------------
+group('ebooks, parts read on their own, chart sentences');
+// -----------------------------------------------------------------------
+var book = 'Contents\nFirst Sock by A. Knitter ............ PAGE 2\nSecond Sock by B. Knitter ............ PAGE 3\n' +
+  '=== PAGE 2 ===\nFirst Sock\nCUFF\nCO 40 sts. Join to work in the rnd.\nRnd 1: *K2, p2; rep from * to end.\nRnd 2: Knit.\n' +
+  '=== PAGE 3 ===\nSecond Sock\nSizes S (M)\nCUFF\nCO 48 (56) sts. Join to work in the rnd.\nRnd 1: *K1, p1; rep from * to end.\n' +
+  'HEEL FLAP\nRow 1 (RS): *Sl 1, k1; rep from * to end.\nRow 2 (WS): Sl 1, purl to end.\nRep last 2 rows 4 more times.\n' +
+  'TURN HEEL\nRow 1 (RS): Sl 1, k10, ssk, k1, turn.\n';
+var pb = K.parse(book);
+eq(pb.meta.groups, ['First Sock', 'Second Sock'], 'an ebook with a contents page: one group per pattern');
+var sb = K.splitSections(book);
+eq(sb.map(function (s) { return [s.group && s.group.name, s.name]; }),
+  [['First Sock', 'Cuff'], ['Second Sock', 'Cuff'], ['Second Sock', 'Heel Flap'], ['Second Sock', 'Turn Heel']],
+  'each pattern keeps its own parts; nothing runs on from the first into the second');
+var turn = sb[3];
+ok(/^Sizes: S, M\n/.test(turn.text), 'a part carries its pattern\'s size line', turn.text.slice(0, 40));
+ok(/Start with 48 \(56\) sts\./.test(turn.text), 'a part that carries on from the one before starts from its count', turn.text.slice(0, 80));
+eq(lineWith(K.parse(turn.text, { size: 1 }), 'Row 1 (RS): Sl 1, k10').computed, 55, '...so read on its own, Turn Heel row 1 at size M is 56 - 1');
+var chs = K.parse('CO 339 sts.\nRows 1, 3, and 5: (Wrong side facing) Knit. See Chart A for Rows 2-12.\nRow 2: K3, *k1; rep from * to end.\nRow 4: Knit.');
+eq([lineWith(chs, 'Row 2:').chart, lineWith(chs, 'Row 4:').chart], [{ name: 'A', row: 2 }, { name: 'A', row: 4 }],
+  '"See Chart A for Rows 2-12" puts the chart on the rows it covers');
+var che = K.parse('CO 99 sts.\nRow 1: K1, work Row 1 of Oriel chart, k1.\nShape waist: Cont in charted patt, dec 1 st each end every 8th row 6 times, ending with chart Row 20.');
+eq(lineWith(che, 'ending with chart Row 20').chart, { name: 'Oriel', row: 20 }, '"ending with chart Row 20" names the chart the part was last on');
+
+// -----------------------------------------------------------------------
+group('rows: unique numbers, flat inside round, short-row honesty');
+// -----------------------------------------------------------------------
+var tEnum = 'CO 30 sts.\nRows 2, 4, 6 and 8 (WS): Purl.\nRows 1, 3, 5 and 7 (RS): Knit.\nNext row (RS): Knit.';
+eq(lineWith(K.parse(tEnum), 'Next row').row, 9, 'no second row 8 after the enumerations');
+var tEnum2 = 'CO 30 sts.\nRow 1 (RS): Knit.\nRows 2, 4, 6 and 8 (WS): Purl.\nRows 3, 5 and 7 (RS): Knit.\nNext row (RS): Knit.';
+eq(lineWith(K.parse(tEnum2), 'Next row').row, 9, '...in either order');
+var tRep8 = 'CO 40 sts.\nRow 1 (RS): K1, m1, knit to last st, m1, k1.\nRow 2 (WS): Purl.\nRow 3: Knit.\nRow 4: Purl.\nRow 5: Knit.\nRow 6: Purl.\nRow 7: Knit.\nRow 8 (WS): Purl.\nRep Rows 1-8 4 more times.';
+var pR8 = K.parse(tRep8);
+var r8 = lineWith(pR8, 'Rep Rows 1-8');
+eq(pick(r8, ['repeatFrom', 'repeatTo', 'count']), { repeatFrom: 9, repeatTo: 40, count: 50 }, '"Rep Rows 1-8 4 more times" covers rows 9-40, 42 -> 50');
+eq([9, 16, 17, 40].map(function (r) { return K.targetFor(pR8, r); }), [44, 44, 46, 50], '...counting the shaping row by row');
+ok(K.lineFor(pR8, 20) === r8, 'lineFor(20) is the repeat line');
+eq(K.summary(pR8).maxRow, 40, 'the piece runs to row 40');
+var tHeel = 'CO 64 sts. Join to work in the rnd.\nRnds 1-40: Knit.\nHeel flap: worked back and forth over 32 sts.\n' +
+  'Row 1 (RS): *Sl 1, k1; rep from * to end.\nRow 2 (WS): Sl 1, purl to end.\nShort-row 1 (RS): K18, ssk, k1, turn.\n' +
+  'Gusset\nRnd 1: Knit.';
+var pHeel = K.parse(tHeel);
+eq(['Rnds 1-40', 'Row 1 (RS)', 'Row 2 (WS)', 'Short-row 1', 'Rnd 1: Knit'].map(function (s) { return lineWith(pHeel, s).workedIn; }),
+  ['rounds', 'rows', 'rows', 'rows', 'rounds'], 'workedIn: a flat heel inside a sock knitted in the round, then rounds again');
+ok(!lineWith(K.parse('CO 30 sts.\nRow 11: Knit 10 stitches of heel, do not turn'), 'Row 11').shortRow, '"do not turn" is not a short row');
+ok(!lineWith(K.parse('CO 40 sts.\nRow 2: Knit stitches until 2 stitches before the marker, knit 2 together, slip marker, work instep stitches. Turn work, position needle point and work next instep stitches, slip marker, knit 2 together, knit rest of stitches on this needle point.'), 'Row 2').shortRow,
+  'magic loop "Turn work, position needle point" is not a short row');
+ok(!lineWith(K.parse('CO 64 sts.\nRow 1: K64, turn.'), 'Row 1').shortRow, 'a turn after every stitch is worked is a full row');
+ok(lineWith(K.parse('CO 64 sts.\nRow 1: K60, turn.'), 'Row 1').shortRow, '...one that leaves stitches is a short row');
+ok(lineWith(K.parse('CO 30 sts.\nShort-row 1 (RS) K25, wrap next st, turn.'), 'Short-row').shortRow, '"wrap next st, turn"');
+
+// -----------------------------------------------------------------------
+group('size-conditional blocks');
+// -----------------------------------------------------------------------
+var tScope = 'Sizes XS/S (M-L-XL-2/3XL-4/5XL)\nCast on 200 (208-232-252-256-268) sts.\nRnd 1: Knit.\nRnd 2: Knit.\n' +
+  'Sizes XL, 2/3XL and 4/5XL only: 1st rnd: Knit.\n' +
+  '2nd rnd: (Knit to next marker. M1. SM. K2. SM. Knit to next marker. SM. K2. SM. M1) twice. Knit to end of rnd. (256-260-\n272) sts.\n' +
+  'Rep last 2 rnds, inc 4 sts every other rnd (1-6-10) time(s) more. (260-284-312) sts.\n' +
+  'All sizes: Cont even in rnds on 204 (216-240-260-284-312) sts until work from front neck measures 8½ (9-10-11-12-13)" [21.5 (23-25.5-28-30.5-33) cm] sts.';
+var pS3 = K.parse(tScope, { size: 3 });
+eq(pick(lineWith(pS3, '2nd rnd: (Knit'), ['row', 'count', 'computed']), { row: 4, count: 256, computed: 256 },
+  'XL: a 3-value list on a scoped line is read for the sizes it names (and numbered on from rnd 2)');
+eq(pick(lineWith(pS3, 'Rep last 2 rnds, inc 4'), ['kind', 'repeatTimes', 'count']), { kind: 'repeat', repeatTimes: 2, count: 260 },
+  'XL: "(1-6-10) time(s) more" = 1 more, 260 sts');
+eq(lineWith(pS3, 'Sizes XL').sizeSkip, undefined, 'XL keeps the block');
+var pS0 = K.parse(tScope, { size: 0 });
+ok(lineWith(pS0, 'Sizes XL').kind === 'note' && lineWith(pS0, 'Sizes XL').sizeSkip, 'XS/S drops the scoped first line');
+ok(lineWith(pS0, '2nd rnd: (Knit').kind === 'note' && lineWith(pS0, '2nd rnd: (Knit').sizeSkip, '...and the lines under the scope');
+ok(lineWith(pS0, 'Rep last 2 rnds, inc 4').kind === 'note', '...and its repeat');
+var allSizes = lineWith(pS0, 'All sizes');
+ok(allSizes && !allSizes.sizeSkip, '"All sizes:" ends the block');
+eq(allSizes.until, { kind: 'length', value: 8.5, unit: 'in', endOn: null }, 'All sizes line: until 8½"');
+eq(K.detectSizes('The instructions are written for XS/S. If changes are necessary\nfor larger size(s) the instructions will be written XS/S (M-L-\nXL-2/3XL-4/5XL).\nSizes XS/S M L\nSizes XL 2/3XL 4/5XL'),
+  ['XS/S', 'M', 'L', 'XL', '2/3XL', '4/5XL'], 'Bernat: six sizes from the wrapped "XS/S (M-L-XL-...)" line, not the 3-size yarn table');
+eq(K.detectSizes('FINISHED SIZE 7 (8½, 9½)" (18 [21.5, 24] cm) foot circumference'), ['7"', '8½"', '9½"'],
+  'sock sizes named by their measurement');
+eq(K.sizeScope('Size 7" (18 cm) only:', ['7"', '8½"', '9½"']), { indices: [0], label: true }, 'a measurement-named scope');
+
+// -----------------------------------------------------------------------
+group('sections and garment parts');
+// -----------------------------------------------------------------------
+var tSock = 'CUFF\nCO 64 sts. Join to work in the rnd.\nRnd 1: *K2, p2; rep from * to end.\nRnds 2-20: Rep Rnd 1.\n' +
+  'HEEL FLAP\nRow 1 (RS): *Sl 1, k1; rep from * to end.\nRow 2 (WS): Sl 1, purl to end.\n' +
+  'Turn Heel\nRow 1 (RS): Sl 1, k16, ssk, k1, turn.\nRow 2 (WS): Sl 1, p5, p2tog, p1, turn.\n' +
+  'Shape Gusset\nRnd 1: Knit.\nRnd 2: Knit.\nTOE\nRnd 1: *K1, ssk, knit to 3 sts before m, k2tog, k1; rep from * once more.';
+eq(K.splitSections(tSock).map(function (s) { return s.name; }), ['Cuff', 'Heel Flap', 'Turn Heel', 'Shape Gusset', 'Toe'],
+  'sock parts by their garment names ("Turn Heel" is a part, not an imperative)');
+eq(K.placement('FINISHING\nSew pockets to the Front, 2 cm above the ribbing.').length >= 0, true, 'placement runs');
+var tGarment = 'BACK\nCO 80 sts.\nRow 1 (RS): *K2, p2; rep from * to end.\nRow 2 (WS): *K2, p2; rep from * to end.\n' +
+  'FRONT\nCO 80 sts.\nRow 1 (RS): Knit.\nSLEEVES (make 2)\nCO 40 sts.\nRow 1 (RS): Knit.';
+var sg = K.splitSections(tGarment);
+eq(sg.map(function (s) { return [s.name, s.makeCount]; }), [['Back', 1], ['Front', 1], ['Sleeves', 2]], 'Back / Front / Sleeves (make 2)');
+
+// -----------------------------------------------------------------------
+group('glossary');
+// -----------------------------------------------------------------------
+var gText = 'ABBREVIATIONS\nAlt = Alternate P = Purl\nK = Knit Rnd(s) = Round(s)\nK2tog = Knit next 2 stitches together\nSsk = Slip next 2 stitches\n\nRow 1: K2, ssk, yo, knit to end.';
+var g = K.glossary(gText);
+ok(g.some(function (x) { return x.abbr === 'K2tog' && x.fromPattern; }), 'the pattern\'s own K2tog line, fromPattern');
+ok(g.some(function (x) { return x.abbr === 'P' && x.meaning === 'Purl' && x.fromPattern; }), 'two definitions on one line split');
+ok(g.some(function (x) { return x.abbr === 'yo' && !x.fromPattern; }), 'yo from the table (used, not defined)');
+ok(!g.some(function (x) { return x.abbr === 'C6F'; }), 'unused table entries are not offered');
+eq(g.filter(function (x) { return /^ssk$/i.test(x.abbr); }).length, 1, 'a defined abbreviation is not offered twice');
+ok(P.glossary('Rnd 1: 6 sc in magic ring (6)').some(function (x) { return x.abbr === 'sc'; }), 'Patterns.glossary works for crochet too');
+
+// -----------------------------------------------------------------------
+group('repeats keep the shaping going (coordinator audit)');
+// -----------------------------------------------------------------------
+var shawlA = 'Set-up: CO 7 sts. (7 sts)\nRow 1 (RS): K2, yo, k1, yo, k1, yo, k1, yo, k2. (11 sts)\nRow 2 (WS): Knit. (11 sts)\n' +
+  'Row 3 (RS): K2, yo, k to centre st, yo, k1, yo, k to last 2 sts, yo, k2. (15 sts)\nRow 4 (WS): Knit. (15 sts)\n';
+var shRange = K.parse(shawlA + 'Rows 5-124: Rep Rows 3-4. (255 sts)\nRow 125 (RS): Knit. (255 sts)');
+var shTimes = K.parse(shawlA + 'Rep Rows 3-4 60 more times. (255 sts)\nNext row (RS): Knit. (255 sts)');
+[shRange, shTimes].forEach(function (p, k) {
+  var form = k ? '"Rep Rows 3-4 60 more times"' : '"Rows 5-124: Rep Rows 3-4"';
+  eq([5, 6, 7, 64, 100, 123, 124, 125].map(function (r) { return K.targetFor(p, r); }),
+    [19, 19, 23, 135, 207, 255, 255, 255], form + ': rows 5, 6, 7 ... 124 grow by 4 every RS row');
+});
+eq(lineWith(shTimes, 'Next row').row, 125, '"Next row" after "60 more times" is row 125');
+eq(K.summary(shTimes).maxRow, 125, 'the times form runs the piece to row 125');
+var sleeveA = 'Set-up: CO 42 sts. (42 sts)\nRow 1 (RS): Knit. (42 sts)\nRow 2 (WS): Purl. (42 sts)\n' +
+  'Row 3 (RS): K1, m1, k to last st, m1, k1. (44 sts)\nRow 4 (WS): Purl. (44 sts)\nRep Rows 3-4 10 more times. (64 sts)\nNext row (RS): Knit.';
+var pSl = K.parse(sleeveA);
+eq([5, 6, 7, 24].map(function (r) { return K.targetFor(pSl, r); }), [46, 46, 48, 64], 'sleeve increases do not stick at 44');
+eq(lineWith(pSl, 'Next row').count, 64, 'the row after the repeat counts from its total');
+var noTot = K.parse('CO 20 sts.\nRow 1 (RS): K1, m1, knit to end.\nRow 2 (WS): Purl.\nRep Rows 1-2 4 more times.\nNext row (RS): Knit.');
+eq(pick(lineWith(noTot, 'Rep Rows'), ['count', 'countSource']), { count: 25, countSource: 'computed' },
+  'a repeat with no printed total is worked out row by row');
+eq(lineWith(noTot, 'Next row').computed, 25, '...and the next row starts from it');
+// the built-in Socks template (js/app-knitting.js): a heel flap printed with
+// the 32 sts it is worked over, though the leg had 64
+var sockA = 'Rnds 17-56: Knit. (64 sts)\nHeel Flap\nThe heel flap is worked back and forth over the first 32 sts; the other 32 sts wait for the instep.\n' +
+  'Row 57 (RS): *Sl1, k1; rep from * to end. (32 sts)\nRow 58 (WS): Sl1, p to end. (32 sts)\nRows 59-88: Rep Rows 57-58. (32 sts)';
+var pSock = K.parse('Set-up: CO 64 sts. (64 sts)\n' + sockA);
+eq([59, 60, 75, 87, 88].map(function (r) { return K.targetFor(pSock, r); }), [32, 32, 32, 32, 32],
+  'socks template heel flap rows 59-88: 32 each (a row replays what its words do, not the drop to 32)');
+var gus = K.parse('Rnd 104: K9, pick up and knit 17 sts along the side of the heel flap, pm, k32, pm, pick up and knit 17 sts along the other side of the heel flap, k9. (84 sts)\n' +
+  'Rnd 105: K to 3 sts before marker, k2tog, k1, sm, k32, sm, k1, ssk, k to end. (82 sts)\nRnd 106: Knit. (82 sts)\nRnds 107-124: Rep Rnds 105-106. (64 sts)');
+eq([107, 108, 109, 123, 124].map(function (r) { return K.targetFor(gus, r); }), [80, 80, 78, 64, 64], 'socks gusset decreases keep going to 64');
+
+// -----------------------------------------------------------------------
+group('expand');
+// -----------------------------------------------------------------------
+var px = K.parse('CO 20 sts.\nRow 1 (RS): K2, *p2, k2; rep from * to last 2 sts, p2.\nRow 2 (WS): Purl.\nRow 3 (RS): K1, k2tog, knit to last 3 sts, ssk, k1.\nRow 4 (WS): BO 4 sts, purl to end.\nRow 5 (RS): K3, C6F, knit to end.');
+var e1 = K.expand(px, 1, 20, null);
+eq(e1.stitches.length, 20, 'expand row 1: 20 records');
+eq(e1.stitches.slice(0, 6).map(function (s) { return s.t; }), ['k', 'k', 'p', 'p', 'k', 'k'], 'k2 p2 rib in order');
+ok(e1.stitches.every(function (s) { return s.w === 0.8 && s.h === 0.75 && s.side === 'rs'; }), 'rib: width 0.8, height 0.75, side rs');
+var e2 = K.expand(px, 2, 20, e1.state);
+ok(e2.stitches.every(function (s) { return s.t === 'p' && s.w === 1; }), 'purl row: p, width 1');
+var e3 = K.expand(px, 3, 20, e2.state);
+eq(e3.stitches.length, 18, 'dec row: 18 records');
+eq([e3.stitches[1].t, e3.stitches[16].t], ['k2tog', 'ssk'], 'k2tog and ssk where they are worked');
+eq(e3.dec, [1, 16], 'dec positions');
+var e4 = K.expand(px, 4, 18, e3.state);
+eq([e4.stitches.filter(function (s) { return s.t === 'bo'; }).length, e4.live], [4, 14], 'bind off: 4 bo records, 14 live');
+var e5 = K.expand(px, 5, 14, e4.state);
+var cab = e5.stitches.filter(function (s) { return s.t === 'cable'; });
+eq([cab.length, cab[0].w, cab[0].cross, cab[0].span], [6, 0.85, 'f', 6], 'C6F: six cable records, w 0.85, front cross');
+var pg = K.parse('CO 10 sts.\nRow 1: Knit.\nRow 2: Knit.\nRow 3: Knit.');
+var g1 = K.expand(pg, 1, 10, null), g2 = K.expand(pg, 2, 10, g1.state);
+eq([g1.height, g2.height], [0.75, 0.5], 'garter: a knit row after a knit row is half height');
+var psr = K.parse('CO 30 sts.\nRow 1 (RS): K20, w&t.\nRow 2 (WS): P10, w&t.');
+var es = K.expand(psr, 1, 30, null);
+eq([es.stitches.length, es.shortRow], [20, true], 'short row: records only for the 20 stitches worked');
+var plx = K.parse('CO 8 sts.\nRow 1: K1, yo, k2tog, k2, yo, ssk, k1.');
+var el = K.expand(plx, 1, 8, null);
+eq(el.stitches.map(function (s) { return s.t; }), ['k', 'yo', 'k2tog', 'k', 'k', 'yo', 'ssk', 'k'], 'lace: yo holes recorded');
+eq(el.inc, [1, 5], 'yo positions are the increases');
+
+// -----------------------------------------------------------------------
+group('workMode / startHint / colours');
+// -----------------------------------------------------------------------
+eq(K.workMode('CO 60 sts. Join to work in the rnd.\nRnd 1: Knit.\nRnd 2: Knit.'), 'rounds', 'workMode rounds');
+eq(K.workMode('CO 60 sts.\nRow 1 (RS): Knit.\nRow 2 (WS): Purl.'), 'rows', 'workMode rows');
+eq(K.workMode('Using dpns, CO 48 sts and join in the round. Knit every round.'), 'rounds', 'workMode from words');
+eq(pick(K.startHint('CO 60 sts. Join to work in the rnd, being careful not to twist.\nRnd 1: Knit.'), ['start', 'castOn']),
+  { start: 'cast-on-round', castOn: 60 }, 'startHint: cast on in the round');
+eq(pick(K.startHint('Using the Turkish method (see Glossary), CO 24 (28, 32) sts.\nNext rnd: Knit.'), ['start', 'castOn', 'method']),
+  { start: 'cast-on-round', castOn: 24, method: 'turkish' }, 'startHint: Turkish cast-on (toe-up)');
+eq(pick(K.startHint('CO 30 sts.\nRow 1 (RS): Knit.'), ['start', 'castOn']), { start: 'cast-on', castOn: 30 }, 'startHint: flat');
+eq(K.colorHex('red'), P.colorHex('red'), 'colorHex shared');
+eq(K.stuffingHint('Stuff lightly.'), true, 'stuffingHint shared');
+
+
+// -----------------------------------------------------------------------
+group('polish: instructions printed inside a paragraph');
+// -----------------------------------------------------------------------
+var hat = K.parse('Hat\nCO 100 sts. Place marker (m) and join for working\nin the rnd. Work in k2, p2 rib for 1". Inc. Rnd: Work\nin St st (knit all sts) inc 20 sts evenly spaced—120 sts. Work 5\nrnds even in St st. Work Rows 1–40 of Lace chart, placing m\nbetween each rep—80 sts rem. Break yarn, leaving a 12" tail.');
+eq(pick(lineWith(hat, 'Inc. Rnd:'), ['kind', 'row', 'count']), { kind: 'row', row: 1, count: 120 }, 'mid-paragraph "Inc. Rnd: ...—120 sts." is round 1 of 120');
+eq(lineWith(hat, 'Inc. Rnd:').text, 'Inc. Rnd: Work in St st (knit all sts) inc 20 sts evenly spaced—120 sts.', '...joined over its wrap, up to its full stop');
+eq(pick(lineWith(hat, 'Work 5 rnds even'), ['kind', 'count']), { kind: 'repeat', count: 120 }, '"Work 5 rnds even in St st." on its own: 120');
+eq(pick(lineWith(hat, 'Work Rows 1–40 of Lace chart'), ['count', 'chart']), { count: 80, chart: { name: 'Lace', row: 1, rowEnd: 40 } }, 'the chart sentence: 80 sts at its end');
+ok(lineWith(hat, 'Break yarn').text.indexOf('Break yarn') === 0, 'the prose after it keeps its own line');
+eq(pick(lineWith(hat, 'CO 100 sts'), ['kind', 'count']), { kind: 'setup', count: 100 }, 'the cast-on at the head of the paragraph is untouched');
+var toe = K.parse('CO 60 sts.\nRnd 1: Knit.\nFoot: Work even until foot measures 7" from heel, ending with chart\nRnd 10. toe: Dec rnd: K1, ssk, knit to last 3 sts, k2tog, k1—2 sts dec\'d. Work 1\nrnd even. Rep last 2 rnds 4 more times—50 sts rem.');
+eq(pick(lineWith(toe, 'Foot: Work even'), ['kind', 'count']), { kind: 'row', count: 60 }, '"Foot: Work even until ..." goes on with the stitches before it');
+ok(toe.every(function (l) { return !(l.kind === 'row' && l.row === 10); }), '"ending with chart" / "Rnd 10." is the end of a sentence, not round 10');
+eq(lineWith(toe, 'toe:').text.trim(), 'toe:', 'a small-capitals heading run into the sentence goes on a line of its own');
+eq(pick(lineWith(toe, 'Dec rnd:'), ['kind', 'count', 'delta']), { kind: 'row', count: 58, delta: -2 }, 'Dec rnd: 58');
+eq(pick(lineWith(toe, 'Rep last 2 rnds 4 more times'), ['kind', 'count']), { kind: 'repeat', count: 50 }, 'its repeat: 50 printed');
+var bern = K.parse('3rd row: K1. *M1. SM. K2. SM. M1.** Knit to next marker. Rep from * to ** once more. K1. 44 sts.\nNext rnd: Knit to next marker. Remove marker. K1. Slip next 44 sts onto scrap yarn. Cast on 2 sts. K58. 140 sts.');
+eq(bern.filter(function (l) { return l.kind === 'row'; }).length, 2, 'a row written in many short sentences stays one row ("K1. *M1. SM. K2.", "Cast on 2 sts.")');
+var spec = K.parse('Scarf\nWith 4 strands of A held tog, use the knitted method\n(see below) to CO 27 sts. Knit 6 rows. Next row: K3,\nwork in lace to last 3 sts, k3.');
+eq(pick(lineWith(spec, 'to CO 27 sts'), ['kind', 'count']), { kind: 'setup', count: 27 }, '"With ..., use the knitted method (see below) to CO 27 sts." is the cast-on');
+eq(lineWith(spec, 'Knit 6 rows').text, 'Knit 6 rows.', '"Knit 6 rows." is its own instruction');
+eq(lineWith(spec, 'Next row: K3').text, 'Next row: K3, work in lace to last 3 sts, k3.', '"Next row:" joined over its wrap');
+var notes = K.parse('Shawl\nCO 7 sts. Work Rows 1–20 according to Chart 1, placing\nmarkers as shown on Row 1, and on either side of the\nboxes on Row 9 (see Notes). Rep Rows 9–20 six more times—191 sts.\nChange to Chart 2, and work Rows 1–8 once—207 sts.');
+ok(!notes.some(function (l) { return l.kind === 'row' && l.row === 9; }), '"...boxes on Row 9 (see Notes)." is not row 9');
+eq(pick(lineWith(notes, 'Rep Rows 9–20 six more times'), ['kind', 'count']), { kind: 'repeat', count: 191 }, 'mid-paragraph repeat: 191');
+ok(lineWith(notes, 'Change to Chart 2').kind !== 'setup', 'a chart sentence is never a foundation');
+var orl = K.parse('With largest needles, CO 99 sts.\nShape waist: Cont in patt, dec 1 st each end of needle every 8th row 6 times, ending with chart\nRow 20—87 sts rem; piece measures about 6" from CO. Shape bust: Inc row: (RS)\nInc 1 st inside selvedge st each end of needle—2 sts inc\'d.');
+ok(!orl.some(function (l) { return l.kind === 'row' && l.row === 20; }), '"ending with chart" / "Row 20—87 sts rem" is not row 20');
+eq(pick(lineWith(orl, 'Shape bust: Inc row'), ['kind', 'side', 'delta', 'count']), { kind: 'row', side: 'rs', delta: 2, count: 89 }, '"Shape bust: Inc row: (RS)" is a named row: 87 + 2');
+
+// -----------------------------------------------------------------------
+group('polish: short rows');
+// -----------------------------------------------------------------------
+var flap = K.parse('CO 30 sts.\nRow 1 (RS): *Sl 1, k1; rep from * to end, turn.\nRow 2 (WS): Sl 1, purl to end, turn.');
+eq(flap.filter(function (l) { return l.kind === 'row'; }).map(function (l) { return [l.shortRow, l.count]; }), [[false, 30], [false, 30]],
+  'a heel-flap row that works to the end and turns is not a short row');
+eq(K.parse('Row 1 (RS): Sl 1, purl to end, turn.').filter(function (l) { return l.kind === 'row'; })[0].shortRow, false, '...even with no count to check against');
+var gen = K.parse('CO 48 sts.\nRnd 1: Knit.\nHeel\nPlace 20 sts of sole on one dpn. Work these 20 sts back and forth for heel as foll:\nRow 1: (RS) K19, turn, leaving last st unworked.\nRow 2: (WS) Yo backward, purl to last st, turn, leaving last st unworked.');
+eq(gen.filter(function (l) { return l.kind === 'row'; }).map(function (l) { return [l.shortRow, l.count]; }), [[false, 48], [true, null], [true, null]],
+  'a short row that only turns has no count of its own (not the 48 on the needles)');
+var wt = K.parse('CO 66 sts.\nRow 1: Knit.\nShort-row 1 (RS) K25, wrap next st, turn.\nShort-row 2 (WS) P16, wrap next st, turn.\nRow 2: Knit.');
+eq(wt.filter(function (l) { return l.kind === 'row'; }).map(function (l) { return l.count; }), [66, null, null, 66], 'wrap-and-turn rows: no count; the row after counts on from 66');
+var turnHeel = K.parse('CO 30 sts.\nRow 1: Knit.\nTurn heel\nRow 1 (RS): K17, ssk, k1, turn.\nRow 2 (WS): Sl 1, p5, p2tog, p1, turn.');
+eq(turnHeel.filter(function (l) { return l.kind === 'row'; }).map(function (l) { return l.count; }), [30, 29, 28], 'heel-turn short rows that decrease keep their counts');
+
+// -----------------------------------------------------------------------
+group('polish: two numbers over more sizes');
+// -----------------------------------------------------------------------
+var ftT = 'Finished size 5 (6, 7, 8, 9, 10)" foot circumference. To fit a toddler (child, woman\'s small, woman\'s medium, man\'s small, man\'s medium) foot.\n' +
+  'Notes: Two numbers are given in instructions. The first number is for sizes toddler, woman\'s small, and man\'s small (worked over 60 sts); the\n' +
+  'second number, in parentheses, is for sizes child\'s, woman\'s medium, and man\'s medium (worked over 68 sts).\nLeg\nCO 60 (68) sts. Join in the rnd.\nRnd 1: K1 (2), *p2, k2; rep from * to last 3 (2) sts, p2, k1 (0).';
+eq(K.detectSizes(ftT).length, 6, 'six sizes');
+eq([0, 1, 2, 3, 4, 5].map(function (s) { return lineWith(K.parse(ftT, { size: s }), 'CO 60 (68)').count; }), [60, 68, 60, 68, 60, 68],
+  'the stated grouping maps "60 (68)" onto six sizes');
+eq([0, 3].map(function (s) { return lineWith(K.parse(ftT, { size: s }), 'Rnd 1:').count; }), [60, 68], 'in-segment pairs map the same way ("K1 (2)")');
+var noSay = 'Finished size 5 (6, 7, 8, 9, 10)" foot circumference.\nLeg\nCO 60 (68) sts. Join in the rnd.';
+eq([0, 1, 3].map(function (s) { return lineWith(K.parse(noSay, { size: s }), 'CO 60 (68)').count; }), [null, null, null],
+  'no grouping printed: a two-number list on six sizes says nothing (no count)');
+var smT = 'Sizes: S (M, L, XL)\nInstructions are given for sizes S/M (L/XL).\nBack\nCO 80 (96) sts.\nRow 1: Knit.';
+eq([0, 1, 2, 3].map(function (s) { return lineWith(K.parse(smT, { size: s }), 'CO 80 (96)').count; }), [80, 80, 96, 96], '"sizes S/M (L/XL)" groups four sizes into two numbers');
+var smParts = K.splitSections(ftT);
+ok(smParts.some(function (s) { return /^Numbers: the first number is for sizes 5", 7", 9"; the second number is for sizes 6", 8", 10"\.$/m.test(s.text); }),
+  'a part carries the grouping, so it reads the same on its own');
+
+// -----------------------------------------------------------------------
+group('polish: odds and ends');
+// -----------------------------------------------------------------------
+eq(K.readInstruction('Knit 6, knit 2 together. Repeat to end of row.', 48).count, 42, '"Repeat to end of row" with no star repeats the stitches before it');
+eq(K.readInstruction('Knit 6, knit 2 together. Repeat to end of row.', 36).count, null, '...and gives no count when it does not divide');
+eq(K.readInstruction('Purl 2 together, purl 3.', 5).count, 4, '"purl 2 together" spelled out');
+eq(pick(lineWith(K.parse('CO 64 sts.\nRnd 1: Knit.\nRepeat rnds 1 and 1 until you have 18 sts on each side for a total of 36 stitches.'), 'for a total'), ['count']), { count: 36 },
+  '"...for a total of 36 stitches" is the count, not the per-side 18');
+eq(K.readInstruction('Work end of rnd, remove m, k1, pm for new beg of rnd.', 51).count, 51, 'moving the beginning of the round keeps the count');
+eq(K.readInstruction('Work to last st, sl 1 pwise, remove m, transfer sl st to left needle, pm for new beg of rnd.', 51).count, 51, '"transfer sl st to left needle" moves a stitch, works none');
+eq(K.readInstruction('Work even in patt until foot measures 7" from back of heel.', 60).count, 60, 'a work-even-until row keeps the count');
+eq(lineWith(K.parse('Row 6: Slip 1, purl 7, purl 2 together, purl 1, leaving (2) stitches unworked, turn work.'), 'Row 6').stitches, null, '"leaving (2) stitches" is never a total');
+
+
+// -----------------------------------------------------------------------
+group('polish: QA defects (docs/wave-h/knit-qa.md)');
+// -----------------------------------------------------------------------
+// #2 a length stretch before any written row takes its rows from the gauge
+var bodyT = 'Gauge: 12 sts and 17 rows = 4" [10 cm] in stocking st.\nBODY\nCO 120 sts.\nKnit even in rnds on these 120 sts until Body from Sleeve divide measures 12".\nChange to smaller needle.\nNext rnd: *K1tbl, p1; rep from * around.\nRep last rnd for a further 2".';
+var bodyL = K.parse(bodyT);
+eq(pick(lineWith(bodyL, 'Knit even in rnds'), ['row', 'rowEnd', 'approxRows', 'count']), { row: 1, rowEnd: 51, approxRows: 51, count: 120 },
+  '#2: "until ... from Sleeve divide measures 12"" at 17 rows/4" covers rounds 1-51 (≈)');
+eq(lineWith(bodyL, 'Next rnd: *K1tbl').row, 52, '#2: the rib is round 52, not round 1');
+eq(lineWith(K.parse(bodyT.replace(/^Gauge.*\n/, '')), 'Next rnd: *K1tbl').row, 1, '#2: with no gauge printed nothing is renumbered');
+eq(lineWith(K.parse(bodyT.replace('from Sleeve divide ', '')), 'Next rnd: *K1tbl').row, 1, '#2: a length measured from who-knows-where is not turned into rows');
+// #3 "then work Rnd 1 once more"
+var toeT = 'CO 56 sts.\nRnd 1: *K1, ssk, knit to 3 sts before m, k2tog, k1; rep from * once more—4 sts dec\'d.\nRnd 2: Knit.\nRep last 2 rnds 7 more times, then work Rnd 1 once more—20 sts rem.';
+var toeL = K.parse(toeT), toeR = lineWith(toeL, 'then work Rnd 1 once more');
+eq([toeR.repeatTo, K.targetFor(toeL, 16), K.targetFor(toeL, 17), toeR.deviation || null], [17, 24, 20, null],
+  '#3: the extra Rnd 1 is round 17 (20 sts); round 16 is 24; no false deviation');
+// #4 a repeat's printed total lands on its last row when the rows between cannot be counted
+var hsr = K.parse('CO 30 sts.\nRow 1: Knit.\nShort-row 1: (RS) Sl 1, k16, ssk, k1, turn.\nShort-row 2: (WS) Sl 1, p7, p2tog, p1, turn.\nShort-row 3: (RS) Sl 1, knit to 1 st before gap, ssk, k1, turn.\nShort-row 4: (WS) Sl 1, purl to 1 st before gap, p2tog, p1, turn.\nRep last 2 short-rows 3 more times—18 heel sts rem.');
+eq([K.targetFor(hsr, 9), K.targetFor(hsr, 10)], [null, 18], '#4: "—18 heel sts rem" is the repeat\'s last row\'s; the rows before it say nothing');
+// #5 sizes named by stitch count, starred size-only rows
+var mlT = 'Magic Loop 36 (40, 48) Stitch Adult Socks\nCuff: Cast on 36 (40, 48) stitches.\nHeel Flap: This is worked back and forth on half of your stitches only.\n' +
+  'Row 1: Slip 1, knit 17 (19, 23).\nRow 2: Slip 1, purl remaining 17 (19, 23) stitches.\n' +
+  '****Row 3: 40 stitch sock only: Slip 1, knit 19.\n****Row 4: Slip 1, purl 19.\n****Row 3: 36 and 48 stitch socks only: Slip 1, knit 17 (23).\n####Row 5: 48 stitch only: Slip 1, knit 23.';
+eq(K.detectSizes(mlT), ['36 st', '40 st', '48 st'], '#5: "36 (40, 48) Stitch" names the sizes');
+var ml48 = K.parse(mlT, { size: 2 }), ml40 = K.parse(mlT, { size: 1 });
+eq(ml48.filter(function (l) { return l.kind === 'row'; }).map(function (l) { return l.row + ':' + l.count; }), ['1:24', '2:24', '3:24', '5:24'],
+  '#5 (48): half of 48 on the flap; the 48 rows of the starred block are rows, the 40-only ones are not');
+eq(ml40.filter(function (l) { return l.kind === 'row'; }).map(function (l) { return l.row; }), [1, 2, 3, 4], '#5 (40): the 40-only Row 3 and the starred Row 4 after it');
+// #6 "Row 15 and all following odd-numbered rows through Row" / "35:" and interleaved enumerations
+var icT = 'CO 40 sts.\nRows 1, 3, and 5: Knit.\nRows 2 and 4: K1, k2tog, knit to last 3 sts, ssk, k1.\nRow 6: Knit.\nRow 7 and all following odd-numbered rows through Row\n11: K1, purl to last st, k1.\nRows 8 and 10: K1, k2tog, purl to last 3 sts, ssk, k1—32 sts after Row 10.\nRow 12: Knit.';
+var icL = K.parse(icT);
+eq([2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].map(function (r) { return K.targetFor(icL, r); }), [38, 38, 36, 36, 36, 36, 34, 34, 32, 32, 32],
+  '#6: interleaved enumerations count row by row; "through Row" / "11:" is rows 7, 9, 11');
+// #7 a work-until stretch that shapes publishes no per-row count
+var henT = 'CO 90 sts.\nRow 1: Knit.\nRow 2: BO 4 sts, knit to end—86 sts.\nWork as for back until piece measures 9" from CO.\nNext row: Knit.';
+ok(lineWith(K.parse(henT), 'Work as for back').repeatOf === null || lineWith(K.parse(henT), 'Work as for back').repeatOf === undefined,
+  '#7: "Work as for back until ..." is not row 2 over and over');
+// #8 stitch guides and bylines are not parts; wrapped contents titles
+var sgT = 'Stitch Guide\nDivision Pattern:\nRow 1: (WS) K1, *sl 1 pwise wyf, yo; rep from * to last st, k1.\nRow 2: (RS) K1, *k2tog tbl; rep from * to last st, k1.\nBack\nWith smaller needle, CO 97 sts.\nRow 1: Knit.\nRow 2: Purl.';
+eq(K.splitSections(sgT).map(function (s) { return s.name; }), ['Back'], '#8: the stitch guide\'s pattern rows are not a part');
+var tocT = '=== PAGE 1 ===\nContents\nSophia Lace Shrug by Betty Monroe ....... PAGE 2\nIcelandic Lace Shawl by Halldóra\nCarol Rasmussen Noble ....... PAGE 3\nGlossary ....... PAGE 4\n' +
+  '=== PAGE 2 ===\nSophia Lace Shrug\nBetty Monroe\nCO 40 sts.\nRow 1: Knit.\nRow 2: Purl.\n=== PAGE 3 ===\nIcelandic Lace Shawl\nCarol Rasmussen Noble\nCO 339 sts.\nRow 1: Knit.\n=== PAGE 4 ===\nGlossary\nk2tog: knit 2 together.';
+var tocL = K.parse(tocT);
+eq(tocL.meta.groups, ['Sophia Lace Shrug', 'Icelandic Lace Shawl'], '#8: a contents title wrapped over two lines keeps its name; the Glossary is not a pattern');
+ok(!tocL.meta.sections.some(function (s) { return /Monroe|Noble/.test(s.name); }), '#8: designer bylines are never parts');
+// #11 a sock begun in the round with a flat heel is worked in rounds
+eq(K.workMode('CO 60 sts and join in the rnd.\nRnd 1: Knit.\nRow 1: Sl 1, knit to end.\nRow 2: Sl 1, purl to end.\nRow 3: Sl 1, knit to end.\nRow 4: Sl 1, purl to end.\nRnd 1: Knit.\nRnd 2: Knit.'), 'rounds',
+  '#11: rounds, a flat heel flap, rounds again: rounds');
+// #9 needle labels are not colours
+ok(K.colors('Rnd 1: Needle 1: K1, M1, k1; Needle 2: k1, M1, k1.\nNeedle 1: K10; Needle 2: k8.').names.every(function (n) { return !/needle/i.test(n); }), '#9: "Needle 1:" is never a yarn colour');
+function js(x) { return JSON.stringify(x); }
+// #10 parts carry their pattern's gauge and needle lines - as a field, never in
+// front of the part's first row (the knitter reads the text in the pattern sheet)
+var gpT = 'Sizes: S (M, L)\nGauge: 24 sts and 35 rows = 4" in St st.\nNeedles: Size 5 (3.75 mm).\nCuff\nCO 60 (66, 72) sts.\nRnd 1: Knit.\nHeel\nRow 1: Knit.\nRow 2: Purl.';
+var gpS = K.splitSections(gpT);
+ok(gpS.length === 2 && gpS.every(function (s) { return s.gaugeLines && /^Gauge: 24 sts and 35 rows/.test(s.gaugeLines[0]) && /^Needles: Size 5/.test(s.gaugeLines[1]); }),
+  '#10: every part carries the gauge and needle lines as gaugeLines', js(gpS.map(function (s) { return s.gaugeLines; })));
+ok(gpS.every(function (s) { return !/^(?:Gauge|Needles):/m.test(s.text); }), '#10: ...and not in its text', js(gpS.map(function (s) { return s.text; })));
+// front matter is never a part's pattern text: the materials tail, the gauge
+// and the notes before the first cast-on stay out of the first part, and the
+// prefix every part carries is only "Sizes:" (and "Start with N sts.")
+var fmT = 'MATERIALS\nYarn: 3 balls.\nSize 8 (5 mm) circular knitting\nneedles or size needed to obtain gauge. Yarn needle. Stitch markers.\n' +
+  'GAUGE: 12 sts and 17 rows = 4" [10 cm] in stocking st.\nSizes: S (M, L)\nNotes:\n- Worked in one piece from the neck down.\n' +
+  'With larger needle, cast on 36 (38, 40) sts.\nRow 1: Knit.\nRow 2: Purl.\nBODY\nKnit even in rnds until Body from cast-on measures 4".\nNext rnd: Knit.\n' +
+  'SLEEVES\nRow 1: Knit.\nRow 2: Purl.';
+var fmS = K.splitSections(fmT);
+function fmLead(s) { return s.text.split('\n').filter(function (l) { return !/^(?:Sizes|Numbers):|^Start with\b/.test(l); })[0] || ''; }
+eq(fmS.map(fmLead), ['With larger needle, cast on 36 (38, 40) sts.', 'BODY', 'SLEEVES'],
+  'front matter: each part, after its Sizes / Start lines, begins with its own cast-on or heading');
+ok(fmS.every(function (s) { return !/needles or size|Stitch markers|Worked in one piece|^MATERIALS|^Yarn:/m.test(s.text); }), 'front matter: no materials or notes in any part', js(fmS.map(function (s) { return s.text; })));
+ok(fmS.every(function (s) { return s.gaugeLines && s.gaugeLines.length === 1 && /^GAUGE: 12 sts/.test(s.gaugeLines[0]); }),
+  'front matter: the gauge travels as gaugeLines; the materials tail "needles or size needed..." is never a needle line', js(fmS.map(function (s) { return s.gaugeLines; })));
+var fmB = fmS.filter(function (s) { return s.name === 'Body'; })[0];
+ok(fmB && /\nGAUGE: 12 sts and 17 rows[^\n]*$/.test(fmB.text) && !/GAUGE/.test(fmS[0].text) && !/GAUGE/.test(fmS[2].text),
+  'front matter: only the part with a length stretch ends with the gauge line it needs to be read alone', fmB && js(fmB.text));
+// ...and in a book, each pattern's first part ends with that pattern's OWN gauge
+// (a book's pattern is imported from its parts' text alone)
+var bkT = ['Contents', 'Sock One ........ 2', 'Sock Two ........ 3', '=== page 2 ===', 'Sock One', 'Sizes: S (M, L)',
+  'Gauge: 32 sts and 46 rnds = 4" (10 cm) in St st.', 'LEG', 'CO 56 (64, 72) sts.', 'Rnd 1: Knit.', 'Rnd 2: Knit.',
+  '=== page 3 ===', 'Sock Two', 'Sizes: 5 (6, 7)"', 'Gauge: 34 sts and 48 rnds = 4" (10 cm) in St st.', 'FOOT',
+  'CO 60 (64, 68) sts.', 'Rnd 1: Knit.', 'Rnd 2: Knit.'].join('\n');
+var bkS = K.splitSections(bkT);
+eq(bkS.map(function (s) { return [fmLead(s), s.text.split('\n').pop()]; }),
+  [['LEG', 'Gauge: 32 sts and 46 rnds = 4" (10 cm) in St st.'], ['FOOT', 'Gauge: 34 sts and 48 rnds = 4" (10 cm) in St st.']],
+  'book: each pattern\'s first part begins with its heading and ends with its own gauge line');
+
+} catch (e) {
+  log(false, 'test page threw: ' + e.message, e.stack);
+}
+
+var sEl = document.getElementById('summary');
+sEl.textContent = passed + ' passed, ' + failed + ' failed';
+sEl.className = failed === 0 ? 'ok' : 'bad';
+</script>
+</body>
+</html>

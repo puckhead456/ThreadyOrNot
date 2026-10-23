@@ -19,6 +19,8 @@
   <code>?f=&lt;file.pdf&gt;</code> dumps <code>PdfText.extract</code> per page, then the page's raw
   pdf.js rows (every item, grouped by baseline only, with its y and height) and the items the
   extractor did not emit. <code>&amp;route=open</code> dumps <code>open().textOf</code> instead.
+  <code>&amp;hidden=1</code> (with <code>&amp;raw=1</code>) also lists the text runs the operator list says are
+  clipped away or painted over.
   <code>&amp;pages=3-5</code> limits the raw section. <code>?all=1&amp;sink=PORT</code> walks every
   fixture and POSTs <code>&lt;name&gt;.extract.txt</code> / <code>&lt;name&gt;.raw.txt</code> to a local
   scratch sink (add <code>&amp;heavy=1</code> for files over 17 MB, <code>&amp;only=a,b</code> to pick).
@@ -177,8 +179,17 @@ function dumpOne(name, opts) {
               return rawPage(page).then(function (rows) {
                 var vp = page.getViewport({ scale: 1 });
                 var lost = lostItems(rows, pages[p] || '');
-                raw.push({ p: p, rotate: page.rotate, w: vp.width, h: vp.height, rows: rows, lost: lost });
-                page.cleanup();
+                // &hidden=1: the runs the operator list says nobody can see
+                // (clipped away or painted over), whether or not extract
+                // looked at this page (it only does so for suspect pages)
+                var hid = !opts.hidden ? Promise.resolve([]) : page.getOperatorList().then(function (ol) {
+                  return window.PdfText._textVisibility(ol, window.pdfjsLib.OPS, window.PdfText._imageAlphaOf(page))
+                    .filter(function (r) { return r.hidden; });
+                }, function () { return []; });
+                return hid.then(function (hidden) {
+                  raw.push({ p: p, rotate: page.rotate, w: vp.width, h: vp.height, rows: rows, lost: lost, hidden: hidden });
+                  page.cleanup();
+                });
               });
             });
           });
@@ -198,7 +209,10 @@ function rawText(d) {
     var lost = pg.lost.length ? ['--- not emitted (' + pg.lost.length + '):'].concat(pg.lost.map(function (l) {
       return '  y' + Math.round(l.y) + ' h' + (Math.round(l.h * 10) / 10) + (l.rot ? ' ROT' : '') + ' ' + JSON.stringify(l.str);
     })) : [];
-    return [head].concat(rows, lost).join('\n');
+    var hidden = (pg.hidden || []).length ? ['--- hidden runs (' + pg.hidden.length + '):'].concat(pg.hidden.map(function (r) {
+      return '  y' + Math.round(r.sy) + ' x' + Math.round(r.sx) + ' ' + r.why + ' ' + JSON.stringify(r.text);
+    })) : [];
+    return [head].concat(rows, lost, hidden).join('\n');
   }).join('\n\n');
 }
 
@@ -238,7 +252,7 @@ function runAll() {
         var bytes = parseInt(r.headers.get('content-length'), 10) || 0;
         if (bytes > HEAVY_BYTES && !Q.heavy) { out.insertAdjacentHTML('beforeend', '<div>skip heavy ' + esc(name) + '</div>'); return; }
         var t0 = performance.now();
-        return dumpOne(name, { route: Q.route }).then(function (d) {
+        return dumpOne(name, { route: Q.route, hidden: Q.hidden }).then(function (d) {
           n++;
           var base = name.replace(/\.pdf$/, '') + (Q.route === 'open' ? '.open' : '');
           out.insertAdjacentHTML('beforeend', '<div>' + esc(name) + ' ' + esc(d.meta) + ' ' + Math.round(performance.now() - t0) + ' ms</div>');
@@ -300,7 +314,7 @@ if (Q.render) renderPages();
 else if (Q.all) runAll();
 else if (Q.f) {
   document.querySelector('input[name=f]').value = Q.f;
-  dumpOne(Q.f, { route: Q.route, pages: Q.pages }).then(show, function (e) {
+  dumpOne(Q.f, { route: Q.route, pages: Q.pages, hidden: Q.hidden }).then(show, function (e) {
     document.getElementById('summary').textContent = 'error ' + (e && e.message);
   });
 }

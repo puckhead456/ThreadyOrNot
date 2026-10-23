@@ -34,6 +34,13 @@
          the frame so the working stitch stays in view. Camera only: nothing
          is rebuilt. Pure maths on `Diagram.follow`; `getStats().follow`
          reports it.
+     Knitting (wave H, 1.6.0): a Model with `craft: 'knitting'` (or knitting
+         records) is prepared by `prepKnitRound` — knit V's, purl bumps, the
+         face of a WS row, rib, eyelets, leaning decreases, cables twisted
+         over five rows, cast-on / bind-off edges, a heel flap's held
+         stitches — and the finished mesh is moved through DiagramGeo's
+         `warp` (a heel's bend, a short-row field, a shawl's chevron, a
+         yoke's sleeve tops). Crochet takes none of these paths.
      handle.setSafeInsets({ top, right, bottom, left })   // CSS px
          Margins the piece must stay out of. The stitch button's number and
          pills own the middle of the canvas, and a round-worked solid is also a
@@ -612,6 +619,7 @@
      u: 0..1 across the stitch; s: 0 at its BASE (the round/row it is worked
      into), 1 at its top loops. Zero on all four edges, always. */
   function relief(u, s, D) {
+    if (D.knit) return reliefKnit(u, s, D);
     if (!(u > 0 && u < 1 && s > 0 && s < 1)) return 0;
     var win = smoothstep(0, 0.1, u) * smoothstep(0, 0.1, 1 - u) *
       smoothstep(0, 0.05, s) * smoothstep(0, 0.05, 1 - s);
@@ -688,6 +696,237 @@
     return 1.6 * Math.sin(Math.PI * s) * (1 - Math.cos(TAU * u)) / 2;
   }
 
+  /* ------------------------------------------------ knitted relief (wave H)
+
+     A knit record never reaches the crochet branches above: `descOf` hands
+     it to `knitDescOf` (a round of a knitting Model, `prepKnitRound`), and
+     `relief` to `reliefKnit`. What each looks like, on the face you see (the
+     RS of a flat piece, the outside of a tube):
+       knit      a V: two legs leaning in, meeting at the base, no top bar —
+                 flatter than a crochet V (KNIT_FLAT) and as tall as its row
+       purl      a bump: a curved horizontal loop across the cell
+       a WS row  is seen from the back, so its knits are bumps and its purls
+                 V's (`side: 'ws'`) — which is what makes garter's ridges
+       rib       a round that mixes faced knits and purls stands its knit
+                 columns proud and sinks its purls
+       yo        a hole ringed by its strand
+       k2tog / ssk   a V leaning right / left, its leading leg on top;
+                 cdd   a V with the centre stitch standing up its middle
+       m1 / kfb  a narrower V; kfb also leaves its purl bar at the base
+       sl        a narrower, taller-looking V
+       cable     one record `w` wide, drawn as one slice per stitch it
+                 crosses (`sub` of `subN`): two strands crossing over the
+                 cable's width, the front one on top — `cross: 'f'` travels
+                 left, `'b'` right, as seen on the face (`mir` says which way
+                 the slice index runs on screen)
+       co / bo   a twisted cord / a sideways chain along the edge
+     Zero on all four edges of the cell (a cable: of the whole cable), so it
+     meets crochet's watertight rule. */
+  var K_KV = 5, K_KP = 6, K_YO = 7, K_CAB = 8, K_CO = 9, K_BO = 10;
+  var KNIT_FLAT = 0.72;    // a knit V lies flatter than a crochet one
+  var KNIT_PEAK = { v: 0.8, p: 0.7, yo: 0.55, cab: 1.35, rib: 1.05, edge: 0.65 };
+  var KNIT_PURL_T = { p: 1, p2tog: 1, ssp: 1, p3tog: 1, pfb: 1, m1p: 1, ptbl: 1, sssp: 1 };
+  var KNIT_LEAN = { k2tog: 1, p2tog: 1, k3tog: 1, p3tog: 1, ssk: -1, ssp: -1, sssk: -1, sssp: -1, skp: -1, sk2p: -1 };
+  var KNIT_INC = { m1: 1, m1l: 1, m1r: 1, m1p: 1, kyok: 1, kfb: 2, pfb: 2 };
+  var KNIT_HOLE = { lo: 0.15, hi: 0.85, u: 0.17 };
+
+  /** Stitches a knit record stands for: a cable crosses several. */
+  function knitSpan(st) {
+    // Knits.expand writes a cable as one record per stitch (`span`, `at`)
+    if (!st || st.t !== 'cable' || typeof st.at === 'number') return 1;
+    if (typeof st.n === 'number' && st.n >= 1) return Math.min(24, Math.floor(st.n));
+    var w = typeof st.w === 'number' && st.w > 0 ? st.w : 4 * 0.85;
+    return clamp(Math.round(w / 0.85), 2, 24);
+  }
+
+  /** Is this record a purl as seen on the face? */
+  function knitFacedPurl(st) {
+    var t = String((st && st.t) || 'k').toLowerCase();
+    var purl = KNIT_PURL_T[t] === 1;
+    return st && st.side === 'ws' ? !purl : purl;
+  }
+
+  /* `tw` is this slot's cable twist from `knitTwists` (or null); `mir` is -1
+     when the slice index runs right-to-left on screen; `mode` 'rows'|'rounds'
+     (a round's physical columns also run right-to-left on screen). */
+  function knitDescOf(st, tw, tex, mir, roundH, mode) {
+    var t = String((st && st.t) || 'k').toLowerCase();
+    var D = { k: K_KV, knit: 1, vf: 1, wraps: 0, post: 0, lp: 0, inc: 0, hole: false, h: 1,
+      lean: 0, rib: 0, cross: 0, sub: 0, subN: 1, phase: 0, uflip: 0, ctr: 0, slip: 0, peak: KNIT_PEAK.v };
+    var h = st && typeof st.h === 'number' && isFinite(st.h) && st.h > 0 ? st.h : (roundH > 0 ? roundH : 0.75);
+    D.h = Math.max(0.3, Math.round(h * 20) / 20);
+    var m = mir < 0 ? -1 : 1;
+    var purl = knitFacedPurl(st);
+    if (t === 'yo') {
+      D.k = K_YO; D.hole = true; D.holeLo = KNIT_HOLE.lo; D.holeHi = KNIT_HOLE.hi; D.holeU = KNIT_HOLE.u;
+      D.peak = KNIT_PEAK.yo;
+    } else if (tw && (t === 'cable' || !purl) && t !== 'co' && t !== 'bo') {
+      // a cable crossing, or a knit stitch leaning into one
+      D.k = K_CAB; D.sub = tw.sub | 0; D.subN = Math.max(1, tw.n | 0); D.phase = tw.phase | 0;
+      D.uflip = tw.uflip ? 1 : 0;
+      D.cross = (tw.cross < 0 ? -1 : 1) * (mode === 'rounds' ? -1 : 1);
+      D.peak = KNIT_PEAK.cab;
+    } else if (t === 'cable') {
+      // no twist table (a lone round handed to the test hook): its own row only
+      D.k = K_CAB; D.subN = Math.max(1, knitSpan(st)); D.cross = (st && st.cross === 'b' ? -1 : 1) * m;
+      D.peak = KNIT_PEAK.cab;
+    } else if (t === 'co') {
+      D.k = K_CO; D.peak = KNIT_PEAK.edge;
+    } else if (t === 'bo') {
+      D.k = K_BO; D.peak = KNIT_PEAK.edge;
+    } else {
+      D.k = purl ? K_KP : K_KV;
+      D.peak = purl ? KNIT_PEAK.p : KNIT_PEAK.v;
+      if (!purl) {
+        D.lean = (KNIT_LEAN[t] || 0) * m;
+        if (t === 'cdd' || t === 's2kp') D.ctr = 1;
+        D.inc = KNIT_INC[t] || 0;
+        if (t === 'sl' || t === 'slip') D.slip = 1;
+      }
+      if (tex) { D.rib = purl ? -1 : 1; D.peak = purl ? KNIT_PEAK.p : KNIT_PEAK.rib; }
+    }
+    D.key = 'K' + D.k + ':' + D.lean + ':' + D.rib + ':' + D.cross + ':' + D.sub + '/' + D.subN + ':' +
+      D.phase + ':' + D.uflip + ':' + D.ctr + ':' + D.inc + ':' + D.slip;
+    return D;
+  }
+
+  function reliefKnit(u, s, D) {
+    if (D.k === K_CAB) return reliefCable(u, s, D);
+    if (!(u > 0 && u < 1 && s > 0 && s < 1)) return 0;
+    var win = smoothstep(0, 0.1, u) * smoothstep(0, 0.1, 1 - u) *
+      smoothstep(0, 0.06, s) * smoothstep(0, 0.06, 1 - s);
+    var cu = Math.abs(u - 0.5), d = 0;
+    switch (D.k) {
+      case K_YO:
+        // the strand that rings the eyelet; inside it is open (KNIT_HOLE)
+        var ex = (u - 0.5) / 0.36, ey = (s - 0.5) / 0.4;
+        d = 0.75 * yarnP((Math.sqrt(ex * ex + ey * ey) - 1) / 0.35);
+        break;
+      case K_CO:
+        // a twisted cord along the edge
+        d = 0.85 * yarnP((s - 0.42) / 0.3) * (0.78 + 0.22 * Math.cos(TAU * 2 * (u - 0.25 - 0.5 * s)));
+        break;
+      case K_BO:
+        // a chain lying on its side: each stitch's loop over the next
+        d = 0.9 * Math.max(yarnP((s - 0.64 + 0.12 * (u - 0.5)) / 0.15),
+          yarnP((s - 0.36 - 0.12 * (u - 0.5)) / 0.15));
+        break;
+      case K_KP:
+        // the purl bump: a loop across the cell, lowest in its middle
+        var sc = 0.46 + 0.18 * (2 * cu) * (2 * cu);
+        d = 0.95 * yarnP((s - sc) / 0.22) * (0.85 + 0.15 * Math.cos(TAU * (u - 0.5)));
+        break;
+      default:
+        // the knit V: two legs from its base at the bottom to the top corners
+        var shift = D.lean * 0.15 * s;
+        var off = D.slip ? 0.05 + 0.17 * s : (D.inc ? 0.06 + 0.21 * s : 0.07 + 0.26 * s);
+        var hw = D.slip ? 0.15 : 0.17;
+        var env = smoothstep(0, 0.16, s) * (1 - 0.3 * smoothstep(0.82, 1, s));
+        var lobe = 0.82 + 0.18 * Math.sin(Math.PI * s);
+        var c0 = 0.5 + shift;
+        var aL = D.lean < 0 ? 1.15 : (D.lean > 0 ? 0.8 : 1);
+        var aR = D.lean > 0 ? 1.15 : (D.lean < 0 ? 0.8 : 1);
+        d = Math.max(aL * yarnP((u - (c0 - off)) / hw), aR * yarnP((u - (c0 + off)) / hw)) * env * lobe;
+        d = Math.max(d, 0.22 * yarnP(cu / 0.4) * env);
+        if (D.slip) d *= 1.1;
+        if (D.ctr) d = Math.max(d, 1.15 * yarnP(cu / 0.15) * env);
+        if (D.inc === 2) d = Math.max(d, 0.55 * yarnP((s - 0.12) / 0.09) * yarnP(cu / 0.42));
+    }
+    if (D.rib > 0) d = d * 1.1 + 0.4 * yarnP(cu / 0.45) * Math.sin(Math.PI * s);
+    else if (D.rib < 0) d = d * 0.55 - 0.75 * yarnP(cu / 0.45) * Math.sin(Math.PI * s);
+    return d * KNIT_FLAT * win;
+  }
+
+  /* A cable's twist (wave H). One crossing row is 0.75 of a stitch tall and
+     a 6-stitch cable crosses 3 stitches sideways, so a crossing drawn inside
+     its own row is a near-horizontal smear. On the fabric the stitches lean
+     into the cross for a couple of rows either side of it, so the twist is
+     drawn over a window of 2·CABLE_TW + 1 rows: every faced-knit stitch in
+     the cable's columns within CABLE_TW rows of a crossing row carries
+     `phase` (rows from the crossing), `sub` (its physical column within the
+     cable), `subN`, `cross` and `uflip` (its slice runs right-to-left on
+     screen), from `knitTwists`. Across that window strand A runs from
+     U 0.25 to 0.75 and B back; the front strand stands proud and the back
+     one dips where they pass. `cross` > 0 puts B — the one travelling left on
+     screen — in front: a C6F. Each row stays zero on its own top and bottom
+     edges (watertight like every band); across the cable's slices the surface
+     is continuous, and only the cable's outer edges are windowed. */
+  var CABLE_TW = 2;
+  function strandV(U, centre, n, s) {
+    var fu = (U - centre) * n + 0.5;
+    fu -= Math.floor(fu);
+    var off = 0.07 + 0.26 * s;
+    return Math.max(yarnP((fu - 0.5 + off) / 0.2), yarnP((fu - 0.5 - off) / 0.2));
+  }
+  function reliefCable(u, s, D) {
+    var uu = D.uflip ? 1 - u : u;
+    var U = (D.sub + uu) / D.subN;
+    if (!(U > 0 && U < 1 && s > 0 && s < 1)) return 0;
+    var win = smoothstep(0, 0.07, U) * smoothstep(0, 0.07, 1 - U) *
+      smoothstep(0, 0.06, s) * smoothstep(0, 0.06, 1 - s);
+    var S = (D.phase + CABLE_TW + s) / (2 * CABLE_TW + 1);
+    var e = smoothstep(0, 1, S);
+    var ua = 0.25 + 0.5 * e, ub = 0.75 - 0.5 * e;
+    var front = D.cross > 0 ? ub : ua, back = D.cross > 0 ? ua : ub;
+    var pass = Math.exp(-Math.pow((S - 0.5) / 0.13, 2));
+    var lobe = 0.86 + 0.14 * Math.sin(Math.PI * s);
+    // each strand is a column of knit stitches: its V's lean with it
+    var dF = 1.85 * yarnP((U - front) / 0.17) * lobe * (0.72 + 0.28 * strandV(U, front, D.subN, s));
+    var dB = (1.25 - 0.85 * pass) * yarnP((U - back) / 0.17) * lobe * (0.72 + 0.28 * strandV(U, back, D.subN, s));
+    var d = Math.max(dF, dB, 0.18);
+    return d * KNIT_FLAT * win;
+  }
+
+  /**
+   * Per round, per slot (work order; a cable expanded to its stitches): the
+   * twist a slot belongs to, or undefined. Null when the piece has no cable.
+   * Physical columns: a rows-mode odd row is laid right to left, so its slot
+   * k sits in column W-1-k; rounds always run one way. `base` offsets the
+   * row index (its parity) for a caller holding a single round.
+   */
+  function knitTwists(raw, mode, base) {
+    var n = raw.length, W = new Array(n), cab = [], i, k;
+    var b0 = base | 0;
+    for (i = 0; i < n; i++) {
+      var l = (raw[i] && raw[i].stitches) || [], c = 0;
+      for (k = 0; k < l.length; k++) {
+        var sp = knitSpan(l[k]), rk = l[k];
+        if (rk && rk.t === 'cable') {
+          if (typeof rk.at !== 'number') cab.push({ i: i, c0: c, n: sp, cross: rk.cross === 'b' ? -1 : 1 });
+          else if (rk.at === 0) {
+            // one record per stitch: the cable is the run that starts at `at` 0
+            var span = typeof rk.span === 'number' && rk.span >= 1 ? Math.min(24, rk.span | 0) : 1;
+            var run = 1;
+            while (run < span && l[k + run] && l[k + run].t === 'cable' && l[k + run].at === run) run++;
+            if (run >= 2) cab.push({ i: i, c0: c, n: run, cross: rk.cross === 'b' ? -1 : 1 });
+          }
+        }
+        c += sp;
+      }
+      W[i] = Math.max(c, raw[i] ? raw[i].count | 0 : 0);
+    }
+    if (!cab.length) return null;
+    var rtl = function (j) { return mode === 'rows' && ((j + b0) & 1) === 1; };
+    var out = new Array(n);
+    for (var q = 0; q < cab.length; q++) {
+      var K = cab[q];
+      var p0 = rtl(K.i) ? W[K.i] - K.c0 - K.n : K.c0;
+      for (var d = -CABLE_TW; d <= CABLE_TW; d++) {
+        var j = K.i + d;
+        if (j < 0 || j >= n || !(W[j] > 0)) continue;
+        if (!out[j]) out[j] = new Array(W[j]);
+        for (var col = p0; col < p0 + K.n; col++) {
+          var slot = rtl(j) ? W[j] - 1 - col : col;
+          if (slot < 0 || slot >= W[j]) continue;
+          var cur = out[j][slot];
+          if (cur && Math.abs(cur.phase) <= Math.abs(d)) continue;
+          out[j][slot] = { phase: d, sub: col - p0, n: K.n, cross: K.cross, uflip: rtl(j) };
+        }
+      }
+    }
+    return out;
+  }
+
   /* One stamp per (descriptor, tier, rows, direction): the relief sampled on
      the vertex grid with slopes taken at the GRID spacing, so the shading
      belongs to the mesh that is actually drawn, plus per-vertex cavity and
@@ -721,11 +960,18 @@
     var holes = null, nh = 0;
     if (tier > 0 && D.hole) {
       holes = new Uint8Array(segs * rows);
+      /* A crochet chain space is open from its base up to HOLE_TOP across the
+         whole slice; a knitted eyelet (wave H) names its own window. */
+      var hLo = D.holeLo != null ? D.holeLo : 0, hHi = D.holeHi != null ? D.holeHi : HOLE_TOP;
+      var hU = D.holeU != null ? D.holeU : 0;
       for (t = 0; t < rows; t++) {
         var s0 = sdir > 0 ? t * ht : 1 - (t + 1) * ht;
         var s1 = s0 + ht;
-        if (s1 <= HOLE_TOP + 1e-6 && s0 >= -1e-6) {
-          for (k = 0; k < segs; k++) { holes[t * segs + k] = 1; nh++; }
+        if (s1 <= hHi + 1e-6 && s0 >= hLo - 1e-6) {
+          for (k = 0; k < segs; k++) {
+            if (hU > 0 && (k * hu < hU - 1e-6 || (k + 1) * hu > 1 - hU + 1e-6)) continue;
+            holes[t * segs + k] = 1; nh++;
+          }
         }
       }
     }
@@ -992,6 +1238,126 @@
     };
   }
 
+  /* The knitted twin of prepRound (wave H): the same render-side record, but
+     slices come from knitting records — a cable is one slice per stitch it
+     crosses — and a row worked flat on part of a round (a heel flap; `pad`
+     from DiagramGeo.knitPartials) is closed to its ring by the HELD stitches,
+     drawn first and always solid, the worked stitches after them: that is
+     the side DiagramGeo bends the tube away from. `mir` is -1 when the slice
+     index runs right-to-left on screen (every round seen from outside, and
+     the odd rows of a flat piece), so a k2tog leans right and a C6F crosses
+     left whichever way the row was worked. */
+  function prepKnitRound(round, defColor, prev, index, pad, mode, tws) {
+    var count = Math.max(0, round.count | 0);
+    var done = clamp(round.done | 0, 0, count);
+    var stitches = round.stitches || null;
+    var base = round.color || defColor || DEFAULT_YARN;
+    var height = round.height > 0 ? round.height : 0.75;
+    var ghost = !!round.ghost;
+    var padKey = pad ? pad.ring + ':' + Math.round(pad.ringP * 100) + ':' + Math.round(pad.P * 100) : '';
+    var mir = mode === 'rows' ? ((index & 1) === 1 ? -1 : 1) : -1;
+    if (tws === undefined) {
+      var own = knitTwists([round], mode, index);
+      tws = own ? own[0] || null : null;
+    }
+    var twKey = 0;
+    if (tws) for (var tk = 0; tk < tws.length; tk++) if (tws[tk]) twKey = (twKey * 31 + tk * 7 + (tws[tk].phase + 3) * 3 + tws[tk].sub) | 0;
+
+    if (prev && prev.knit && prev.ref === stitches && prev.count === count && prev.base === base &&
+        prev.height === height && prev.ghost === ghost && prev.padKey === padKey && prev.mir === mir && prev.twKey === twKey) {
+      prev.done = done;
+      prev.doneSlices = count > 0 ? prev.heldSlices + Math.round(done / count * prev.workSlices) : 0;
+      return prev;
+    }
+
+    // slots: one per stitch drawn (a cable expands to its width)
+    var sRec = [], sSub = [], sN = [], sW = [];
+    var list = stitches && stitches.length ? stitches : null;
+    var i, j;
+    if (list) {
+      for (i = 0; i < list.length; i++) {
+        var st = list[i] || {};
+        var span = knitSpan(st);
+        // a bound-off stitch is fabric in its own row (Knits gives it w 0)
+        var w = st.t === 'bo' ? 1 : (typeof st.w === 'number' && isFinite(st.w) && st.w > 0 ? st.w : (span > 1 ? span * 0.85 : 1));
+        for (j = 0; j < span; j++) { sRec.push(st); sSub.push(j); sN.push(span); sW.push(w / span); }
+      }
+    }
+    while (sRec.length < count) {
+      sRec.push(sRec.length ? sRec[sRec.length - 1] : { t: 'k' }); sSub.push(0); sN.push(1);
+      sW.push(sW.length ? sW[sW.length - 1] : 1);
+    }
+    var nWork = sRec.length;
+    var nHeld = 0, wHeld = 1;
+    if (pad && pad.ring > pad.count && count > 0) {
+      nHeld = pad.ring - pad.count;
+      wHeld = Math.max(0.05, (pad.ringP - pad.P) / nHeld);
+    }
+    var total = nWork + nHeld;
+    var n = count > 0 ? Math.min(total, MAX_SLICES) : 0;
+    var heldSlices = total > 0 ? Math.round(n * nHeld / total) : 0;
+    var workSlices = n - heldSlices;
+
+    /* Texture: a round that mixes faced knits and purls (rib, seed, a cable
+       on reverse stockinette) stands its knit columns proud. */
+    var nK = 0, nP = 0;
+    if (list) {
+      for (i = 0; i < list.length; i++) {
+        var tt = list[i] && list[i].t;
+        if (tt === 'yo' || tt === 'cable' || tt === 'co' || tt === 'bo') continue;
+        if (knitFacedPurl(list[i])) nP++; else nK++;
+      }
+    }
+    var tex = nK + nP > 0 && nK >= 0.15 * (nK + nP) && nP >= 0.15 * (nK + nP);
+
+    var hashSeed = 2166136261;
+    var amp = new Float32Array(n), wt = new Float32Array(n), col = new Float32Array(n * 3);
+    var jit = new Float32Array(n), keys = new Array(n), descs = {};
+    var seed = hashNum(hashStr(hashSeed, base), (index | 0) * 7 + 3);
+    var h = hashSeed;
+    h = hashNum(h, count); h = hashStr(h, base); h = hashNum(h, height);
+    h = hashNum(h, ghost ? 1 : 0); h = hashNum(h, stitches ? stitches.length : 0);
+    h = hashStr(h, 'knit' + padKey + ':' + mir); h = hashNum(h, twKey);
+    var held = { t: 'k' };
+    var peak = 0;
+    for (i = 0; i < n; i++) {
+      var rec, sub = 0, subN = 1, ww;
+      if (i < heldSlices) {
+        rec = held; ww = wHeld * nHeld / Math.max(1, heldSlices);
+      } else {
+        var wi = i - heldSlices;
+        var si = workSlices > 0 ? Math.min(nWork - 1, Math.floor(wi * nWork / workSlices)) : 0;
+        rec = sRec[si]; sub = sSub[si]; subN = sN[si];
+        ww = sW[si] * nWork / Math.max(1, workSlices);
+      }
+      var c = (rec && rec.c) || base;
+      jit[i] = 1 + noise11(seed, i * 3) * JIT_AMP;
+      amp[i] = jit[i];
+      var D = knitDescOf(rec, i < heldSlices ? null : (tws ? tws[si] || null : null), tex, mir, height, mode);
+      keys[i] = D.key;
+      if (!descs[D.key]) descs[D.key] = D;
+      if (D.peak > peak) peak = D.peak;
+      wt[i] = ww;
+      var lin = linearOf(c, DEFAULT_YARN);
+      var kl = 1 + noise11(seed, i * 3 + 1) * JIT_LIGHT;
+      var kh = noise11(seed, i * 3 + 2) * JIT_HUE;
+      col[i * 3] = Math.max(0, lin[0] * kl * (1 + kh));
+      col[i * 3 + 1] = Math.max(0, lin[1] * kl);
+      col[i * 3 + 2] = Math.max(0, lin[2] * kl * (1 - kh));
+      h = hashStr(h, D.key); h = hashStr(h, c);
+    }
+    return {
+      count: count, done: done, n: n,
+      doneSlices: count > 0 ? heldSlices + Math.round(done / count * workSlices) : 0,
+      amp: amp, wt: wt, col: col,
+      jit: jit, keys: keys, descs: descs, reliefPeak: peak || 1,
+      height: height, ghost: ghost,
+      ref: stitches, base: base,
+      hash: (h ^ seed) >>> 0,
+      knit: true, padKey: padKey, mir: mir, twKey: twKey, heldSlices: heldSlices, workSlices: workSlices
+    };
+  }
+
   function normalizeModel(model, prev) {
     var m = model || {};
     var mode = m.mode === 'rows' ? 'rows' : 'rounds';
@@ -1000,7 +1366,20 @@
     var prevRounds = (prev && prev.mode === mode) ? prev.rounds : null;
     var rounds = [];
     var raw = [];      // the same rounds, unprepared, for DiagramGeo
-    for (var i = 0; i < src.length; i++) {
+    var GeoK = geoOf();
+    var knit = !!(GeoK && GeoK.isKnit && GeoK.isKnit(m));
+    if (knit) {
+      // wave H: knitting records, and the held stitches of a heel flap
+      for (var ki = 0; ki < src.length; ki++) if (src[ki]) raw.push(src[ki]);
+      var pads = mode === 'rounds' && GeoK.knitPartials ? GeoK.knitPartials(raw) : null;
+      var twists = knitTwists(raw, mode, 0);
+      for (ki = 0; ki < raw.length; ki++) {
+        var pv = prevRounds ? prevRounds[ki] : null;
+        rounds.push(prepKnitRound(raw[ki], def, pv && pv.knit ? pv : null, ki, pads ? pads[ki] : null, mode,
+          twists ? twists[ki] || null : null));
+      }
+    }
+    for (var i = 0; !knit && i < src.length; i++) {
       if (!src[i]) continue;
       rounds.push(prepRound(src[i], def, prevRounds ? prevRounds[rounds.length] : null, rounds.length));
       raw.push(src[i]);
@@ -1585,6 +1964,37 @@
     return geo;
   }
 
+  /* Wave H: a knitted piece's warp (DiagramGeo.layout(...).warp — a heel's
+     bend, a short-row height field, a centre-out shawl's chevron) moves the
+     finished mesh, never the band builder. Anchor and point move through the
+     same map, so the stitch animation still unfurls from its neighbour, and
+     the normal is carried by the map's own derivative (a small step along
+     it, mapped and renormalised). A crochet layout has no warp. */
+  var _wa = [0, 0, 0], _wp = [0, 0, 0], _wq = [0, 0, 0];
+  var WARP_EPS = 0.05;
+  var WARP_FIT_PAD = 1.08;
+  function warpGeo(g, warp, band) {
+    var Geo = geoOf();
+    if (!g || !warp || !Geo || !Geo.warpPoint) return g;
+    var v = g.verts, nv = v.length / FLOATS;
+    for (var q = 0; q < nv; q++) {
+      var p = q * FLOATS;
+      var ax = v[p], ay = v[p + 1], az = v[p + 2];
+      var x = ax + v[p + 3], y = ay + v[p + 4], z = az + v[p + 5];
+      var nx = v[p + 6], ny = v[p + 7], nz = v[p + 8];
+      Geo.warpPoint(warp, band, ax, ay, az, _wa);
+      Geo.warpPoint(warp, band, x, y, z, _wp);
+      Geo.warpPoint(warp, band, x + nx * WARP_EPS, y + ny * WARP_EPS, z + nz * WARP_EPS, _wq);
+      v[p] = _wa[0]; v[p + 1] = _wa[1]; v[p + 2] = _wa[2];
+      v[p + 3] = _wp[0] - _wa[0]; v[p + 4] = _wp[1] - _wa[1]; v[p + 5] = _wp[2] - _wa[2];
+      var mx = _wq[0] - _wp[0], my = _wq[1] - _wp[1], mz = _wq[2] - _wp[2];
+      var ml = Math.sqrt(mx * mx + my * my + mz * mz);
+      if (ml > 1e-9) { v[p + 6] = mx / ml; v[p + 7] = my / ml; v[p + 8] = mz / ml; }
+    }
+    g.warped = true;
+    return g;
+  }
+
   /* Turns one prepared round + its layout band into geometry. */
   function buildRoundBand(mode, round, band, index, tier) {
     var n = round.n;
@@ -1641,7 +2051,8 @@
     var totalW = band.width > 0 ? band.width : n * SW;
     var left = band.x0 != null ? band.x0 : -totalW / 2;
     var rtl = (index & 1) === 1;
-    var shift = rtl ? 0.25 * SW : -0.25 * SW;
+    // crochet rows stagger by a quarter stitch; knitted columns stack straight (wave H)
+    var shift = round.knit ? 0 : (rtl ? 0.25 * SW : -0.25 * SW);
     var x = (rtl ? left + totalW : left) + shift;
     var HALF_PI = Math.PI / 2;
     for (j = 0; j < n; j++) {
@@ -2062,6 +2473,8 @@
         h = hashNum(h, b.sig || 0);
         h = hashNum(h, (b.x0 || 0) * 97);
         h = hashNum(h, tier + 11);
+        // wave H: a knitted piece bent at the heel, or a row field / chevron
+        if (b.warpSig) h = hashNum(h, b.warpSig);
         if (state.hashes[i] === h && state.chunks[i]) continue;
         /* NOT `geo`: `var` is function-scoped, so the old name overwrote the
            layout `geo` above with this band's mesh — and a last round that
@@ -2070,6 +2483,7 @@
            threw and setModel died before it ever applied the fit. The viewer
            then drew every finished amigurumi at scale 1, spilling off frame. */
         var bandGeo = buildRoundBand(mode, r, b, i, tier);
+        if (bandGeo && geo.warp) warpGeo(bandGeo, geo.warp, b);
         if (!bandGeo) { freeChunk(state.chunks[i]); state.chunks[i] = null; state.hashes[i] = h; continue; }
         state.chunks[i] = uploadChunk(bandGeo, state.chunks[i]);
         state.hashes[i] = h;
@@ -2092,8 +2506,11 @@
         var c0 = rounds[0];
         var capCol = [c0.col[0], c0.col[1], c0.col[2]];
         var capHash = hashNum(hashNum(hashNum(c0.hash, bands[0].rTop * 997), capCol[0] * 255), flip ? 3 : 5);
+        if (bands[0].warpSig) capHash = hashNum(capHash, bands[0].warpSig);
         if (state.capHash !== capHash || !state.capChunk) {
-          state.capChunk = uploadChunk(buildCap(bands[0].rTop, bands[0].yTop, capCol, flip ? -1 : 1), state.capChunk);
+          var capGeo = buildCap(bands[0].rTop, bands[0].yTop, capCol, flip ? -1 : 1);
+          if (geo.warp) warpGeo(capGeo, geo.warp, null);
+          state.capChunk = uploadChunk(capGeo, state.capChunk);
           state.capHash = capHash;
           built++;
         }
@@ -2110,8 +2527,11 @@
         var bN = bands[lastSolid];
         var botCol = [cN.col[0], cN.col[1], cN.col[2]];
         var botHash = hashNum(hashNum(hashNum(cN.hash, bN.rBot * 991), lastSolid * 7 + 1), flip ? 3 : 5);
+        if (bN.warpSig) botHash = hashNum(botHash, bN.warpSig);
         if (state.botHash !== botHash || !state.botChunk) {
-          state.botChunk = uploadChunk(buildCap(bN.rBot, bN.yBot, botCol, flip ? 1 : -1), state.botChunk);
+          var botGeo = buildCap(bN.rBot, bN.yBot, botCol, flip ? 1 : -1);
+          if (geo.warp) warpGeo(botGeo, geo.warp, null);
+          state.botChunk = uploadChunk(botGeo, state.botChunk);
           state.botHash = botHash;
           built++;
         }
@@ -2177,6 +2597,20 @@
     function bandExtent(i, out) {
       var r = state.model.rounds[i], b = state.bands[i];
       if (!b || !r || r.count <= 0) return null;
+      /* wave H: a warped knitted band carries its own extent (DiagramGeo
+         measured it through the warp, caps included in the margin) */
+      if (b.ext) {
+        var marg = state.model.mode === 'rows' ? THICK * SW
+          : bumpAmpOf(b, 1) * Math.max(1, r.reliefPeak || 1);
+        var capR = (i === 0 && state.capChunk) || (i === state.botBand && state.botChunk)
+          ? Math.max(Math.abs(b.rTop), Math.abs(b.rBot)) * 0.55 : 0;
+        // a bent piece reaches out sideways (a foot), where perspective swells
+        // the near side of the tube at the frame's edge: keep 8% more room
+        out.rad = b.ext.rad * WARP_FIT_PAD + marg + capR;
+        out.ymin = b.ext.ymin - marg - capR;
+        out.ymax = b.ext.ymax + marg + capR;
+        return out;
+      }
       if (state.model.mode === 'rows') {
         var w = b.width > 0 ? b.width : r.n * SW;
         var x0 = b.x0 != null ? b.x0 : -w / 2;
@@ -2297,7 +2731,7 @@
          geometry is asked for a fit with no current row. */
       var curY = null;
       var cb = state.bands[clamp(state.model.current, 0, Math.max(0, state.bands.length - 1))];
-      if (cb) curY = (cb.yTop + cb.yBot) / 2;
+      if (cb) curY = cb.ext ? (cb.ext.ymin + cb.ext.ymax) / 2 : (cb.yTop + cb.yBot) / 2;
       if (state.fitFinished || state.fitPurpose === 'button') curY = null;
 
       /* DiagramGeo.fit owns the two clamps: (a) a 42-round tail fits by height
@@ -3587,7 +4021,7 @@
 
   global.Diagram = {
     mount: mount,
-    version: '1.5.0',
+    version: '1.6.0',
     /* Follow mode's pure arithmetic (wave F), for hosts and the test page.
        angle(index, count[, a0, aw])  ring angle of the working point
        yawFor(angle)                  camera yaw that puts that angle in front
@@ -3656,6 +4090,18 @@
         if (g) g.prep = pr;
         return g;
       },
+      /* wave H: the knitted twins. `pad` is a DiagramGeo.knitPartials entry. */
+      knitDescOf: knitDescOf,
+      knitSpan: knitSpan,
+      buildKnitRound: function (mode, round, band, index, tier, pad) {
+        var md = mode === 'rows' ? 'rows' : 'rounds';
+        var pr = prepKnitRound(round, DEFAULT_YARN, null, index | 0, pad || null, md);
+        var g = buildRoundBand(md, pr, band, index | 0, tier | 0);
+        if (g) g.prep = pr;
+        return g;
+      },
+      warp: function (g, warp, band) { return warpGeo(g, warp, band); },
+      normalize: function (model) { return normalizeModel(model, null); },
       FLOATS: FLOATS
     }
   };

@@ -1789,6 +1789,7 @@ function extractCached(name) {
     try {
       var o = JSON.parse(hit);
       o.cached = true;
+      if (typeof o.ms !== 'number') o.ms = 0; // a cache entry written by test/knits.fixtures.html carries no timing
       return Promise.resolve(o);
     } catch (e) { /* fall through and re-read */ }
   }
@@ -2013,6 +2014,12 @@ var NEW_CORPUS = [
     check: function (res, secs) {
       eq(secShape(secs).slice(0, 2), ['Body/1/9', 'Sleeves/2/5'],
         'bernat-lace: Body 9 rows and Sleeves 5 rows (x2, "Sew in sleeves") - no phantom rows from wrapped size lists');
+      // wave H: the FINISHING page now reads in column order - a FINISHING
+      // heading ends the Sleeves part, its edging rounds are parts of their own
+      eq(secs.filter(function (s) { return s.name === 'Sleeves'; }).map(function (s) { return /\bNext rnd\b|\b1st rnd\b|edging/i.test(s.text); }), [false],
+        'bernat-lace: the FINISHING page\'s outer-edging and sleeve-edging rounds are not the Sleeves part\'s');
+      eq(secs.filter(function (s) { return /^Next rnd: Ch 1\. 1 sc in same sp as sl st/m.test(s.text) || /^1st rnd: Ch 1\. 1 sc in same sp as sl st/m.test(s.text); }).length, 2,
+        'bernat-lace: the outer edging and the sleeve edging are the parts after FINISHING');
       var lb = P.parse(sectionNamed(secs, 'Body').text);
       eq(lb.filter(function (l) { return l.kind === 'setup'; }).map(function (l) { return l.count; }), [107, 17],
         'bernat-lace: "Ch 107 (...)." and "Foundation row ... Turn." / "17 (19-21-23-27-31) shells." - one setup each, not a spare');
