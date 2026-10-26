@@ -1267,6 +1267,69 @@ group('wave G: size groups - progress, finish and "Remove this size" per group')
 })();
 
 /* ====================================================================== */
+group('wave I: the working mode is remembered per project (Store.focusMode)');
+/* ====================================================================== */
+(function () {
+  fresh();
+  assertEqual(Store.settings().focusProjects, [], 'wave I: a fresh state remembers no working mode (settings.focusProjects = [])');
+  var a = Store.createProject({ name: 'Focus A', templateId: 'blank' });
+  var b = Store.createProject({ name: 'Focus B', templateId: 'blank' });
+  var pa = a.parts[0];
+  assertEqual([Store.focusMode(a.id), Store.focusMode(b.id), Store.focusMode(''), Store.focusMode(null)], [false, false, false, false],
+    'wave I: focusMode is false for every project until it is opened (and for no id)');
+  Store.flush();
+  Store.clearUndo();
+  var updBefore = Store.project(a.id).updatedAt;
+  assertEqual(Store.setFocusMode(a.id, true), true, 'wave I: setFocusMode(id, true) reports the stored value');
+  assertEqual([Store.focusMode(a.id), Store.focusMode(b.id)], [true, false], 'wave I: ...for that project only');
+  assertTrue(!Store.canUndo(), 'wave I: ...with no undo step (a view preference)');
+  assertEqual(Store.project(a.id).updatedAt, updBefore, 'wave I: ...and without counting as work (updatedAt unchanged)');
+  Store.setFocusMode(a.id, true);
+  assertEqual(Store.settings().focusProjects, [a.id], 'wave I: opening it twice stores the id once');
+  assertEqual(Store.setFocusMode('no-such-project', true), false, 'wave I: an id that names no project is refused');
+  assertEqual(Store.settings().focusProjects, [a.id], 'wave I: ...and nothing is stored for it');
+
+  // an Undo never closes (or opens) the mode: settings are in no snapshot
+  Store.tapStitch(a.id, pa.id);          // snapshot taken while open
+  Store.setFocusMode(a.id, false);
+  Store.undo();
+  assertEqual(Store.focusMode(a.id), false, 'wave I: undoing a tap after closing the mode leaves it closed');
+  Store.tapStitch(a.id, pa.id);          // snapshot taken while closed
+  Store.setFocusMode(a.id, true);
+  Store.undo();
+  assertEqual([Store.focusMode(a.id), Store.project(a.id).parts[0].stitch], [true, 0],
+    'wave I: undoing a tap made before opening the mode undoes the tap and keeps the mode open');
+
+  // it survives a reload, and travels in the backup
+  Store.flush();
+  Store.load();
+  assertEqual([Store.focusMode(a.id), Store.focusMode(b.id)], [true, false], 'wave I: the remembered mode survives a reload');
+  var exp = JSON.parse(Store.exportJSON());
+  assertEqual(exp.settings && exp.settings.focusProjects, [a.id], 'wave I: exportJSON carries settings.focusProjects');
+
+  Store.setFocusMode(a.id, false);
+  assertEqual([Store.focusMode(a.id), Store.settings().focusProjects], [false, []], 'wave I: setFocusMode(id, false) forgets it');
+
+  // normalisation: strings only, no blanks, no duplicates, only projects that exist
+  Store.setFocusMode(b.id, true);
+  Store.flush();
+  var raw = JSON.parse(window.localStorage.getItem(K));
+  raw.settings.focusProjects = [b.id, b.id, 5, '', null, '  ', 'gone-project', { id: a.id }];
+  window.localStorage.setItem(K, JSON.stringify(raw));
+  Store.load();
+  assertEqual(Store.settings().focusProjects, [b.id], 'wave I: load keeps distinct ids of projects that exist, and drops the rest');
+  delete raw.settings.focusProjects;
+  window.localStorage.setItem(K, JSON.stringify(raw));
+  Store.load();
+  assertEqual(Store.settings().focusProjects, [], 'wave I: a save from before wave I loads with no working mode open');
+  Store.setFocusMode(b.id, true);
+  Store.deleteProject(b.id);
+  Store.flush();
+  Store.load();
+  assertEqual([Store.settings().focusProjects, Store.focusMode(b.id)], [[], false], 'wave I: a deleted project\'s working mode is dropped on the next load');
+})();
+
+/* ====================================================================== */
 group('Wave H. One parser per craft (Store.registerCraftParser / parserFor)');
 /* ====================================================================== */
 

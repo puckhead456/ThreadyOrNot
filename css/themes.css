@@ -233,6 +233,23 @@ html[data-theme="dragon-pixel"] {
    Theme-specific touches (tasteful, harmless if unused by app.css)
    -------------------------------------------------------------------------- */
 
+/* Wave I working mode: Press Start draws its digits about 7/8 of an em
+   tall, so 46 px gives the same 40 px numeral the other themes get from 54–60
+   px of a rounded face (and keeps "120 / 120" inside half a phone). */
+html[data-theme="dragon-pixel"] .work-big { font-size: 46px; }
+html[data-theme="dragon-pixel"] .work-of { font-size: 18px; }
+/* the 8-bit face is about 1.4x as wide as the rounded ones */
+html[data-theme="dragon-pixel"] .work-line-text { font-size: 15px; line-height: 1.45; }
+html[data-theme="dragon-pixel"] .work-line-tag,
+html[data-theme="dragon-pixel"] .work-title,
+html[data-theme="dragon-pixel"] .work-next { font-size: 12px; }
+/* the counter's action row ("⤢ Work in 3D" is two letters longer than
+   "3D view" was) stays on as few lines as the 8-bit face allows */
+html[data-theme="dragon-pixel"] .stitch-actions > .btn,
+html[data-theme="dragon-pixel"] .stitch-actions > .linkish { font-size: 11px; }
+html[data-theme="dragon-pixel"] .work-sub,
+html[data-theme="dragon-pixel"] .work-cap { font-size: 10px; letter-spacing: 1px; }
+
 /* Pixel theme: hard offset shadows on buttons/cards to match the 8-bit look */
 html[data-theme="dragon-pixel"] .btn,
 html[data-theme="dragon-pixel"] .card {

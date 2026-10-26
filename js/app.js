@@ -2068,29 +2068,6 @@
   }
 
   /**
-   * "Group 4 of 4 · stitch 3 of 6". Wave E: the last group of a round is only
-   * as long as what is left of the round — a 36-stitch round in groups of 10
-   * ends in a group of 6, and a 6-stitch magic ring is one group of 6, not
-   * "stitch 0 of 10". Past the target (an over-count) the group is full size.
-   * @param {number} stitch  stitches done in this row
-   * @param {number} g       group size (> 0)
-   * @param {number|null} target  this row's stitch target
-   * @param {string} approx  '≈ ' when the target was computed
-   */
-  function groupReadout(stitch, g, target, approx) {
-    var groupNo = stitch === 0 ? 1 : Math.ceil(stitch / g);
-    var within = stitch === 0 ? 0 : ((stitch - 1) % g) + 1;
-    var size = g;
-    if (target) {
-      var groups = Math.ceil(target / g);
-      if (groupNo === groups && stitch <= target) size = target - (groups - 1) * g;
-    }
-    var text = 'Group ' + groupNo;
-    if (target) text += ' of ' + approx + Math.ceil(target / g);
-    return text + ' · stitch ' + within + ' of ' + (size < g ? approx : '') + size;
-  }
-
-  /**
    * "Pattern says 36 · instructions add up to 24", or '' — from the
    * `printed` / `computed` pair `Store.roundDeviation` fills only when a
    * round's printed total disagrees with its own instructions.
@@ -2567,7 +2544,9 @@
       // stitch 0 of 10" under a full progress bar was a number about nothing.
       readout = 'All ' + prt.targetRows + ' ' + partRowWord(p, prt).toLowerCase() + 's done';
     } else if (g > 0) {
-      readout = groupReadout(prt.stitch, g, target, approx);
+      // wave I (group-readout): the row's own repeat groups when it has them
+      // ("Group 1 of 6 · stitch 0 of 4"), else groups of the project's size
+      readout = Store.groupReadout(prt, prt.stitch, g, target, approx);
     } else {
       // Grouping off: just the plain stitch number.
       readout = 'stitch ' + prt.stitch;
@@ -2653,6 +2632,9 @@
 
     // wave H: RS/WS, cable ring, short rows, markers, chart, length, pair
     updateKnitWidgets(p, prt);
+
+    // wave I: the working mode's heads-up layer mirrors all of the above
+    updateWorkHud(p, prt);
   }
 
   function updateBottomBar(p, prt) {
@@ -2677,6 +2659,8 @@
     els.pName.textContent = p.name;
     updateTimerChip(p);
     renderTabs(p);
+    // wave I: the working mode this project was left in, before the counters paint
+    syncWorkMode(p);
     updateCounters(p, prt);
     updateBottomBar(p, prt);
     mountLiveDiagram();
@@ -4177,6 +4161,8 @@
 
   /** The viewer header's follow button, in step with the stored setting. */
   function syncFollowButton() {
+    // wave I: the working mode's Turn chips write the same setting
+    if (work.panelOpen && work.segs.follow) work.segs.follow.set(diagramFollowOn() ? 'on' : 'off');
     var b = viewer.followBtn;
     if (!b) return;
     var on = diagramFollowOn();
@@ -4500,6 +4486,12 @@
    */
   function syncDiagramInsets() {
     if (!live.handle || typeof live.handle.setSafeInsets !== 'function') return;
+    // wave I: in working mode the piece gets what the heads-up layer leaves
+    if (work.on && work.hud && !work.hud.hidden) {
+      syncWorkInsets();
+      return;
+    }
+    work.insetKey = '';
     var head = document.getElementById('stitch-head');
     var hint = document.getElementById('stitch-hint');
     var top = head ? head.offsetHeight : 0;
@@ -4509,6 +4501,41 @@
     var bottom = !counted && hint && !hint.hidden ? hint.offsetHeight + 10 : 0;
     try {
       live.handle.setSafeInsets({ top: top + 4, right: 8, bottom: bottom + 4, left: 8 });
+    } catch (e) {
+      /* ignore */
+    }
+  }
+
+  /**
+   * Wave I: the working mode's free area. Portrait: between the readout stack
+   * and the next-row line / buttons. Side by side (landscape): right of the
+   * readout column, between the header and the buttons. Measured, and only
+   * handed over when it changed (it is on the tap path).
+   */
+  function syncWorkInsets() {
+    var n = work.n;
+    if (!els.stitchBtn || !n.stack) return;
+    var br = els.stitchBtn.getBoundingClientRect();
+    if (!br.width || !br.height) return;
+    var st = n.stack.getBoundingClientRect();
+    var bt = n.btns.getBoundingClientRect();
+    var ft = n.foot.getBoundingClientRect();
+    var top, bottom, left = 8, right = 8;
+    if (workSide()) {
+      left = Math.max(8, st.right - br.left + 8);
+      top = Math.max(8, n.head.getBoundingClientRect().bottom - br.top + 4);
+      bottom = Math.max(8, br.bottom - bt.top + 4);
+    } else {
+      top = Math.max(8, st.bottom - br.top + 6);
+      var low = ft.height > 0 ? Math.min(ft.top, bt.top) : bt.top;
+      bottom = Math.max(8, br.bottom - low + 6);
+    }
+    var ins = { top: Math.round(top), right: right, bottom: Math.round(bottom), left: Math.round(left) };
+    var key = ins.top + ',' + ins.right + ',' + ins.bottom + ',' + ins.left;
+    if (key === work.insetKey) return;
+    work.insetKey = key;
+    try {
+      live.handle.setSafeInsets(ins);
     } catch (e) {
       /* ignore */
     }
@@ -4607,6 +4634,8 @@
       // Handy for measuring from the console (handle.getStats()); nothing in
       // the app reads it back.
       live.canvas.diagram = live.handle;
+      // wave I: a fresh handle has no insets yet, whatever was handed before
+      work.insetKey = '';
     }
     els.stitchBtn.classList.add('has-diagram');
     resizeDiagrams();
@@ -4625,14 +4654,16 @@
     if (live.btn || !els.stitchActions) return;
     // Plain `.btn` on purpose: --surface-2 / --text is a pair every theme
     // designed to contrast, unlike the old --primary-text on a black scrim.
-    var b = button('btn stitch-3d', null, 'Open the 3D view');
+    // Wave I: it opens the full-screen working mode (15c); the old viewer
+    // sheet is one tap further, under the mode's Options → Whole piece.
+    var b = button('btn stitch-3d', null, 'Work in 3D: count full screen with the piece');
     b.id = 'stitch-3d';
     b.setAttribute('data-tour', 'stitch-3d');
     b.appendChild(el('span', 'stitch-3d-glyph', '⤢'));
-    b.appendChild(el('span', 'stitch-3d-label', '3D view'));
+    b.appendChild(el('span', 'stitch-3d-label', 'Work in 3D'));
     on(b, 'click', function (e) {
       e.stopPropagation();
-      openViewerSheet();
+      openWorkMode();
     });
     var reset = document.getElementById('stitch-reset');
     if (reset && reset.parentNode === els.stitchActions) {
@@ -5097,6 +5128,655 @@
         }
       ],
       onClose: destroyViewer
+    });
+  }
+
+  /* ================================================================== *
+   * 15c. Working mode (wave I, focus-mode)
+   *
+   * The owner: "give the app a working mode … where its full screen counting
+   * the stitches and rounds". The ⤢ "Work in 3D" button opens it. It is the
+   * project screen itself in a full-screen dress (`#screen-project.work-mode`,
+   * css/app.css "Wave I — working mode"): the stitch button, with the live 3D
+   * piece inside it, fills the screen and stays the one tap target. So the
+   * gesture (press-and-release, 12 px tolerance, a swipe spins the piece),
+   * the follow turn, the over-count wedge, the alert flash, the
+   * announcements and the celebrations are the counter's own, not copies.
+   *
+   * Over it sits a heads-up layer (`#work-hud`, pointer-events: none except
+   * its controls, so a tap on its text still counts): rows done and the
+   * stitch count in big digits, the pattern line and the colour / turn /
+   * deviation hints MIRRORED from the counter's own nodes (so they are the
+   * same text), the next row, and big −1 / Undo / row − / row + buttons that
+   * click the counter's own controls. The chips (worked in, way up, terms,
+   * turn) fold into the header. Whether the mode was left open is remembered
+   * per project (`Store.focusMode` / `Store.setFocusMode`).
+   * ================================================================== */
+
+  var work = {
+    on: false,
+    hud: null,
+    n: {},
+    panelOpen: false,
+    segs: {},
+    insetKey: '',
+    mirrors: Object.create(null),
+    nextKey: '',
+    // without Store.focusMode (an old cached store.js): this page load only
+    fallbackId: null
+  };
+  /** Side-by-side layout: the readouts in a left column, the piece to the right. */
+  var WORK_SIDE_MQ = '(orientation: landscape)';
+
+  function workSide() {
+    try {
+      return !!window.matchMedia(WORK_SIDE_MQ).matches;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function workWanted(p) {
+    if (!p || isCraftProject(p)) return false;
+    if (typeof Store.focusMode === 'function') return !!Store.focusMode(p.id);
+    return work.fallbackId === p.id;
+  }
+
+  function rememberWork(p, onFlag) {
+    if (!p) return;
+    if (typeof Store.setFocusMode === 'function') Store.setFocusMode(p.id, onFlag);
+    work.fallbackId = onFlag ? p.id : null;
+  }
+
+  /** What the counter says, in one sentence: "Round 4: 3 of 18 stitches". */
+  function workCountSentence(p, prt) {
+    if (!p || !prt) return '';
+    if (partFinished(prt)) return 'All ' + prt.targetRows + ' ' + partRowWord(p, prt).toLowerCase() + 's done';
+    var ri = Store.repeatInfo(prt);
+    var target = Store.currentTarget(prt);
+    return rowWordAt(p, prt, ri.workingRow) + ' ' + ri.workingRow + ': ' +
+      (target ? prt.stitch + ' of ' + target : String(prt.stitch)) + ' ' + (prt.stitch === 1 && !target ? 'stitch' : 'stitches');
+  }
+
+  function openWorkMode() {
+    var p = currentProject();
+    if (!p) return;
+    rememberWork(p, true);
+    fb('tap');
+    render();
+    announce('Working mode. ' + workCountSentence(p, Store.activePart(p)));
+    if (els.stitchBtn) {
+      try { els.stitchBtn.focus({ preventScroll: true }); } catch (e) { els.stitchBtn.focus(); }
+    }
+  }
+
+  function closeWorkMode() {
+    var p = currentProject();
+    rememberWork(p, false);
+    fb('tap');
+    render();
+    announce('Back to the counter. ' + workCountSentence(p, p ? Store.activePart(p) : null));
+    var b = document.getElementById('stitch-3d') || els.stitchBtn;
+    if (b) {
+      try { b.focus({ preventScroll: true }); } catch (e) { b.focus(); }
+    }
+  }
+
+  /** Called by renderProject before the counters paint: the remembered mode. */
+  function syncWorkMode(p) {
+    var want = workWanted(p);
+    if (want) ensureWorkHud();
+    if (want === work.on) return;
+    work.on = want;
+    work.insetKey = '';
+    if (els.project) els.project.classList.toggle('work-mode', want);
+    if (work.hud) work.hud.hidden = !want;
+    if (!want) setWorkPanel(false);
+    // the stitch button just changed size: the canvas follows once laid out
+    // (mountLiveDiagram resizes at once; this catches the settled layout)
+    window.requestAnimationFrame(function () {
+      resizeDiagrams();
+    });
+  }
+
+  function workButton(cls, glyph, label, word) {
+    var b = button('work-btn ' + cls, null, label);
+    b.appendChild(el('span', 'work-btn-glyph', glyph));
+    if (word) b.appendChild(el('span', 'work-btn-word', word));
+    return b;
+  }
+
+  /** Click one of the counter's own controls, so every rule stays the counter's. */
+  function clickCounter(node) {
+    if (node && !node.disabled) node.click();
+  }
+
+  function ensureWorkHud() {
+    if (work.hud && document.contains(work.hud)) return work.hud;
+    if (!els.project) return null;
+    var n = (work.n = {});
+    var hud = el('div', 'work-hud');
+    hud.id = 'work-hud';
+    hud.hidden = true;
+    hud.setAttribute('role', 'region');
+    hud.setAttribute('aria-label', 'Working mode');
+
+    /* ---- header: ✕, whose piece, the folded chips ---- */
+    var head = el('div', 'work-head');
+    var close = button('work-icon work-close', '✕', 'Close working mode');
+    on(close, 'click', closeWorkMode);
+    n.title = el('div', 'work-title');
+    var more = button('work-icon work-more', null, 'Working mode options');
+    more.appendChild(el('span', 'work-more-text', 'Options'));
+    more.appendChild(el('span', 'work-more-caret', '▾'));
+    more.setAttribute('aria-expanded', 'false');
+    more.setAttribute('aria-controls', 'work-panel');
+    on(more, 'click', function () { setWorkPanel(!work.panelOpen); });
+    head.appendChild(close);
+    head.appendChild(n.title);
+    head.appendChild(more);
+    n.head = head;
+    n.more = more;
+
+    /* ---- the readouts, the pattern line, the hints ---- */
+    var stack = el('div', 'work-stack');
+    var read = el('div', 'work-read');
+    var rowCell = el('div', 'work-cell work-rowcell');
+    n.rowCap = el('div', 'work-cap');
+    var rowLine = el('div', 'work-numline');
+    n.rowNum = el('span', 'work-big');
+    n.rowOf = el('span', 'work-of');
+    rowLine.appendChild(n.rowNum);
+    rowLine.appendChild(n.rowOf);
+    n.rowSub = el('div', 'work-sub');
+    n.rowTags = el('div', 'work-tags');
+    rowCell.appendChild(n.rowCap);
+    rowCell.appendChild(rowLine);
+    // "piece 1 of 2" and the RS / WS chip share one line
+    var rowMeta = el('div', 'work-meta');
+    rowMeta.appendChild(n.rowSub);
+    rowMeta.appendChild(n.rowTags);
+    rowCell.appendChild(rowMeta);
+    var stCell = el('div', 'work-cell work-stcell');
+    n.stCell = stCell;
+    stCell.appendChild(el('div', 'work-cap', 'STITCHES'));
+    var stLine = el('div', 'work-numline');
+    n.stNum = el('span', 'work-big');
+    n.stOf = el('span', 'work-of');
+    stLine.appendChild(n.stNum);
+    stLine.appendChild(n.stOf);
+    n.stSub = el('div', 'work-sub');
+    stCell.appendChild(stLine);
+    stCell.appendChild(n.stSub);
+    read.appendChild(rowCell);
+    read.appendChild(stCell);
+    stack.appendChild(read);
+
+    n.line = el('div', 'work-line');
+    n.lineTag = el('span', 'work-line-tag');
+    var main = el('span', 'work-line-main');
+    n.lineText = el('span', 'work-line-text');
+    n.lineNotes = el('span', 'work-line-notes');
+    main.appendChild(n.lineText);
+    main.appendChild(n.lineNotes);
+    n.line.appendChild(n.lineTag);
+    n.line.appendChild(main);
+    stack.appendChild(n.line);
+
+    n.hints = el('div', 'work-hints');
+    n.hintBox = {};
+    ['setup', 'yarn', 'short', 'extra', 'dev'].forEach(function (k) {
+      var h = el('div', 'work-hint');
+      h.hidden = true;
+      n.hintBox[k] = h;
+      n.hints.appendChild(h);
+    });
+    n.markers = el('div', 'knit-markers work-markers');
+    n.markers.hidden = true;
+    n.hints.appendChild(n.markers);
+    stack.appendChild(n.hints);
+    n.stack = stack;
+
+    /* ---- what comes next ---- */
+    var foot = el('div', 'work-foot');
+    n.tip = el('div', 'work-tip', 'Tap anywhere to count · swipe to turn');
+    n.next = el('div', 'work-next');
+    n.nextTag = el('span', 'work-next-tag');
+    n.nextText = el('span', 'work-next-text');
+    n.next.appendChild(n.nextTag);
+    n.next.appendChild(n.nextText);
+    foot.appendChild(n.tip);
+    foot.appendChild(n.next);
+    n.foot = foot;
+
+    /* ---- the bottom corners ---- */
+    var btns = el('div', 'work-btns');
+    n.stMinus = workButton('work-st-minus', '−1', 'Remove one stitch');
+    on(n.stMinus, 'click', function (e) { e.stopPropagation(); clickCounter(document.getElementById('stitch-minus')); });
+    n.undo = workButton('work-undo', '↶', 'Undo last action');
+    on(n.undo, 'click', function (e) { e.stopPropagation(); clickCounter(els.btnUndo); });
+    n.rowMinus = workButton('work-row-minus', '−', 'Previous row');
+    on(n.rowMinus, 'click', function (e) { e.stopPropagation(); clickCounter(document.getElementById('row-minus')); });
+    n.rowPlus = workButton('work-row-plus', '+', 'Complete row', 'Row');
+    on(n.rowPlus, 'click', function (e) { e.stopPropagation(); clickCounter(document.getElementById('row-plus')); });
+    btns.appendChild(n.stMinus);
+    btns.appendChild(n.undo);
+    btns.appendChild(el('span', 'work-gap'));
+    btns.appendChild(n.rowMinus);
+    btns.appendChild(n.rowPlus);
+    n.btns = btns;
+
+    /* ---- the folded chips ---- */
+    var scrim = el('div', 'work-scrim');
+    scrim.hidden = true;
+    on(scrim, 'click', function () { setWorkPanel(false); });
+    var panel = el('div', 'work-panel');
+    panel.id = 'work-panel';
+    panel.hidden = true;
+    panel.setAttribute('role', 'group');
+    panel.setAttribute('aria-label', 'Working mode options');
+    n.scrim = scrim;
+    n.panel = panel;
+
+    hud.appendChild(head);
+    hud.appendChild(stack);
+    hud.appendChild(foot);
+    hud.appendChild(btns);
+    hud.appendChild(scrim);
+    hud.appendChild(panel);
+    els.project.appendChild(hud);
+    work.hud = hud;
+    // a web font landing late, or a hint wrapping, moves the free area too
+    if (typeof window.ResizeObserver === 'function') {
+      try {
+        var ro = new window.ResizeObserver(function () {
+          if (work.on) syncDiagramInsets();
+        });
+        ro.observe(stack);
+        ro.observe(foot);
+        ro.observe(btns);
+      } catch (e) { /* the tap path re-measures anyway */ }
+    }
+    work.mirrors = Object.create(null);
+    work.nextKey = '';
+    return hud;
+  }
+
+  /**
+   * Copy a counter node's children into a HUD node, once per change. Ids and
+   * tour hooks are dropped from the copy, and a copied button clicks the
+   * counter's button at the same place (looked up at click time, because the
+   * knitting chips are rebuilt on every update).
+   */
+  function mirrorNode(key, src, dst) {
+    var html = src ? src.innerHTML : '';
+    if (work.mirrors[key] === html) return;
+    work.mirrors[key] = html;
+    clear(dst);
+    if (!src) return;
+    for (var c = src.firstChild; c; c = c.nextSibling) dst.appendChild(c.cloneNode(true));
+    Array.prototype.forEach.call(dst.querySelectorAll('[id],[data-tour]'), function (x) {
+      x.removeAttribute('id');
+      x.removeAttribute('data-tour');
+    });
+    Array.prototype.forEach.call(dst.querySelectorAll('button'), function (b, i) {
+      on(b, 'click', function (e) {
+        e.stopPropagation();
+        clickCounter(src.querySelectorAll('button')[i]);
+      });
+    });
+  }
+
+  /** A counter node shown as one HUD hint (its class rides along for its colours). */
+  function mirrorHint(key, src) {
+    var box = work.n.hintBox[key];
+    var show = !!(src && !src.hidden && src.parentNode && (src.textContent || '').trim());
+    box.hidden = !show;
+    if (!show) {
+      if (work.mirrors[key] !== '') { work.mirrors[key] = ''; clear(box); }
+      return;
+    }
+    box.className = 'work-hint ' + src.className;
+    if (src.getAttribute('aria-label')) box.setAttribute('aria-label', src.getAttribute('aria-label'));
+    else box.removeAttribute('aria-label');
+    if (src.getAttribute('role')) box.setAttribute('role', src.getAttribute('role'));
+    mirrorNode(key, src, box);
+  }
+
+  /** The text nodes of the stitch readout ("Group 2 of 3 · stitch 4 of 10"), without the ≈ why badge. */
+  function readoutText() {
+    var r = els.stitchReadout;
+    if (!r) return '';
+    var s = '';
+    for (var c = r.firstChild; c; c = c.nextSibling) if (c.nodeType === 3) s += c.nodeValue;
+    return s.trim();
+  }
+
+  /** "Next · Rnd 5 · 5. Inc, 3sc, repeat around", or "Last round of Body". */
+  function paintWorkNext(p, prt, ri, line, finished) {
+    var n = work.n;
+    var sr = null;
+    try { sr = isKnit(p) && typeof Store.shortRowInfo === 'function' ? Store.shortRowInfo(prt) : null; } catch (e) { sr = null; }
+    var nextRow = ri.workingRow + 1;
+    var key, tag = '', text = '', nline = null, word = rowWordAt(p, prt, ri.workingRow).toLowerCase();
+    if (finished || sr) {
+      key = 'none';
+    } else if (prt.targetRows && nextRow > prt.targetRows) {
+      var pieceLeft = prt.makeCount > 1 && prt.piecesDone + 1 < prt.makeCount;
+      key = 'last:' + prt.id + ':' + prt.row + ':' + pieceLeft;
+      tag = pieceLeft ? 'Then' : 'Last';
+      text = pieceLeft
+        ? prt.name + ' ' + (prt.piecesDone + 2) + ' of ' + prt.makeCount + ', from ' + shortRowWordAt(p, prt, 1).toLowerCase() + ' 1'
+        : 'This is the last ' + word + ' of ' + prt.name;
+    } else {
+      var nri = Store.repeatInfo({ row: prt.row + 1, repeat: prt.repeat });
+      nline = Store.lineForRow(prt, nri.patternRow);
+      tag = 'Next · ' + shortRowWordAt(p, prt, nri.patternRow) + ' ' + nri.patternRow;
+      key = 'next:' + prt.id + ':' + nri.patternRow + ':' + (nline ? nline.text : '') + ':' + (nline === line);
+      if (nline && nline === line) text = 'same as this ' + word;
+      else if (!nline) key = 'none';
+    }
+    if (key === work.nextKey) return;
+    work.nextKey = key;
+    n.next.hidden = key === 'none';
+    if (key === 'none') return;
+    n.nextTag.textContent = tag;
+    if (nline && nline !== line && nline.text) fillSizeMarked(n.nextText, nline.text, prt, p);
+    else n.nextText.textContent = text;
+    n.next.setAttribute('aria-label', tag + ': ' + (n.nextText.textContent || ''));
+  }
+
+  /** Paint the HUD from the counter (called at the end of updateCounters). */
+  function updateWorkHud(p, prt) {
+    if (!work.on || !work.hud || !p || !prt) return;
+    var n = work.n;
+    var finished = partFinished(prt);
+    var ri = Store.repeatInfo(prt);
+
+    var mate = isKnit(p) && typeof Store.linkedPart === 'function' ? Store.linkedPart(p, prt) : null;
+    var name = groupPrefix(p, prt) + (mate && typeof Store.linkedLabel === 'function' ? Store.linkedLabel(p, prt) : prt.name);
+    n.title.textContent = name;
+    n.title.title = name;
+
+    // rows DONE, as the counter's big number counts them
+    var doneWord = rowWordAt(p, prt, Math.max(1, prt.row));
+    n.rowCap.textContent = (doneWord + 's done').toUpperCase();
+    n.rowNum.textContent = String(prt.row);
+    n.rowOf.textContent = prt.targetRows ? '/ ' + (Store.targetApprox(prt) ? '≈ ' : '') + prt.targetRows : '';
+    var rowSub = [];
+    if (prt.makeCount > 1) rowSub.push('piece ' + Math.min(prt.piecesDone + 1, prt.makeCount) + ' of ' + prt.makeCount);
+    if (els.repeat && !els.repeat.hidden && els.repeat.textContent) rowSub.push(els.repeat.textContent);
+    n.rowSub.textContent = rowSub.join(' · ');
+    n.rowSub.hidden = !rowSub.length;
+    // knitting: the RS / WS chip and the cable ring, from the row label
+    // ("SHORT ROWS" is not repeated: the short-row strip says "Short row 2 of 14")
+    var tagSrc = null;
+    if (isKnit(p) && els.rowLabel) {
+      tagSrc = document.createElement('div');
+      Array.prototype.forEach.call(els.rowLabel.querySelectorAll('.knit-side-chip, .knit-cable'), function (x) {
+        tagSrc.appendChild(x.cloneNode(true));
+      });
+    }
+    if (tagSrc && tagSrc.firstChild) {
+      n.rowTags.hidden = false;
+      var tagHtml = tagSrc.innerHTML;
+      if (work.mirrors.rowTags !== tagHtml) {
+        work.mirrors.rowTags = tagHtml;
+        clear(n.rowTags);
+        while (tagSrc.firstChild) n.rowTags.appendChild(tagSrc.firstChild);
+        var chip = n.rowTags.querySelector('.knit-side-chip');
+        if (chip) {
+          chip.removeAttribute('data-tour');
+          on(chip, 'click', function (e) {
+            e.stopPropagation();
+            clickCounter(els.rowLabel.querySelector('.knit-side-chip'));
+          });
+        }
+      }
+    } else {
+      n.rowTags.hidden = true;
+      if (work.mirrors.rowTags) { work.mirrors.rowTags = ''; clear(n.rowTags); }
+    }
+
+    // stitches
+    var target = Store.currentTarget(prt);
+    var line = Store.lineForRow(prt, ri.patternRow);
+    var approx = target && Store.isComputed(line) ? '≈ ' : '';
+    n.stNum.textContent = String(prt.stitch);
+    n.stOf.textContent = target && !finished ? '/ ' + approx + target : '';
+    n.stSub.textContent = readoutText();
+    n.stCell.classList.toggle('over', !!(target && prt.stitch > target));
+
+    // the pattern line: the strip's own nodes, so it is the same text
+    var lineOn = !!(els.patternLine && !els.patternLine.hidden && !finished);
+    n.line.hidden = !lineOn;
+    if (lineOn) {
+      mirrorNode('tag', els.patternTag, n.lineTag);
+      mirrorNode('text', els.patternText, n.lineText);
+      var notesOn = !!(els.patternNotes && !els.patternNotes.hidden && els.patternNotes.textContent);
+      n.lineNotes.hidden = !notesOn;
+      n.lineNotes.textContent = notesOn ? els.patternNotes.textContent : '';
+    }
+
+    // the hints: setup, colour change / turn, short rows, knitting chips, deviation
+    mirrorHint('setup', els.setupLine);
+    mirrorHint('yarn', els.yarnLine);
+    mirrorHint('short', knitEls.short);
+    mirrorHint('extra', knitEls.extra);
+    mirrorHint('dev', els.stitchDev);
+    if (isKnit(p)) {
+      paintMarkers(n.markers, p, prt, finished);
+      n.markers.removeAttribute('data-tour');
+    } else {
+      n.markers.hidden = true;
+    }
+
+    paintWorkNext(p, prt, ri, line, finished);
+    n.tip.hidden = finished || prt.stitch > 0;
+
+    // the buttons say what the counter's buttons say
+    var headWord = shortRowWordAt(p, prt, ri.workingRow);
+    var plus = document.getElementById('row-plus');
+    n.rowPlus.setAttribute('aria-label', plus && plus.getAttribute('aria-label') === 'Short row done (turn)'
+      ? 'Short row done (turn)' : 'Complete ' + rowWordAt(p, prt, ri.workingRow).toLowerCase());
+    var w = n.rowPlus.querySelector('.work-btn-word');
+    if (w) w.textContent = headWord;
+    n.rowMinus.setAttribute('aria-label', 'Previous ' + rowWordAt(p, prt, Math.max(1, prt.row)).toLowerCase());
+    n.undo.disabled = !Store.canUndo();
+
+    if (work.panelOpen) syncWorkPanel(p, prt);
+    syncDiagramInsets();
+  }
+
+  /* ---- the folded chips: worked in, way up, terms, turn, and the sheets ---- */
+
+  function setWorkPanel(open) {
+    var n = work.n;
+    if (!n.panel) return;
+    open = !!open;
+    var wasOpen = work.panelOpen;
+    work.panelOpen = open;
+    if (open) buildWorkPanel();
+    n.panel.hidden = !open;
+    n.scrim.hidden = !open;
+    n.more.setAttribute('aria-expanded', open ? 'true' : 'false');
+    n.more.classList.toggle('on', open);
+    if (open) {
+      var first = n.panel.querySelector('button');
+      if (first) { try { first.focus({ preventScroll: true }); } catch (e) { first.focus(); } }
+    } else if (wasOpen && n.panel.contains(document.activeElement)) {
+      try { n.more.focus({ preventScroll: true }); } catch (e2) { n.more.focus(); }
+    }
+  }
+
+  function workPanelRow(label, node, hint) {
+    var row = el('div', 'work-panel-row');
+    row.appendChild(el('span', 'work-panel-label', label));
+    row.appendChild(node);
+    if (hint) row.appendChild(hint);
+    return row;
+  }
+
+  function buildWorkPanel() {
+    var p = currentProject();
+    var prt = p ? Store.activePart(p) : null;
+    var panel = work.n.panel;
+    clear(panel);
+    work.segs = {};
+    if (!p || !prt) return;
+    var segs = work.segs;
+
+    var sum = shapeSummary(currentModel());
+    if (sum) {
+      var shape = el('div', 'work-shape');
+      shape.appendChild(el('span', 'work-shape-name', sum.name));
+      if (sum.detail) shape.appendChild(el('span', 'work-shape-sub', sum.detail));
+      panel.appendChild(shape);
+    }
+
+    function changed() {
+      pushDiagram('none');
+      render();
+      fb('tap');
+    }
+    segs.mode = segmented(
+      [{ id: 'auto', label: 'Auto' }, { id: 'rounds', label: 'Rounds' }, { id: 'rows', label: 'Rows' }],
+      prt.workMode === 'rounds' || prt.workMode === 'rows' ? prt.workMode : 'auto',
+      function (v) {
+        var cp = currentPart();
+        if (cp) Store.updatePart(p.id, cp.id, { workMode: v });
+        changed();
+      }
+    );
+    segs.mode.node.setAttribute('aria-label', 'Worked in rounds or rows');
+    panel.appendChild(workPanelRow('Worked in', segs.mode.node));
+
+    segs.orientHint = el('div', 'work-panel-hint', orientationHint(partOrientation(prt), prt));
+    segs.orient = segmented(ORIENT_OPTIONS, partOrientation(prt), function (v) {
+      var cp = currentPart();
+      if (cp) Store.updatePart(p.id, cp.id, { orientation: v });
+      changed();
+    });
+    segs.orient.node.setAttribute('aria-label', 'Worked top-down or bottom-up');
+    panel.appendChild(workPanelRow('Way up', segs.orient.node, segs.orientHint));
+
+    // UK / US names are crochet's question, not knitting's (as in the viewer)
+    if (!isKnit(p)) {
+      segs.dialectHint = el('div', 'work-panel-hint', dialectHint(partDialectPick(prt), prt, true));
+      segs.dialect = segmented(DIALECT_OPTIONS, partDialectPick(prt), function (v) {
+        var cp = currentPart();
+        if (cp) Store.updatePart(p.id, cp.id, { dialect: v });
+        changed();
+      });
+      segs.dialect.node.setAttribute('aria-label', 'Stitch terms: UK or US');
+      panel.appendChild(workPanelRow('Terms', segs.dialect.node, segs.dialectHint));
+    }
+
+    // the same setting as Settings → "3D follows your stitches" and the viewer's ↻
+    segs.follow = segmented(
+      [{ id: 'on', label: 'Follows stitches' }, { id: 'off', label: 'Free spin' }],
+      diagramFollowOn() ? 'on' : 'off',
+      function (v) {
+        setDiagramFollow(v === 'on');
+        fb('tap');
+      }
+    );
+    segs.follow.node.setAttribute('aria-label', 'The 3D piece turns with each stitch, or spins freely');
+    panel.appendChild(workPanelRow('Turn', segs.follow.node));
+
+    var acts = el('div', 'work-actions');
+    if (wakeSupported) {
+      segs.awake = button('btn work-awake', '☀ Keep awake', 'Keep screen awake');
+      on(segs.awake, 'click', function () {
+        clickCounter(els.btnWake);
+        syncWorkPanel(currentProject(), currentPart());
+      });
+      acts.appendChild(segs.awake);
+    }
+    var pat = button('btn', '📖 Pattern', 'Open the whole pattern');
+    on(pat, 'click', function () {
+      var cp = currentPart();
+      setWorkPanel(false);
+      if (cp) openPatternSheet(p.id, cp.id);
+    });
+    acts.appendChild(pat);
+    var yarn = button('btn', '🎨 Yarn colours', 'Yarn colours');
+    on(yarn, 'click', function () {
+      setWorkPanel(false);
+      openYarnSheet(p.id);
+    });
+    acts.appendChild(yarn);
+    if (diagramAvailable()) {
+      var whole = button('btn', '🔍 Whole piece', 'Look at the whole piece: drag to turn, pinch to zoom');
+      on(whole, 'click', function () {
+        setWorkPanel(false);
+        openViewerSheet();
+      });
+      acts.appendChild(whole);
+    }
+    panel.appendChild(acts);
+    syncWorkPanel(p, prt);
+  }
+
+  /** Keep the open panel's chips in step with the Store (an Undo moves them too). */
+  function syncWorkPanel(p, prt) {
+    var segs = work.segs;
+    if (!work.panelOpen || !prt) return;
+    if (segs.mode) segs.mode.set(prt.workMode === 'rounds' || prt.workMode === 'rows' ? prt.workMode : 'auto');
+    if (segs.orient) {
+      segs.orient.set(partOrientation(prt));
+      segs.orientHint.textContent = orientationHint(partOrientation(prt), prt);
+    }
+    if (segs.dialect) {
+      segs.dialect.set(partDialectPick(prt));
+      segs.dialectHint.textContent = dialectHint(partDialectPick(prt), prt, true);
+    }
+    if (segs.follow) segs.follow.set(diagramFollowOn() ? 'on' : 'off');
+    if (segs.awake) {
+      var awake = !!Store.settings().keepAwake;
+      segs.awake.classList.toggle('on', awake);
+      segs.awake.setAttribute('aria-pressed', awake ? 'true' : 'false');
+    }
+  }
+
+  /**
+   * Keyboard in working mode: Space / Enter count a stitch, the arrows move
+   * the row (up / right complete one, down / left step back), Escape folds
+   * the chips or closes the mode. Never while a sheet or a tour is up, never
+   * from a text field, and never on top of a control's own Enter / Space.
+   */
+  function bindWorkKeys() {
+    on(document, 'keydown', function (e) {
+      if (!work.on || !els.project || els.project.hidden) return;
+      if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey) return;
+      if (openSheets.length) return;
+      if (window.Tour && typeof window.Tour.isRunning === 'function' && window.Tour.isRunning()) return;
+      var t = e.target;
+      var tag = t && t.tagName ? t.tagName.toLowerCase() : '';
+      if (tag === 'input' || tag === 'textarea' || tag === 'select' || (t && t.isContentEditable)) return;
+      var inPanel = !!(work.n.panel && work.n.panel.contains(t));
+      var key = e.key;
+      if (key === 'Escape' || key === 'Esc') {
+        e.preventDefault();
+        if (work.panelOpen) setWorkPanel(false);
+        else closeWorkMode();
+        return;
+      }
+      if (key === ' ' || key === 'Spacebar' || key === 'Enter') {
+        // a focused control (the stitch button included) activates itself
+        if (tag === 'button' || (t && t.getAttribute && t.getAttribute('role') === 'button')) return;
+        e.preventDefault();
+        if (!e.repeat) doStitchTap();
+        return;
+      }
+      if (inPanel || work.panelOpen) return;
+      if (key === 'ArrowUp' || key === 'ArrowRight') {
+        e.preventDefault();
+        if (!e.repeat) clickCounter(document.getElementById('row-plus'));
+      } else if (key === 'ArrowDown' || key === 'ArrowLeft') {
+        e.preventDefault();
+        if (!e.repeat) clickCounter(document.getElementById('row-minus'));
+      }
     });
   }
 
@@ -9711,6 +10391,8 @@
 
     // Stitch controls
     bindStitchButton();
+    // wave I: Space / Enter / arrows / Escape in the working mode
+    bindWorkKeys();
     on($('#stitch-minus'), 'click', function () {
       var p = currentProject();
       var prt = currentPart();

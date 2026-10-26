@@ -1090,6 +1090,11 @@
         autoAdvance: true,
         // The 3D piece inside the stitch button.
         liveDiagram: true,
+        // Wave I (focus-mode): the ids of the projects whose full-screen
+        // working mode was left open, so reopening one returns to it. A view
+        // preference of this device: settings are never in an undo snapshot,
+        // so an Undo can never close (or open) the mode.
+        focusProjects: [],
         // Guided help: which tours have been completed, and whether the
         // first-run welcome card has been answered.
         toursSeen: [],
@@ -1146,6 +1151,18 @@
     return out;
   }
 
+  /** Wave I: `settings.focusProjects` — distinct non-empty id strings, capped. */
+  var FOCUS_PROJECTS_MAX = 200;
+  function normalizeFocusProjects(raw) {
+    var out = [];
+    if (!Array.isArray(raw)) return out;
+    for (var i = 0; i < raw.length && out.length < FOCUS_PROJECTS_MAX; i++) {
+      var id = typeof raw[i] === 'string' ? raw[i].trim() : '';
+      if (id && out.indexOf(id) === -1) out.push(id);
+    }
+    return out;
+  }
+
   /* Everything the shell knows how to normalise. Anything else in a saved or
    * imported state is carried through verbatim (12 #2). */
   var KNOWN_STATE_KEYS = {
@@ -1169,6 +1186,8 @@
         autoAdvance: s.autoAdvance === undefined ? true : !!s.autoAdvance,
         // Old saves have no idea the diagram exists — they migrate to "on".
         liveDiagram: s.liveDiagram === undefined ? true : !!s.liveDiagram,
+        // Wave I: old saves never had a working mode open.
+        focusProjects: normalizeFocusProjects(s.focusProjects),
         // Old saves have neither — they migrate to "nothing seen, not welcomed".
         toursSeen: Array.isArray(s.toursSeen)
           ? s.toursSeen.filter(function (t) { return typeof t === 'string' && t; })
@@ -1200,6 +1219,10 @@
         }
       }
     }
+    // Wave I: a working mode remembered for a project that is gone is dropped.
+    out.settings.focusProjects = out.settings.focusProjects.filter(function (id) {
+      return !!findProject(out.projects, id);
+    });
     // Active project must exist.
     if (out.activeProjectId && !findProject(out.projects, out.activeProjectId)) {
       out.activeProjectId = null;
@@ -1709,6 +1732,42 @@
     if (!(key in s)) return;
     s[key] = value;
     save();
+  }
+
+  /**
+   * Wave I (focus-mode): was the full-screen working mode left open on this
+   * project? A device preference kept in `settings.focusProjects`, not on the
+   * project, so it is in no undo snapshot and never moves `updatedAt`.
+   * @returns {boolean}
+   */
+  function focusMode(projectId) {
+    var id = str(projectId, '').trim();
+    if (!id) return false;
+    var list = settings().focusProjects;
+    return Array.isArray(list) && list.indexOf(id) !== -1;
+  }
+
+  /**
+   * Remember (or forget) the working mode for one project. No undo step.
+   * Refuses an id that names no project.
+   * @returns {boolean} whether the stored value is now `on`
+   */
+  function setFocusMode(projectId, on) {
+    var id = str(projectId, '').trim();
+    if (!id || !project(id)) return false;
+    var s = settings();
+    var list = normalizeFocusProjects(s.focusProjects);
+    var at = list.indexOf(id);
+    if (on && at === -1) {
+      list.push(id);
+      // the oldest remembered project gives way past the cap
+      if (list.length > FOCUS_PROJECTS_MAX) list.splice(0, list.length - FOCUS_PROJECTS_MAX);
+    } else if (!on && at !== -1) {
+      list.splice(at, 1);
+    }
+    s.focusProjects = list;
+    save();
+    return focusMode(id) === !!on;
   }
 
   function projects() {
@@ -2819,6 +2878,118 @@
   }
 
   /* ------------------------------------------------------------------ *
+   * wave I (group-readout): the groups the row is worked in
+   *
+   * The readout under the stitch button used to chunk every row into the
+   * project's `groupSize` (10): "Inc, 2sc, repeat around" over 18 read
+   * "Group 1 of ≈ 3 · stitch 0 of 10". A row worked in repeats is counted in
+   * its repeats instead - "Group 1 of 6 · stitch 0 of 4" - read off the
+   * row's own expansion (`Patterns.repeatGroups`, the knitting reader's for a
+   * knitted part), and only when that expansion makes exactly the row's
+   * target. Anything else keeps the groupSize chunks.
+   * ------------------------------------------------------------------ */
+
+  /**
+   * The repeat groups of the row being worked on `prt`, or null.
+   * -> { groups, total, runs: [{ group (0 = before/after the groups), size }] }
+   */
+  function rowGroups(prt) {
+    if (!prt) return null;
+    var target = currentTarget(prt);
+    if (!target) return null;
+    var ri = repeatInfo(prt);
+    var row = ri.patternRow;
+    // the row worked just before: the end of the block when a repeat starts over
+    var prevRow = (ri.inside && ri.j === 1 && ri.k > 1 && prt.repeat) ? prt.repeat.endRow : row - 1;
+    var prev = prevRow >= 1 ? targetFor(prt, prevRow) : null;
+    var entry = partLines(prt);
+    if (!entry || entry === EMPTY_ENTRY || !entry.lines || !entry.lines.length) return null;
+    var key = row + '|' + prev + '|' + target;
+    if (!entry.groups) entry.groups = {};
+    if (Object.prototype.hasOwnProperty.call(entry.groups, key)) return entry.groups[key];
+    var out = null;
+    var api = patternsApi(prt);
+    if (api && typeof api.repeatGroups === 'function') {
+      try { out = api.repeatGroups(entry.lines, row, prev); } catch (e) { out = null; }
+    }
+    // the groups have to add up to the very number the counter counts to
+    if (!out || out.total !== target) out = null;
+    entry.groups[key] = out;
+    return out;
+  }
+
+  /**
+   * Where stitch `stitch` (stitches done in this row) falls among `info`'s
+   * groups. `stitch` 0 is the start of the first run. Past the end of the
+   * row (an over-count) the last group's size carries on.
+   * -> { group, of, within, size, before (group number the run leads into,
+   *      0 when none), boundary (true when this stitch ends a group) }
+   */
+  function groupAt(info, stitch) {
+    if (!info || !info.runs || !info.runs.length) return null;
+    var s = Math.max(0, Math.floor(stitch || 0));
+    var runs = info.runs, cum = 0, i, r = runs[0];
+    function next(from) {
+      for (var j = from; j < runs.length; j++) if (runs[j].group) return runs[j].group;
+      return 0;
+    }
+    if (s === 0) {
+      return { group: r.group, of: info.groups, within: 0, size: r.size,
+        before: r.group ? 0 : next(0), boundary: false };
+    }
+    for (i = 0; i < runs.length; i++) {
+      r = runs[i];
+      if (s <= cum + r.size) {
+        return { group: r.group, of: info.groups, within: s - cum, size: r.size,
+          before: r.group ? 0 : next(i + 1), boundary: !!r.group && s === cum + r.size };
+      }
+      cum += r.size;
+    }
+    // over-count: past the row's total
+    var last = runs[runs.length - 1], extra = s - info.total;
+    if (last.group) {
+      var w = ((extra - 1) % last.size) + 1;
+      return { group: last.group + Math.ceil(extra / last.size), of: info.groups, within: w,
+        size: last.size, before: 0, boundary: w === last.size };
+    }
+    return { group: 0, of: info.groups, within: last.size + extra, size: last.size, before: 0, boundary: false };
+  }
+
+  /**
+   * The readout under the stitch button: "Group 1 of 6 · stitch 0 of 4" for a
+   * row worked in repeats ("Before group 1 · stitch 1 of 1" / "After group 5
+   * · stitch 2 of 2" for the stitches outside them), else the `groupSize`
+   * chunks - the last chunk only as long as what is left of the row, "≈" on
+   * a computed total ("Group 2 of ≈ 3 · stitch 4 of 10"). The repeat count
+   * carries no "≈": it is what the row's own words say.
+   * @param {Object} prt
+   * @param {number} stitch  stitches done in this row
+   * @param {number} g       group size (> 0; 0 = grouping off -> "stitch N")
+   * @param {number|null} target  this row's stitch target
+   * @param {string} approx  '≈ ' when the target was computed
+   */
+  function groupReadout(prt, stitch, g, target, approx) {
+    approx = approx || '';
+    if (!(g > 0)) return 'stitch ' + stitch;
+    var at = groupAt(rowGroups(prt), stitch);
+    if (at) {
+      var tail = ' · stitch ' + at.within + ' of ' + at.size;
+      if (at.group) return 'Group ' + at.group + ' of ' + at.of + tail;
+      return (at.before ? 'Before group ' + at.before : 'After group ' + at.of) + tail;
+    }
+    var groupNo = stitch === 0 ? 1 : Math.ceil(stitch / g);
+    var within = stitch === 0 ? 0 : ((stitch - 1) % g) + 1;
+    var size = g;
+    if (target) {
+      var groups = Math.ceil(target / g);
+      if (groupNo === groups && stitch <= target) size = target - (groups - 1) * g;
+    }
+    var text = 'Group ' + groupNo;
+    if (target) text += ' of ' + approx + Math.ceil(target / g);
+    return text + ' · stitch ' + within + ' of ' + (size < g ? approx : '') + size;
+  }
+
+  /* ------------------------------------------------------------------ *
    * Counting
    * ------------------------------------------------------------------ */
 
@@ -3089,7 +3260,16 @@
     }
     // groupSize 0 means grouping is off — no group event, no buzz.
     var g = proj.groupSize;
-    if (g > 0 && s % g === 0) return { event: 'group', stitch: s, group: s / g };
+    if (g > 0) {
+      // wave I: a row worked in repeats buzzes at the end of each repeat
+      var rg = rowGroups(prt);
+      if (rg) {
+        var at = groupAt(rg, s);
+        if (at && at.boundary) return { event: 'group', stitch: s, group: at.group };
+        return { event: 'stitch', stitch: s };
+      }
+      if (s % g === 0) return { event: 'group', stitch: s, group: s / g };
+    }
     return { event: 'stitch', stitch: s };
   }
 
@@ -8993,6 +9173,9 @@
     getState: getState,
     settings: settings,
     setSetting: setSetting,
+    // wave I (focus-mode): the per-project working mode, a device preference
+    focusMode: focusMode,
+    setFocusMode: setFocusMode,
 
     // persistence health (13 #1–#3, 09 #2/#4, 12 #1)
     saveFailed: saveFailed,
@@ -9078,6 +9261,10 @@
     targetFor: targetFor,
     currentTarget: currentTarget,
     currentTargetInfo: currentTargetInfo,
+    // wave I (group-readout): the repeat groups of the row being worked
+    rowGroups: rowGroups,
+    groupAt: groupAt,
+    groupReadout: groupReadout,
     patternSummary: patternSummary,
     splitSections: splitSections,
     // wave H (knit-qa): the gauge an import would write (preview), never writing

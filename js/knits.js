@@ -754,16 +754,28 @@
     if (n > REP_MAX) { st.fail = true; return; }
     st.P += o.p * n; st.C += o.c * n; st.net += (o.p - o.c) * n;
     st.toEnd = false;
-    st.trace.push({ op: o, n: n });
+    st.trace.push(st.rp ? { op: o, n: n, rp: st.rp } : { op: o, n: n });
+  }
+
+  // wave I (group-readout): under Patterns.repeatGroups (E.tagReps()) every
+  // working of a repeated block tags the ops it adds `rp: {s, k}`, so the
+  // counter can say "Group 3 of 20 · stitch 2 of 4" for "*k2, p2; rep from *
+  // to end". A repeat inside a repeat keeps the outer tag (`st.rp` is set).
+  var REP_SET = 0;
+  function repTagging(st) { return !!(E && E.tagReps && E.tagReps()) && !st.rp; }
+  function repWork(st, set, k, fn) {
+    if (!set) { fn(); return; }
+    st.rp = { s: set, k: k };
+    try { fn(); } finally { st.rp = null; }
   }
 
   function exec(items, st, depth) {
     if ((depth || 0) > 6) { st.fail = true; return; }
-    var marks = {};
+    var marks = {}, tpos = {};
     for (var i = 0; i < items.length && !st.fail; i++) {
       var it = items[i];
       if (it.unknown) { st.fail = true; return; }
-      if (it.mark) { marks[it.mark] = i; if (it.mark === 1) { marks.prev1 = marks.last1; marks.last1 = i; } continue; }
+      if (it.mark) { tpos[i] = st.trace.length; marks[it.mark] = i; if (it.mark === 1) { marks.prev1 = marks.last1; marks.last1 = i; } continue; }
       if (it.op) { addOp(st, it.op, it.n || 1); continue; }
       if (it.zero) { if (it.join) st.joined = true; continue; }
       if (it.turn) { st.short = true; continue; }
@@ -789,8 +801,11 @@
       }
       if (it.fill) { fill(st, it.fill, it.to, it); continue; }
       if (it.group) {
-        if (it.to) { repeatUntil(st, it.group, it.to, depth, true); continue; }
-        for (var g = 0, gt = (it.times === null || it.times === undefined) ? 1 : it.times; g < gt && !st.fail; g++) exec(it.group, st, (depth || 0) + 1);
+        var gset = repTagging(st) ? ++REP_SET : 0;
+        if (it.to) { repeatUntil(st, it.group, it.to, depth, true, gset, 1); continue; }
+        for (var g = 0, gt = (it.times === null || it.times === undefined) ? 1 : it.times; g < gt && !st.fail; g++) {
+          repWork(st, gt > 1 ? gset : 0, g + 1, function () { exec(it.group, st, (depth || 0) + 1); });
+        }
         continue;
       }
       if (it.rep) {
@@ -809,10 +824,20 @@
           if (stop === undefined || stop <= start) { st.fail = true; return; }
         }
         var block = items.slice(start + 1, stop).filter(function (x) { return !x.mark; });
+        // the block was worked once already on the way here: that working
+        // is group 1 (its trace entries, between the two marks)
+        var rset = 0;
+        if (repTagging(st) && tpos[start] !== undefined) {
+          rset = ++REP_SET;
+          var tEnd = stop === i ? st.trace.length : tpos[stop];
+          for (var ti = tpos[start]; ti < tEnd && ti < st.trace.length; ti++) st.trace[ti].rp = { s: rset, k: 1 };
+        }
         if (it.rep.times !== null && it.rep.times !== undefined) {
-          for (var t = 0; t < it.rep.times && !st.fail; t++) exec(block, st, (depth || 0) + 1);
+          for (var t = 0; t < it.rep.times && !st.fail; t++) {
+            repWork(st, rset, t + 2, function () { exec(block, st, (depth || 0) + 1); });
+          }
         } else if (it.rep.until && it.rep.until.kind !== 'none') {
-          repeatUntil(st, block, it.rep.until, depth, false);
+          repeatUntil(st, block, it.rep.until, depth, false, rset, 2);
         } else {
           st.fail = true;
         }
@@ -827,7 +852,7 @@
     return s;
   }
 
-  function repeatUntil(st, block, to, depth, first) {
+  function repeatUntil(st, block, to, depth, first, tagSet, tagK) {
     var pr = probe(block, depth);
     if (pr.fail || pr.short) { st.fail = true; return; }
     if (to.kind === 'gap') { st.gap = true; st.fail = true; return; }
@@ -851,7 +876,9 @@
     // a group "(k1, p1) to end" is worked from scratch; "rep from * to end"
     // has worked its block once already, so a zero here is fine too
     if (reps > REP_MAX) { st.fail = true; return; }
-    for (var r = 0; r < reps && !st.fail; r++) exec(block, st, (depth || 0) + 1);
+    for (var r = 0; r < reps && !st.fail; r++) {
+      repWork(st, tagSet || 0, (tagK || 1) + r, function () { exec(block, st, (depth || 0) + 1); });
+    }
     if (to.kind === 'end') st.toEnd = true;
   }
 
@@ -4241,6 +4268,12 @@
       }
     }
     (run.trace || []).forEach(function (tr) {
+      var at0 = out.length;
+      one(tr);
+      // wave I: the repeat tag of the op (only ever set under repeatGroups)
+      if (tr.rp) for (var j = at0; j < out.length; j++) out[j].rp = tr.rp;
+    });
+    function one(tr) {
       if (tr.op) {
         var o = tr.op, n = tr.n || 1;
         if (o.held) return;
@@ -4272,7 +4305,7 @@
       } else if (tr.unknownBlock) {
         u++;
       }
-    });
+    }
     return out;
   }
 
@@ -4409,6 +4442,8 @@
         }
       }
       var live = recs.filter(function (r) { return r.t !== 'bo'; }).length;
+      // wave I: a row padded or cut to its total is not the groups its words make
+      if (E.tagReps() && !ev.short && target !== null && live !== target) res.fitted = true;
       if (!ev.short && target !== null) {
         if (live < target) {
           for (var a = live; a < target; a++) recs.push({ t: 'k' });
@@ -4435,6 +4470,7 @@
         if (r.t === 'cable') { o.w = W_CABLE; o.cross = r.cross; o.span = r.span; o.at = r.at; if (r.name) o.name = r.name; }
         else if (rib && (r.t === 'k' || r.t === 'p')) o.w = W_RIB;
         if (r.t === 'bo') o.w = 0;
+        if (r.rp) o.rp = r.rp;
         return o;
       });
       res.color = st.color || null;
