@@ -23,6 +23,8 @@
   // until the shell adds js/knits.js to index.html, the page loads it itself
   if (!window.Knits) document.write('<script src="../js/knits.js"><\/script>');
 </script>
+<!-- wave I: store.js for the counter's group readout (Store.groupReadout) -->
+<script src="../js/store.js"></script>
 <script>
 'use strict';
 
@@ -916,6 +918,55 @@ eq(K.parse(mbk.join('\n')).meta.groups, ['Plain Socks For A Guy', 'Clam Diggers 
   'a booklet whose patterns open with "Materials Required:": the titles above them are the groups; the crochet page ends at the next pattern; a hook line is no title');
 eq(pick(lineWith(K.parse('BOTTOM YOKE\nBeg at side seam of Yoke, with\nlarger circular needle pick up and knit\n216 sts evenly\naround bottom edge of Yoke.\n1st rnd: Knit.'), 'pick up and knit'), ['kind', 'count']),
   { kind: 'setup', count: 216 }, '"Beg at ..., with larger circular needle pick up and knit" / "216 sts" - a wrapped pick-up with no comma before "pick up"');
+
+// ---- wave I (group-readout): a row counted in its repeat groups ----------
+(function () {
+  function sig(r) {
+    return r ? r.groups + ': ' + r.runs.map(function (x) { return (x.group ? 'g' : '-') + x.size; }).join(' ') + ' =' + r.total : null;
+  }
+  function g4(n) { var a = []; for (var i = 0; i < n; i++) a.push('g4'); return a.join(' '); }
+  function g3(n) { var a = []; for (var i = 0; i < n; i++) a.push('g3'); return a.join(' '); }
+  var T = 'Cast on 80 sts.\nRow 1: *K2, p2; rep from * to end.\nRow 2: K1, *k2tog, k2; rep from * to last 3 sts, k3. (61 sts)\n' +
+    'Row 3: Knit.\nRow 4: *K3, k2tog; rep from * 3 times more, k to end.\nRow 5: K2tog to last st, k1.';
+  var L = K.parse(T);
+  eq(typeof K.repeatGroups, 'function', 'Knits.repeatGroups comes with the shared engine');
+  eq(sig(K.repeatGroups(L, 1, 80)), '20: ' + g4(20) + ' =80', '"*K2, p2; rep from * to end" on 80: twenty groups of 4 (the first working of the block is group 1)');
+  eq(sig(K.repeatGroups(L, 2, 80)), '19: -1 ' + g3(19) + ' -3 =61', '"K1, *k2tog, k2; rep from * to last 3 sts, k3": 1 before, nineteen groups of 3 made, 3 after');
+  eq(K.repeatGroups(L, 3, 61), null, '"Knit.": no groups');
+  eq(sig(K.repeatGroups(L, 4, 61)), '4: g4 g4 g4 g4 -41 =57', '"*K3, k2tog; rep from * 3 times more, k to end": four groups, then the rest of the row');
+  eq(K.repeatGroups(L, 5, 57), null, '"K2tog to last st": one stitch is no group');
+  eq(sig(K.repeatGroups(K.parse('Cast on 60 sts.\nRow 1: (K1, p1) to end.'), 1, 60)).slice(0, 7), '30: g2 ', '"(K1, p1) to end": thirty groups of 2');
+  var before = JSON.stringify(K.expand(L, 1, 80).stitches);
+  K.repeatGroups(L, 1, 80);
+  var after = JSON.stringify(K.expand(L, 1, 80).stitches);
+  log(before === after && after.indexOf('"rp"') < 0, 'Knits.expand() after repeatGroups(): the same records, no "rp" tag');
+
+  // through the Store, as the counter reads it
+  if (!window.Store) { log(false, 'wave I: store.js loaded'); return; }
+  Store.registerCraftParser('knitting', 'Knits');
+  var p = Store.createProject({ name: 'wave I knit groups', craft: 'knitting' });
+  try {
+    Store.updatePart(p.id, p.parts[0].id, { patternText: T });
+    var at = function (row) { Store.jumpToRow(p.id, p.parts[0].id, row); return Store.project(p.id).parts[0]; };
+    var ro = function (prt, s) {
+      var ti = Store.currentTargetInfo(prt);
+      return Store.groupReadout(prt, s, 10, ti.value, ti.computed ? '≈ ' : '');
+    };
+    var r1 = at(1);
+    eq([0, 4, 5, 80].map(function (s) { return ro(r1, s); }),
+      ['Group 1 of 20 · stitch 0 of 4', 'Group 1 of 20 · stitch 4 of 4', 'Group 2 of 20 · stitch 1 of 4', 'Group 20 of 20 · stitch 4 of 4'],
+      'knit row 1 "*K2, p2; rep from * to end": Group 1 of 20 · stitch 0 of 4 ...');
+    var r2 = at(2);
+    eq([0, 1, 2, 58, 59, 61].map(function (s) { return ro(r2, s); }),
+      ['Before group 1 · stitch 0 of 1', 'Before group 1 · stitch 1 of 1', 'Group 1 of 19 · stitch 1 of 3',
+       'Group 19 of 19 · stitch 3 of 3', 'After group 19 · stitch 1 of 3', 'After group 19 · stitch 3 of 3'],
+      'knit row 2: before group 1, nineteen groups of 3, after group 19');
+    var r3 = at(3);
+    eq(ro(r3, 0), 'Group 1 of ≈ 7 · stitch 0 of 10', 'knit row 3 "Knit.": the group-size chunks as before');
+  } finally {
+    try { Store.deleteProject(p.id); } catch (e) { /* scratch */ }
+  }
+})();
 
 } catch (e) {
   log(false, 'test page threw: ' + e.message, e.stack);

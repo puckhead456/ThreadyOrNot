@@ -5255,7 +5255,10 @@
       // ONCE and cloned once per corner, and every clone's chains stand beside
       // the anchor the same way the original's do (markCornerChains) - and
       // every clone of `[ch 3, sc in next sp]` is the same slack loop.
-      out.push({ t: e.t, c: e.c, h: e.h, w: e.w, g: e.g, free: e.free, loop: e.loop, post: e.post });
+      var o = { t: e.t, c: e.c, h: e.h, w: e.w, g: e.g, free: e.free, loop: e.loop, post: e.post };
+      // wave I: a repeat tag travels too (present only under repeatGroups)
+      if (e.rp) o.rp = e.rp;
+      out.push(o);
     }
     return out;
   }
@@ -5265,7 +5268,9 @@
     for (i = 0; i < list.length; i++) {
       var e = list[i];
       if (e === FILL_MARK) { out.push(e); continue; }
-      out.push({ t: e.t, c: colr, h: e.h, w: e.w, g: e.g, free: e.free, loop: e.loop, post: e.post });
+      var pc = { t: e.t, c: colr, h: e.h, w: e.w, g: e.g, free: e.free, loop: e.loop, post: e.post };
+      if (e.rp) pc.rp = e.rp;
+      out.push(pc);
     }
     return out;
   }
@@ -5567,8 +5572,11 @@
     for (i = 0; i < list.length; i++) {
       var e = list[i];
       if (e === FILL_MARK) { out.push(e); continue; }
-      if (e.t === 'ch') { out.push({ t: e.t, c: e.c, h: e.h, w: e.w, g: e.g }); continue; }
-      out.push({ t: first ? 'inc' : 'inc+', c: e.c, h: e.h, w: e.w, g: e.g, post: e.post });
+      var ig = e.t === 'ch' ? { t: e.t, c: e.c, h: e.h, w: e.w, g: e.g } :
+        { t: first ? 'inc' : 'inc+', c: e.c, h: e.h, w: e.w, g: e.g, post: e.post };
+      if (e.rp) ig.rp = e.rp;
+      out.push(ig);
+      if (e.t === 'ch') continue;
       first = false;
     }
     return out;
@@ -6446,8 +6454,9 @@
           var sa = trailingChainAt(glist);
           if (sa > 0 && oneStitch(glist.slice(0, sa))) seamAt = sa;
         }
+        var bset = it.mult > 1 ? repSet() : 0;
         for (k = 0; k < it.mult; k++) {
-          var cl = cloneList(glist);
+          var cl = tagRep(cloneList(glist), bset, k);
           if (seamAt >= 0 && k < it.mult - 1 && cl.length === glist.length) {
             markSeamLoop(cl, seamAt);
           }
@@ -6589,7 +6598,8 @@
     var left = remaining - whole * fill.c;
     if (whole * Math.max(1, fill.list.length) + left > MAX_STITCHES) return null;
     var rep = [], k;
-    for (k = 0; k < whole; k++) rep = rep.concat(cloneList(fill.list));
+    var fset = repSet();
+    for (k = 0; k < whole; k++) rep = rep.concat(tagRep(cloneList(fill.list), fset, k));
     rep = rep.concat(padRun(fill.list.length ? fill.list : list, left));
     return spliceMark(list, rep);
   }
@@ -6612,7 +6622,8 @@
       var left = prev - groups * body.c;
       if (groups * Math.max(1, plain.length) + left > MAX_STITCHES) return null;
       var out = [];
-      for (k = 0; k < groups; k++) out = out.concat(cloneList(plain));
+      var tset = repSet();
+      for (k = 0; k < groups; k++) out = out.concat(tagRep(cloneList(plain), tset, k));
       return out.concat(padRun(plain, left));
     }
     if (body.fill) return resolveFill(body.list, body.fill, body.c, prev);
@@ -6673,14 +6684,15 @@
       var headSeam = (oneStitch(postB.list) && !SKIP_LEAD_RE.test(sr.post)) ?
         trailingChainAt(headB.list) : -1;
       var out = pre.list.slice();
+      var sset = repSet();
       for (k = 0; k < reps; k++) {
-        var hc = cloneList(headB.list);
+        var hc = tagRep(cloneList(headB.list), sset, k);
         var withPost = !(sr.endAt && k === reps - 1);
         if (headSeam >= 0 && withPost && hc.length === headB.list.length) {
           markSeamLoop(hc, headSeam);
         }
         out = out.concat(hc);
-        if (withPost) out = out.concat(cloneList(postB.list));
+        if (withPost) out = out.concat(tagRep(cloneList(postB.list), sset, k));
       }
       if (spare > 0) out = out.concat(padRun(headB.list, spare));
       // A granny round that opens with its corner and then writes "* side,
@@ -6717,7 +6729,8 @@
       var left2 = room2 - groups * hb.c;
       if (groups * Math.max(1, plain.length) + left2 > MAX_STITCHES) return null;
       var out2 = [];
-      for (k = 0; k < groups; k++) out2 = out2.concat(cloneList(plain));
+      var aset = repSet();
+      for (k = 0; k < groups; k++) out2 = out2.concat(tagRep(cloneList(plain), aset, k));
       out2 = out2.concat(padRun(plain, left2));
       return out2.concat(tb.list);
     }
@@ -7056,6 +7069,66 @@
     return st.uk;
   }
 
+  // --- wave I (group-readout): the repeat groups a row is worked in -------
+
+  // On only while repeatGroups() runs, so every other expand() returns
+  // exactly what it always did. Each repeat loop takes a set id, and every
+  // copy of its unit is tagged `rp: {s, k}` (k = which copy). A repeat inside
+  // a repeat is re-tagged by the outer one, so the outermost repeat - the one
+  // "rep from * around" names - is the group.
+  var TAG_REPS = null;
+
+  function repSet() { return TAG_REPS ? ++TAG_REPS.next : 0; }
+
+  function tagRep(list, set, k) {
+    if (!TAG_REPS || !set) return list;
+    var tag = { s: set, k: k + 1 }, i;
+    for (i = 0; i < list.length; i++) if (list[i] && list[i] !== FILL_MARK) list[i].rp = tag;
+    return list;
+  }
+
+  /**
+   * The groups a row is worked in, as the maker counts them: "Inc, 2sc,
+   * repeat around" over 18 is six groups of 4 made stitches, "(2sc, inc) x6"
+   * the same, "sc, (2sc, inc) x5, 2sc" one stitch before group 1 and two
+   * after group 5. Read off the row's own expand() (the knitting reader's
+   * when this is Knits), so the groups are the stitches the 3D view draws.
+   * Stitches are what the row MAKES: chains and bound-off stitches are not
+   * counted, the second stitch of an increase is.
+   * -> { groups, total, runs: [{ group (1-based; 0 = outside any group), size }] }
+   *    or null when the row is not worked in at least two groups, one of 2+.
+   */
+  function repeatGroups(lines, rowNumber, prevCount) {
+    var saved = TAG_REPS, res = null;
+    TAG_REPS = { next: 0 };
+    try { res = api.expand(lines, rowNumber, prevCount, null); } catch (e) { res = null; }
+    finally { TAG_REPS = saved; }
+    if (!res || !res.stitches || !res.stitches.length) return null;
+    // a round whose printed total disagrees with its own words is drawn to
+    // the printed total, padded or cut - its groups are not what it says
+    if (res.deviation || res.fitted) return null;
+    var runs = [], cur = null, lastKey = null, n = 0, total = 0, big = 0, i;
+    for (i = 0; i < res.stitches.length; i++) {
+      var c = res.stitches[i];
+      if (!c || c.t === 'ch' || c.t === 'bo') continue;
+      var key = c.rp ? c.rp.s + ':' + c.rp.k : '';
+      if (cur === null || key !== lastKey) {
+        cur = { group: c.rp ? ++n : 0, size: 0, worked: 0 };
+        runs.push(cur);
+        lastKey = key;
+      }
+      cur.size++;
+      if (c.t !== 'inc+') cur.worked++;
+      total++;
+      // a lone increase ("inc in each st", 2 made from 1 worked) is one
+      // instruction, not a group - the same as "dec all around"
+      if (cur.group && (cur.size >= 3 || cur.worked >= 2)) big = 1;
+    }
+    if (n < 2 || !big) return null;
+    for (i = 0; i < runs.length; i++) delete runs[i].worked;
+    return { groups: n, total: total, runs: runs };
+  }
+
   function expand(lines, rowNumber, prevCount, state) {
     var parsed, st;
     try {
@@ -7190,8 +7263,11 @@
       // the row's height comes from what was READ, never from the padding
       var dom = dominantHeight(list);
       settleHeights(list, dom);
+      var preFit = TAG_REPS ? countable(list) : 0;
       list = fitTo(list, target);
       if (refCap !== null && list.length > refCap) list = list.slice(0, refCap);
+      // wave I: padded or cut to a total, the row is not the groups its words make
+      if (TAG_REPS && countable(list) !== preFit) res.fitted = true;
       // every group that was worked into one place now divides that place's
       // width between its stitches (§8c) - the row's WIDTH, which is what the
       // geometry sums for a perimeter, rather than its stitch count
@@ -7224,6 +7300,7 @@
           w: e.w === undefined ? 1 : e.w };
         if (e.post) o.post = e.post;
         if (lp && e.t !== 'ch') o.lp = lp;
+        if (TAG_REPS && e.rp) o.rp = e.rp;
         return o;
       });
     } catch (e4) {
@@ -7468,6 +7545,8 @@
     colors: colors,
     colorHex: colorHex,
     expand: expand,
+    // wave I: the repeat groups of one row, for the counter's group readout
+    repeatGroups: repeatGroups,
     // §8c: how wide one chain of a slack loop is, for the geometry owner
     LOOP_CHAIN_W: LOOP_CHAIN_W,
     startHint: startHint,
@@ -7506,7 +7585,10 @@
     asParsed: asParsed, normState: normState, applyPhrases: applyPhrases,
     lineFor: lineFor, repeatLineFor: repeatLineFor, refSource: refSource,
     refLineAt: refLineAt, instrOf: instrOf, joinRepeatTail: joinRepeatTail,
-    inRange: inRange, isFurniture: isFurniture, MODE_JOIN_RE: MODE_JOIN_RE
+    inRange: inRange, isFurniture: isFurniture, MODE_JOIN_RE: MODE_JOIN_RE,
+    // wave I: is a repeatGroups() reading under way? (a craft's own expand
+    // tags its repeat copies only then)
+    tagReps: function () { return !!TAG_REPS; }
   };
   if (typeof PROFILE.init === 'function') PROFILE.init(E, api);
   return api;

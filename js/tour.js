@@ -831,8 +831,9 @@
             title: 'Your piece, in 3D',
             body:
               'The piece under the number grows as you count — a bright ring marks the round ' +
-              'you are on and the faint rings below are what is still to come. Tap 3D view to ' +
-              'open it full size and spin it around.'
+              'you are on and the faint rings below are what is still to come. Tap Work in 3D to ' +
+              'count full screen: tap anywhere on the piece for a stitch, swipe to turn it, and ' +
+              'the big buttons in the corners take a stitch off or move the row.'
           },
           {
             target: '#stitch-readout',

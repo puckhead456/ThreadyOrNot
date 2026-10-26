@@ -656,21 +656,26 @@ p { margin: 0 0 0.6em; }
   color: var(--text);
   box-shadow: var(--shadow);
 }
+/* Wave I (the owner, on a phone: "a lil bigger would be awesome"): the strip
+   reads about 1.2x larger than it did (tag 11 -> 13.5 px, instruction 15 -> 18
+   px) and wraps to two lines at most; the whole text is a tap away in the
+   pattern sheet. The stitch button gives the height back (see "17. Larger
+   screens" and the short-screen blocks), so nothing overflows at 375 x 640. */
 .pattern-line-tag {
   flex: 0 0 auto;
-  font-size: 11px;
-  font-weight: 800;
+  font-size: 13.5px;
+  font-weight: 900;
   letter-spacing: 0.6px;
   text-transform: uppercase;
   color: var(--text);
 }
 .pattern-line-text {
   flex: 1 1 auto;
-  font-size: 15px;
-  line-height: 1.35;
+  font-size: 18px;
+  line-height: 1.3;
   overflow: hidden;
   display: -webkit-box;
-  -webkit-line-clamp: 3;
+  -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
 }
 
@@ -682,7 +687,7 @@ p { margin: 0 0 0.6em; }
   gap: 2px;
 }
 .pattern-line-notes {
-  font-size: 12px;
+  font-size: 14px;
   line-height: 1.3;
   color: var(--text-muted);
 }
@@ -1051,6 +1056,14 @@ dialog.sheet.sheet-viewer .sheet-inner { height: 92dvh; }
   justify-content: space-between;
   gap: 10px;
   flex-wrap: wrap;
+}
+/* Wave I: on a phone a knitting part's four actions (−1, + marker, Work in
+   3D, reset stitches) wrapped to a second 46 px line, which pushed the
+   counter 46 px further over. Tighter padding keeps them on one line. */
+@media (max-width: 420px) {
+  .stitch-actions { gap: 6px; }
+  .stitch-actions > .btn { min-width: 44px; padding-left: 8px; padding-right: 8px; }
+  .stitch-actions > .linkish { padding: 0 2px; font-size: 13px; }
 }
 
 /* --------------------------------------------------------------------------
@@ -2176,10 +2189,47 @@ textarea.mono {
   .project-body .counter-card .bar-label { margin-top: 2px; font-size: 12px; }
   .project-body .tabs { padding-bottom: 2px; }
   .pattern-line { padding: 6px 10px; }
-  .pattern-line-text { -webkit-line-clamp: 2; font-size: 14px; }
+  /* wave I: 14 -> 17 px, the same 1.2x as the tall layout */
+  .pattern-line-text { -webkit-line-clamp: 2; font-size: 17px; }
+  .pattern-line-notes { font-size: 13px; }
   .setup-line { padding: 4px 10px; }
   .project-body .stitch-section { gap: 4px; }
   .project-body .stitch-btn { min-height: 120px; }
+}
+
+/* Wave I — the larger pattern strip pays for itself. Measured on the owner's
+   bee (3 sizes, so the 44 px size strip is up too) over every round of every
+   part: at 375 x 812 the strip's worst round (a colour change, the turn into
+   rows, a two-line instruction and a note) came out 32 px over, and at
+   375 x 640 a multi-size project was already up to 32 px over BEFORE this
+   wave (46 px after the bigger text). So, on phones that are not tall:
+   - each progress label sits beside its bar instead of under it (one line);
+   - the strip loses 2 px of padding;
+   - the big button's floor in a multi-size project gives up 20 px (812) or
+     16 px (640). It still takes every pixel that is free, and the full-screen
+     working mode (⤢ Work in 3D) is the big target on a small phone now;
+   - below 760 px the note under an instruction is one line (the whole text
+     is in the pattern sheet, a tap away).
+   0 px over at both sizes on every round of the bee, Keyring, Medium and Big. */
+@media (max-height: 860px) {
+  .project-body .progress { display: flex; align-items: center; gap: 8px; }
+  .project-body .progress .bar { flex: 1 1 auto; min-width: 0; }
+  .project-body .progress .bar-label { flex: 0 0 auto; margin-top: 0; }
+  .pattern-line { padding: 8px 12px; }
+  .project-body.has-sizes .stitch-btn { min-height: max(calc(20vh - 64px), 96px); }
+  /* a knitting part carries a 40 px marker strip under the readout (and a
+     short-row strip on those rows): its button gives that height back */
+  .project-body:has(.knit-markers:not([hidden])) .stitch-btn { min-height: max(calc(20vh - 56px), 100px); }
+}
+@media (max-height: 760px) {
+  .pattern-line { padding: 4px 10px; }
+  .project-body .pattern-line-notes { -webkit-line-clamp: 1; }
+  .project-body.has-sizes .stitch-btn,
+  .project-body:has(.knit-markers:not([hidden])) .stitch-btn { min-height: 80px; }
+  /* the short-row strip keeps to one line: its "rows 89–102 · …" clips */
+  .project-body .knit-short { flex-wrap: nowrap; }
+  .project-body .knit-short-text { white-space: nowrap; }
+  .project-body .knit-short-sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 }
 
 /* --------------------------------------------------------------------------
@@ -2225,7 +2275,8 @@ mark.size-mark {
   gap: 4px 10px;
   padding: 4px 10px;
   border-radius: var(--radius-sm);
-  font-size: 13px;
+  /* wave I: 13 -> 16 px with the pattern line it sits on */
+  font-size: 16px;
   font-weight: 700;
   color: var(--text);
 }
@@ -2234,8 +2285,8 @@ mark.size-mark {
 .yarn-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .yarn-tag-swatch {
   display: inline-block;
-  width: 11px;
-  height: 11px;
+  width: 13px;
+  height: 13px;
   margin-right: 5px;
   vertical-align: -1px;
   border-width: 1.5px;
@@ -2335,9 +2386,9 @@ mark.size-mark {
   .yarn-line:not([hidden]) + .pattern-line .pattern-line-notes { -webkit-line-clamp: 1; }
 }
 /* Wave G: a colour change and the rounds -> rows turn share the one strip */
-.turn-change .turn-icon { font-size: 15px; line-height: 1; }
+.turn-change .turn-icon { font-size: 18px; line-height: 1; }
 @media (max-height: 760px) {
-  .yarn-line { padding: 2px 8px; font-size: 12px; }
+  .yarn-line { padding: 2px 8px; font-size: 15px; }
   .yarn-line:not([hidden]) + .pattern-line .pattern-line-text { -webkit-line-clamp: 1; }
 }
 
@@ -2611,4 +2662,379 @@ mark.size-mark {
   .knit-short { margin-top: 4px; padding: 4px 10px; }
   .knit-extra { margin-top: 4px; }
   .knit-chip { min-height: 32px; }
+}
+
+/* --------------------------------------------------------------------------
+   Wave I — working mode (js/app.js "15c. Working mode"). The project screen
+   in a full-screen dress: the stitch button, with the live 3D piece in it,
+   fills the screen and is still the one tap target; #work-hud floats the
+   readouts and the big controls over it. The HUD lets every tap through
+   except on its own controls, so a tap on its text counts a stitch.
+   -------------------------------------------------------------------------- */
+
+#screen-project.work-mode > .topbar,
+#screen-project.work-mode > .bottombar { display: none; }
+#screen-project.work-mode .project-body {
+  position: static;
+  overflow: hidden;
+  padding: 0;
+  max-width: none;
+}
+#screen-project.work-mode .project-body > :not(.stitch-section),
+#screen-project.work-mode .stitch-section > :not(.stitch-btn) { display: none !important; }
+#screen-project.work-mode .stitch-section { position: static; }
+/* the screen (position: fixed) is the containing block, so the button is the
+   whole screen under the banner strip */
+#screen-project.work-mode .stitch-btn {
+  position: absolute;
+  inset: 0;
+  width: auto;
+  height: auto;
+  min-height: 0;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  transition: none;
+}
+#screen-project.work-mode .stitch-btn.pressed {
+  transform: none;
+  box-shadow: inset 0 0 0 6px var(--primary-glow);
+}
+#screen-project.work-mode .stitch-btn:focus-visible {
+  outline: 3px solid var(--accent-2);
+  outline-offset: -6px;
+}
+#screen-project.work-mode .stitch-head,
+#screen-project.work-mode .stitch-hint { display: none; }
+
+.work-hud {
+  --work-glow: 0 0 2px var(--primary), 0 0 6px var(--primary), 0 0 14px var(--primary), 0 2px 3px rgba(0, 0, 0, 0.35);
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr) auto auto;
+  grid-template-areas: "head" "stack" "." "foot" "btns";
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+  color: var(--primary-text);
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.work-hud button,
+.work-hud .work-panel,
+.work-hud .work-scrim { pointer-events: auto; }
+
+/* header: close, whose piece, Options */
+.work-head {
+  grid-area: head;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px 2px;
+}
+.work-icon {
+  flex: 0 0 auto;
+  min-width: 48px;
+  min-height: 48px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 20px;
+  font-weight: 800;
+  box-shadow: var(--shadow);
+}
+.work-more { padding: 0 14px; font-size: 15px; }
+.work-more.on { background: var(--primary); color: var(--primary-text); border-color: var(--primary-text); }
+.work-more-caret { font-size: 13px; }
+.work-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  text-align: center;
+  font-size: 15px;
+  font-weight: 800;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-shadow: var(--work-glow);
+}
+
+/* the readouts: rows done | stitches, in big digits */
+.work-stack {
+  grid-area: stack;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  padding: 0 12px;
+}
+.work-read { display: flex; gap: 10px; align-items: flex-start; }
+.work-cell {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  text-shadow: var(--work-glow);
+}
+.work-cap {
+  font-family: var(--font-display);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  opacity: 0.95;
+}
+.work-numline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: center;
+  column-gap: 6px;
+  max-width: 100%;
+}
+.work-big {
+  font-family: var(--font-display);
+  /* digits at least 40 px tall at arm's length: 60 px Fredoka draws a 45 px
+     numeral (56 px: 42, 54 px: 40). The pixel theme sets its own size in
+     css/themes.css, because its font draws digits nearly a full em tall. */
+  font-size: 60px;
+  font-weight: 700;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+.work-of {
+  font-family: var(--font-display);
+  font-size: 24px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.92;
+}
+.work-of:empty { display: none; }
+.work-sub { font-size: 13px; font-weight: 700; line-height: 1.3; }
+.work-sub:empty { display: none; }
+.work-meta { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 2px 8px; }
+.work-tags { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 4px; text-shadow: none; }
+.work-tags .knit-side-chip { min-height: 36px; min-width: 48px; margin-left: 0; font-size: 15px; }
+.work-tags .knit-cable { text-shadow: var(--work-glow); }
+
+/* the pattern line: the strip's own text, larger */
+.work-line {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow);
+}
+.work-line-tag {
+  flex: 0 0 auto;
+  font-size: 15px;
+  font-weight: 900;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+}
+.work-line-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.work-line-text {
+  font-size: 21px;
+  font-weight: 700;
+  line-height: 1.28;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+}
+.work-line-notes {
+  font-size: 14px;
+  line-height: 1.3;
+  color: var(--text-muted);
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 1;
+  -webkit-box-orient: vertical;
+}
+
+/* colour change, turn, short rows, knitting chips, "3 more than..." */
+.work-hints { display: flex; flex-direction: column; gap: 4px; }
+.work-hint {
+  margin: 0;
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 16px;
+  font-weight: 700;
+  box-shadow: var(--shadow);
+}
+.work-hint.stitch-dev { color: var(--danger); text-align: center; }
+.work-hint.knit-extra { background: transparent; box-shadow: none; padding: 0; }
+.work-hint .yarn-text { white-space: normal; }
+.work-markers { margin: 0; padding: 4px 8px; border-radius: var(--radius-sm); background: var(--surface); color: var(--text); }
+
+/* what comes next, and the first-tap tip */
+.work-foot {
+  grid-area: foot;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  padding: 0 12px 4px;
+}
+.work-tip {
+  text-align: center;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  text-shadow: var(--work-glow);
+}
+.work-next {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 15px;
+  box-shadow: var(--shadow);
+}
+.work-next-tag {
+  flex: 0 0 auto;
+  font-size: 12px;
+  font-weight: 900;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.work-next-text { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+
+/* the bottom corners: -1, Undo ... row -, row + */
+.work-btns {
+  grid-area: btns;
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  padding: 4px 12px 12px;
+}
+.work-gap { flex: 1 1 auto; }
+.work-btn {
+  flex: 0 0 auto;
+  min-width: 64px;
+  min-height: 64px;
+  padding: 0 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  font-family: var(--font-display);
+  font-size: 24px;
+  font-weight: 700;
+  line-height: 1;
+  box-shadow: var(--shadow);
+}
+.work-btn:active { transform: scale(0.95); }
+.work-btn:disabled { opacity: 0.45; }
+.work-btn:focus-visible, .work-icon:focus-visible { outline: 3px solid var(--accent-2); outline-offset: 2px; }
+.work-row-plus {
+  min-width: 96px;
+  background: var(--accent);
+  color: var(--accent-text);
+  border: var(--tap-border);
+}
+.work-btn-glyph { font-size: 30px; }
+.work-st-minus .work-btn-glyph { font-size: 24px; }
+.work-btn-word { font-size: 14px; letter-spacing: 1px; text-transform: uppercase; }
+
+/* the folded chips */
+.work-scrim { position: absolute; inset: 0; z-index: 4; background: rgba(0, 0, 0, 0.3); }
+.work-panel {
+  position: absolute;
+  z-index: 5;
+  top: calc(env(safe-area-inset-top) + 60px);
+  left: 8px;
+  right: 8px;
+  max-height: calc(100% - env(safe-area-inset-top) - 72px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow);
+}
+.work-shape { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; font-weight: 800; }
+.work-shape-sub { font-size: 13px; font-weight: 700; color: var(--text-muted); }
+.work-panel-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+.work-panel-row .seg { flex: 1 1 220px; }
+.work-panel-label {
+  flex: 0 0 6.5em;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.work-panel-hint { flex: 1 1 100%; font-size: 12px; color: var(--text-muted); }
+.work-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.work-actions .btn { flex: 1 1 auto; min-height: 44px; padding: 6px 12px; font-size: 14px; }
+.work-actions .btn.on { background: var(--accent); color: var(--accent-text); }
+
+/* short phones: the piece keeps a fair share */
+@media (max-height: 700px) {
+  .work-big { font-size: 56px; }
+  .work-line-text { font-size: 19px; -webkit-line-clamp: 2; }
+  .work-line { padding: 6px 10px; }
+  .work-hint { font-size: 15px; padding: 2px 10px; }
+  .work-hint .knit-short-sub { display: none; }
+  .work-btn { min-height: 58px; min-width: 58px; }
+  .work-btns { padding-bottom: 8px; }
+}
+
+/* side by side: the readouts in a left column, the piece on the right */
+@media (orientation: landscape) {
+  .work-hud {
+    grid-template-columns: minmax(0, min(46%, 520px)) minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr) auto auto;
+    grid-template-areas: "head head" "stack ." "foot ." "btns btns";
+  }
+  /* the column clips rather than run under the buttons (a knitting short
+     row with markers is the tallest it gets) */
+  .work-stack { min-height: 0; overflow: hidden; align-self: start; max-height: 100%; }
+  .work-foot { padding-top: 4px; }
+  .work-title { text-align: left; }
+}
+@media (orientation: landscape) and (max-height: 500px) {
+  .work-head { padding-top: 4px; }
+  .work-stack { gap: 4px; }
+  .work-icon { min-height: 44px; min-width: 44px; }
+  .work-big { font-size: 54px; }
+  .work-line-text { font-size: 18px; -webkit-line-clamp: 2; }
+  .work-line { padding: 4px 10px; }
+  .work-line-notes { display: none; }
+  .work-hint { font-size: 14px; padding: 2px 8px; }
+  .work-hint .knit-short-sub { display: none; }
+  .work-tip { display: none; }
+  .work-btn { min-height: 56px; min-width: 56px; }
+  .work-btns { padding: 2px 12px 8px; }
+  .work-panel { top: calc(env(safe-area-inset-top) + 54px); max-height: calc(100% - env(safe-area-inset-top) - 62px); }
+}
+@media (min-width: 700px) {
+  .work-panel { left: auto; width: 440px; }
 }

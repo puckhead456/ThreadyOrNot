@@ -44,6 +44,8 @@
 <div id="summary"></div>
 
 <script src="../js/patterns.js"></script>
+<!-- wave I: store.js for the counter's group readout on the bee -->
+<script src="../js/store.js"></script>
 <script src="../js/vendor/pdf.min.js"></script>
 <script src="../js/pdftext.js"></script>
 <script>
@@ -88,6 +90,26 @@ function eq(actual, expected, label) {
 }
 
 // ---------------------------------------------------------------- helpers
+
+/**
+ * wave I (group-readout): the counter's readout under the stitch button for
+ * `row` of a part made from `text`, at each of `stitches` - Store.groupReadout
+ * with the project's default group size of 10, "≈" from currentTargetInfo, as
+ * js/app.js renders it. The scratch project is deleted again.
+ */
+function groupReadouts(text, row, stitches) {
+  if (!window.Store) return null;
+  var p = Store.createProject({ name: 'fixture group readout', templateId: 'blank' });
+  try {
+    Store.updatePart(p.id, p.parts[0].id, { patternText: text });
+    Store.jumpToRow(p.id, p.parts[0].id, row);
+    var prt = Store.project(p.id).parts[0];
+    var ti = Store.currentTargetInfo(prt);
+    return stitches.map(function (s) { return Store.groupReadout(prt, s, 10, ti.value, ti.computed ? '≈ ' : ''); });
+  } finally {
+    try { Store.deleteProject(p.id); } catch (e) { /* scratch */ }
+  }
+}
 
 function sliceBlock(text, startRe, endRe) {
   var lines = text.split(/\r\n|\r|\n/), on = false, res = [];
@@ -500,6 +522,16 @@ function checkPdf(name, res) {
     eq(rowCounts(sectionNamed(secs, 'Body'), [15, 16, 19]), [30, 24, 18], 'crochet-panda.pdf: Body rounds 15, 16, 19');
     eq(rowCounts(sectionNamed(secs, 'Head'), [6, 8, 21]), [36, 48, 18], 'crochet-panda.pdf: Head rounds 6, 8, 21 (6 and 8 wrap mid-instruction)');
     eq(rowCounts(sectionNamed(secs, 'Eye'), [1, 2]), [6, 12], 'crochet-panda.pdf: Eye rounds 1 and 2');
+    // wave I: the counter counts a round in its repeats
+    var pb = sectionNamed(secs, 'Body').text;
+    eq(groupReadouts(pb, 4, [0, 4, 5]), ['Group 1 of 6 · stitch 0 of 4', 'Group 1 of 6 · stitch 4 of 4', 'Group 2 of 6 · stitch 1 of 4'],
+      'crochet-panda.pdf (wave I): Body Rnd 4 "(2 sc in next st, sc in next 2 sts) around. (24)" - Group 1 of 6 · stitch 0 of 4');
+    eq(groupReadouts(pb, 6, [0, 4, 5, 34, 35]),
+      ['Before group 1 · stitch 0 of 4', 'Before group 1 · stitch 4 of 4', 'Group 1 of 5 · stitch 1 of 6',
+       'Group 5 of 5 · stitch 6 of 6', 'After group 5 · stitch 1 of 2'],
+      'crochet-panda.pdf (wave I): Body Rnd 6 "Sc in next 2 sts, 2 sc in next st, (sc in next 4 sts, 2 sc in next st) 5 times, sc in next 2 sts" - 4 before, five groups of 6, 2 after');
+    eq(groupReadouts(sectionNamed(secs, 'Leg').text, 5, [0]), ['Group 1 of 2 · stitch 0 of 10'],
+      'crochet-panda.pdf (wave I): Leg Rnd 5 "sc next 2 sts tog 3 times" between plain runs - the group-size chunks, as before');
   }
   if (name === 'crochet-baphomet.pdf') {
     var bn = names(secs);
@@ -508,6 +540,14 @@ function checkPdf(name, res) {
     eq(bn.filter(function (x) { return x === 'Tail'; }).length, 1, 'crochet-baphomet.pdf: "Tail:" printed twice on two lines is one section');
     eq(bn.filter(function (x) { return x.indexOf('Body') === 0; }), ['Body/Head'],
       'crochet-baphomet.pdf: "Body/Head" is one part and "Body/Head (cont.):" does not restart it');
+    // wave I: the counter counts a round in its repeats
+    var be = sectionNamed(secs, 'Ears').text;
+    eq([groupReadouts(be, 3, [0])[0], groupReadouts(be, 4, [0])[0]], ['Group 1 of 6 · stitch 0 of 3', 'Group 1 of 6 · stitch 0 of 4'],
+      'crochet-baphomet.pdf (wave I): Ears R3 "(sc,inc)x6 [18]" and R4 "(2sc,inc)x6 [24]" - groups of 3 and 4');
+    eq(groupReadouts(sectionNamed(secs, 'Body/Head').text, 11, [0, 4]), ['Group 1 of 9 · stitch 0 of 3', 'Group 2 of 9 · stitch 1 of 3'],
+      'crochet-baphomet.pdf (wave I): Body/Head R11 "(2sc, dec)x9 [27]" - nine groups of 3');
+    eq(groupReadouts(sectionNamed(secs, 'Feet').text, 3, [0]), ['Group 1 of 8 · stitch 0 of 3'],
+      'crochet-baphomet.pdf (wave I): Feet R3 "(HDCinc, HDC)x8 [24]" - eight groups of 3');
 
     // callouts written over the photos ("Arm goes here" sideways, "5 4 3 2 1"
     // under a picture of the rounds) must not reach a line or a note
@@ -2155,6 +2195,20 @@ var NEW_CORPUS = [
         'bee-sizes Keyring Body: 5, 10, 15 ... 10, closes on 5');
       eq(counts(secs[2], 17), [6, 12, 18, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 18, 12, 6],
         'bee-sizes Medium Body: 6, 12, 18, 24 x11 ("5-6.", "7-8." ranges), 18, 12, 6 - 17 rounds');
+      // wave I (the owner's screenshot): Medium Body, round 3 of 17 done, next
+      // "4. Inc, 2sc, repeat around" read "Group 1 of ≈ 3 · stitch 0 of 10"
+      var mbt = secs[2].text;
+      eq(groupReadouts(mbt, 4, [0, 4, 5, 24]),
+        ['Group 1 of 6 · stitch 0 of 4', 'Group 1 of 6 · stitch 4 of 4', 'Group 2 of 6 · stitch 1 of 4', 'Group 6 of 6 · stitch 4 of 4'],
+        'bee-sizes Medium Body round 4 "Inc, 2sc, repeat around" (18 -> ≈ 24): Group 1 of 6 · stitch 0 of 4');
+      eq([3, 15, 16].map(function (r) { return groupReadouts(mbt, r, [0])[0]; }),
+        ['Group 1 of 6 · stitch 0 of 3', 'Group 1 of 6 · stitch 0 of 3', 'Group 1 of 6 · stitch 0 of 2'],
+        'bee-sizes Medium Body: round 3 "Inc, sc" (12 -> 18), 15 "Dec, 2sc" (24 -> 18), 16 "Dec, 1sc" (18 -> 12) - six groups each');
+      eq([groupReadouts(mbt, 17, [0])[0], groupReadouts(mbt, 5, [0])[0]],
+        ['Group 1 of ≈ 1 · stitch 0 of ≈ 6', 'Group 1 of ≈ 3 · stitch 0 of 10'],
+        'bee-sizes Medium Body: round 17 "Dec all around" and round 5 "Sc in each st" keep the group-size chunks');
+      eq(groupReadouts(secs[4].text, 6, [0]), ['Group 1 of 6 · stitch 0 of 6'],
+        'bee-sizes Big Body round 6 (30 -> 36): six groups of 6');
       eq(counts(secs[4], 29), [6, 12, 18, 24, 30, 36, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
         42, 42, 42, 42, 42, 42, 36, 30, 24, 18, 12, 6],
         'bee-sizes Big Body: "6..Inc", "7.. Inc", "8-11..sc" read; 29 rounds ending on "Dec all around" = 6');

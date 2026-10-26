@@ -20,6 +20,8 @@
 <div id="summary"></div>
 
 <script src="../js/patterns.js"></script>
+<!-- wave I: store.js for the counter's group readout (Store.groupReadout) -->
+<script src="../js/store.js"></script>
 <!-- pdftext.js is loaded for its pure line-rebuilding helpers only; pdf.js
      itself is not needed here (the library loads lazily, on first extract). -->
 <script src="../js/pdftext.js"></script>
@@ -3275,6 +3277,121 @@ group('wave H: a FINISHING heading ends the part above it');
     'the size list wrapped as "27-" / "38-38) sc" is one list, never a row 38');
   assertEqual(P.parse('Rnd 1: 6 sc in MR (6)\nRnd 2: inc x6 (12)\nFinishing\nRnd 3: (sc, inc) x6 (18)').filter(function (l) { return l.kind === 'row'; }).map(function (l) { return l.section; }), [0, 0, 0],
     'a "Finishing" line in sentence case is not the heading');
+})();
+
+// =====================================================================
+group('wave I: the counter counts a round in its repeat groups');
+// =====================================================================
+// Owner's screenshot: the bee (Medium Body), round 4 "Inc, 2sc, repeat around"
+// over 18 read "Group 1 of ≈ 3 · stitch 0 of 10" - the project's group size of
+// 10 chunking a round that is six groups of (inc, 2sc), 4 made each.
+(function () {
+  var BEE = 'BODY\nIn yellow\n1. 6sc in mr\n2. Inc in eact st\n3. Inc, sc, repeat around\n4. Inc, 2sc, repeat around\n' +
+    '5-6. Sc in each st\nColour change to black yarn\n7-8. Sc in each st\nColour change to yellow\n9-10. Sc in each st\n' +
+    'Colour change to black\n11-12. Sc in each st\nColour change to yellow\n13-14. Sc in each st\n15. Dec, 2sc, repeat around\n' +
+    'Add safety eyes (see photos) and\nstart stuffing\n16. Dec, 1sc, repeat around\n17. Dec all around\nTie off, finish stuffing, and close';
+  function sig(r) {
+    return r ? r.groups + ': ' + r.runs.map(function (x) { return (x.group ? 'g' : '-') + x.size; }).join(' ') + ' =' + r.total : null;
+  }
+  var L = P.parse(BEE);
+  assertTrue(typeof P.repeatGroups === 'function', 'Patterns.repeatGroups is exported');
+  assertEqual(sig(P.repeatGroups(L, 3, 12)), '6: g3 g3 g3 g3 g3 g3 =18', 'bee round 3 "Inc, sc, repeat around" on 12: six groups of 3 made');
+  assertEqual(sig(P.repeatGroups(L, 4, 18)), '6: g4 g4 g4 g4 g4 g4 =24', 'bee round 4 "Inc, 2sc, repeat around" on 18: six groups of 4 made (3 worked)');
+  assertEqual(sig(P.repeatGroups(L, 15, 24)), '6: g3 g3 g3 g3 g3 g3 =18', 'bee round 15 "Dec, 2sc, repeat around" on 24: six groups of 3 made (4 worked)');
+  assertEqual(sig(P.repeatGroups(L, 16, 18)), '6: g2 g2 g2 g2 g2 g2 =12', 'bee round 16 "Dec, 1sc, repeat around" on 18: six groups of 2');
+  assertEqual(P.repeatGroups(L, 17, 12), null, 'bee round 17 "Dec all around": one stitch is no group - null');
+  assertEqual(P.repeatGroups(L, 2, 6), null, 'bee round 2 "Inc in each st": a lone increase is no group - null');
+  assertEqual(P.repeatGroups(L, 5, 24), null, 'bee round 5 "Sc in each st": null');
+  assertEqual(P.repeatGroups(L, 1, null), null, 'bee round 1 "6sc in mr": null');
+
+  function one(instr, prev) {
+    return sig(P.repeatGroups(P.parse('Rnd 1: 6 sc in mr (6)\nRnd 2: ' + instr), 2, prev));
+  }
+  [['(2sc, inc) x6 (24)', 18, '6: g4 g4 g4 g4 g4 g4 =24', 'panda / Baphomet style "(2sc, inc) x6"'],
+   ['(sc, inc) x6', 12, '6: g3 g3 g3 g3 g3 g3 =18', '"(sc, inc) x6"'],
+   ['[2 sc, inc] x 6 (24)', 18, '6: g4 g4 g4 g4 g4 g4 =24', '"[2 sc, inc] x 6"'],
+   ['(sc, inc)*6', 12, '6: g3 g3 g3 g3 g3 g3 =18', '"(sc, inc)*6"'],
+   ['*2sc, inc* x6', 18, '6: g4 g4 g4 g4 g4 g4 =24', '"*2sc, inc* x6"'],
+   ['*sc, inc* around', 12, '6: g3 g3 g3 g3 g3 g3 =18', '"*sc, inc* around"'],
+   ['(sc, inc) around', 12, '6: g3 g3 g3 g3 g3 g3 =18', '"(sc, inc) around"'],
+   ['Sc, inc, rep around', 12, '6: g3 g3 g3 g3 g3 g3 =18', '"Sc, inc, rep around"'],
+   ['*sc in next 2 sts, inc; rep from * around', 24, '8: g4 g4 g4 g4 g4 g4 g4 g4 =32', '"*sc in next 2 sts, inc; rep from * around" on 24: eight groups'],
+   ['*sc, inc; rep from * 5 times more', 12, '6: g3 g3 g3 g3 g3 g3 =18', '"rep from * 5 times more" = six groups'],
+   ['(sc, dec) x6 (12)', 18, '6: g2 g2 g2 g2 g2 g2 =12', '"(sc, dec) x6": groups of 2 made'],
+   ['ch 1, (sc, inc) x6, sl st to first sc', 12, '6: g3 g3 g3 g3 g3 g3 =18', 'the turning chain and the join are not stitches of any group'],
+   ['sc, (2sc, inc) x5, 2sc (23)', 18, '5: -1 g4 g4 g4 g4 g4 -2 =23', 'an offset round: 1 stitch before group 1, 2 after group 5'],
+   ['Inc, 2sc, repeat around', 19, '6: g4 g4 g4 g4 g4 g4 -1 =25', '"repeat around" over a count it does not divide: the stitch left over is after the groups']
+  ].forEach(function (c) { assertEqual(one(c[0], c[1]), c[2], c[3]); });
+  assertEqual(one('(2sc, inc) x6 (30)', 18), null, 'a printed total the words do not make (30 vs 24): no groups, the round is padded');
+  assertEqual(one('Dec all around', 12), null, '"Dec all around": null');
+  assertEqual(one('sc in each st around (12)', 12), null, '"sc in each st around": null');
+
+  // expand() is untouched: no tag leaks into the 3D view's records
+  var before = JSON.stringify(P.expand(L, 4, 18).stitches);
+  P.repeatGroups(L, 4, 18);
+  var after = JSON.stringify(P.expand(L, 4, 18).stitches);
+  assertTrue(before === after && after.indexOf('"rp"') < 0, 'expand() after repeatGroups(): the same records, no "rp" tag');
+
+  // ---- through the Store: the readout the counter shows ----------------
+  if (!window.Store) { log(false, 'wave I: store.js loaded'); return; }
+  var made = [];
+  function proj(text) {
+    var p = Store.createProject({ name: 'wave I groups', templateId: 'blank' });
+    made.push(p.id);
+    Store.updatePart(p.id, p.parts[0].id, { patternText: text });
+    return Store.project(p.id);
+  }
+  function at(p, row) {
+    Store.jumpToRow(p.id, p.parts[0].id, row);
+    return Store.project(p.id).parts[0];
+  }
+  function readout(prt, s, g) {
+    var ti = Store.currentTargetInfo(prt);
+    return Store.groupReadout(prt, s, g === undefined ? 10 : g, ti.value, ti.computed ? '≈ ' : '');
+  }
+  try {
+    var b = proj(BEE);
+    var r4 = at(b, 4);
+    var ti4 = Store.currentTargetInfo(r4);
+    assertEqual([ti4.value, ti4.computed], [24, true], 'bee round 4 through the Store: target ≈ 24 (computed)');
+    assertEqual(readout(r4, 0), 'Group 1 of 6 · stitch 0 of 4', 'bee round 4 at 0: "Group 1 of 6 · stitch 0 of 4" (was "Group 1 of ≈ 3 · stitch 0 of 10")');
+    assertEqual([1, 4, 5, 23, 24].map(function (s) { return readout(r4, s); }),
+      ['Group 1 of 6 · stitch 1 of 4', 'Group 1 of 6 · stitch 4 of 4', 'Group 2 of 6 · stitch 1 of 4',
+       'Group 6 of 6 · stitch 3 of 4', 'Group 6 of 6 · stitch 4 of 4'], 'bee round 4: stitches 1, 4, 5, 23, 24');
+    assertEqual(readout(r4, 25), 'Group 7 of 6 · stitch 1 of 4', 'bee round 4, an over-count: the groups carry on');
+    assertEqual(readout(r4, 3, 0), 'stitch 3', 'grouping off (group size 0): just the stitch number');
+    assertEqual(readout(at(b, 3), 0), 'Group 1 of 6 · stitch 0 of 3', 'bee round 3 (12 -> 18): six groups of 3');
+    assertEqual(readout(at(b, 15), 7), 'Group 3 of 6 · stitch 1 of 3', 'bee round 15 "Dec, 2sc" (24 -> 18) at 7: group 3, stitch 1 of 3');
+    assertEqual(readout(at(b, 16), 12), 'Group 6 of 6 · stitch 2 of 2', 'bee round 16 "Dec, 1sc" (18 -> 12) at 12');
+    assertEqual(readout(at(b, 17), 0), 'Group 1 of ≈ 1 · stitch 0 of ≈ 6', 'bee round 17 "Dec all around": the group-size chunks, as before');
+    assertEqual(readout(at(b, 5), 12), 'Group 2 of ≈ 3 · stitch 2 of 10', 'bee round 5 "Sc in each st": the group-size chunks, as before');
+    assertEqual(readout(at(b, 2), 0), 'Group 1 of ≈ 2 · stitch 0 of 10', 'bee round 2 "Inc in each st": the chunks, as before');
+    var rg = Store.rowGroups(at(b, 4));
+    assertEqual(rg && [rg.groups, rg.total], [6, 24], 'Store.rowGroups(part) on round 4: 6 groups, 24 stitches');
+    assertEqual(Store.groupAt(rg, 8), { group: 2, of: 6, within: 4, size: 4, before: 0, boundary: true }, 'Store.groupAt: stitch 8 ends group 2');
+
+    // the buzz: at the end of each repeat, not at every 10th stitch
+    var b4 = at(b, 4), ev = [];
+    for (var k = 0; k < 9; k++) ev.push(Store.tapStitch(b.id, b4.id).event);
+    assertEqual(ev, ['stitch', 'stitch', 'stitch', 'group', 'stitch', 'stitch', 'stitch', 'group', 'stitch'],
+      'tapStitch on round 4: a group event at 4 and 8 (the end of each (inc, 2sc))');
+    var b5 = at(b, 5), ev5 = [];
+    for (k = 0; k < 10; k++) ev5.push(Store.tapStitch(b.id, b5.id).event);
+    assertEqual(ev5[9], 'group', 'tapStitch on round 5 "Sc in each st": the 10-stitch group event as before');
+
+    // printed-count rounds, and an offset round
+    var o = proj('Rnd 1: 6 sc in mr (6)\nRnd 2: inc x6 (12)\nRnd 3: (sc, inc) x6 (18)\nRnd 4: sc, (2sc, inc) x5, 2sc (23)\nRnd 5: (2sc, inc) x6 (30)');
+    assertEqual(readout(at(o, 3), 0), 'Group 1 of 6 · stitch 0 of 3', '"(sc, inc) x6 (18)": Group 1 of 6 · stitch 0 of 3');
+    var o4 = at(o, 4);
+    assertEqual([0, 1, 2, 21, 22, 23].map(function (s) { return readout(o4, s); }),
+      ['Before group 1 · stitch 0 of 1', 'Before group 1 · stitch 1 of 1', 'Group 1 of 5 · stitch 1 of 4',
+       'Group 5 of 5 · stitch 4 of 4', 'After group 5 · stitch 1 of 2', 'After group 5 · stitch 2 of 2'],
+      'the offset round "sc, (2sc, inc) x5, 2sc": before group 1, the groups, after group 5');
+    assertEqual(readout(at(o, 5), 0), 'Group 1 of 3 · stitch 0 of 10',
+      '"(2sc, inc) x6 (30)" over 23 makes 27 - the words disagree with the total, so the plain chunks');
+  } finally {
+    made.forEach(function (id) { try { Store.deleteProject(id); } catch (e) { /* scratch */ } });
+  }
 })();
 
 var summaryEl = document.getElementById('summary');
