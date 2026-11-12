@@ -48,6 +48,13 @@
   function round2(n) { return Math.round(n * 100) / 100; }
   function round1(n) { return Math.round(n * 10) / 10; }
 
+  /** 5721 -> '5,721' (fixed separator, whatever the device locale). */
+  function fmtInt(n) {
+    var v = Math.round(Number(n) || 0), neg = v < 0;
+    var s = String(Math.abs(v)).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+    return neg ? '-' + s : s;
+  }
+
   function deepCopy(o) {
     try { return JSON.parse(JSON.stringify(o)); } catch (e) { return null; }
   }
@@ -555,30 +562,87 @@
     '310|Black|000000'
   ];
 
-  function buildFlossTable(raw) {
+  /* Wave J: DMC's 35 colours released in 2017, numbered 1 to 35 (charts
+     print them as '04' or '4'). They are NOT in the MIT source above, which
+     predates them. Names are DMC's own; the hex values are APPROXIMATE, even
+     more so than the table above: they come from the published DMC-to-RGB
+     conversion charts as recalled without a download, and should be checked
+     against a physical shade card before anyone relies on them. They are
+     appended (never interleaved), so every older entry keeps its index and
+     wins a tie in nearestFloss. */
+  var FLOSS_DMC_2017_RAW = [
+    '1|White Tin|e3e3e6',
+    '2|Tin|d7d7d8',
+    '3|Tin Medium|b8b8bb',
+    '4|Tin Dark|aeaeb1',
+    '5|Driftwood Light|e3ccbe',
+    '6|Driftwood Medium Light|dcc6b8',
+    '7|Driftwood|8f7b6e',
+    '8|Driftwood Dark|6a5046',
+    '9|Cocoa Very Dark|552014',
+    '10|Tender Green Very Light|edfed9',
+    '11|Tender Green Light|e2edb5',
+    '12|Tender Green|cdd99a',
+    '13|Nile Green Medium Light|bff6e0',
+    '14|Apple Green Pale|d0fbb2',
+    '15|Apple Green|d1eda4',
+    '16|Chartreuse Light|c9c258',
+    '17|Yellow Plum Light|e5e272',
+    '18|Yellow Plum|d9d56d',
+    '19|Autumn Gold Medium Light|f7c95f',
+    '20|Shrimp|f7af93',
+    '21|Alizarin Light|d79982',
+    '22|Alizarin|bc604e',
+    '23|Apple Blossom|ede2ed',
+    '24|White Lavender|e0d7ee',
+    '25|Lavender Ultra Light|dad2e9',
+    '26|Lavender Pale|d7cae6',
+    '27|White Violet|f0eef9',
+    '28|Eggplant Medium Light|9086a9',
+    '29|Eggplant|674076',
+    '30|Blueberry Medium Light|7d77a5',
+    '31|Blueberry|50518d',
+    '32|Blueberry Dark|4d2e8a',
+    '33|Fuchsia|9c599e',
+    '34|Fuchsia Dark|7d3064',
+    '35|Fuchsia Very Dark|46052d'
+  ];
+
+  function buildFlossTable(raw, extra) {
     var out = [];
     for (var i = 0; i < raw.length; i++) {
       var p = raw[i].split('|');
       var hex = p[2];
-      out.push({
+      var e = {
         code: p[0],
         name: p[1],
         hex: hex,
         r: parseInt(hex.slice(0, 2), 16),
         g: parseInt(hex.slice(2, 4), 16),
         b: parseInt(hex.slice(4, 6), 16)
-      });
+      };
+      if (extra) for (var k in extra) e[k] = extra[k];
+      out.push(e);
     }
     return out;
   }
 
-  var FLOSS = { dmc: buildFlossTable(FLOSS_DMC_RAW) };
+  var FLOSS = {
+    dmc: buildFlossTable(FLOSS_DMC_RAW).concat(
+      buildFlossTable(FLOSS_DMC_2017_RAW, { approx: true, since: 2017 }))
+  };
 
   /* code -> entry, for hexFor(). Keys are lowercased. */
   var DMC_BY_CODE = {};
+  /* The same without the 2017 colours. The key parser decides what is a
+     floss code with it, so that a bare '9' or '20' (a ruler, an Anchor
+     number, a row label) means exactly what it meant before those colours
+     had swatches; it fills in their swatch afterwards (see keyHexFor). */
+  var DMC_KEY_CODES = {};
   (function () {
     for (var i = 0; i < FLOSS.dmc.length; i++) {
       DMC_BY_CODE[FLOSS.dmc[i].code.toLowerCase()] = FLOSS.dmc[i];
+      if (!FLOSS.dmc[i].since) DMC_KEY_CODES[FLOSS.dmc[i].code.toLowerCase()] = FLOSS.dmc[i];
     }
   })();
 
@@ -594,15 +658,34 @@
     'b5200': 'b5200'
   };
 
-  function canonDmcCode(code) {
-    var c = String(code == null ? '' : code).trim().toLowerCase();
+  function canonIn(table, c) {
     if (!c) return '';
     if (DMC_ALIASES[c]) return DMC_ALIASES[c];
-    if (DMC_BY_CODE[c]) return c;
-    // '0310' and '310 ' style noise
+    if (table[c]) return c;
+    // '0310' and '310 ' style noise; also '04' for the 2017 colour 4
     var stripped = c.replace(/^0+(?=\d)/, '');
-    if (DMC_BY_CODE[stripped]) return stripped;
+    if (table[stripped]) return stripped;
     return c;
+  }
+
+  function canonDmcCode(code) {
+    var c = String(code == null ? '' : code).trim().toLowerCase();
+    /* 'DMC 04' / 'dmc#310': the brand written into the code itself */
+    c = c.replace(/^dmc(?:\s*[#:.-]?\s*)(?=[a-z0-9])/, '');
+    return canonIn(DMC_BY_CODE, c);
+  }
+
+  /**
+   * The key parser's lookup: exactly the pre-2017 table and the old
+   * normalising, so every decision the parser makes about "is this a floss
+   * code" is unchanged by the 2017 colours (fixtures are the ratchet).
+   * parseKey fills in the 2017 swatches once the rows are decided.
+   */
+  function keyHexFor(brand, code) {
+    var b = String(brand == null ? '' : brand).trim().toLowerCase();
+    if (b && b !== 'dmc') return null;
+    var e = DMC_KEY_CODES[canonIn(DMC_KEY_CODES, String(code == null ? '' : code).trim().toLowerCase())];
+    return e ? e.hex : null;
   }
 
   /**
@@ -1603,7 +1686,50 @@
 
   var FABRIC_KINDS = { aida: 1, evenweave: 1, linen: 1 };
   var PALETTE_KINDS = { cross: 1, back: 1, knot: 1, bead: 1, half: 1, blend: 1 };
-  var SOURCE_KINDS = { oxs: 1, pdf: 1, photo: 1, manual: 1 };
+  var SOURCE_KINDS = { oxs: 1, pdf: 1, photo: 1, manual: 1, picture: 1 };
+  var CHECK_VERDICTS = { exact: 1, close: 1, off: 1, unchecked: 1 };
+
+  function countOrNull(v) {
+    return typeof v === 'number' && isFinite(v) && v >= 0 ? Math.min(Math.round(v), 1e9) : null;
+  }
+
+  /**
+   * Wave J: source.check, the banner's copy of a Check (CONTRACT §3) as the
+   * app stores it: { verdict, summary, readTotal, expectedTotal, off,
+   * colours }. Nothing else is kept, strings are capped, numbers finite.
+   */
+  function normalizeSourceCheck(c) {
+    if (!isObj(c)) return null;
+    return {
+      verdict: CHECK_VERDICTS[c.verdict] ? c.verdict : 'unchecked',
+      summary: str(c.summary, '').replace(/\s+/g, ' ').trim().slice(0, 400),
+      readTotal: countOrNull(c.readTotal),
+      expectedTotal: countOrNull(c.expectedTotal),
+      off: countOrNull(c.off) === null ? 0 : Math.min(countOrNull(c.off), 9999),
+      colours: countOrNull(c.colours) === null ? null : Math.min(countOrNull(c.colours), 9999)
+    };
+  }
+
+  /**
+   * Wave J: current.rowOpts, the Row by row options (app-xstitch.js
+   * normRowOpts: { from, dir, one, skipEmpty }, defaults top / ltr / false /
+   * true). A `color` (palette index or null) is kept only when one was
+   * stored, and dropped to null when it is not a palette index.
+   */
+  function normalizeRowOpts(v, nPalette) {
+    if (!isObj(v)) return null;
+    var out = {
+      from: v.from === 'bottom' ? 'bottom' : 'top',
+      dir: v.dir === 'serpentine' ? 'serpentine' : 'ltr',
+      one: v.one === true,
+      skipEmpty: v.skipEmpty !== false
+    };
+    if (Object.prototype.hasOwnProperty.call(v, 'color')) {
+      var c = v.color;
+      out.color = typeof c === 'number' && isFinite(c) && c >= 0 && c < nPalette && Math.floor(c) === c ? c : null;
+    }
+    return out;
+  }
   var BRANDS = ['DMC', 'Anchor', 'Madeira', 'Cosmo', 'Olympus', 'Sullivans'];
 
   function canonBrand(word) {
@@ -2044,6 +2170,11 @@
       tool: CHART_TOOLS[cu.tool] ? cu.tool : 'tap',
       layer: CHART_LAYERS[cu.layer] ? cu.layer : 'cross'
     };
+    /* Wave J: the Row by row sheet's options (app-xstitch.js normRowOpts).
+       Only present when the app has saved some, so older saves normalise
+       exactly as before. */
+    var rowOpts = normalizeRowOpts(cu.rowOpts, palette.length);
+    if (rowOpts) out.current.rowOpts = rowOpts;
 
     /* parking */
     var parking = [];
@@ -2092,6 +2223,12 @@
       importedAt: clampInt(so.importedAt, 0, 1e15, 0),
       warnings: warnings
     };
+    /* Wave J: what a chart read from a picture records (app-xstitch.js
+       "Use this chart"). Each is kept only when it was there. */
+    var srcCheck = normalizeSourceCheck(so.check);
+    if (srcCheck) out.source.check = srcCheck;
+    var spic = str(so.picture, '').trim();
+    if (spic && spic.length <= 200) out.source.picture = spic;
 
     /* project is accepted for symmetry with the shell's normalizeProject; the
        cross-stitch model does not need anything out of it in v1. */
@@ -2764,7 +2901,7 @@
     if (t && t[1].length > t[2].length + 2 &&
         t[1].slice(-t[2].length) === t[2]) {
       var code = t[1].slice(0, t[1].length - t[2].length);
-      if (/^\d{3,5}$/.test(code) && hexFor('DMC', code)) return code + s.slice(t[0].length);
+      if (/^\d{3,5}$/.test(code) && keyHexFor('DMC', code)) return code + s.slice(t[0].length);
     }
     var m = /^\s*(\d{1,4})\s*\/\s*(\d{2,8})\b/.exec(s);
     if (!m) return s;
@@ -2994,7 +3131,7 @@
       if (!allowBare || codes.length < 2) return null;
       /* Light Effects E-codes (E677) are real DMC threads without a swatch here. */
       for (i = 0; i < codes.length; i++) {
-        if (!hexFor('DMC', codes[i]) && !/^E\d{3,4}$/i.test(codes[i])) return null;
+        if (!keyHexFor('DMC', codes[i]) && !/^E\d{3,4}$/i.test(codes[i])) return null;
       }
     }
 
@@ -3090,7 +3227,7 @@
       cands.sort(function (a, b) { return b.length - a.length; });
       for (var c = 0; c < cands.length; c++) {
         var piece = cands[c];
-        if (!hexFor(brand, piece)) continue;
+        if (!keyHexFor(brand, piece)) continue;
         out.push(piece);
         if (walk(rest.slice(piece.length))) return true;
         out.pop();
@@ -3189,7 +3326,7 @@
        beside it. */
     if (cut > 0) {
       for (i = 0; i < 2 && i < toks.length; i++) {
-        if (/^\d{3,4}$/.test(toks[i]) && hexFor('DMC', toks[i]) && cut <= i) {
+        if (/^\d{3,4}$/.test(toks[i]) && keyHexFor('DMC', toks[i]) && cut <= i) {
           cut = i + 1;
           while (cut < toks.length && /^\d{2,5}$/.test(toks[cut]) && distinctChars(toks[cut], 2) >= 2) cut++;
           break;
@@ -3236,7 +3373,7 @@
        number run that the ordinary row parser already had its chance at */
     if (CODE_TOKEN_RE.test(toks[start - 1])) return null;
     var code = toks[start];
-    if (!hexFor(brand || 'DMC', code)) return null;
+    if (!keyHexFor(brand || 'DMC', code)) return null;
     return opts && opts.withRun ? { code: code, run: run } : code;
   }
 
@@ -3425,7 +3562,7 @@
     return String(line)
       .replace(/(^|\s)(\d{1,3})\s*\/\s*\2(\d{3,5})(?=\s*\()/g, '$1$3')
       .replace(/(^|\s)(\d{3,5}?)(\d{1,3})\s*\/\s*\3(?=\s*\()/g, function (all, sp, code, n) {
-        return hexFor('DMC', code) ? sp + code : all;
+        return keyHexFor('DMC', code) ? sp + code : all;
       });
   }
 
@@ -3530,6 +3667,172 @@
     return n === 1 ? hit : null;
   }
 
+  /* ---------------- wave J: the "Floss list" layout ----------------
+   *
+   *   Floss list for crosses
+   *   Use 2 strands of thread for cross stitch
+   *   N Symbol Number Name Stitches
+   *   1 <glyph> <glyph on swatch> DMC 04 Tin - Dark 100
+   *
+   * The symbol column is drawn, so it reaches the text as nothing, a stray
+   * character or a private-use code. The rows are recognised by their
+   * brand + code, everything in front of the brand is the row number and
+   * that symbol junk, and the numbers after the name are the columns the
+   * header put there. Only switched on by its own heading or header row, so
+   * no other layout's rows go through it. */
+
+  var FL_HEAD_RE = /^\s*floss\s*list\b\s*(?:for\s+)?(.*?)\s*:?\s*$/i;
+  var FL_USE_RE = /^\s*use\s+(\d|one|two|three|four|five|six)\s+(?:strands?|threads?)\b(.*)$/i;
+  var FL_TOTAL_RE = /^\s*(?:grand\s+)?totals?\b\s*:?/i;
+  var FL_BRAND_RE = /(^|[^A-Za-z])(DMC|Anchor|Madeira|Cosmo|Olympus|Sullivans)(?![A-Za-z])/i;
+  var FL_CODE_RE = /^\s*[#:.\-]?\s*(B5200|Blanc|Ecru|White|E\d{3,4}|\d{1,5})(?![\dA-Za-z])/i;
+  var FL_COLS = {
+    n: 'n', no: 'n', 'no.': 'n', '#': 'n', nr: 'n', 'nº': 'n',
+    symbol: 'symbol', sym: 'symbol', symb: 'symbol', key: 'symbol',
+    number: 'number', code: 'number', floss: 'number', thread: 'number', brand: 'number',
+    name: 'name', description: 'name', colour: 'name', color: 'name',
+    stitches: 'stitches', count: 'stitches', sts: 'stitches',
+    strands: 'strands', strand: 'strands',
+    skeins: 'skeins', skein: 'skeins',
+    length: 'length'
+  };
+  var FL_NUMERIC = { stitches: 1, strands: 1, skeins: 1 };
+  var FL_SHADE_RE = /^(?:-|very|ultra|light|lt|dark|dk|medium|med|md|pale|bright|deep|soft|vy|ul)$/i;
+  var FL_DEFAULT_COLS = ['n', 'symbol', 'number', 'name', 'stitches'];
+
+  /** 'N Symbol Number Name Stitches' -> the column list, or null. */
+  function flossListHeader(line) {
+    var s = String(line).replace(/stitch\s*count/ig, 'stitches').trim();
+    if (!s || s.length > 80) return null;
+    var toks = s.split(/\s+/), cols = [];
+    for (var i = 0; i < toks.length; i++) {
+      var c = FL_COLS[toks[i].toLowerCase()];
+      if (!c) return null;
+      if (cols.indexOf(c) < 0) cols.push(c);
+    }
+    if (cols.indexOf('number') < 0 || cols.indexOf('name') < 0 || cols.indexOf('stitches') < 0) return null;
+    return cols.length >= 3 ? cols : null;
+  }
+
+  /** The section a 'Floss list for …' heading opens. */
+  function flossListKind(rest) {
+    var s = String(rest || '');
+    if (/half|petite|quarter|fractional/i.test(s)) return 'half';
+    if (/back\s*stitch/i.test(s)) return 'back';
+    if (/knot/i.test(s)) return 'knot';
+    if (/bead/i.test(s)) return 'bead';
+    return 'cross';
+  }
+
+  /* '1,839', '1.839', '1 839' with a no-break or thin space, "1'839" */
+  function flUnthousand(s) {
+    return s.replace(/(\d)[,.   '’](?=\d{3}(?!\d))/g, '$1');
+  }
+  /* A space-like thousands separator is only trusted in the LAST number on
+     the line (the count), and before the line's spaces are normalised:
+     '1 839' is 1839, but '1 310' at the front is row 1, DMC 310. */
+  function flSpacedCount(s) {
+    return String(s).replace(/(\d)[   ](?=\d{3}(?!\d)\D*$)/, '$1');
+  }
+
+  /**
+   * One floss-list row, or null. -> { n, symbol, unreadable, brand, code,
+   * name, pre: [ints between code and name], post: [ints after the name] }
+   */
+  function flossListRow(line, docBrand) {
+    var s = flSpacedCount(line == null ? '' : line).replace(/[     ]/g, ' ');
+    s = s.replace(/[–—]/g, '-');
+    if (s.length > 160) return null;
+    var prefix, brand, after;
+    var bm = FL_BRAND_RE.exec(s);
+    if (bm) {
+      prefix = s.slice(0, bm.index + bm[1].length);
+      brand = canonBrand(bm[2]) || bm[2];
+      after = s.slice(bm.index + bm[0].length);
+    } else {
+      /* No brand printed: '1 04 Tin - Dark 100' needs the row number in
+         front of the code to tell them apart. */
+      var nb = /^\s*(\d{1,4})\s+((?:[^\sA-Za-z0-9]{1,3}\s+){0,2})(?=(?:B5200|Blanc|Ecru|White|E\d{3,4}|\d{1,5})\s+[A-Za-z])/i.exec(s);
+      if (!nb) return null;
+      prefix = nb[1] + ' ' + nb[2];
+      brand = docBrand || 'DMC';
+      after = s.slice(nb[0].length);
+    }
+    var cm = FL_CODE_RE.exec(after);
+    if (!cm) return null;
+    var code = cm[1];
+    if (NAMED_CODE_RE.test(code)) {
+      code = code.charAt(0).toUpperCase() + code.slice(1).toLowerCase();
+      if (/^b5200$/i.test(code)) code = 'B5200';
+    }
+
+    /* the prefix: an optional row number and the symbol column's junk */
+    var n = null, symbol = '', unreadable = false;
+    var pm = /^\s*(\d{1,4})(?!\d)/.exec(prefix);
+    var junk = prefix;
+    if (pm) { n = parseInt(pm[1], 10); junk = prefix.slice(pm[0].length); }
+    junk = junk.trim();
+    if (junk.length > 16 || /[A-Za-z]{3,}/.test(junk)) return null;   // prose, not a row
+    var jt = junk ? junk.split(/\s+/) : [];
+    if (jt.length > 4) return null;
+    for (var j = 0; j < jt.length; j++) {
+      if (hasUnreadableGlyph(jt[j])) { unreadable = true; continue; }
+      if (!symbol && jt[j].length <= 2) symbol = jt[j];
+    }
+
+    /* the rest: name words and the numeric columns */
+    var rest = flUnthousand(after.slice(cm[0].length)).trim();
+    rest = rest.replace(/\s+\d+(?:[.,]\d+)?\s*(?:m|cm|mm|in|inches|yds?)\.?\s*$/i, '');   // a length column
+    rest = rest.replace(/(\d)\s*(?:sts?|stitches)\.?\s*$/i, '$1');
+    var toks = rest ? rest.split(/\s+/) : [];
+    var pre = [], post = [];
+    while (toks.length && /^\d{1,6}$/.test(toks[0])) pre.push(parseInt(toks.shift(), 10));
+    while (toks.length && /^\d{1,7}$/.test(toks[toks.length - 1])) post.unshift(parseInt(toks.pop(), 10));
+    if (!toks.length && pre.length && !post.length) { post = pre; pre = []; }
+    var joined = toks.join(' ');
+    var name = joined.replace(/^[-:|\s]+/, '').replace(/[-:|\s]+$/, '').replace(/\s+/g, ' ');
+    if (name && !/[A-Za-z]/.test(name)) return null;
+    if (name.split(' ').length > 10) return null;
+    return { n: n, symbol: symbol, unreadable: unreadable, brand: brand, code: code,
+      name: name, pre: pre, post: post, dangling: /\s-\s*$/.test(' ' + joined) };
+  }
+
+  /**
+   * The numbers a floss-list row carried, put into the header's columns.
+   * Columns after the name are filled from the right ('Golden Brown 2 1184'
+   * under '… Name Stitches' is a name with a 2 in it); a number with no
+   * column left goes back into the name.
+   */
+  function flossListFields(row, cols) {
+    var nameAt = cols.indexOf('name'), numAt = cols.indexOf('number');
+    var before = [], after = [], i;
+    for (i = 0; i < cols.length; i++) {
+      if (!FL_NUMERIC[cols[i]] && cols[i] !== 'length') continue;
+      if (nameAt >= 0 && i < nameAt && i > numAt) before.push(cols[i]);
+      else if (nameAt < 0 || i > nameAt) after.push(cols[i]);
+    }
+    var out = { stitches: null, strands: null, skeins: null, namePre: [], namePost: [] };
+    var take = function (vals, names, fromRight) {
+      vals = vals.slice();
+      names = names.filter(function (c) { return c !== 'length'; });
+      var spill = [];
+      while (vals.length > names.length) {
+        if (fromRight) spill.push(vals.shift());
+        else spill.unshift(vals.pop());
+      }
+      var off = fromRight ? names.length - vals.length : 0;
+      for (var k = 0; k < vals.length; k++) out[names[off + k]] = vals[k];
+      return spill;
+    };
+    out.namePost = take(row.post, after, true);
+    out.namePre = take(row.pre, before, false);
+    /* a 'strands' that is plainly a stitch count was put in the wrong box */
+    if (out.strands !== null && out.strands > 12 && out.stitches === null) {
+      out.stitches = out.strands; out.strands = null;
+    }
+    return out;
+  }
+
   /**
    * parseKey(text, opts) -> KeyResult  (B3.3)
    */
@@ -3560,6 +3863,8 @@
       imageOnly: false,
       /** Wave F: 'extractor' | 'repaired' — see expandCountColumns. */
       keyOrder: 'extractor',
+      /** Wave J: the stitch total a key prints under its rows, or null. */
+      totalStitches: null,
       warnings: warnings
     };
 
@@ -3638,8 +3943,136 @@
       if (prev.strands === null && entry.strands !== null) prev.strands = entry.strands;
     }
 
+    /* Wave J: the "Floss list" layout. `fl` is null until its heading or
+       header row is seen; `fl.cur` is the row being built, which a wrapped
+       name or a one-cell-per-line extraction finishes on later lines. */
+    var fl = null;
+    function flFlush() {
+      var c = fl && fl.cur;
+      if (fl) fl.cur = null;
+      if (!c || !c.code) return;
+      if (c.unreadable) anyUnreadable = true;
+      var f = flossListFields(c, fl.cols);
+      var name = f.namePre.concat(c.name ? [c.name] : [], f.namePost).join(' ').trim();
+      addEntry({
+        symbol: c.symbol, brand: c.brand, code: c.code, name: name,
+        strands: f.strands !== null ? f.strands : fl.strands,
+        stitchCount: f.stitches, skeins: f.skeins !== null ? f.skeins : defaultSkeins,
+        kind: fl.kind, blendCode: null,
+        hex: keyHexFor(c.brand, c.code), line: c.lines.join(' / ')
+      });
+    }
+    /** true when the floss-list reader used the line up. */
+    function flLine(rawLine) {
+      var s = flSpacedCount(rawLine).replace(/[     ]/g, ' ');
+      var t = s.trim();
+      if (!t || /^={2,}\s*PAGE\b/i.test(t) || /©|\(c\)|copyright|all rights reserved/i.test(t)) {
+        flFlush();
+        return false;
+      }
+      var m = FL_HEAD_RE.exec(t);
+      if (m && t.length <= 60) {
+        flFlush();
+        fl.kind = flossListKind(m[1]);
+        fl.strands = null;
+        kind = fl.kind;
+        return true;
+      }
+      m = FL_USE_RE.exec(t);
+      if (m) {
+        flFlush();
+        var sv = /^\d$/.test(m[1]) ? parseInt(m[1], 10) : WORD_NUMS[m[1].toLowerCase()];
+        if (sv >= 1 && sv <= 12) fl.strands = sv;
+        return true;
+      }
+      var hdrCols = flossListHeader(t);
+      if (hdrCols) { flFlush(); fl.cols = hdrCols; return true; }
+      if (FL_TOTAL_RE.test(t)) {
+        flFlush();
+        var tt = flUnthousand(t);
+        var tm = /(\d+)\s*(?:stitches|sts)\b/i.exec(tt) || /(\d+)\D*$/.exec(tt);
+        if (tm && fl.kind === 'cross' && result.totalStitches === null) {
+          result.totalStitches = parseInt(tm[1], 10);
+        }
+        return true;
+      }
+      var row = flossListRow(t, docBrand);
+      if (row) {
+        if (fl.cur && !fl.cur.code && row.n === null) {
+          /* the row number (and maybe its symbol) came on lines of their own */
+          row.n = fl.cur.n;
+          if (!row.symbol) row.symbol = fl.cur.symbol;
+          row.lines = fl.cur.lines.concat([t]);
+        } else {
+          flFlush();
+          row.lines = [t];
+        }
+        fl.cur = row;
+        return true;
+      }
+      var cur = fl.cur;
+      /* one cell per line: a bare number is this row's count, or the next row's number */
+      if (/^\d[\d,. ']*$/.test(t)) {
+        var v = parseInt(flUnthousand(t), 10);
+        if (cur && cur.code && !cur.post.length) {
+          cur.post.push(v); cur.lines.push(t);
+          return true;
+        }
+        if (!cur || cur.code) {
+          flFlush();
+          if (v < 1000) {
+            fl.cur = { n: v, symbol: '', unreadable: false, code: null, name: '', pre: [], post: [], lines: [t] };
+            return true;
+          }
+        }
+        return false;
+      }
+      /* ... and the symbol, when it survived as a glyph on its own line */
+      if (cur && !cur.code && t.length <= 3 && !/[A-Za-z0-9]/.test(t)) {
+        if (hasUnreadableGlyph(t)) cur.unreadable = true;
+        else if (!cur.symbol) cur.symbol = t;
+        cur.lines.push(t);
+        return true;
+      }
+      /* A name that wrapped onto the next line, maybe with the count after
+         it. Only while the row is visibly unfinished (no count yet, no name
+         yet, a name ending in ' -') or when the line is nothing but shade
+         words, so a footer under the last row is never glued onto it. */
+      if (cur && cur.code && t.length <= 48 && /[A-Za-z]{2,}/.test(t) && !/[:;]/.test(t) &&
+          !sectionKindFor(t) && !kindsNamedIn(t).length) {
+        var wt = flUnthousand(t).replace(/[–—]/g, '-').split(/\s+/), tailNums = [];
+        while (wt.length && /^\d{1,7}$/.test(wt[wt.length - 1])) tailNums.unshift(parseInt(wt.pop(), 10));
+        var ok = wt.length > 0 && wt.length <= 6;
+        for (var wi = 0; ok && wi < wt.length; wi++) {
+          if (/^\d+$/.test(wt[wi])) ok = false;     // 'Page 4 of 5' is not a name
+        }
+        var unfinished = !cur.post.length || !cur.name || cur.dangling;
+        var shadeWords = ok && wt.every(function (w) { return FL_SHADE_RE.test(w); });
+        if (ok && (unfinished || shadeWords) && (!tailNums.length || !cur.post.length)) {
+          var lead = wt.join(' ').replace(/^-\s*/, '');
+          var glue = cur.dangling || /^-/.test(wt[0]) ? ' - ' : ' ';
+          cur.name = cur.name ? cur.name + glue + lead : lead;
+          cur.dangling = /\s-$/.test(' ' + cur.name);
+          cur.name = cur.name.replace(/\s*-\s*$/, '').replace(/\s+/g, ' ').trim();
+          if (tailNums.length) cur.post = tailNums;
+          cur.lines.push(t);
+          return true;
+        }
+      }
+      flFlush();
+      return false;
+    }
+
     for (var li = 0; li < rawLines.length; li++) {
       var rawLine = rawLines[li];
+      if (!fl && (FL_HEAD_RE.test(rawLine) && rawLine.trim().length <= 60 ||
+                  flossListHeader(String(rawLine).trim()))) {
+        fl = { cols: FL_DEFAULT_COLS, kind: 'cross', strands: null, cur: null };
+      }
+      if (fl && flLine(rawLine)) {
+        blankRun = 0;
+        continue;
+      }
       if (/^\s*={2,}\s*PAGE\b/i.test(rawLine)) {                 // PdfText page marker
         inBlock = false;
         brandBlock = false;
@@ -3725,7 +4158,7 @@
             symbol: '', brand: glued.brand, code: gCode, name: '',
             strands: null, stitchCount: null, skeins: defaultSkeins,
             kind: kind, blendCode: null,
-            hex: hexFor(glued.brand, gCode), line: String(rawLine).trim()
+            hex: keyHexFor(glued.brand, gCode), line: String(rawLine).trim()
           });
         }
         inBlock = true;
@@ -3752,7 +4185,7 @@
             strands: null, stitchCount: null,
             skeins: lc.skeins === null ? defaultSkeins : lc.skeins,
             kind: kind, blendCode: null,
-            hex: hexFor(lBrand, lCode), line: String(rawLine).trim()
+            hex: keyHexFor(lBrand, lCode), line: String(rawLine).trim()
           });
         }
         continue;
@@ -3787,7 +4220,7 @@
           symbol: '', brand: headerBrand || docBrand || 'DMC', code: tail.code,
           name: '', strands: null, stitchCount: null, skeins: defaultSkeins,
           kind: kind, blendCode: null,
-          hex: hexFor(headerBrand || 'DMC', tail.code), line: String(rawLine).trim()
+          hex: keyHexFor(headerBrand || 'DMC', tail.code), line: String(rawLine).trim()
         });
         owedAlt = altCols + 1 - tail.run;
         continue;
@@ -3804,6 +4237,8 @@
       if (queuedKinds.length && SKEIN_EACH_RE.test(rawLine)) kind = queuedKinds.shift();
     }
 
+    if (fl) flFlush();
+
     /* Zip the detached columns back onto the rows they belonged to. The
        marks that were read off the front of a legend row go last, because
        by then the column they sit beside is the only one still open. */
@@ -3819,6 +4254,9 @@
 
     for (var ei = 0; ei < entries.length; ei++) {
       var e = entries[ei];
+      /* The rows were decided with the pre-2017 table (keyHexFor); the
+         2017 colours (DMC 1-35) get their approximate swatch here. */
+      if (e.hex === null) e.hex = hexFor(e.brand, e.code);
       if (e.hex === null && (e.brand === 'DMC' || e.brand === '')) {
         if (/^4\d{3}$/.test(e.code)) pushOnce(warnings, 'variegated colours are approximate on screen');
         else pushOnce(warnings, 'no colour data for ' + (e.brand || 'DMC') + ' ' + e.code);
@@ -3828,6 +4266,20 @@
     }
     if (anyUnreadable) pushOnce(warnings, 'symbols unreadable');
     result.entries = entries;
+
+    /* A printed total is a checksum on the rows above it. */
+    if (result.totalStitches !== null) {
+      var rowSum = 0, allCounted = true;
+      for (var ts = 0; ts < entries.length; ts++) {
+        if (entries[ts].kind !== 'cross' && entries[ts].kind !== 'blend') continue;
+        if (entries[ts].stitchCount === null) allCounted = false;
+        else rowSum += entries[ts].stitchCount;
+      }
+      if (allCounted && rowSum !== result.totalStitches) {
+        pushOnce(warnings, 'the key prints a total of ' + fmtInt(result.totalStitches) +
+          ' stitches but its rows add up to ' + fmtInt(rowSum) + ' — check the counts');
+      }
+    }
 
     /* ---------------- fabric, design, sizes ---------------- */
     var i, line, m;
@@ -3874,20 +4326,10 @@
       }
 
       if (result.design.w === null) {
-        m = /stitch(?:es)?\s*count\s*:?\s*(\d+)\s*(?:w|x|×|wide|by)\s*(\d+)/i.exec(line) ||
-            /(\d+)\s*(?:w|wide)\s*(?:x|×|by)\s*(\d+)\s*(?:h|high)/i.exec(line) ||
-            /design\s*(?:area|size)\s*:?\s*(\d+)\s*(?:x|×)\s*(\d+)/i.exec(line);
-        if (m) {
-          result.design.w = parseInt(m[1], 10);
-          result.design.h = parseInt(m[2], 10);
-        } else {
-          /* Height first is just as common: '35h x 49w' (Tiny Modernist),
-             'MAXIMUM STITCH COUNT 32 high x 56 wide' (a magazine chart). */
-          m = /\b(\d+)\s*(?:h\b|high)\s*(?:x|×|by)\s*(\d+)\s*(?:w\b|wide)/i.exec(line);
-          if (m) {
-            result.design.w = parseInt(m[2], 10);
-            result.design.h = parseInt(m[1], 10);
-          }
+        var dsz = designSizeFromLine(line);
+        if (dsz) {
+          result.design.w = dsz.w;
+          result.design.h = dsz.h;
         }
       }
 
@@ -4099,8 +4541,8 @@
     for (var j = li + 1; j < rawLines.length && j <= li + 3; j++) {
       var toks = tokenizeKeyLine(cleanKeyLine(rawLines[j]));
       if (!toks.length) continue;
-      if (hexFor('DMC', toks[0])) return true;
-      return toks.length > 1 && toks[0].length <= 2 && !!hexFor('DMC', toks[1]);
+      if (keyHexFor('DMC', toks[0])) return true;
+      return toks.length > 1 && toks[0].length <= 2 && !!keyHexFor('DMC', toks[1]);
     }
     return false;
   }
@@ -4110,7 +4552,7 @@
     if (!tok) return false;
     if (NAMED_CODE_RE.test(tok)) return true;
     if (!CODE_TOKEN_RE.test(tok)) return false;
-    return !!hexFor(brand || 'DMC', tok) || /^\d{3,5}$/.test(tok);
+    return !!keyHexFor(brand || 'DMC', tok) || /^\d{3,5}$/.test(tok);
   }
 
   /**
@@ -4138,7 +4580,7 @@
        as wide as the header promised and starts with a floss we know is
        spared the margin-ruler test. */
     var brandRow = altCols > 0 && toks.length === altCols + 1 &&
-      !!hexFor(docBrand || 'DMC', toks[0]);
+      !!keyHexFor(docBrand || 'DMC', toks[0]);
     if (!brandRow && looksLikeGridLine(toks)) return null;
     /* A line of nothing but chart glyphs ('p 22222 888 <<<<< p') is a row of
        the grid that shared a line with the key. A run of one digit is a
@@ -4150,7 +4592,7 @@
         /* ... except that DMC really does sell 333, 444, 666 and 777. On a
            short line ('O 666', a symbol and its code) such a token is the
            floss; a row of the grid is never this short. */
-        if (toks.length <= 3 && /^\d{3,4}$/.test(toks[g]) && hexFor('DMC', toks[g])) {
+        if (toks.length <= 3 && /^\d{3,4}$/.test(toks[g]) && keyHexFor('DMC', toks[g])) {
           allGlyphs = false;
           break;
         }
@@ -4193,7 +4635,7 @@
 
     var effBrand = brand || docBrand || '';
     var lookupBrand = effBrand || 'DMC';
-    var hex = hexFor(lookupBrand, code);
+    var hex = keyHexFor(lookupBrand, code);
 
     /* Reject prose: a bare short number with no brand and no DMC match is
        almost always "2 strands throughout" or a margin ruler. A document-level
@@ -4202,8 +4644,10 @@
        Library scan reads "ANCHOR ... 65 BROAD STREET BOSTON MASS." as an
        Anchor 65 — so that case also wants a key header above it. */
     /* DMC's 2017 colours are numbered 1 to 35 ('19' is Medium Light Autumn
-       Gold). The floss table has no swatches for them, so they only count
-       as codes under a header that names DMC as a column. */
+       Gold). A bare small number is far more often something else, so they
+       only count as codes under a header that names DMC as a column (or
+       with the brand written on the row). Their swatches (wave J) are
+       filled in after the rows are decided. */
     var newDmc = !!dmcTable && !brand && /^(?:[1-9]|[12]\d|3[0-5])$/.test(code) &&
       !symbol && !(i < toks.length && normUnitWord(toks[i])) &&   // '(2 strands)'
       !new RegExp('\\(\\s*' + code + '\\b').test(rawLine);
@@ -4356,6 +4800,58 @@
       var h = parseFloat(m[spec.h]);
       if (spec.cm) { w /= CM_PER_IN; h /= CM_PER_IN; }
       return { count: parseInt(m[spec.c], 10), wIn: round2(w), hIn: round2(h) };
+    }
+    return null;
+  }
+
+  /* Design size in stitches. The first four are the forms parseKey has
+     always read (their order and their looseness are kept exactly, the
+     fixtures depend on it); the rest are wave J's, and they refuse a pair
+     that is really a measurement ('5.9 x 8.2"', '15 x 21 cm'). */
+  var NOT_A_MEASURE = '(?![.,]\\d)(?!\\s*(?:cm|mm|in\\b|inch|["”″\']))';
+  var DESIGN_SIZE_RES = [
+    { re: /stitch(?:es)?\s*count\s*:?\s*(\d+)\s*(?:w|x|×|wide|by)\s*(\d+)/i, w: 1, h: 2 },
+    { re: /(\d+)\s*(?:w|wide)\s*(?:x|×|by)\s*(\d+)\s*(?:h|high)/i, w: 1, h: 2 },
+    { re: /design\s*(?:area|size)\s*:?\s*(\d+)\s*(?:x|×)\s*(\d+)/i, w: 1, h: 2 },
+    /* Height first is just as common: '35h x 49w' (Tiny Modernist),
+       'MAXIMUM STITCH COUNT 32 high x 56 wide' (a magazine chart). */
+    { re: /\b(\d+)\s*(?:h\b|high)\s*(?:x|×|by)\s*(\d+)\s*(?:w\b|wide)/i, w: 2, h: 1 },
+    /* wave J */
+    { re: new RegExp('design\\s*(?:area|size)\\s*:?\\s*(\\d{1,4})\\s*by\\s*(\\d{1,4})\\b' + NOT_A_MEASURE, 'i'), w: 1, h: 2 },
+    { re: /(?:^|[^\d.,])(\d{1,4})\s*(?:x|×|by)\s*(\d{1,4})\s*(?:stitch(?:es)?|sts)\b/i, w: 1, h: 2 },
+    { re: new RegExp('\\b(?:size|dimensions?|stitches)\\s*(?:in\\s*stitches\\s*)?:?\\s*(\\d{1,4})\\s*(?:x|×|by)\\s*(\\d{1,4})\\b' + NOT_A_MEASURE, 'i'), w: 1, h: 2 }
+  ];
+
+  /** One line's design size in stitches, or null. */
+  function designSizeFromLine(line) {
+    var s = String(line == null ? '' : line);
+    if (!/\d/.test(s)) return null;
+    for (var i = 0; i < DESIGN_SIZE_RES.length; i++) {
+      var spec = DESIGN_SIZE_RES[i];
+      var m = spec.re.exec(s);
+      if (!m) continue;
+      var w = parseInt(m[spec.w], 10), h = parseInt(m[spec.h], 10);
+      if (i >= 4 && !(w > 0 && h > 0)) continue;
+      return { w: w, h: h };
+    }
+    return null;
+  }
+
+  /**
+   * designSize(text) -> { w, h, source } | null      (wave J)
+   * The declared design size in stitches: 'Design size: 144 x 85 stitches',
+   * 'Stitch count: 144w x 85h', '35h x 49w', '144 x 85 stitches',
+   * 'Size: 144 by 85'. The first line that says it wins, the same rule
+   * parseKey uses for `design`. `source` is that line as printed (trimmed),
+   * so the app can show where the number came from.
+   */
+  function designSize(text) {
+    var lines = String(text == null ? '' : text).split(/\r\n|\r|\n/);
+    for (var i = 0; i < lines.length; i++) {
+      var d = designSizeFromLine(lines[i]);
+      if (d && d.w > 0 && d.h > 0) {
+        return { w: d.w, h: d.h, source: lines[i].replace(/\s+/g, ' ').trim().slice(0, 120) };
+      }
     }
     return null;
   }
@@ -5592,6 +6088,389 @@
   }
 
   /* ================================================================== *
+   * 10c. Wave J: the key as a checksum (checkCounts) and written
+   *      row-by-row instructions (writtenRows / rowText / rowDone /
+   *      cellsOfRow). Pure; no state of their own.
+   * ================================================================== */
+
+  /* The key rows a cell chart can be checked against: full crosses (and
+     blends, which are full crosses in two threads). Backstitch, knots,
+     beads and fractionals are not cells. */
+  var CHECK_KINDS = { cross: 1, blend: 1 };
+
+  /** 'dmc|4' for DMC 04 / 4 / 'DMC 04'; '' when there is no code. */
+  function codeKey(brand, code) {
+    var b = String(brand == null ? '' : brand).trim().toLowerCase() || 'dmc';
+    var c = String(code == null ? '' : code).trim();
+    if (!c) return '';
+    c = b === 'dmc' ? canonDmcCode(c) : c.toLowerCase().replace(/^0+(?=\d)/, '');
+    return b + '|' + c;
+  }
+
+  /** 'DMC 310', '310' with no brand, else the name. */
+  function flossLabel(e) {
+    if (!e) return 'a colour';
+    var code = str(e.code, '').trim(), brand = str(e.brand, '').trim();
+    if (code) return (brand ? brand + ' ' : '') + code;
+    return str(e.name, '').trim() || 'a colour';
+  }
+
+  function plural(n, one, many) { return n === 1 ? one : (many || one + 's'); }
+
+  /**
+   * checkCounts(data, entries) -> Check          (CONTRACT §3)
+   *
+   * Compares the chart's cells per palette entry with the stitch counts the
+   * key printed. Palette entries are matched to key entries by brand + code
+   * (DMC '04' = '4'), one to one in key order; when the chart splits one
+   * floss over two palette entries, the extra ones count towards the key
+   * row already matched. Only cross / blend rows are checked (see
+   * CHECK_KINDS). A missing, null or zero `stitchCount` is "the key gives no
+   * count": `expected: null`, `delta`/`pct`/`ok` null for that row.
+   * `pct` is the signed difference as a percentage of the printed count.
+   * With no `entries` array, the palette itself is listed, unchecked.
+   */
+  function checkCounts(data, entries) {
+    data = isObj(data) ? data : {};
+    var palette = Array.isArray(data.palette) ? data.palette : [];
+    var grid = chartCells(data.chart);
+    var noKey = !Array.isArray(entries);
+    var list = noKey ? palette : entries;
+    var i, k;
+
+    /* cells per palette value */
+    var perVal = {}, readTotal = 0;
+    if (grid) {
+      var cells = grid.cells, n = grid.w * grid.h;
+      for (i = 0; i < n; i++) {
+        var v = cells[i];
+        if (v < 0) continue;
+        readTotal++;
+        perVal[v] = (perVal[v] || 0) + 1;
+      }
+    }
+
+    /* the key rows that are checked, and their codes */
+    var rowIdx = [], byKey = {};
+    for (i = 0; i < list.length; i++) {
+      var en = isObj(list[i]) ? list[i] : {};
+      var kd = en.kind ? String(en.kind) : 'cross';
+      if (!CHECK_KINDS[kd]) continue;
+      rowIdx.push(i);
+      var ck = codeKey(en.brand, en.code);
+      if (ck) (byKey[ck] = byKey[ck] || []).push(i);
+    }
+
+    /* palette value -> key entry */
+    var read = {}, claimed = {}, unmatchedClasses = 0, unmatchedCells = 0;
+    var vals = Object.keys(perVal).map(Number).sort(function (a, b) { return a - b; });
+    for (k = 0; k < vals.length; k++) {
+      var pv = vals[k], cnt = perVal[pv], target = -1;
+      if (noKey) {
+        if (pv < list.length && CHECK_KINDS[(list[pv] && list[pv].kind) || 'cross']) target = pv;
+      } else {
+        var pe = palette[pv];
+        var cands = pe ? byKey[codeKey(pe.brand, pe.code)] : null;
+        if (cands && cands.length) {
+          for (var ci = 0; ci < cands.length && target < 0; ci++) {
+            if (!claimed[cands[ci]]) target = cands[ci];
+          }
+          if (target < 0) target = cands[0];
+        }
+      }
+      if (target < 0) { unmatchedClasses++; unmatchedCells += cnt; continue; }
+      claimed[target] = 1;
+      read[target] = (read[target] || 0) + cnt;
+    }
+
+    var rows = [], unmatchedEntries = [], hasCounts = false;
+    var expectedTotal = 0, accounted = 0, exact = true, allClose = true, nCounted = 0, nOk = 0;
+    for (k = 0; k < rowIdx.length; k++) {
+      var ei = rowIdx[k], e = isObj(list[ei]) ? list[ei] : {};
+      var got = read[ei] || 0;
+      var sc = noKey ? null : e.stitchCount;
+      var expected = typeof sc === 'number' && isFinite(sc) && sc > 0 ? Math.round(sc) : null;
+      var row = {
+        entry: ei,
+        code: str(e.code, ''),
+        brand: str(e.brand, ''),
+        name: str(e.name, '') || ((flossFor(e.brand, e.code) || {}).name || ''),
+        hex: normHex(e.hex, null) || hexFor(e.brand, e.code) || null,
+        read: got,
+        expected: expected,
+        delta: null, pct: null, ok: null
+      };
+      if (expected !== null) {
+        hasCounts = true;
+        nCounted++;
+        row.delta = got - expected;
+        row.pct = round1(row.delta / expected * 100);
+        row.ok = Math.abs(row.delta) <= Math.max(2, expected * 0.01);
+        if (row.delta !== 0) exact = false;
+        if (!row.ok) allClose = false; else nOk++;
+        expectedTotal += expected;
+        accounted += Math.min(got, expected);
+      }
+      if (!got) unmatchedEntries.push(ei);
+      rows.push(row);
+    }
+    if (!hasCounts) exact = false;
+
+    var verdict, summary;
+    var agree = hasCounts && expectedTotal > 0 ? Math.round(accounted / expectedTotal * 10000) / 10000 : 0;
+    var offRows = rows.filter(function (r) { return r.ok === false; })
+      .sort(function (a, b) { return Math.abs(b.delta) - Math.abs(a.delta) || a.entry - b.entry; });
+    var nearRows = rows.filter(function (r) { return r.ok === true && r.delta !== 0; });
+    var reads = function (r) {
+      return flossLabel(r) + ' reads ' + fmtInt(r.read) + ' of ' + fmtInt(r.expected);
+    };
+    var strays = unmatchedClasses
+      ? ' ' + unmatchedClasses + ' ' + plural(unmatchedClasses, 'colour') + ' in the chart (' +
+        fmtInt(unmatchedCells) + ' ' + plural(unmatchedCells, 'stitch', 'stitches') + ') ' +
+        (unmatchedClasses === 1 ? 'is' : 'are') + ' not in the key.'
+      : '';
+
+    if (!grid) {
+      verdict = 'unchecked';
+      summary = 'There is no chart to check against the key.';
+    } else if (!rows.length) {
+      verdict = 'unchecked';
+      summary = 'There is no colour key to check this chart against (' +
+        fmtInt(readTotal) + ' ' + plural(readTotal, 'stitch', 'stitches') + ' read).';
+    } else if (!hasCounts) {
+      verdict = 'unchecked';
+      summary = 'The key prints no stitch counts, so this chart cannot be checked against it (' +
+        fmtInt(readTotal) + ' ' + plural(readTotal, 'stitch', 'stitches') + ' read).';
+    } else {
+      /* Who the sentence is about: every colour, or only the ones the key
+         prints a count for (then the rest are named at the end). */
+      var some = nCounted < rows.length, single = nCounted === 1;
+      var nNoCount = rows.length - nCounted;
+      var who = some
+        ? (single ? 'The 1 colour the key counts'
+          : (nCounted === 2 ? 'Both colours the key counts' : 'All ' + nCounted + ' colours the key counts'))
+        : (single ? 'The only colour' : nCounted === 2 ? 'Both colours' : 'All ' + nCounted + ' colours');
+      var noCount = some
+        ? '; ' + nNoCount + ' ' + plural(nNoCount, 'colour') + ' ' + plural(nNoCount, 'has', 'have') +
+          ' no printed count' : '';
+      var readCounted = 0;
+      for (k = 0; k < rows.length; k++) if (rows[k].expected !== null) readCounted += rows[k].read;
+      if (exact && !unmatchedCells) {
+        verdict = 'exact';
+        summary = who + (single ? ' matches' : ' match') + ' the key exactly (' + fmtInt(expectedTotal) + ' ' +
+          plural(expectedTotal, 'stitch', 'stitches') + ')' + noCount + '.';
+      } else if (allClose && unmatchedCells <= Math.max(2, expectedTotal * 0.01)) {
+        verdict = 'close';
+        summary = who + (single ? ' is' : ' are') +
+          ' within a stitch or two of the key (' + fmtInt(readCounted) +
+          ' of ' + fmtInt(expectedTotal) + ' stitches)' +
+          (nearRows.length ? '; ' + nearRows.slice(0, 2).map(reads).join('; ') : '') + noCount + '.' + strays;
+      } else {
+        verdict = 'off';
+        var shown = offRows.slice(0, 2).map(reads);
+        if (offRows.length > 2) shown.push('and ' + (offRows.length - 2) + ' more ' + plural(offRows.length - 2, 'is', 'are') + ' off');
+        var head = single
+          ? (some ? 'The 1 colour the key counts' : 'The only colour') + (nOk ? ' matches' : ' does not match')
+          : nOk + ' of ' + nCounted + ' ' + (some ? 'colours the key counts' : 'colours') + ' match';
+        summary = head + (shown.length ? '; ' + shown.join('; ') : '') + noCount + '.' + strays;
+      }
+    }
+
+    return {
+      hasCounts: hasCounts,
+      rows: rows,
+      unmatchedEntries: unmatchedEntries,
+      unmatchedClasses: unmatchedClasses,
+      readTotal: readTotal,
+      expectedTotal: hasCounts ? expectedTotal : null,
+      exact: exact,
+      agree: agree,
+      verdict: verdict,
+      summary: summary
+    };
+  }
+
+  /* ---- written instructions --------------------------------------- */
+
+  /* The last chart unpacked, so a sheet that asks rowDone() for every row
+     does not unpack the RLE once per row. Keyed by the packed string. */
+  var ROW_CACHE = { key: null, w: 0, h: 0, grid: null };
+  var DONE_CACHE = { key: null, bytes: null };
+
+  function gridOf(data) {
+    var chart = isObj(data) && isObj(data.chart) ? data.chart : null;
+    if (!chart) return null;
+    var cells = chart.cells;
+    var key = typeof cells === 'string' ? cells
+      : (isObj(cells) && typeof cells.data === 'string' ? cells.data : null);
+    if (key !== null && ROW_CACHE.key === key && ROW_CACHE.w === chart.w && ROW_CACHE.h === chart.h) {
+      return ROW_CACHE.grid;
+    }
+    var g = chartCells(chart);
+    if (g && key !== null) { ROW_CACHE.key = key; ROW_CACHE.w = chart.w; ROW_CACHE.h = chart.h; ROW_CACHE.grid = g; }
+    return g;
+  }
+
+  /** The crosses' progress bitmap as bytes (the same bits progressStats reads). */
+  function doneBytes(data) {
+    var pr = isObj(data) && isObj(data.progress) ? data.progress : null;
+    if (!pr || pr.mode === 'counts') return null;
+    var s = str(pr.done, '');
+    if (DONE_CACHE.key === s) return DONE_CACHE.bytes;
+    var b = b64ToBytes(s);
+    DONE_CACHE.key = s; DONE_CACHE.bytes = b;
+    return b;
+  }
+
+  function colorOpt(opts) {
+    var c = isObj(opts) ? opts.color : null;
+    return typeof c === 'number' && isFinite(c) && c >= 0 ? Math.floor(c) : null;
+  }
+
+  /**
+   * writtenRows(data, opts) -> { w, h, from, dir, color, rows, totals }   (CONTRACT §2)
+   *
+   * rows[k] = { y, n, rtl, stitches, runs: [{ p, n, x }] }
+   *  - `n` is the row's label in the chosen order over the WHOLE chart
+   *    (row 1 = top row, or bottom row with from:'bottom'), so labels stay
+   *    put when yFrom/yTo or skipEmpty leave rows out.
+   *  - serpentine: odd-numbered rows go left to right, even ones right to
+   *    left (`rtl`), by that label, so the direction never depends on which
+   *    rows are listed.
+   *  - runs are in working order and cover the whole row; `p` -1 is "skip"
+   *    (unstitched, or another colour in a one-colour pass). `x` is in chart
+   *    space: the column the run STARTS at as worked, so in an rtl row it
+   *    is the run's rightmost column and the run covers x, x-1, … x-n+1.
+   *  - yFrom / yTo: 0-based chart rows, inclusive, clamped.
+   *  - totals: rows listed, stitches in them, and empty rows in the range
+   *    (counted whether or not skipEmpty dropped them).
+   */
+  function writtenRows(data, opts) {
+    opts = isObj(opts) ? opts : {};
+    var from = opts.from === 'bottom' ? 'bottom' : 'top';
+    var dir = opts.dir === 'serpentine' ? 'serpentine' : 'ltr';
+    var color = colorOpt(opts);
+    var g = gridOf(data);
+    var out = { w: g ? g.w : 0, h: g ? g.h : 0, from: from, dir: dir, color: color,
+      rows: [], totals: { rows: 0, stitches: 0, emptyRows: 0 } };
+    if (!g) return out;
+    var w = g.w, h = g.h, cells = g.cells;
+    var y0 = clampInt(opts.yFrom, 0, h - 1, 0), y1 = clampInt(opts.yTo, 0, h - 1, h - 1);
+    if (y0 > y1) { var tmp = y0; y0 = y1; y1 = tmp; }
+    var count = y1 - y0 + 1;
+    for (var k = 0; k < count; k++) {
+      var y = from === 'top' ? y0 + k : y1 - k;
+      var label = from === 'top' ? y + 1 : h - y;
+      var rtl = dir === 'serpentine' && label % 2 === 0;
+      var base = y * w, runs = [], stitches = 0;
+      var curP = -2, curN = 0, curX = 0;
+      for (var s = 0; s < w; s++) {
+        var x = rtl ? w - 1 - s : s;
+        var v = cells[base + x];
+        var p = v < 0 || (color !== null && v !== color) ? -1 : v;
+        if (p >= 0) stitches++;
+        if (p === curP) { curN++; continue; }
+        if (curN) runs.push({ p: curP, n: curN, x: curX });
+        curP = p; curN = 1; curX = x;
+      }
+      if (curN) runs.push({ p: curP, n: curN, x: curX });
+      if (!stitches) out.totals.emptyRows++;
+      if (!stitches && opts.skipEmpty) continue;
+      out.rows.push({ y: y, n: label, rtl: rtl, stitches: stitches, runs: runs });
+      out.totals.stitches += stitches;
+    }
+    out.totals.rows = out.rows.length;
+    return out;
+  }
+
+  /** How a colour is named in the written text. */
+  function runColourName(palette, p, names) {
+    var e = palette[p];
+    if (!isObj(e)) return 'colour ' + (p + 1);
+    var label = flossLabel(e);
+    if (names === 'symbol') return str(e.symbol, '') || label;
+    if (names === 'code+name') {
+      var nm = str(e.name, '').trim();
+      return str(e.code, '').trim() && nm ? label + ' ' + nm : label;
+    }
+    return label;
+  }
+
+  /**
+   * rowText(row, data, opts) -> 'Row 12 (left to right): skip 3, 5 × DMC 310, 1 DMC 842'
+   *
+   * opts.names: 'code' (default) | 'code+name' | 'symbol' (falls back to the
+   * code when an entry has no symbol). Leading skips are kept: they place
+   * the first stitch. Trailing skips are left off the text (there is
+   * nothing after them to place; they are still in row.runs) unless
+   * opts.trailing is true. A run of one reads '1 DMC 310', not '1 × …'.
+   * A row with nothing to stitch says so.
+   */
+  function rowText(row, data, opts) {
+    opts = isObj(opts) ? opts : {};
+    row = isObj(row) ? row : {};
+    var names = opts.names === 'code+name' || opts.names === 'symbol' ? opts.names : 'code';
+    var palette = isObj(data) && Array.isArray(data.palette) ? data.palette : [];
+    var head = 'Row ' + (row.n === undefined ? (num(row.y, 0) + 1) : row.n) +
+      ' (' + (row.rtl ? 'right to left' : 'left to right') + ')';
+    var runs = Array.isArray(row.runs) ? row.runs : [];
+    var end = runs.length;
+    if (!opts.trailing) while (end > 0 && !(runs[end - 1].p >= 0)) end--;
+    var any = false, parts = [];
+    for (var i = 0; i < end; i++) {
+      var r = runs[i], n = clampInt(r.n, 0, 1e6, 0);
+      if (!n) continue;
+      if (!(r.p >= 0)) { parts.push('skip ' + n); continue; }
+      any = true;
+      parts.push((n === 1 ? '1 ' : n + ' × ') + runColourName(palette, r.p, names));
+    }
+    if (!any) return head + ': nothing to stitch';
+    return head + ': ' + parts.join(', ');
+  }
+
+  /**
+   * cellsOfRow(data, y, opts) -> number[]
+   * The cell indices (y * w + x, ascending) a "row done" tap marks: every
+   * stitched cell of chart row y, or only those of opts.color.
+   */
+  function cellsOfRow(data, y, opts) {
+    var g = gridOf(data);
+    if (!g) return [];
+    y = clampInt(y, -1, 1e6, -1);
+    if (y < 0 || y >= g.h) return [];
+    var color = colorOpt(opts), out = [], base = y * g.w;
+    for (var x = 0; x < g.w; x++) {
+      var v = g.cells[base + x];
+      if (v < 0 || (color !== null && v !== color)) continue;
+      out.push(base + x);
+    }
+    return out;
+  }
+
+  /**
+   * rowDone(data, y, opts) -> boolean
+   * Every stitched cell of row y (of opts.color, when given) is marked in
+   * the crosses' progress bitmap (data.progress.done). A row with nothing
+   * to stitch is done. No chart, a row off the chart, or a counts-mode
+   * project: false.
+   */
+  function rowDone(data, y, opts) {
+    var g = gridOf(data);
+    if (!g) return false;
+    y = clampInt(y, -1, 1e6, -1);
+    if (y < 0 || y >= g.h) return false;
+    var color = colorOpt(opts), base = y * g.w;
+    var bytes = doneBytes(data);
+    for (var x = 0; x < g.w; x++) {
+      var v = g.cells[base + x];
+      if (v < 0 || (color !== null && v !== color)) continue;
+      var i = base + x;
+      if (!bytes || !(((bytes[i >> 3] || 0) >> (i & 7)) & 1)) return false;
+    }
+    return true;
+  }
+
+  /* ================================================================== *
    * 11. Exports and registration
    * ================================================================== */
 
@@ -5670,6 +6549,15 @@
     extractGrid: extractGrid,
     printableHTML: printableHTML,
 
+    /* wave J: the key as a checksum, and written instructions */
+    designSize: designSize,
+    checkCounts: checkCounts,
+    writtenRows: writtenRows,
+    rowText: rowText,
+    rowDone: rowDone,
+    cellsOfRow: cellsOfRow,
+    fmtInt: fmtInt,
+
     /* internals, exposed for test/xstitch.test.html only */
     _key: {
       brandColumnHeader: brandColumnHeader,
@@ -5686,7 +6574,10 @@
       trailingCodeRow: trailingCodeRow,
       tidyName: tidyName,
       cleanKeyLine: cleanKeyLine,
-      expandCountColumns: expandCountColumns
+      expandCountColumns: expandCountColumns,
+      flossListRow: flossListRow,
+      flossListHeader: flossListHeader,
+      keyHexFor: keyHexFor
     },
 
     _grid: {

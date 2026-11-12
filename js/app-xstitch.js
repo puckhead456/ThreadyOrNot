@@ -1179,6 +1179,16 @@
       var expand = button('xs-expand', '⤢', 'Open the full chart');
       on(expand, 'click', function () { openChartSheet(project.id); });
       n.chart.node.appendChild(expand);
+      /* Wave J: a chart read from a picture says how its check went, and
+         is the way back into that check. */
+      n.readBand = button('xs-read-band', null, 'Open the chart check');
+      n.readBand.hidden = true;
+      n.readBandText = el('span', 'xs-read-band-text');
+      n.readBand.appendChild(el('span', 'xs-read-band-icon', '🖼'));
+      n.readBand.appendChild(n.readBandText);
+      n.readBand.appendChild(el('span', 'xs-read-band-go', '›'));
+      on(n.readBand, 'click', function () { reopenRead(project.id); });
+      n.chartCard.appendChild(n.readBand);
     } else {
       n.pageFrame = el('div', 'xs-page-frame');
       n.pageImg = el('img', 'xs-page-img');
@@ -1263,7 +1273,13 @@
     on(n.minus, 'click', function () { unmarkOne(project.id); });
     n.reset = button('linkish', 'reset this colour');
     on(n.reset, 'click', function () { resetColour(project.id); });
+    /* Wave J: the written instructions, for any project with a grid */
+    n.rowsBtn = button('btn ghost xs-rows-btn', '☰ Row by row', 'Row by row: the chart written out a row at a time');
+    n.rowsBtn.id = 'xs-rows-btn';
+    n.rowsBtn.hidden = true;
+    on(n.rowsBtn, 'click', function () { openRowsSheet(project.id); });
     actions.appendChild(n.minus);
+    actions.appendChild(n.rowsBtn);
     actions.appendChild(n.reset);
     section.appendChild(actions);
     n.section = section;
@@ -1288,7 +1304,7 @@
     n.keyList = el('div', 'list xs-key-list');
     n.keyCard.appendChild(n.keyList);
     n.keyEmpty = el('p', 'muted xs-key-empty',
-      'No colours yet. Use the ⋯ menu → Import pattern to drop in a PDF or an OXS chart, ' +
+      'No colours yet. Use the ⋯ menu → Import pattern to drop in a PDF, an OXS chart or a picture of a chart, ' +
       'or add them by hand.');
     n.keyCard.appendChild(n.keyEmpty);
     var addBtn = button('btn ghost block', '＋ Add a colour');
@@ -1572,6 +1588,8 @@
     n.btnPages.disabled = !data.pages.length &&
       !(hasChart(data) && view.sizeBytes > X.SIZE_WARN_BYTES);
     n.btnChart.disabled = !hasChart(data);
+    if (n.rowsBtn) n.rowsBtn.hidden = !rowsAvailable(data);
+    if (n.readBand) syncReadBand(project, data);
 
     redrawAll();
   }
@@ -1582,7 +1600,9 @@
     if (!pages.length) {
       n.pageImg.hidden = true;
       n.pageEmpty.hidden = false;
-      n.pageEmpty.textContent = 'No chart pages yet. Import a PDF or an OXS file from the ⋯ menu.';
+      n.pageEmpty.textContent = readerAvailable()
+        ? 'No chart yet. Use the ⋯ menu → Import pattern to drop in a PDF, an OXS file or a picture of a chart.'
+        : 'No chart pages yet. Import a PDF or an OXS file from the ⋯ menu.';
       n.pageBar.hidden = true;
       if (n.pageExpand) n.pageExpand.hidden = true;
       return;
@@ -2298,6 +2318,12 @@
         var proj0 = Store.project(projectId);
         if (proj0 && dataOf(proj0).pages.length) zoomRow.appendChild(zPage);
         zoomRow.appendChild(zNext);
+        if (rowsAvailable(data)) {
+          var zRows = button('btn ghost xs-find-next', '☰', 'Row by row');
+          zRows.title = 'Row by row';
+          on(zRows, 'click', function () { openRowsSheet(projectId); });
+          zoomRow.appendChild(zRows);
+        }
         body.appendChild(zoomRow);
 
         setHint();
@@ -2692,6 +2718,426 @@
     syncModel(data);
     syncScreen(p, data);
     if (total > 0) noteMilestones(projectId, beforeByColor);
+  }
+
+  /* ---- Row by row (wave J): the chart as written instructions ---------- */
+
+  /** Needs a grid and the key worker's written-rows functions in XStitch. */
+  function rowsAvailable(data) {
+    return !!(data && hasChart(data) && typeof X.writtenRows === 'function' &&
+      typeof X.rowText === 'function' && typeof X.cellsOfRow === 'function' &&
+      typeof X.rowDone === 'function');
+  }
+
+  /** The per-project Row by row options, with defaults. */
+  function normRowOpts(v) {
+    v = isObj(v) ? v : {};
+    return {
+      from: v.from === 'bottom' ? 'bottom' : 'top',
+      dir: v.dir === 'serpentine' ? 'serpentine' : 'ltr',
+      one: v.one === true,
+      skipEmpty: v.skipEmpty !== false
+    };
+  }
+
+  /** The project's own options (craftData.current.rowOpts, view state), else the defaults. */
+  function rowOptsOf(data) {
+    return normRowOpts(data && data.current && isObj(data.current.rowOpts) ? data.current.rowOpts : null);
+  }
+
+  /** XStitch.writtenRows options for these Row by row options. */
+  function writtenOptsFor(ro, data) {
+    var pi = data && data.palette.length
+      ? clampInt(data.current.paletteIndex, 0, data.palette.length - 1, 0) : null;
+    return { from: ro.from, dir: ro.dir, color: ro.one && pi !== null ? pi : null, skipEmpty: ro.skipEmpty };
+  }
+
+  function rowOptsLabel(ro, data) {
+    var bits = [ro.from === 'bottom' ? 'From the bottom' : 'From the top',
+      ro.dir === 'serpentine' ? 'back and forth' : 'every row left to right'];
+    if (ro.one && data && data.palette.length) {
+      bits.push('only ' + paletteLabel(data.palette[clampInt(data.current.paletteIndex, 0, data.palette.length - 1, 0)]));
+    } else {
+      bits.push('all colours');
+    }
+    if (ro.skipEmpty) bits.push('empty rows hidden');
+    return bits.join(' · ');
+  }
+
+  /** The column of a row's first stitch (where the crosshair goes). */
+  function firstStitchX(row) {
+    var runs = row && row.runs ? row.runs : [];
+    for (var i = 0; i < runs.length; i++) if (runs[i].p >= 0) return runs[i].x;
+    return 0;
+  }
+
+  function stitchesWord(n) { return comma(n) + (n === 1 ? ' stitch' : ' stitches'); }
+
+  /** Run chips: a swatch with the symbol, and the count; "skip n" muted. */
+  function runChips(row, data, cap) {
+    var wrap = el('span', 'xs-runs');
+    wrap.setAttribute('aria-hidden', 'true');
+    var runs = row.runs || [];
+    var lim = cap && runs.length > cap ? cap : runs.length;
+    for (var i = 0; i < lim; i++) {
+      var r = runs[i];
+      if (r.p < 0) {
+        wrap.appendChild(el('span', 'xs-run xs-run-skip', 'skip ' + r.n));
+        continue;
+      }
+      var e = data.palette[r.p] || {};
+      var chip = el('span', 'xs-run');
+      var sw = el('span', 'xs-run-sw', e.symbol || '');
+      sw.style.background = swatchHex(e);
+      sw.style.color = X.symbolInk(e.hex || '808080') === 'light' ? '#fff' : '#111';
+      chip.appendChild(sw);
+      chip.appendChild(el('span', 'xs-run-n', String(r.n)));
+      wrap.appendChild(chip);
+    }
+    if (lim < runs.length) wrap.appendChild(el('span', 'xs-run xs-run-skip', '+' + (runs.length - lim) + ' more'));
+    return wrap;
+  }
+
+  function openRowsSheet(projectId) {
+    var p0 = Store.project(projectId);
+    if (!p0) return;
+    var d0 = dataOf(p0);
+    if (!rowsAvailable(d0)) {
+      toast(hasChart(d0) ? 'Row by row is not available on this device yet'
+        : 'Row by row needs a chart grid: import an .oxs file, read a chart picture or make one from a photo');
+      return;
+    }
+    var ro = rowOptsOf(d0);
+    var wr = null, focus = -1, lo = 0, hi = 0;
+    var WINDOW = 30;
+    var nd = {};
+
+    function data() { return dataOf(Store.project(projectId)); }
+    function wopts(d) { return writtenOptsFor(ro, d); }
+    function live() { return !!(view && view.projectId === projectId && view.bits && view.cells); }
+
+    function isDone(d, row) {
+      if (!row || !row.stitches) return false;
+      try { return !!X.rowDone(d, row.y, wopts(d)); } catch (e) { return false; }
+    }
+
+    function firstOpen(d) {
+      for (var i = 0; i < wr.rows.length; i++) {
+        if (wr.rows[i].stitches > 0 && !isDone(d, wr.rows[i])) return i;
+      }
+      return wr.rows.length ? wr.rows.length - 1 : -1;
+    }
+
+    function recompute(keepY) {
+      var d = data();
+      try { wr = X.writtenRows(d, wopts(d)); } catch (e) { wr = null; }
+      if (!wr || !Array.isArray(wr.rows)) wr = { w: d.chart.w, h: d.chart.h, rows: [], totals: { rows: 0, stitches: 0, emptyRows: 0 } };
+      var idx = -1;
+      if (keepY !== null && keepY !== undefined) {
+        for (var i = 0; i < wr.rows.length; i++) if (wr.rows[i].y === keepY) { idx = i; break; }
+      }
+      focus = idx >= 0 ? idx : firstOpen(d);
+      placeWindow();
+    }
+
+    function placeWindow() {
+      var f = Math.max(0, focus);
+      if (f < lo || f >= hi || hi === 0) {
+        lo = Math.max(0, f - 8);
+        hi = Math.min(wr.rows.length, lo + WINDOW);
+      }
+    }
+
+    function saveOpts() {
+      saveViewState(projectId, { rowOpts: { from: ro.from, dir: ro.dir, one: ro.one, skipEmpty: ro.skipEmpty } });
+    }
+
+    function render() {
+      var d = data();
+      renderNow(d);
+      renderColours(d);
+      if (C.preserveFocus) C.preserveFocus(function () { renderList(d); });
+      else renderList(d);
+      nd.optsSummary.textContent = rowOptsLabel(ro, d);
+    }
+
+    function renderNow(d) {
+      clear(nd.now);
+      var row = focus >= 0 ? wr.rows[focus] : null;
+      if (!row) {
+        nd.now.appendChild(el('p', 'muted', ro.one
+          ? 'This colour has no stitches on the chart.'
+          : 'There are no stitches on this chart.'));
+        nd.done.hidden = true;
+        nd.nav.hidden = true;
+        return;
+      }
+      nd.done.hidden = false;
+      nd.nav.hidden = false;
+      var done = isDone(d, row);
+      var head = el('div', 'xs-row-now-head');
+      head.appendChild(el('span', 'xs-row-now-n', 'Row ' + row.n));
+      head.appendChild(el('span', 'xs-row-now-sub', 'of ' + (wr.h || d.chart.h) + ' · ' +
+        (row.rtl ? 'right to left ←' : 'left to right →') + ' · ' + stitchesWord(row.stitches)));
+      nd.now.appendChild(head);
+      var chips = runChips(row, d, 0);
+      chips.classList.add('xs-runs-big');
+      nd.now.appendChild(chips);
+      var txt = '';
+      try { txt = X.rowText(row, d, { names: 'code' }); } catch (e) { txt = ''; }
+      var sr = el('p', 'sr-only', txt);
+      nd.now.appendChild(sr);
+      if (nd.now.parentNode) nd.now.parentNode.classList.toggle('done', done);
+
+      nd.done.textContent = done ? '✓ Row ' + row.n + ' is done · tap to unmark' : 'Row ' + row.n + ' done';
+      nd.done.setAttribute('aria-pressed', done ? 'true' : 'false');
+      nd.done.classList.toggle('primary', !done);
+      nd.done.classList.toggle('is-done', done);
+      nd.next.classList.toggle('primary', done);
+      nd.prev.disabled = focus <= 0;
+      nd.next.disabled = focus >= wr.rows.length - 1;
+      nd.done.disabled = !row.stitches;
+    }
+
+    function renderColours(d) {
+      clear(nd.colours);
+      nd.colours.hidden = !ro.one;
+      if (!ro.one) return;
+      var cur = clampInt(d.current.paletteIndex, 0, Math.max(0, d.palette.length - 1), 0);
+      d.palette.forEach(function (e, i) {
+        var b = button('xs-row-col' + (i === cur ? ' on' : ''), null, 'Only ' + paletteLabel(e));
+        b.setAttribute('aria-pressed', i === cur ? 'true' : 'false');
+        b.setAttribute('data-focus-key', 'rowcol-' + i);
+        var sw = el('span', 'xs-swatch xs-swatch-sm', e.symbol || '');
+        sw.style.background = swatchHex(e);
+        sw.style.color = X.symbolInk(e.hex) === 'light' ? '#fff' : '#111';
+        b.appendChild(sw);
+        b.appendChild(el('span', 'xs-row-col-code', e.code));
+        on(b, 'click', function () {
+          if (live()) setCurrentColour(projectId, i);
+          else Store.updateCraftData(projectId, function (cd) { cd.current.paletteIndex = i; }, { undo: false });
+          recompute(null);
+          render();
+        });
+        nd.colours.appendChild(b);
+      });
+    }
+
+    function renderList(d) {
+      clear(nd.list);
+      if (!wr.rows.length) return;
+      if (lo > 0) {
+        var earlier = button('btn ghost block xs-row-more', 'Show earlier rows');
+        earlier.setAttribute('data-focus-key', 'row-earlier');
+        on(earlier, 'click', function () { lo = Math.max(0, lo - WINDOW); renderList(data()); });
+        nd.list.appendChild(earlier);
+      }
+      for (var i = lo; i < hi; i++) nd.list.appendChild(rowItem(d, i));
+      if (hi < wr.rows.length) {
+        var later = button('btn ghost block xs-row-more', 'Show more rows');
+        later.setAttribute('data-focus-key', 'row-later');
+        on(later, 'click', function () { hi = Math.min(wr.rows.length, hi + WINDOW); renderList(data()); });
+        nd.list.appendChild(later);
+      }
+    }
+
+    function rowItem(d, i) {
+      var row = wr.rows[i];
+      var done = isDone(d, row);
+      var b = button('xs-row-item' + (i === focus ? ' current' : '') + (done ? ' done' : ''));
+      b.setAttribute('data-focus-key', 'row-' + row.y);
+      var txt = '';
+      try { txt = X.rowText(row, d, { names: 'code+name' }); } catch (e) { txt = 'Row ' + row.n; }
+      b.setAttribute('aria-label', txt + '.' + (done ? ' Done.' : '') + (i === focus ? ' Current row.' : ''));
+      if (i === focus) b.setAttribute('aria-current', 'step');
+      var head = el('span', 'xs-row-item-head');
+      head.appendChild(el('span', 'xs-row-item-n', 'Row ' + row.n + ' ' + (row.rtl ? '←' : '→')));
+      head.appendChild(el('span', 'xs-row-item-sub', row.stitches ? stitchesWord(row.stitches) : 'empty'));
+      if (done) head.appendChild(el('span', 'xs-key-tick', '✓'));
+      b.appendChild(head);
+      b.appendChild(runChips(row, d, 40));
+      on(b, 'click', function () { setFocus(i); });
+      return b;
+    }
+
+    /* The list scrolls on its own, so bringing the current row into view
+       never pushes the row card or the options off the sheet. */
+    function scrollListTo(item) {
+      if (!item || !nd.list) return;
+      var top = item.offsetParent === nd.list ? item.offsetTop : item.offsetTop - nd.list.offsetTop;
+      var bottom = top + item.offsetHeight;
+      if (top < nd.list.scrollTop) nd.list.scrollTop = Math.max(0, top - 4);
+      else if (bottom > nd.list.scrollTop + nd.list.clientHeight) nd.list.scrollTop = bottom - nd.list.clientHeight + 4;
+    }
+
+    /** Focus a row: the current row card, and the chart's crosshair on it. */
+    function setFocus(i) {
+      if (i < 0 || i >= wr.rows.length) return;
+      focus = i;
+      placeWindow();
+      var row = wr.rows[i];
+      var x = firstStitchX(row);
+      if (live()) setCrosshair(x, row.y);
+      saveViewState(projectId, { cx: x, cy: row.y });
+      render();
+      var cur = nd.list.querySelector('.xs-row-item.current');
+      scrollListTo(cur);
+    }
+
+    /** Row done (one undo step), or un-done when the row already is. */
+    function toggleRow() {
+      var d = data();
+      var row = focus >= 0 ? wr.rows[focus] : null;
+      if (!row) return;
+      if (!live()) { toast('Open the project to mark rows'); return; }
+      var o = wopts(d);
+      var value = !isDone(d, row);
+      var cells;
+      try { cells = X.cellsOfRow(d, row.y, o) || []; } catch (e) { cells = []; }
+      var before = snapshotByColor();
+      var changed = {};
+      var total = 0;
+      for (var k = 0; k < cells.length; k++) {
+        var idx = cells[k];
+        var pi = view.cells[idx];
+        if (pi === undefined || pi < 0) continue;
+        var was = (view.bits.bytes[idx >> 3] >> (idx & 7)) & 1;
+        if (was === (value ? 1 : 0)) continue;
+        X.setBit(view.bits, idx, value);
+        changed[pi] = (changed[pi] || 0) + (value ? 1 : -1);
+        total += value ? 1 : -1;
+      }
+      if (!total) { toast(value ? 'That row is already done' : 'Nothing to unmark in that row'); return; }
+      view.img = null;                 // a whole row: rebuild the picture once
+      commitBulk(projectId, changed, total, { x: firstStitchX(row), y: row.y }, before);
+      C.announce(value ? 'Row ' + row.n + ' done' : 'Row ' + row.n + ' unmarked');
+      render();
+    }
+
+    function copyRows(oneColour) {
+      var d = data();
+      var o = wopts(d);
+      if (!oneColour) o.color = null;
+      else o.color = clampInt(d.current.paletteIndex, 0, Math.max(0, d.palette.length - 1), 0);
+      var all;
+      try { all = X.writtenRows(d, o); } catch (e) { all = null; }
+      if (!all || !all.rows) { toast('Those rows could not be written out'); return; }
+      var p = Store.project(projectId);
+      var lines = [];
+      lines.push(((p && p.name) || d.design.title || 'Chart') + ' — ' + d.chart.w + ' × ' + d.chart.h + ' stitches');
+      lines.push('Rows counted from the ' + (o.from === 'bottom' ? 'bottom' : 'top') + ', ' +
+        (o.dir === 'serpentine' ? 'worked back and forth' : 'every row left to right') +
+        (o.color !== null ? ', only ' + paletteLabel(d.palette[o.color]) : '') + '.');
+      lines.push('');
+      all.rows.forEach(function (r) {
+        try { lines.push(X.rowText(r, d, { names: 'code+name' })); } catch (e) { /* skip */ }
+      });
+      var text = lines.join('\n');
+      fallbackCopy(text, function () { toast('Copied ' + plural(all.rows.length, 'row') + ' as text'); });
+    }
+
+    function optionsChanged() {
+      saveOpts();
+      var keepY = focus >= 0 && wr.rows[focus] ? wr.rows[focus].y : null;
+      lo = 0; hi = 0;
+      recompute(keepY);
+      render();
+    }
+
+    recompute(null);
+
+    C.openSheet({
+      title: 'Row by row',
+      cls: 'sheet-xs-rows',
+      build: function (body) {
+        var opts = el('details', 'xs-advanced xs-row-opts');
+        var sum = el('summary');
+        sum.appendChild(el('span', null, 'Options'));
+        nd.optsSummary = el('span', 'muted xs-row-opts-sum', '');
+        sum.appendChild(nd.optsSummary);
+        opts.appendChild(sum);
+        var fromSeg = C.segmented([{ id: 'top', label: 'Top' }, { id: 'bottom', label: 'Bottom' }], ro.from,
+          function (v) { ro.from = v; optionsChanged(); });
+        opts.appendChild(field('Start from', fromSeg.node, 'Row 1 is the top row, or the bottom one.'));
+        var dirSeg = C.segmented([{ id: 'ltr', label: 'Left to right' }, { id: 'serpentine', label: 'Back and forth' }],
+          ro.dir, function (v) { ro.dir = v; optionsChanged(); });
+        opts.appendChild(field('Direction', dirSeg.node, 'Back and forth turns at the end of every row.'));
+        var oneSeg = C.segmented([{ id: 'all', label: 'All colours' }, { id: 'one', label: 'One at a time' }],
+          ro.one ? 'one' : 'all', function (v) { ro.one = v === 'one'; optionsChanged(); });
+        opts.appendChild(field('Colours', oneSeg.node, 'One at a time lists just the colour you pick below.'));
+        opts.appendChild(C.switchRow('Hide empty rows', 'Rows with nothing to stitch are left out.',
+          ro.skipEmpty, function (v) { ro.skipEmpty = v; optionsChanged(); }));
+        body.appendChild(opts);
+
+        nd.colours = el('div', 'xs-row-cols');
+        nd.colours.setAttribute('role', 'group');
+        nd.colours.setAttribute('aria-label', 'Which colour');
+        body.appendChild(nd.colours);
+
+        var nowCard = el('section', 'xs-row-now');
+        nowCard.setAttribute('aria-label', 'The row you are on');
+        nd.now = el('div', 'xs-row-now-body');
+        nowCard.appendChild(nd.now);
+        nd.done = button('btn primary block xs-row-done', 'Row done');
+        on(nd.done, 'click', toggleRow);
+        nowCard.appendChild(nd.done);
+        nd.nav = el('div', 'xs-row-nav');
+        nd.prev = button('btn ghost', '‹ Previous', 'Previous row');
+        nd.next = button('btn ghost', 'Next ›', 'Next row');
+        on(nd.prev, 'click', function () { setFocus(focus - 1); });
+        on(nd.next, 'click', function () { setFocus(focus + 1); });
+        nd.nav.appendChild(nd.prev);
+        nd.nav.appendChild(nd.next);
+        nowCard.appendChild(nd.nav);
+        body.appendChild(nowCard);
+
+        var copyRow = el('div', 'xs-row-copy');
+        var copyAll = button('btn ghost', 'Copy all rows', 'Copy every row as text');
+        on(copyAll, 'click', function () { copyRows(false); });
+        copyRow.appendChild(copyAll);
+        var copyOne = button('btn ghost', 'Copy this colour', 'Copy the rows of the current colour as text');
+        on(copyOne, 'click', function () { copyRows(true); });
+        copyRow.appendChild(copyOne);
+        body.appendChild(copyRow);
+
+        nd.list = el('div', 'xs-row-list');
+        nd.list.setAttribute('aria-label', 'Rows');
+        body.appendChild(nd.list);
+        body.appendChild(el('p', 'muted xs-read-note',
+          'Tap a row to put the chart’s crosshair on it. Row done marks every stitch of that row ' +
+          'on the chart (only the chosen colour when you work one at a time), and Undo takes it back.'));
+
+        render();
+        window.requestAnimationFrame(function () {
+          var cur = nd.list.querySelector('.xs-row-item.current');
+          scrollListTo(cur);
+        });
+      },
+      footer: [
+        {
+          text: 'Undo',
+          cls: 'btn ghost',
+          onClick: function () {
+            if (!Store.undo()) { toast('Nothing to undo'); return; }
+            fb('undo');
+            var p2 = Store.project(projectId);
+            if (p2 && view && view.projectId === projectId) {
+              var d2 = dataOf(p2);
+              view.img = null;
+              view.stats = null;
+              syncModel(d2);
+              syncScreen(p2, d2);
+            }
+            C.render();
+            var keepY = focus >= 0 && wr.rows[focus] ? wr.rows[focus].y : null;
+            recompute(keepY);
+            render();
+            toast('Undone');
+          }
+        },
+        { text: 'Done', cls: 'btn primary', onClick: function (api) { api.close(); } }
+      ]
+    });
   }
 
   /* ---- floss list ---------------------------------------------------- */
@@ -3657,17 +4103,26 @@
       previewBox.hidden = !node;
     }
 
+    /* Wave J: a picture of a chart can be dropped, chosen or pasted here
+       when the chart reader (js/xstitch-read.js) is on this device. */
+    var pictures = readerAvailable();
+    var pasteGuard = null;
+
     C.openSheet({
       title: 'Import a chart',
       cls: 'sheet-xs-import',
       build: function (body, api) {
         zone = C.pdfDropZone({
-          label: 'Drop a cross-stitch PDF or .oxs file here, or choose a file',
-          accept: ['.pdf', '.oxs', '.xml'],
+          label: pictures
+            ? 'Drop a cross-stitch PDF, an .oxs file or a picture of a chart here, or choose a file'
+            : 'Drop a cross-stitch PDF or .oxs file here, or choose a file',
+          accept: importAcceptList(),
           icon: '🧵',
           ariaLabel: 'Choose a cross-stitch chart',
           tour: 'xs-import-drop',
-          rejectMessage: 'That needs to be a PDF or an .oxs chart',
+          rejectMessage: pictures
+            ? 'That needs to be a PDF, an .oxs chart or a picture (PNG, JPEG or WebP)'
+            : 'That needs to be a PDF or an .oxs chart',
           onPages: function (handle) {
             pdfHandle = handle;
           },
@@ -3675,7 +4130,8 @@
             handlePdfText(projectId, res, pdfHandle, setPreview);
           },
           onFile: function (file) {
-            readOxsFile(projectId, file, setPreview);
+            if (pictures && isImageFile(file)) handlePicture(projectId, file, setPreview);
+            else readOxsFile(projectId, file, setPreview);
           },
           onError: function (err) {
             setPreview(el('p', 'muted', (err && err.message) ||
@@ -3689,6 +4145,43 @@
         body.appendChild(previewBox);
 
         var more = el('div', 'list xs-import-more');
+
+        if (pictures) {
+          var picPick = document.createElement('input');
+          picPick.type = 'file';
+          picPick.accept = 'image/*';
+          picPick.className = 'sr-only';
+          picPick.tabIndex = -1;
+          picPick.setAttribute('aria-hidden', 'true');
+          on(picPick, 'change', function () {
+            var f = picPick.files && picPick.files[0];
+            picPick.value = '';
+            if (f) handlePicture(projectId, f, setPreview);
+          });
+          var picItem = el('button', 'menu-item xs-read-item');
+          picItem.type = 'button';
+          picItem.appendChild(el('span', 'menu-icon', '🖼'));
+          var picText = el('span', 'xs-read-item-text');
+          picText.appendChild(el('span', null, 'Read a picture of a chart'));
+          picText.appendChild(el('span', 'muted xs-read-item-sub',
+            'A screenshot or image with one square per stitch. You can also paste one here.'));
+          picItem.appendChild(picText);
+          on(picItem, 'click', function () { picPick.click(); });
+          more.appendChild(picItem);
+          more.appendChild(picPick);
+
+          /* A pasted screenshot (Ctrl+V / long-press Paste) reads like a drop,
+             but only while this sheet is the one on top. */
+          pasteGuard = function (e) {
+            var sheets = document.querySelectorAll('dialog.sheet');
+            if (!sheets.length || sheets[sheets.length - 1] !== api.dialog) return;
+            var f = imageFromClipboard(e);
+            if (!f) return;
+            e.preventDefault();
+            handlePicture(projectId, f, setPreview);
+          };
+          document.addEventListener('paste', pasteGuard);
+        }
 
         var photoItem = el('button', 'menu-item');
         photoItem.type = 'button';
@@ -3712,6 +4205,8 @@
           'Chart pages are rendered as images and saved with the project; Back up now includes them.'));
       },
       onClose: function () {
+        if (pasteGuard) document.removeEventListener('paste', pasteGuard);
+        pasteGuard = null;
         if (zone && zone.destroy) zone.destroy();
         zone = null;
         if (pdfHandle && pdfHandle.destroy) {
@@ -3913,10 +4408,10 @@
         '). Check it before importing.';
     } else if ((res.chars || 0) < 60) {
       band.textContent = 'This PDF is a scan, so there is no text to read. The chart pages are ' +
-        'here; add colours by hand or from a photo.';
+        'here; ' + (handle && readerAvailable() ? 'read the chart from the page pictures below, or add colours by hand.' : 'add colours by hand or from a photo.');
     } else {
       band.textContent = 'I couldn’t find a colour key in this PDF. The chart pages are here; ' +
-        'add colours by hand or from a photo.';
+        (handle && readerAvailable() ? 'read the chart from the page pictures below, or add colours by hand.' : 'add colours by hand or from a photo.');
     }
     card.appendChild(band);
 
@@ -3983,6 +4478,28 @@
 
     /* The beta grid reader, offered only when the key has counts to check
        against and the PDF is still open. Failing costs the stitcher nothing. */
+    /* Wave J: the page pictures, for a chart the vector reader cannot see
+       (drawn as an image, or read far from the key's counts). Offered at
+       once when the vector reader is not, and after it fails otherwise. */
+    var picWrap = null;
+    if (handle && readerAvailable()) {
+      picWrap = el('div', 'xs-pdfpic');
+      var picBox = el('div', 'xs-beta-box');
+      picBox.hidden = true;
+      var picBtn = button('btn ghost block xs-beta-btn', '🖼 Read the chart from the page pictures');
+      on(picBtn, 'click', function () {
+        picBtn.disabled = true;
+        readPdfPictures(projectId, handle, key, edits, picBox, progressLine).then(function () {
+          picBtn.disabled = false;
+        });
+      });
+      picWrap.appendChild(picBtn);
+      picWrap.appendChild(picBox);
+      picWrap.appendChild(el('p', 'muted xs-import-note',
+        'For charts that are a picture inside the PDF: finds the page that shows the whole design, ' +
+        'reads it square by square on this device and checks it against the key’s stitch counts.'));
+    }
+
     if (handle && gridIsWorthTrying(key)) {
       var betaBox = el('div', 'xs-beta-box');
       betaBox.hidden = true;
@@ -3992,9 +4509,10 @@
         go.disabled = true;
         runGridBeta(handle, key, betaBox, function (res) {
           applyPdf(projectId, edits, key, handle, progressLine, res);
-        }).then(function () {
+        }).then(function (res) {
           beta.disabled = false;
           go.disabled = false;
+          if (picWrap && (!res || !res.ok || (res.colors && res.matched < res.colors))) picWrap.hidden = false;
         });
       });
       card.appendChild(beta);
@@ -4002,7 +4520,9 @@
       card.appendChild(el('p', 'muted xs-import-note',
         'Reading the grid gets you stitch-by-stitch counting instead of a count per colour. ' +
         'It only works on charts that draw every stitch as a coloured square.'));
+      if (picWrap) picWrap.hidden = true;
     }
+    if (picWrap) card.appendChild(picWrap);
 
     setPreview(card);
   }
@@ -4518,7 +5038,223 @@
       window.XStitchPhoto.isAvailable() && typeof window.XStitchPhoto.convert === 'function');
   }
 
-  function openPhotoSheet(projectId) {
+  /**
+   * The crop frame (B6) over a picked picture: drag the frame or a corner,
+   * arrow keys nudge the focused one (1%, Shift 5%). Shared by Photo to chart
+   * and Read a chart picture (wave J). `onChange(crop)` gets { x, y, w, h }
+   * in source pixels, or null for the whole picture, on every user change.
+   */
+  function makeCropFrame(o) {
+    o = o || {};
+    var MIN_CROP = 20;
+    var CORNER_IDS = ['tl', 'tr', 'bl', 'br'];
+    var noun = o.noun || 'photo';
+    var url = null, srcW = 0, srcH = 0, crop = null, aspectLock = false, pendingSet = null;
+
+    var wrap = el('div', 'xs-crop');
+    wrap.hidden = true;
+    var img = el('img');
+    img.alt = o.alt || ('The ' + noun + ' you picked');
+    wrap.appendChild(img);
+    var box = el('div', 'xs-crop-box');
+    wrap.appendChild(box);
+
+    var row = el('div', 'xs-crop-row');
+    var hint = el('span', 'muted xs-crop-hint', '');
+    row.appendChild(hint);
+    var reset = button('linkish xs-crop-reset', 'Reset crop');
+    reset.hidden = true;
+    row.appendChild(reset);
+
+    var lockRow = C.switchRow('Keep the crop shape',
+      'Locks the frame to its current shape while you drag a corner.',
+      false, function (v) { aspectLock = v; });
+
+    function get() {
+      if (!crop || !srcW || !srcH) return null;
+      if (crop.x <= 0 && crop.y <= 0 && crop.w >= srcW && crop.h >= srcH) return null;
+      return { x: Math.round(crop.x), y: Math.round(crop.y), w: Math.round(crop.w), h: Math.round(crop.h) };
+    }
+
+    function sync() {
+      if (!srcW || !srcH || !crop) return;
+      box.style.left = (crop.x / srcW * 100) + '%';
+      box.style.top = (crop.y / srcH * 100) + '%';
+      box.style.width = (crop.w / srcW * 100) + '%';
+      box.style.height = (crop.h / srcH * 100) + '%';
+      var c = get();
+      hint.textContent = c
+        ? ('Cropping ' + Math.round(crop.w) + ' × ' + Math.round(crop.h) + ' of ' +
+           srcW + ' × ' + srcH + ' pixels')
+        : ('Using the whole ' + noun + ', ' + srcW + ' × ' + srcH + ' pixels');
+      reset.hidden = !c;
+    }
+
+    function changed() {
+      if (typeof o.onChange === 'function') {
+        try { o.onChange(get()); } catch (e) { /* ignore */ }
+      }
+    }
+
+    function resetCrop() {
+      if (!srcW || !srcH) return;
+      crop = { x: 0, y: 0, w: srcW, h: srcH };
+      sync();
+    }
+
+    function clampCrop() {
+      if (crop.w < MIN_CROP) crop.w = MIN_CROP;
+      if (crop.h < MIN_CROP) crop.h = MIN_CROP;
+      if (crop.w > srcW) crop.w = srcW;
+      if (crop.h > srcH) crop.h = srcH;
+      if (crop.x < 0) crop.x = 0;
+      if (crop.y < 0) crop.y = 0;
+      if (crop.x + crop.w > srcW) crop.x = srcW - crop.w;
+      if (crop.y + crop.h > srcH) crop.y = srcH - crop.h;
+    }
+
+    var drag = null;
+
+    function start(e, mode) {
+      if (!crop || !srcW) return;
+      var r = img.getBoundingClientRect();
+      if (!r.width || !r.height) return;
+      drag = {
+        mode: mode, px: e.clientX, py: e.clientY,
+        sx: r.width / srcW, sy: r.height / srcH,
+        x: crop.x, y: crop.y, w: crop.w, h: crop.h,
+        ratio: crop.h > 0 ? crop.w / crop.h : 1
+      };
+      try { e.target.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+      e.preventDefault();
+      e.stopPropagation();
+    }
+
+    /* Move the frame, or one corner of it, by (dx, dy) source pixels from
+       where it was at `base`. Shared by the pointer and the arrow keys. */
+    function shift(base, mode, dx, dy) {
+      var right = base.x + base.w, bottom = base.y + base.h;
+      if (mode === 'move') {
+        crop.x = base.x + dx;
+        crop.y = base.y + dy;
+        crop.w = base.w;
+        crop.h = base.h;
+      } else {
+        var nx = base.x, ny = base.y, nr = right, nb = bottom;
+        if (mode.charAt(1) === 'l') nx = Math.min(base.x + dx, right - MIN_CROP);
+        else nr = Math.max(right + dx, base.x + MIN_CROP);
+        if (mode.charAt(0) === 't') ny = Math.min(base.y + dy, bottom - MIN_CROP);
+        else nb = Math.max(bottom + dy, base.y + MIN_CROP);
+        crop.x = nx; crop.y = ny; crop.w = nr - nx; crop.h = nb - ny;
+        if (aspectLock && base.ratio > 0) {
+          /* keep the shape: the longer change wins, the anchored corner stays */
+          var byW = crop.w / base.ratio;
+          var byH = crop.h * base.ratio;
+          if (Math.abs(byW - crop.h) < Math.abs(byH - crop.w)) crop.h = byW;
+          else crop.w = byH;
+          if (mode.charAt(1) === 'l') crop.x = nr - crop.w;
+          if (mode.charAt(0) === 't') crop.y = nb - crop.h;
+        }
+      }
+      clampCrop();
+      sync();
+      changed();
+    }
+
+    function move(e) {
+      if (!drag) return;
+      shift(drag, drag.mode, (e.clientX - drag.px) / drag.sx, (e.clientY - drag.py) / drag.sy);
+      e.preventDefault();
+    }
+
+    var KEY_DIRS = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
+    function nudge(e, mode) {
+      var d = KEY_DIRS[e.key];
+      if (!d || !crop || !srcW || !srcH) return;
+      if (mode === 'move' && e.target !== box) return;
+      var step = e.shiftKey ? 0.05 : 0.01;
+      var base = { x: crop.x, y: crop.y, w: crop.w, h: crop.h,
+        ratio: crop.h > 0 ? crop.w / crop.h : 1 };
+      shift(base, mode, d[0] * Math.max(1, srcW * step), d[1] * Math.max(1, srcH * step));
+      e.preventDefault();
+      e.stopPropagation();
+    }
+
+    function end() { if (drag) { drag = null; changed(); } }
+
+    on(box, 'pointerdown', function (e) {
+      if (e.target !== box) return;
+      start(e, 'move');
+    });
+    box.tabIndex = 0;
+    box.setAttribute('role', 'group');
+    box.setAttribute('aria-label', 'Crop frame: arrow keys move it, Shift moves further');
+    on(box, 'keydown', function (e) { nudge(e, 'move'); });
+    var CORNER_NAMES = { tl: 'top-left', tr: 'top-right', bl: 'bottom-left', br: 'bottom-right' };
+    CORNER_IDS.forEach(function (id) {
+      var handle = el('span', 'xs-crop-h xs-crop-' + id);
+      handle.setAttribute('role', 'button');
+      handle.tabIndex = 0;
+      handle.setAttribute('aria-label', 'The ' + CORNER_NAMES[id] +
+        ' corner of the crop: drag it, or use the arrow keys');
+      on(handle, 'keydown', function (e) { nudge(e, id); });
+      on(handle, 'pointerdown', function (e) { start(e, id); });
+      on(handle, 'pointermove', move);
+      on(handle, 'pointerup', end);
+      on(handle, 'pointercancel', end);
+      box.appendChild(handle);
+    });
+    on(box, 'pointermove', move);
+    on(box, 'pointerup', end);
+    on(box, 'pointercancel', end);
+
+    on(reset, 'click', function () { resetCrop(); changed(); });
+
+    on(img, 'load', function () {
+      srcW = img.naturalWidth || 0;
+      srcH = img.naturalHeight || 0;
+      if (!srcW || !srcH) { wrap.hidden = true; return; }
+      wrap.hidden = false;
+      resetCrop();
+      if (pendingSet) {
+        crop = { x: pendingSet.x, y: pendingSet.y, w: pendingSet.w, h: pendingSet.h };
+        pendingSet = null;
+        clampCrop();
+        sync();
+      }
+    });
+    on(img, 'error', function () { wrap.hidden = true; });
+
+    return {
+      wrap: wrap,
+      row: row,
+      lockRow: lockRow,
+      /** Show a new picture (a Blob / File); the crop starts as the whole of it. */
+      load: function (blob) {
+        if (url) { try { URL.revokeObjectURL(url); } catch (e) { /* ignore */ } }
+        url = URL.createObjectURL(blob);
+        crop = null; srcW = 0; srcH = 0;
+        img.src = url;
+        wrap.hidden = true;
+      },
+      get: get,
+      /** Put the frame back where it was (a saved crop); applied once loaded. */
+      set: function (c) {
+        if (!c) { resetCrop(); return; }
+        if (!srcW) { pendingSet = c; return; }
+        crop = { x: c.x, y: c.y, w: c.w, h: c.h };
+        clampCrop();
+        sync();
+      },
+      reset: resetCrop,
+      destroy: function () {
+        if (url) { try { URL.revokeObjectURL(url); } catch (e) { /* ignore */ } }
+        url = null;
+      }
+    };
+  }
+
+  function openPhotoSheet(projectId, initialFile) {
     if (!photoAvailable()) {
       C.openSheet({
         title: 'Photo to chart',
@@ -4551,158 +5287,13 @@
 
     var previewCanvas, statusLine, readout, runBtn, pickBtn, warnBox;
 
-    /* ---- crop frame (B6) ---------------------------------------------- */
-    var cropWrap, cropImg, cropBox, cropHint, cropReset, cropLockRow;
-    var cropUrl = null, srcW = 0, srcH = 0;
-    var crop = null;             // { x, y, w, h } in SOURCE pixels, null = all
-    var aspectLock = false;
-    var MIN_CROP = 20;
-    var CORNER_IDS = ['tl', 'tr', 'bl', 'br'];
+    /* the crop frame (B6), shared with Read a chart picture */
+    var cropper = makeCropFrame({
+      noun: 'photo',
+      onChange: function (c) { opts.crop = c; schedule(); }
+    });
 
-    function cropOpt() {
-      if (!crop || !srcW || !srcH) return null;
-      if (crop.x <= 0 && crop.y <= 0 && crop.w >= srcW && crop.h >= srcH) return null;
-      return { x: Math.round(crop.x), y: Math.round(crop.y), w: Math.round(crop.w), h: Math.round(crop.h) };
-    }
-
-    function syncCropBox() {
-      if (!cropBox || !srcW || !srcH || !crop) return;
-      cropBox.style.left = (crop.x / srcW * 100) + '%';
-      cropBox.style.top = (crop.y / srcH * 100) + '%';
-      cropBox.style.width = (crop.w / srcW * 100) + '%';
-      cropBox.style.height = (crop.h / srcH * 100) + '%';
-      opts.crop = cropOpt();
-      if (cropHint) {
-        cropHint.textContent = opts.crop
-          ? ('Cropping ' + Math.round(crop.w) + ' × ' + Math.round(crop.h) + ' of ' +
-             srcW + ' × ' + srcH + ' pixels')
-          : ('Using the whole photo, ' + srcW + ' × ' + srcH + ' pixels');
-      }
-      if (cropReset) cropReset.hidden = !opts.crop;
-    }
-
-    function resetCrop() {
-      if (!srcW || !srcH) return;
-      crop = { x: 0, y: 0, w: srcW, h: srcH };
-      syncCropBox();
-    }
-
-    function clampCrop() {
-      if (crop.w < MIN_CROP) crop.w = MIN_CROP;
-      if (crop.h < MIN_CROP) crop.h = MIN_CROP;
-      if (crop.w > srcW) crop.w = srcW;
-      if (crop.h > srcH) crop.h = srcH;
-      if (crop.x < 0) crop.x = 0;
-      if (crop.y < 0) crop.y = 0;
-      if (crop.x + crop.w > srcW) crop.x = srcW - crop.w;
-      if (crop.y + crop.h > srcH) crop.y = srcH - crop.h;
-    }
-
-    function bindCrop() {
-      var drag = null;
-
-      function start(e, mode) {
-        if (!crop || !srcW) return;
-        var r = cropImg.getBoundingClientRect();
-        if (!r.width || !r.height) return;
-        drag = {
-          mode: mode, px: e.clientX, py: e.clientY,
-          sx: r.width / srcW, sy: r.height / srcH,
-          x: crop.x, y: crop.y, w: crop.w, h: crop.h,
-          ratio: crop.h > 0 ? crop.w / crop.h : 1
-        };
-        try { e.target.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
-        e.preventDefault();
-        e.stopPropagation();
-      }
-
-      /* Move the frame, or one corner of it, by (dx, dy) source pixels from
-         where it was at `base`. Shared by the pointer and the arrow keys. */
-      function shift(base, mode, dx, dy) {
-        var right = base.x + base.w, bottom = base.y + base.h;
-        if (mode === 'move') {
-          crop.x = base.x + dx;
-          crop.y = base.y + dy;
-          crop.w = base.w;
-          crop.h = base.h;
-        } else {
-          var nx = base.x, ny = base.y, nr = right, nb = bottom;
-          if (mode.charAt(1) === 'l') nx = Math.min(base.x + dx, right - MIN_CROP);
-          else nr = Math.max(right + dx, base.x + MIN_CROP);
-          if (mode.charAt(0) === 't') ny = Math.min(base.y + dy, bottom - MIN_CROP);
-          else nb = Math.max(bottom + dy, base.y + MIN_CROP);
-          crop.x = nx; crop.y = ny; crop.w = nr - nx; crop.h = nb - ny;
-          if (aspectLock && base.ratio > 0) {
-            /* keep the shape: the longer change wins, the anchored corner stays */
-            var byW = crop.w / base.ratio;
-            var byH = crop.h * base.ratio;
-            if (Math.abs(byW - crop.h) < Math.abs(byH - crop.w)) crop.h = byW;
-            else crop.w = byH;
-            if (mode.charAt(1) === 'l') crop.x = nr - crop.w;
-            if (mode.charAt(0) === 't') crop.y = nb - crop.h;
-          }
-        }
-        clampCrop();
-        syncCropBox();
-        schedule();
-      }
-
-      function move(e) {
-        if (!drag) return;
-        shift(drag, drag.mode, (e.clientX - drag.px) / drag.sx, (e.clientY - drag.py) / drag.sy);
-        e.preventDefault();
-      }
-
-      /* Arrow keys nudge the focused corner (or the whole frame) by 1% of
-         the photo, 5% with Shift; the frame gets a visible focus ring. */
-      var KEY_DIRS = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
-      function nudge(e, mode) {
-        var d = KEY_DIRS[e.key];
-        if (!d || !crop || !srcW || !srcH) return;
-        if (mode === 'move' && e.target !== cropBox) return;
-        var step = e.shiftKey ? 0.05 : 0.01;
-        var base = { x: crop.x, y: crop.y, w: crop.w, h: crop.h,
-          ratio: crop.h > 0 ? crop.w / crop.h : 1 };
-        shift(base, mode, d[0] * Math.max(1, srcW * step), d[1] * Math.max(1, srcH * step));
-        e.preventDefault();
-        e.stopPropagation();
-      }
-
-      function end() { if (drag) { drag = null; schedule(); } }
-
-      on(cropBox, 'pointerdown', function (e) {
-        if (e.target !== cropBox) return;
-        start(e, 'move');
-      });
-      cropBox.tabIndex = 0;
-      cropBox.setAttribute('role', 'group');
-      cropBox.setAttribute('aria-label', 'Crop frame: arrow keys move it, Shift moves further');
-      on(cropBox, 'keydown', function (e) { nudge(e, 'move'); });
-      var CORNER_NAMES = { tl: 'top-left', tr: 'top-right', bl: 'bottom-left', br: 'bottom-right' };
-      CORNER_IDS.forEach(function (id) {
-        var handle = el('span', 'xs-crop-h xs-crop-' + id);
-        handle.setAttribute('role', 'button');
-        handle.tabIndex = 0;
-        handle.setAttribute('aria-label', 'The ' + CORNER_NAMES[id] +
-          ' corner of the crop: drag it, or use the arrow keys');
-        on(handle, 'keydown', function (e) { nudge(e, id); });
-        on(handle, 'pointerdown', function (e) { start(e, id); });
-        on(handle, 'pointermove', move);
-        on(handle, 'pointerup', end);
-        on(handle, 'pointercancel', end);
-        cropBox.appendChild(handle);
-      });
-      on(cropBox, 'pointermove', move);
-      on(cropBox, 'pointerup', end);
-      on(cropBox, 'pointercancel', end);
-    }
-
-    function loadSource(f) {
-      if (cropUrl) { try { URL.revokeObjectURL(cropUrl); } catch (e) { /* ignore */ } }
-      cropUrl = URL.createObjectURL(f);
-      cropImg.src = cropUrl;
-      cropWrap.hidden = true;
-    }
+    function loadSource(f) { cropper.load(f); }
 
     function schedule() {
       if (timer) clearTimeout(timer);
@@ -4814,51 +5405,17 @@
         pickBtn = button('btn block', '📷 Choose a photo');
         on(pickBtn, 'click', function () { pick.click(); });
         on(pick, 'change', function () {
-          file = pick.files && pick.files[0];
-          if (!file) return;
-          pickBtn.textContent = file.name;
-          crop = null;
-          opts.crop = null;
-          loadSource(file);
-          run();
+          var f = pick.files && pick.files[0];
+          if (!f) return;
+          takePhoto(f);
         });
         body.appendChild(pickBtn);
         body.appendChild(pick);
 
         /* the source photo with a draggable crop frame */
-        cropWrap = el('div', 'xs-crop');
-        cropWrap.hidden = true;
-        cropImg = el('img');
-        cropImg.alt = 'The photo you picked';
-        cropWrap.appendChild(cropImg);
-        cropBox = el('div', 'xs-crop-box');
-        cropBox.setAttribute('role', 'group');
-        cropBox.setAttribute('aria-label', 'Crop frame — drag to move, drag a corner to resize');
-        cropWrap.appendChild(cropBox);
-        on(cropImg, 'load', function () {
-          srcW = cropImg.naturalWidth || 0;
-          srcH = cropImg.naturalHeight || 0;
-          if (!srcW || !srcH) { cropWrap.hidden = true; return; }
-          cropWrap.hidden = false;
-          resetCrop();
-        });
-        on(cropImg, 'error', function () { cropWrap.hidden = true; });
-        body.appendChild(cropWrap);
-        bindCrop();
-
-        var cropRow = el('div', 'xs-crop-row');
-        cropHint = el('span', 'muted xs-crop-hint', '');
-        cropRow.appendChild(cropHint);
-        cropReset = button('linkish xs-crop-reset', 'Reset crop');
-        cropReset.hidden = true;
-        on(cropReset, 'click', function () { resetCrop(); schedule(); });
-        cropRow.appendChild(cropReset);
-        body.appendChild(cropRow);
-
-        cropLockRow = C.switchRow('Keep the crop shape',
-          'Locks the frame to its current shape while you drag a corner.',
-          false, function (v) { aspectLock = v; });
-        body.appendChild(cropLockRow);
+        body.appendChild(cropper.wrap);
+        body.appendChild(cropper.row);
+        body.appendChild(cropper.lockRow);
 
         previewCanvas = document.createElement('canvas');
         previewCanvas.className = 'xs-photo-preview';
@@ -4912,6 +5469,10 @@
         runBtn = button('btn ghost block', 'Redo the conversion');
         on(runBtn, 'click', run);
         body.appendChild(runBtn);
+
+        /* Wave J: "A photo to turn into a chart" from the picture question
+           arrives with the photo already chosen. */
+        if (initialFile) takePhoto(initialFile);
       },
       footer: [
         { text: 'Cancel', cls: 'btn ghost', onClick: function (api) { api.close(); } },
@@ -4929,10 +5490,17 @@
         if (timer) clearTimeout(timer);
         if (token) { try { P.cancel(token); } catch (e) { /* ignore */ } }
         token = null;
-        if (cropUrl) { try { URL.revokeObjectURL(cropUrl); } catch (e) { /* ignore */ } }
-        cropUrl = null;
+        cropper.destroy();
       }
     });
+
+    function takePhoto(f) {
+      file = f;
+      pickBtn.textContent = f.name || 'Pasted picture';
+      opts.crop = null;
+      loadSource(f);
+      run();
+    }
   }
 
   /**
@@ -4966,6 +5534,1660 @@
     toast('Chart made from your photo · ' +
       plural(stats.colors || (d.palette ? d.palette.length : 0), 'colour'));
     checkSize(projectId);
+  }
+
+  /* ================================================================== *
+   * 7b. Read a chart picture (wave J, docs/wave-j/CONTRACT.md §4)
+   *
+   * Recovers the chart that is already in a picture, one square per
+   * stitch, through window.XSRead (js/xstitch-read.js, its own Web Worker).
+   * Everything is feature-detected: without XSRead none of these entry
+   * points appear and the module behaves exactly as before.
+   * ================================================================== */
+
+  var IMAGE_EXTS = ['.png', '.jpg', '.jpeg', '.webp'];
+  /** detect() confidence from which a picture opens the review directly. */
+  var DETECT_SURE = 0.6;
+  /** cellConf under this is drawn as unsure (the reader's own LOW_CONF wins). */
+  var LOW_CONF_DEFAULT = 128;
+  /** A PDF page is drawn at no less than this many px per stitch to read it. */
+  var PDF_MIN_PX = 8;
+  var PDF_MAX_SIDE = 4096, PDF_MAX_AREA = 16e6, PDF_MAX_CANDIDATES = 12;
+  var readSeq = 0;
+
+  function readerAvailable() {
+    var R = window.XSRead;
+    if (!R || typeof R.read !== 'function' || typeof R.detect !== 'function') return false;
+    try { return typeof R.isAvailable !== 'function' || !!R.isAvailable(); } catch (e) { return false; }
+  }
+
+  function isImageFile(f) {
+    if (!f) return false;
+    var type = String(f.type || '').toLowerCase();
+    if (/^image\//.test(type)) return type.indexOf('svg') < 0;
+    var name = String(f.name || '').toLowerCase();
+    for (var i = 0; i < IMAGE_EXTS.length; i++) {
+      if (name.slice(-IMAGE_EXTS[i].length) === IMAGE_EXTS[i]) return true;
+    }
+    return false;
+  }
+
+  /** What the drop zones accept: pictures only while the reader is here. */
+  function importAcceptList() {
+    var base = ['.pdf', '.oxs', '.xml'];
+    return readerAvailable() ? base.concat(IMAGE_EXTS) : base;
+  }
+
+  /** The first picture on a paste event's clipboard, as a File, or null. */
+  function imageFromClipboard(e) {
+    var cd = e && e.clipboardData;
+    if (!cd) return null;
+    var items = cd.items || [];
+    for (var i = 0; i < items.length; i++) {
+      var it = items[i];
+      if (it && it.kind === 'file' && /^image\//i.test(it.type || '')) {
+        var f = it.getAsFile && it.getAsFile();
+        if (!f) continue;
+        if (f.name) return f;
+        try { return new File([f], 'pasted-picture.' + (String(it.type).split('/')[1] || 'png'), { type: it.type }); } catch (err) { return f; }
+      }
+    }
+    var files = cd.files || [];
+    for (var j = 0; j < files.length; j++) if (isImageFile(files[j])) return files[j];
+    return null;
+  }
+
+  /** BlobStore keys for the picture a chart was read from and its details. */
+  function readKeys(projectId) {
+    return { pic: 'p:' + projectId + ':readsrc:0', meta: 'p:' + projectId + ':readsrc:meta' };
+  }
+
+  /**
+   * A short fingerprint of a chart's cells. The stored read details are only
+   * shown for the chart they describe: Undo puts the old chart back, and the
+   * banner must not then claim it was read from a picture.
+   */
+  function cellsPrint(chart) {
+    if (!chart || !chart.w || !chart.h || !chart.cells) return '';
+    var s = String(chart.cells.data || '');
+    var h = 2166136261;
+    for (var i = 0; i < s.length; i++) {
+      h ^= s.charCodeAt(i);
+      h = Math.imul ? Math.imul(h, 16777619) : (h * 16777619) | 0;
+    }
+    return chart.w + 'x' + chart.h + ':' + (h >>> 0).toString(36) + ':' + s.length;
+  }
+
+  function copyEntry(e) {
+    e = e || {};
+    return {
+      symbol: e.symbol || '', brand: e.brand || 'DMC', code: String(e.code || ''), name: e.name || '',
+      hex: e.hex || null, strands: e.strands || null, stitchCount: e.stitchCount || null,
+      skeins: e.skeins || null, kind: e.kind || 'cross'
+    };
+  }
+
+  function codeKey(brand, code) {
+    var c = String(code || '').trim().toUpperCase().replace(/^0+(?=\w)/, '');
+    return String(brand || 'DMC').toUpperCase() + ' ' + c;
+  }
+
+  /** The project's own key, if it has one, for a picture dropped on its own. */
+  function projectKey(data) {
+    if (!data || !data.palette.length) return null;
+    var k = keyFromPalette(data);
+    return {
+      entries: k.entries.map(copyEntry),
+      meta: { title: data.design.title || '', strands: data.strandsDefault, design: { w: data.design.w, h: data.design.h } }
+    };
+  }
+
+  function sizeMatches(a, b) {
+    return !!(a && b && Math.abs(a.w - b.w) <= 1 && Math.abs(a.h - b.h) <= 1);
+  }
+
+  /** A detect() result whose grid (or one of its alternatives) is the declared size. */
+  function detectMatches(det, declared) {
+    if (!det || !det.ok || !declared) return false;
+    if (sizeMatches(det.size, declared)) return true;
+    var alts = Array.isArray(det.alternatives) ? det.alternatives : [];
+    for (var i = 0; i < alts.length; i++) if (sizeMatches(alts[i], declared)) return true;
+    return false;
+  }
+
+  /**
+   * Which PDF page to read: the one whose grid is the declared design size
+   * (the whole-design preview page), else the most confident grid. `tile` is
+   * a page that holds only part of the declared design.
+   * @param {Array<{n, det}>} cands
+   * @param {{w,h}|null} declared
+   * @returns {{best, match: boolean, tile}}
+   */
+  function pickPdfPage(cands, declared) {
+    var best = null, bestScore = -1, tile = null;
+    (cands || []).forEach(function (c) {
+      var d = c && c.det;
+      if (!d || !d.ok || !d.size) return;
+      var match = detectMatches(d, declared);
+      var score = (match ? 10 : 0) + (d.confidence || 0);
+      if (declared && !match && d.size.w <= declared.w + 1 && d.size.h <= declared.h + 1 &&
+          d.size.w * d.size.h < declared.w * declared.h * 0.8 && (d.confidence || 0) >= 0.5 && !tile) {
+        tile = c;
+      }
+      if (score > bestScore) { bestScore = score; best = c; }
+    });
+    return { best: best, match: !!(best && detectMatches(best.det, declared)), tile: tile };
+  }
+
+  /**
+   * The pdf.js scale to draw a page at so a stitch is at least 8 px, given
+   * the pitch seen at scale `s0`, capped at 4096 px a side and 16 MP.
+   */
+  function pdfReadScale(base, pitchAtS0, s0) {
+    var s = s0;
+    if (pitchAtS0 > 0 && pitchAtS0 < PDF_MIN_PX * 1.05) s = s0 * (PDF_MIN_PX * 1.1) / pitchAtS0;
+    var bw = Math.max(1, base.w), bh = Math.max(1, base.h);
+    var cap = Math.min(PDF_MAX_SIDE / Math.max(bw, bh), Math.sqrt(PDF_MAX_AREA / (bw * bh)));
+    return Math.max(0.1, Math.min(s, cap));
+  }
+
+  /** How many key colours a check says are off (an expected count not met). */
+  function checkOff(check) {
+    if (!check || !Array.isArray(check.rows)) return 0;
+    var n = 0;
+    for (var i = 0; i < check.rows.length; i++) {
+      var r = check.rows[i];
+      if (r && r.expected !== null && r.expected !== undefined && !r.ok) n++;
+    }
+    return n;
+  }
+
+  /** The line a project read from a picture shows above its chart. */
+  function readBannerText(info) {
+    if (!info) return '';
+    var head = 'Read from a picture. ';
+    if (info.verdict === 'exact' || info.verdict === 'close') {
+      return head + (info.summary || 'The colours match the key.');
+    }
+    if (info.verdict === 'off') {
+      var off = info.off || 0;
+      return head + (off > 0 ? plural(off, 'colour') + (off === 1 ? ' is' : ' are') + ' off'
+        : 'Some colours do not match the key') + '; open the chart check.';
+    }
+    return head + 'The key gave no stitch counts to check it against; open the chart check.';
+  }
+
+  /** "37 squares are unsure" */
+  function unsureText(n) {
+    if (!n) return 'Every square was read clearly.';
+    return comma(n) + (n === 1 ? ' square is' : ' squares are') + ' unsure. They are outlined on “What was read”.';
+  }
+
+  function readJsonBlob(blob) {
+    if (!blob) return Promise.resolve(null);
+    var p = typeof blob.text === 'function' ? blob.text() : new Promise(function (resolve) {
+      var fr = new FileReader();
+      fr.onload = function () { resolve(String(fr.result || '')); };
+      fr.onerror = function () { resolve(''); };
+      fr.readAsText(blob);
+    });
+    return p.then(function (t) { try { return JSON.parse(t); } catch (e) { return null; } }, function () { return null; });
+  }
+
+  function canvasBlob(canvas, type) {
+    return new Promise(function (resolve) {
+      if (!canvas || !canvas.toBlob) { resolve(null); return; }
+      try { canvas.toBlob(function (b) { resolve(b); }, type || 'image/png'); } catch (e) { resolve(null); }
+    });
+  }
+
+  /* ---- entry point 1: a picture --------------------------------------- */
+
+  /**
+   * A dropped, chosen or pasted picture. A confident grid opens the review;
+   * otherwise the stitcher says which they meant. Never routed silently.
+   */
+  function handlePicture(projectId, file, setPreview) {
+    if (!readerAvailable()) {
+      setPreview(el('p', 'muted', 'Pictures of charts cannot be read on this device.'));
+      return;
+    }
+    var proj = Store.project(projectId);
+    var pk = proj ? projectKey(dataOf(proj)) : null;
+    var card = el('div', 'card xs-preview-card xs-pic-card');
+    var line = el('p', 'muted', 'Looking at ' + (file.name || 'the picture') + '…');
+    line.setAttribute('role', 'status');
+    card.appendChild(line);
+    setPreview(card);
+
+    var p;
+    try { p = window.XSRead.detect(file, { size: null }); } catch (e) { p = null; }
+    Promise.resolve(p).then(function (det) { return det; }, function () { return null; }).then(function (det) {
+      det = det || { ok: false, reason: 'no-image', message: 'That picture could not be opened.' };
+      /* the import sheet was closed (or another file taken) while looking */
+      if (!card.isConnected) return;
+      if (det.reason === 'no-image') {
+        clear(card);
+        card.appendChild(el('p', null, det.message || 'That picture could not be opened.'));
+        fb('alert');
+        return;
+      }
+      var src = {
+        blob: file, name: file.name || 'Pasted picture', detect: det,
+        key: pk ? pk.entries : null, keyMeta: pk ? pk.meta : null, keyFrom: pk ? 'project' : null,
+        size: pk && pk.meta.design.w && pk.meta.design.h ? { w: pk.meta.design.w, h: pk.meta.design.h } : null
+      };
+      if (det.ok && (det.confidence || 0) >= DETECT_SURE && det.style !== 'unknown') {
+        clear(card);
+        card.appendChild(el('p', 'muted', 'Found a chart grid of about ' + det.size.w + ' × ' +
+          det.size.h + ' squares. Opening the check…'));
+        openReadSheet(projectId, src);
+        return;
+      }
+      clear(card);
+      card.appendChild(el('h3', 'xs-h3', 'Is this a chart or a photo?'));
+      var why;
+      if (det.ok) {
+        why = 'It might be a chart: there seems to be a grid of about ' + det.size.w + ' × ' +
+          det.size.h + ' squares, but I am not sure.';
+      } else if (det.reason === 'too-small') {
+        why = det.message || 'The squares are too small to read. A bigger picture would help.';
+      } else {
+        why = 'I could not find a chart grid in it.';
+      }
+      card.appendChild(el('p', 'muted', why));
+      var asChart = button('btn primary block', 'A chart, one square per stitch');
+      on(asChart, 'click', function () { openReadSheet(projectId, src); });
+      var asPhoto = button('btn block', 'A photo to turn into a chart');
+      on(asPhoto, 'click', function () { openPhotoSheet(projectId, file); });
+      card.appendChild(asChart);
+      card.appendChild(asPhoto);
+      card.appendChild(el('p', 'muted xs-import-note',
+        'A chart is read square by square and checked against its key. A photo is turned into a new ' +
+        'chart of your own, with the colours you choose.'));
+      try { asChart.focus(); } catch (e) { /* ignore */ }
+    });
+  }
+
+  /* ---- entry point 2: the page pictures of a PDF ----------------------- */
+
+  function readPdfPictures(projectId, handle, key, edits, box, progressLine) {
+    clear(box);
+    box.hidden = false;
+    var line = el('p', 'muted xs-render-progress', 'Looking at the pages…');
+    line.setAttribute('role', 'status');
+    box.appendChild(line);
+    var stop = { cancelled: false };
+    var stopBtn = button('btn ghost block', 'Stop');
+    on(stopBtn, 'click', function () { stop.cancelled = true; stopBtn.disabled = true; });
+    box.appendChild(stopBtn);
+
+    var R = window.XSRead;
+    var doc = handle && handle.doc;
+    var total = Math.min(handle && handle.numPages || 0, PDF_MAX_CANDIDATES);
+    var declared = key && key.design && key.design.w && key.design.h ? { w: key.design.w, h: key.design.h } : null;
+    var entries = (edits && edits.entries ? edits.entries : (key ? key.entries : [])).map(copyEntry);
+    var keyMeta = {
+      title: key && key.design && key.design.title || '',
+      strands: key && key.strandsDefault || null,
+      design: declared || {},
+      fabric: key && key.fabric ? { count: key.fabric.count || null, kind: key.fabric.kind || null, over: key.fabric.over || null } : null
+    };
+    var cands = [];
+
+    function baseSize(n) {
+      if (!doc || typeof doc.getPage !== 'function') return Promise.resolve({ w: 612, h: 792 });
+      return doc.getPage(n).then(function (pg) {
+        var vp = pg.getViewport({ scale: 1 });
+        return { w: vp.width, h: vp.height };
+      });
+    }
+
+    function look(n) {
+      return function () {
+        if (stop.cancelled) return null;
+        line.textContent = 'Looking for the chart: page ' + n + ' of ' + total + '…';
+        return baseSize(n).then(function (base) {
+          var s0 = Math.min(3, 1600 / Math.max(base.w, base.h));
+          return handle.renderPage(n, { scale: s0, signal: stop }).then(function (canvas) {
+            return Promise.resolve(R.detect(canvas, { size: null })).then(function (det) {
+              cands.push({ n: n, det: det, base: base, s0: s0 });
+              canvas.width = 0; canvas.height = 0;     // let the memory go
+            });
+          });
+        }).then(null, function (err) {
+          if (err && err.name === 'AbortError') stop.cancelled = true;
+        });
+      };
+    }
+
+    var chain = Promise.resolve();
+    for (var n = 1; n <= total; n++) chain = chain.then(look(n));
+
+    function finish(node) {
+      clear(box);
+      box.appendChild(node);
+    }
+
+    function proceed(c, forceSize) {
+      var det = c.det;
+      var pitch = det.lattice ? Math.min(det.lattice.pitchX, det.lattice.pitchY) : 0;
+      if (forceSize && det.crop) pitch = Math.min(det.crop.w / forceSize.w, det.crop.h / forceSize.h);
+      var s1 = pdfReadScale(c.base, pitch, c.s0);
+      line.textContent = 'Drawing page ' + c.n + ' at full size…';
+      return handle.renderPage(c.n, { scale: s1, signal: stop }).then(function (canvas) {
+        return canvasBlob(canvas, 'image/png').then(function (blob) {
+          var px = pitch * s1 / c.s0;
+          var msg = el('div');
+          msg.appendChild(el('p', 'xs-beta-ok', 'Page ' + c.n + ' shows the chart' +
+            (declared ? ' (' + declared.w + ' × ' + declared.h + ' stitches)' : '') + '.'));
+          msg.appendChild(el('p', 'muted', 'Drawn at about ' + Math.round(px) + ' pixels a square. ' +
+            'The check opens on top of this; nothing is changed until you say so.'));
+          finish(msg);
+          openReadSheet(projectId, {
+            blob: blob, canvas: canvas, name: 'Page ' + c.n, key: entries, keyMeta: keyMeta,
+            size: forceSize || declared, pdf: { handle: handle, key: key, progressLine: progressLine, page: c.n }
+          });
+        });
+      }, function (err) {
+        finish(el('p', 'muted', err && err.name === 'AbortError'
+          ? 'Stopped. Nothing was changed.'
+          : 'Page ' + c.n + ' could not be drawn. Nothing was changed.'));
+      });
+    }
+
+    return chain.then(function () {
+      if (stop.cancelled) { finish(el('p', 'muted', 'Stopped. Nothing was changed.')); return; }
+      var pick = pickPdfPage(cands, declared);
+      if (!pick.best) {
+        var why = el('div');
+        var tooSmall = cands.filter(function (c) { return c.det && c.det.reason === 'too-small'; })[0];
+        why.appendChild(el('p', null, 'Could not find a chart grid on ' +
+          (total === 1 ? 'the page' : 'any of the first ' + total + ' pages') + '.'));
+        why.appendChild(el('p', 'muted', tooSmall && tooSmall.det.message
+          ? tooSmall.det.message
+          : 'If the chart is a photo or a scan of paper, it cannot be read yet. A screenshot of the ' +
+            'chart, zoomed in, can be: use “Read a picture of a chart”.'));
+        finish(why);
+        fb('alert');
+        return;
+      }
+      if (declared && !pick.match) {
+        var b = pick.tile || pick.best;
+        var box2 = el('div');
+        if (pick.tile) {
+          box2.appendChild(el('p', null, 'Each chart page here seems to hold only part of the design ' +
+            '(page ' + b.n + ' shows about ' + b.det.size.w + ' × ' + b.det.size.h + ' of the ' +
+            declared.w + ' × ' + declared.h + ' squares).'));
+          box2.appendChild(el('p', 'muted', 'Reading a chart split across several pages is not something ' +
+            'this can do yet, and one piece is not the whole chart. A picture of the whole design works.'));
+        } else {
+          box2.appendChild(el('p', null, 'The grid on page ' + b.n + ' looks like ' + b.det.size.w + ' × ' +
+            b.det.size.h + ' squares, but the PDF says ' + declared.w + ' × ' + declared.h + '.'));
+        }
+        var anyway = button('btn ghost block', 'Read page ' + b.n + ' as ' + declared.w + ' × ' + declared.h + ' anyway');
+        on(anyway, 'click', function () {
+          anyway.disabled = true;
+          clear(box);
+          box.appendChild(line);
+          proceed(b, declared);
+        });
+        box2.appendChild(anyway);
+        var counted = entries.some(function (e) { return e.stitchCount > 0; });
+        box2.appendChild(el('p', 'muted xs-import-note', counted
+          ? 'The check against the key’s stitch counts will say plainly whether that worked.'
+          : 'This key has no stitch counts to check the read against, so look closely at what was read.'));
+        finish(box2);
+        return;
+      }
+      return proceed(pick.best, null);
+    });
+  }
+
+  /* ---- the review: Read a chart picture -------------------------------- */
+
+  /** Theme colours for the review canvas, read once per sheet. */
+  function readColours() {
+    var cs = null;
+    try { cs = window.getComputedStyle(document.documentElement); } catch (e) { cs = null; }
+    function v(name, dflt) {
+      if (!cs) return dflt;
+      var s = C && C.cssVar ? C.cssVar(cs, name, dflt) : (cs.getPropertyValue(name) || '').trim();
+      return s || dflt;
+    }
+    return { bg: v('--surface-2', '#eeeeee'), line: v('--primary', '#d23c3c'), warn: v('--danger', '#c0392b'), text: v('--text', '#222') };
+  }
+
+  /**
+   * src = { blob, canvas?, name, key: KeyEntry[]|null, keyMeta, keyFrom,
+   *         size: {w,h}|null, saved: stored options|null, pdf: {...}|null }
+   */
+  function openReadSheet(projectId, src) {
+    if (!readerAvailable()) { toast('Reading a chart picture is not available on this device'); return; }
+    var R = window.XSRead;
+    if (!Store.project(projectId) || !src || !(src.blob || src.canvas)) return;
+    var saved = isObj(src.saved) ? src.saved : {};
+    var keyMeta = src.keyMeta || {};
+    var o = {
+      crop: saved.crop || null,
+      size: saved.size || src.size || null,
+      lattice: saved.lattice || null,
+      key: src.key && src.key.length ? src.key.map(copyEntry) : null,
+      fabric: typeof saved.fabric === 'string' ? saved.fabric : 'auto',
+      mode: saved.mode === 'colour' || saved.mode === 'symbol' ? saved.mode : 'auto',
+      maxColors: 60,
+      assign: isObj(saved.assign) ? JSON.parse(JSON.stringify(saved.assign)) : {}
+    };
+    var projectKeyEntries = src.keyFrom === 'project' && o.key ? o.key.slice() : null;
+    var renames = isObj(saved.renames) ? JSON.parse(JSON.stringify(saved.renames)) : {};
+    var typed = isObj(saved.typed) ? JSON.parse(JSON.stringify(saved.typed)) : {};
+    var LOW = typeof R.LOW_CONF === 'number' ? R.LOW_CONF : LOW_CONF_DEFAULT;
+
+    var res = null, lastGood = null, token = null, timer = null, closed = false;
+    var resCounts = null, palSig = '';
+    var pic = null, picW = 0, picH = 0, picUrl = null;
+    var show = 'picture', pickFabric = false;
+    var cols = readColours();
+    var api = null;
+    var n = {};
+    var vs = { z: 1, ox: 0, oy: 0, laidOut: false, cw: 0, ch: 0 };
+    var pending = false, previewOff = null, previewFor = null;
+
+    function hasKey() { return !!(o.key && o.key.length); }
+
+    /* -- the picture, decoded once for drawing -- */
+    function decode() {
+      if (src.canvas) {
+        pic = src.canvas; picW = src.canvas.width; picH = src.canvas.height;
+        invalidate();
+        return;
+      }
+      var done = function (img, w, h) {
+        if (closed) return;
+        pic = img; picW = w; picH = h;
+        vs.laidOut = false;
+        invalidate();
+      };
+      if (typeof window.createImageBitmap === 'function') {
+        window.createImageBitmap(src.blob).then(function (bm) { done(bm, bm.width, bm.height); }, viaImage);
+      } else {
+        viaImage();
+      }
+      function viaImage() {
+        picUrl = URL.createObjectURL(src.blob);
+        var im = new Image();
+        im.onload = function () { done(im, im.naturalWidth, im.naturalHeight); };
+        im.onerror = function () { setStatus('That picture could not be opened.', 'bad'); };
+        im.src = picUrl;
+      }
+    }
+
+    /* -- the canvas view: the picture with the grid over it, or the read -- */
+    function invalidate() {
+      if (pending || closed) return;
+      pending = true;
+      window.requestAnimationFrame(function () { pending = false; draw(); });
+    }
+
+    function fitView(w, h) {
+      if (!picW || !picH) return;
+      var fr = focusRect();
+      vs.z = Math.min(w / fr.w, h / fr.h) * 0.98;
+      vs.ox = (w - fr.w * vs.z) / 2 - fr.x * vs.z;
+      vs.oy = (h - fr.h * vs.z) / 2 - fr.y * vs.z;
+      vs.laidOut = true;
+      vs.user = false;
+      vs.cw = w; vs.ch = h;
+    }
+
+    /** What Fit frames: the chart found (or the crop), else the whole picture. */
+    function focusRect() {
+      var r = res || lastGood;
+      if (r && r.crop && r.crop.w > 0) return r.crop;
+      if (o.crop) return o.crop;
+      return { x: 0, y: 0, w: picW, h: picH };
+    }
+
+    function lattice() {
+      if (o.lattice) return o.lattice;
+      var r = res || lastGood;
+      return r && r.lattice ? r.lattice : null;
+    }
+
+    function gridSize() {
+      var r = res || lastGood;
+      if (r && r.size) return r.size;
+      return o.size;
+    }
+
+    function previewCanvas() {
+      if (!res || !res.preview) return null;
+      if (previewFor === res) return previewOff;
+      var pv = res.preview;
+      var c = document.createElement('canvas');
+      c.width = pv.w; c.height = pv.h;
+      try {
+        var id = new ImageData(new Uint8ClampedArray(pv.data), pv.w, pv.h);
+        c.getContext('2d').putImageData(id, 0, 0);
+      } catch (e) { return null; }
+      previewOff = c; previewFor = res;
+      return c;
+    }
+
+    function draw() {
+      if (closed || !n.canvas) return;
+      var cv = n.canvas;
+      var r = cv.getBoundingClientRect();
+      if (!r.width || !r.height) return;
+      var dpr = Math.min(window.devicePixelRatio || 1, 2);
+      var pw = Math.round(r.width * dpr), ph = Math.round(r.height * dpr);
+      if (cv.width !== pw || cv.height !== ph) { cv.width = pw; cv.height = ph; }
+      if (!vs.laidOut || vs.cw !== r.width || vs.ch !== r.height) fitView(r.width, r.height);
+      var g = cv.getContext('2d');
+      if (!g) return;
+      g.setTransform(dpr, 0, 0, dpr, 0, 0);
+      g.fillStyle = cols.bg;
+      g.fillRect(0, 0, r.width, r.height);
+      if (!pic) return;
+      var z = vs.z;
+      var lat = lattice(), size = gridSize();
+      var reading = show === 'read' && res && res.ok && lat && size;
+      g.imageSmoothingEnabled = z < 1;
+      g.globalAlpha = reading ? 0.22 : 1;
+      g.drawImage(pic, 0, 0, picW, picH, vs.ox, vs.oy, picW * z, picH * z);
+      g.globalAlpha = 1;
+      if (reading) {
+        var pc = previewCanvas();
+        if (pc) {
+          g.imageSmoothingEnabled = false;
+          g.drawImage(pc, 0, 0, pc.width, pc.height,
+            vs.ox + lat.x0 * z, vs.oy + lat.y0 * z, size.w * lat.pitchX * z, size.h * lat.pitchY * z);
+        }
+        drawUnsure(g, r, lat, size);
+      } else if (lat && size) {
+        drawGridOver(g, r, lat, size);
+      }
+    }
+
+    function drawGridOver(g, r, lat, size) {
+      var z = vs.z;
+      var cellPx = Math.min(lat.pitchX, lat.pitchY) * z;
+      var x0 = vs.ox + lat.x0 * z, y0 = vs.oy + lat.y0 * z;
+      var W = size.w * lat.pitchX * z, H = size.h * lat.pitchY * z;
+      var i, p;
+      g.save();
+      if (cellPx >= 4) {
+        g.globalAlpha = 0.55;
+        g.strokeStyle = cols.line;
+        g.lineWidth = 1;
+        g.beginPath();
+        for (i = 1; i < size.w; i++) {
+          if (i % 10 === 0) continue;
+          p = Math.round(x0 + i * lat.pitchX * z) + 0.5;
+          if (p < 0 || p > r.width) continue;
+          g.moveTo(p, Math.max(0, y0)); g.lineTo(p, Math.min(r.height, y0 + H));
+        }
+        for (i = 1; i < size.h; i++) {
+          if (i % 10 === 0) continue;
+          p = Math.round(y0 + i * lat.pitchY * z) + 0.5;
+          if (p < 0 || p > r.height) continue;
+          g.moveTo(Math.max(0, x0), p); g.lineTo(Math.min(r.width, x0 + W), p);
+        }
+        g.stroke();
+      }
+      /* the 10-lines and the outline, with a pale halo so they read on any picture */
+      g.globalAlpha = 1;
+      function majors(count) {
+        var a = [];
+        for (var m = 0; m < count; m += 10) a.push(m);
+        a.push(count);
+        return a;
+      }
+      var mx = majors(size.w), my = majors(size.h);
+      [['rgba(255,255,255,0.85)', 3], [cols.line, 1.5]].forEach(function (pass) {
+        g.strokeStyle = pass[0];
+        g.lineWidth = pass[1];
+        g.beginPath();
+        mx.forEach(function (c) { var q = x0 + c * lat.pitchX * z; g.moveTo(q, y0); g.lineTo(q, y0 + H); });
+        my.forEach(function (c) { var q = y0 + c * lat.pitchY * z; g.moveTo(x0, q); g.lineTo(x0 + W, q); });
+        g.stroke();
+      });
+      g.restore();
+    }
+
+    function drawUnsure(g, r, lat, size) {
+      if (!res || !res.cellConf || !res.lowCells) return;
+      var z = vs.z, conf = res.cellConf;
+      var cw = lat.pitchX * z, chh = lat.pitchY * z;
+      var x0 = vs.ox + lat.x0 * z, y0 = vs.oy + lat.y0 * z;
+      var cx0 = Math.max(0, Math.floor(-x0 / cw)), cx1 = Math.min(size.w, Math.ceil((r.width - x0) / cw));
+      var cy0 = Math.max(0, Math.floor(-y0 / chh)), cy1 = Math.min(size.h, Math.ceil((r.height - y0) / chh));
+      g.save();
+      g.strokeStyle = cols.warn;
+      g.fillStyle = cols.warn;
+      g.lineWidth = cw >= 6 ? 2 : 1;
+      for (var y = cy0; y < cy1; y++) {
+        for (var x = cx0; x < cx1; x++) {
+          if (conf[y * size.w + x] >= LOW) continue;
+          var px = x0 + x * cw, py = y0 + y * chh;
+          if (cw >= 4) g.strokeRect(px + 1, py + 1, Math.max(1, cw - 2), Math.max(1, chh - 2));
+          else g.fillRect(px, py, Math.max(1.5, cw), Math.max(1.5, chh));
+        }
+      }
+      g.restore();
+    }
+
+    /* pan / pinch / wheel / double-tap, and the fabric pick */
+    var ptrs = {}, pinch = null, lastTap = 0;
+    function ptrList() { var a = []; for (var k in ptrs) a.push(ptrs[k]); return a; }
+    function bindView(cv) {
+      on(cv, 'pointerdown', function (e) {
+        ptrs[e.pointerId] = { x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY, moved: false };
+        try { cv.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+        var l = ptrList();
+        if (l.length === 2) {
+          var dx = l[0].x - l[1].x, dy = l[0].y - l[1].y, rr = cv.getBoundingClientRect();
+          var mx = (l[0].x + l[1].x) / 2 - rr.left, my = (l[0].y + l[1].y) / 2 - rr.top;
+          pinch = { d: Math.max(1, Math.sqrt(dx * dx + dy * dy)), z: vs.z, mx: mx, my: my,
+            cx: (mx - vs.ox) / vs.z, cy: (my - vs.oy) / vs.z };
+        }
+        e.preventDefault();
+      });
+      on(cv, 'pointermove', function (e) {
+        var p = ptrs[e.pointerId];
+        if (!p) return;
+        var dx = e.clientX - p.x, dy = e.clientY - p.y;
+        p.x = e.clientX; p.y = e.clientY;
+        if (Math.abs(p.x - p.sx) > 4 || Math.abs(p.y - p.sy) > 4) p.moved = true;
+        var l = ptrList();
+        if (l.length === 2 && pinch) {
+          var ddx = l[0].x - l[1].x, ddy = l[0].y - l[1].y;
+          var d = Math.max(1, Math.sqrt(ddx * ddx + ddy * ddy));
+          vs.z = Math.max(0.02, Math.min(40, pinch.z * d / pinch.d));
+          vs.ox = pinch.mx - pinch.cx * vs.z;
+          vs.oy = pinch.my - pinch.cy * vs.z;
+          vs.user = true;
+        } else {
+          vs.ox += dx; vs.oy += dy;
+          if (p.moved) vs.user = true;
+        }
+        invalidate();
+        e.preventDefault();
+      });
+      function up(e) {
+        var p = ptrs[e.pointerId];
+        delete ptrs[e.pointerId];
+        if (ptrList().length < 2) pinch = null;
+        if (!p || p.moved) return;
+        if (pickFabric) { sampleFabric(e.clientX, e.clientY); return; }
+        var now = Date.now();
+        if (now - lastTap < 320) { lastTap = 0; vs.laidOut = false; invalidate(); return; }
+        lastTap = now;
+      }
+      on(cv, 'pointerup', up);
+      on(cv, 'pointercancel', up);
+      on(cv, 'wheel', function (e) {
+        e.preventDefault();
+        var rr = cv.getBoundingClientRect();
+        var mx = e.clientX - rr.left, my = e.clientY - rr.top;
+        var cx = (mx - vs.ox) / vs.z, cy = (my - vs.oy) / vs.z;
+        vs.z = Math.max(0.02, Math.min(40, vs.z * (e.deltaY < 0 ? 1.15 : 1 / 1.15)));
+        vs.ox = mx - cx * vs.z; vs.oy = my - cy * vs.z;
+        vs.user = true;
+        invalidate();
+      });
+      cv.tabIndex = 0;
+      on(cv, 'keydown', function (e) {
+        var k = e.key, step = 40;
+        if (k === '+' || k === '=') zoomBy(1.3);
+        else if (k === '-' || k === '_') zoomBy(1 / 1.3);
+        else if (k === '0') { vs.laidOut = false; invalidate(); }
+        else if (k === 'ArrowLeft') { vs.ox += step; invalidate(); }
+        else if (k === 'ArrowRight') { vs.ox -= step; invalidate(); }
+        else if (k === 'ArrowUp') { vs.oy += step; invalidate(); }
+        else if (k === 'ArrowDown') { vs.oy -= step; invalidate(); }
+        else return;
+        e.preventDefault();
+      });
+    }
+
+    /** "Show them": the next unsure square, centred and big enough to see. */
+    var unsureAt = -1;
+    function focusUnsure() {
+      var lat = lattice(), size = gridSize();
+      if (!res || !res.cellConf || !lat || !size) return;
+      var conf = res.cellConf, n0 = conf.length;
+      for (var k = 1; k <= n0; k++) {
+        var i = (unsureAt + k) % n0;
+        if (conf[i] < LOW) { unsureAt = i; break; }
+      }
+      if (unsureAt < 0) return;
+      var x = unsureAt % size.w, y = Math.floor(unsureAt / size.w);
+      vs.z = Math.max(vs.z, 18 / Math.min(lat.pitchX, lat.pitchY));
+      vs.ox = vs.cw / 2 - (lat.x0 + (x + 0.5) * lat.pitchX) * vs.z;
+      vs.oy = vs.ch / 2 - (lat.y0 + (y + 0.5) * lat.pitchY) * vs.z;
+      vs.user = true;
+      invalidate();
+      setStatus('Unsure square at column ' + (x + 1) + ', row ' + (y + 1) + '. “Show them” again for the next one.', 'busy');
+      try { n.canvas.scrollIntoView({ block: 'nearest' }); } catch (e) { /* ignore */ }
+    }
+
+    function zoomBy(f) {
+      var cw = vs.cw / 2, ch = vs.ch / 2;
+      var cx = (cw - vs.ox) / vs.z, cy = (ch - vs.oy) / vs.z;
+      vs.z = Math.max(0.02, Math.min(40, vs.z * f));
+      vs.ox = cw - cx * vs.z; vs.oy = ch - cy * vs.z;
+      vs.user = true;
+      invalidate();
+    }
+
+    function sampleFabric(clientX, clientY) {
+      var rr = n.canvas.getBoundingClientRect();
+      var sx = Math.floor((clientX - rr.left - vs.ox) / vs.z), sy = Math.floor((clientY - rr.top - vs.oy) / vs.z);
+      if (!pic || sx < 0 || sy < 0 || sx >= picW || sy >= picH) { toast('Tap on the picture'); return; }
+      var c = document.createElement('canvas');
+      c.width = 1; c.height = 1;
+      var hex = null;
+      try {
+        var g = c.getContext('2d');
+        g.drawImage(pic, sx, sy, 1, 1, 0, 0, 1, 1);
+        var d = g.getImageData(0, 0, 1, 1).data;
+        hex = '#' + [d[0], d[1], d[2]].map(function (v) { return (v < 16 ? '0' : '') + v.toString(16); }).join('');
+      } catch (e) { hex = null; }
+      pickFabric = false;
+      n.canvas.classList.remove('picking');
+      if (!hex) { toast('That colour could not be read'); return; }
+      o.fabric = hex;
+      syncFabric();
+      setStatus('Fabric set to the colour you tapped. Reading again…', 'busy');
+      schedule(0);
+    }
+
+    /* -- reading -- */
+    function setStatus(text, kind) {
+      if (!n.status) return;
+      n.status.textContent = text;
+      n.status.className = 'xs-read-status' + (kind ? ' is-' + kind : '');
+    }
+
+    function schedule(ms) {
+      if (timer) window.clearTimeout(timer);
+      timer = window.setTimeout(run, typeof ms === 'number' ? ms : 300);
+    }
+
+    function readOpts(tok) {
+      return {
+        crop: o.crop, size: o.size, lattice: o.lattice, key: hasKey() ? o.key : null,
+        fabric: o.fabric, mode: o.mode, maxColors: o.maxColors,
+        assign: Object.keys(o.assign).length ? o.assign : null, token: tok
+      };
+    }
+
+    function run() {
+      timer = null;
+      if (closed) return;
+      /* one reader worker: the run in flight goes first */
+      if (token) { try { R.cancel(token); } catch (e) { /* ignore */ } }
+      readSeq += 1;
+      var mine = 'xsread-' + readSeq;
+      token = mine;
+      setStatus('Reading…', 'busy');
+      setUse(false);
+      var pr;
+      try {
+        pr = R.read(src.canvas || src.blob, readOpts(mine), function (p) {
+          if (token !== mine || !p) return;
+          var phase = p.phase ? String(p.phase) : '';
+          var pct = typeof p.pct === 'number' ? ' ' + Math.round(p.pct) + '%' : '';
+          setStatus('Reading… ' + phase + pct, 'busy');
+        });
+      } catch (e) {
+        pr = Promise.resolve({ ok: false, reason: 'no-image', message: 'That picture could not be read.' });
+      }
+      Promise.resolve(pr).then(function (r) { return r; }, function () {
+        return { ok: false, reason: 'no-image', message: 'That picture could not be read.' };
+      }).then(function (r) {
+        if (closed || token !== mine) return;          // superseded or closed
+        token = null;
+        if (r && r.reason === 'cancelled') return;
+        adopt(r || { ok: false, reason: 'no-grid', message: '' });
+      });
+    }
+
+    function adopt(r) {
+      res = r;
+      if (r.ok) {
+        lastGood = r;
+        var counts = null;
+        try {
+          var cells = X.unpackCells(r.data.chart.cells);
+          counts = new Array(r.data.palette.length);
+          for (var k = 0; k < counts.length; k++) counts[k] = 0;
+          for (var i = 0; i < cells.length; i++) if (cells[i] >= 0 && cells[i] < counts.length) counts[cells[i]]++;
+        } catch (e) { counts = null; }
+        resCounts = counts;
+        var sig = r.data.palette.map(function (e) { return e.code; }).join(',');
+        if (sig !== palSig && palSig) {
+          /* a different palette: per-colour fixes made for the old one would land on the wrong colours */
+          if (!hasKey()) { renames = {}; typed = {}; }
+        }
+        palSig = sig;
+        if (!o.size) syncSizeInputs(r.size);
+        else syncSizeInputs(o.size);
+        if (!vs.user) vs.laidOut = false;      /* frame the chart that was found, until the stitcher zooms */
+      }
+      renderResult();
+      invalidate();
+    }
+
+    /* -- results -- */
+    function entriesForCheck() {
+      if (hasKey()) {
+        return o.key.map(function (e, i) {
+          var c = copyEntry(e);
+          if (!c.stitchCount && typed['k' + i] > 0) c.stitchCount = typed['k' + i];
+          return c;
+        });
+      }
+      var pal = dataNow().palette;
+      return pal.map(function (p, i) {
+        /* a colour renamed to one already listed joins it: checkCounts adds
+           a non-checked duplicate's squares to the first row with its code */
+        var first = groupOf(pal, i) === i;
+        return { brand: p.brand || 'DMC', code: p.code, name: p.name, hex: p.hex,
+          stitchCount: first && typed['p' + i] > 0 ? typed['p' + i] : null, kind: first ? 'cross' : 'merged' };
+      });
+    }
+
+    /** The first palette index with the same floss as entry i. */
+    function groupOf(pal, i) {
+      var k = codeKey(pal[i].brand, pal[i].code);
+      for (var j = 0; j < i; j++) if (codeKey(pal[j].brand, pal[j].code) === k) return j;
+      return i;
+    }
+
+    /** The read data with the stitcher's colour fixes (no-key path) applied. */
+    function dataNow() {
+      if (!res || !res.ok) return null;
+      if (!Object.keys(renames).length) return res.data;
+      var d = {};
+      for (var k in res.data) d[k] = res.data[k];
+      d.palette = res.data.palette.map(function (p, i) {
+        var rn = renames['p' + i];
+        if (!rn) return p;
+        var q = {};
+        for (var kk in p) q[kk] = p[kk];
+        q.brand = rn.brand; q.code = rn.code; q.name = rn.name; q.hex = rn.hex;
+        return q;
+      });
+      return d;
+    }
+
+    function checkNow() {
+      if (!res || !res.ok) return null;
+      var anyTyped = Object.keys(typed).some(function (k) { return typed[k] > 0; });
+      var anyRename = Object.keys(renames).length > 0;
+      if ((anyTyped || anyRename) && typeof X.checkCounts === 'function') {
+        try {
+          var c = X.checkCounts(dataNow(), entriesForCheck());
+          if (c && c.verdict) return c;
+        } catch (e) { /* fall back to the reader's own */ }
+      }
+      return res.check || null;
+    }
+
+    function renderResult() {
+      clear(n.results);
+      var r = res;
+      if (!r) return;
+      if (!r.ok) {
+        var msg = r.message || 'Could not find a grid in this picture.';
+        setStatus(msg, 'bad');
+        var help = el('div', 'xs-read-fail');
+        help.appendChild(el('p', null, r.reason === 'no-grid' || r.reason === 'not-a-chart'
+          ? 'Could not find a grid: try a bigger picture, crop it to the chart, or type the size in stitches under “Adjust”.'
+          : r.reason === 'too-small'
+            ? 'The squares are too small to read. Try a bigger picture, or zoom in before taking the screenshot.'
+            : r.reason === 'too-many-colors'
+              ? 'If this is a chart, crop the picture to just the chart (Adjust the read → Crop to the chart): ' +
+                'a photo or a printed key beside it adds colours a chart does not have.'
+              : 'Try a bigger picture, or type the size in stitches under “Adjust”.'));
+        n.results.appendChild(help);
+        if (n.adjust) n.adjust.open = true;
+        if (n.cropDetails && (r.reason === 'too-many-colors' || r.reason === 'not-a-chart')) n.cropDetails.open = true;
+        fb('alert');
+        setUse(false);
+        return;
+      }
+      var chk = checkNow();
+      var d = dataNow();
+      var bits = [r.size.w + ' × ' + r.size.h + ' squares',
+        plural(d.palette.length, 'colour'), comma(chk && chk.readTotal ? chk.readTotal : countAll()) + ' stitches'];
+      setStatus('Read ' + bits.join(' · ') + '.', 'ok');
+
+      var verdict = el('p', 'xs-verdict xs-verdict-' + (chk ? chk.verdict : 'unchecked'));
+      verdict.setAttribute('role', 'status');
+      verdict.textContent = chk && chk.summary ? chk.summary
+        : 'The key gave no stitch counts, so this read cannot be checked. Type the counts from the key below if you have them.';
+      n.results.appendChild(verdict);
+      if (chk && chk.verdict === 'unchecked' && chk.summary) {
+        n.results.appendChild(el('p', 'muted xs-read-note',
+          'Type the stitch counts from the key into the table to check the read.'));
+      }
+
+      var unsure = el('p', 'xs-unsure' + (r.lowCells ? ' has-unsure' : ''), unsureText(r.lowCells || 0));
+      if (r.lowCells) {
+        var seeIt = button('linkish', 'Show them');
+        on(seeIt, 'click', function () { setShow('read'); focusUnsure(); });
+        unsure.appendChild(document.createTextNode(' '));
+        unsure.appendChild(seeIt);
+      }
+      n.results.appendChild(unsure);
+
+      n.results.appendChild(countTable(chk, d));
+      var un = unmatchedList();
+      if (un) n.results.appendChild(un);
+
+      var warn = (r.stats && r.stats.warnings) || [];
+      if (warn.length) n.results.appendChild(warningList('Notes from the reader', warn.slice(0, 5), true));
+      setUse(true);
+      if (chk && (chk.verdict === 'exact' || chk.verdict === 'close')) fb('done');
+    }
+
+    function countAll() {
+      if (!resCounts) return 0;
+      var t = 0;
+      for (var i = 0; i < resCounts.length; i++) t += resCounts[i];
+      return t;
+    }
+
+    function swatch(hex, symbol) {
+      var sw = el('span', 'xs-swatch xs-swatch-sm', symbol || '');
+      var h = String(hex || '').replace('#', '');
+      sw.style.background = h ? '#' + h : 'transparent';
+      if (h) sw.style.color = X.symbolInk(h) === 'light' ? '#fff' : '#111';
+      return sw;
+    }
+
+    function countInput(keyName, label) {
+      var inp = C.numInput(typed[keyName] || '', 0, 1e7, 'type it');
+      inp.className = (inp.className ? inp.className + ' ' : '') + 'xs-count-in';
+      inp.setAttribute('aria-label', 'Stitches the key prints for ' + label);
+      on(inp, 'change', function () {
+        typed[keyName] = clampInt(inp.value, 0, 1e7, 0);
+        renderResult();
+      });
+      return inp;
+    }
+
+    function countTable(chk, d) {
+      var wrap = el('div', 'xs-count-wrap');
+      var t = el('table', 'xs-count-table');
+      var cap = el('caption', 'sr-only', 'Stitches read for each colour, against the key');
+      t.appendChild(cap);
+      var thead = el('thead');
+      var hr = el('tr');
+      ['Colour', 'Read', 'Key', ''].forEach(function (h, i) {
+        var th = el('th', i === 1 || i === 2 ? 'num' : null, h);
+        th.setAttribute('scope', 'col');
+        if (i === 3) th.appendChild(el('span', 'sr-only', 'Match'));
+        hr.appendChild(th);
+      });
+      thead.appendChild(hr);
+      t.appendChild(thead);
+      var tb = el('tbody');
+
+      function row(hex, symbol, label, read, expected, inputKey, okState, extra) {
+        var tr = el('tr', okState === true ? 'ok' : okState === false ? 'off' : null);
+        var c1 = el('th', 'xs-count-name');
+        c1.setAttribute('scope', 'row');
+        c1.appendChild(swatch(hex, symbol));
+        var nm = el('span', 'xs-count-label', label);
+        c1.appendChild(nm);
+        if (extra) c1.appendChild(extra);
+        tr.appendChild(c1);
+        tr.appendChild(el('td', 'num', comma(read)));
+        var c3 = el('td', 'num');
+        /* a count the stitcher typed stays editable */
+        if (inputKey) c3.appendChild(countInput(inputKey, label));
+        else if (expected !== null && expected !== undefined) c3.textContent = comma(expected);
+        else c3.textContent = '—';
+        tr.appendChild(c3);
+        var c4 = el('td', 'xs-count-mark');
+        if (okState === true) {
+          var near = read - expected;
+          c4.appendChild(el('span', 'xs-mark-ok', '✓'));
+          if (near) {
+            /* within a stitch or two: still say by how much */
+            c4.appendChild(el('span', 'xs-mark-near', ' ' + (near > 0 ? '+' : '−') + comma(Math.abs(near))));
+            c4.appendChild(el('span', 'sr-only', 'close: ' + comma(Math.abs(near)) + (near > 0 ? ' too many' : ' too few')));
+          } else {
+            c4.appendChild(el('span', 'sr-only', 'matches'));
+          }
+        } else if (okState === false) {
+          var diff = read - expected;
+          c4.textContent = (diff > 0 ? '+' : '−') + comma(Math.abs(diff));
+          c4.setAttribute('aria-label', comma(Math.abs(diff)) + (diff > 0 ? ' too many' : ' too few'));
+        }
+        tr.appendChild(c4);
+        tb.appendChild(tr);
+      }
+
+      if (hasKey() && chk && Array.isArray(chk.rows)) {
+        chk.rows.forEach(function (cr) {
+          var label = (cr.brand ? cr.brand + ' ' : '') + cr.code + (cr.name ? ' · ' + cr.name : '');
+          var hasExp = cr.expected !== null && cr.expected !== undefined;
+          var e = o.key[cr.entry] || {};
+          /* ok is null when the key printed no count: unchecked, not wrong */
+          var printed = hasExp && !(typed['k' + cr.entry] > 0);
+          row(cr.hex || e.hex, e.symbol, label, cr.read || 0, hasExp ? cr.expected : null,
+            printed ? null : 'k' + cr.entry, cr.ok === true ? true : cr.ok === false ? false : null, null);
+        });
+      } else {
+        /* the check entries are the palette itself, one to one by index */
+        var byEntry = {};
+        if (chk && Array.isArray(chk.rows)) chk.rows.forEach(function (cr) { byEntry[cr.entry] = cr; });
+        d.palette.forEach(function (p, i) {
+          var label = (p.brand ? p.brand + ' ' : '') + p.code + (p.name ? ' · ' + p.name : '');
+          var first = groupOf(d.palette, i);
+          var fix = button('linkish xs-fix', renames['p' + i] ? 'changed' : 'change', 'Change ' + label + ' to another DMC colour');
+          on(fix, 'click', function () { openRename(i, p); });
+          var extra = el('span', 'xs-count-sub', renames['p' + i] ? 'you chose this · ' : 'nearest DMC · ');
+          extra.appendChild(fix);
+          if (first !== i) {
+            /* the same floss twice: one colour once the chart is used */
+            extra.insertBefore(document.createTextNode('joins the row above with this number · '), extra.firstChild);
+            row(p.hex, p.symbol, label, resCounts ? resCounts[i] : 0, null, null, null, extra);
+            return;
+          }
+          var exp = typed['p' + i] > 0 ? typed['p' + i] : null;
+          var rd = 0;
+          for (var j = 0; j < d.palette.length; j++) if (resCounts && groupOf(d.palette, j) === i) rd += resCounts[j];
+          var cr = byEntry[i];
+          var ok = exp === null ? null : (cr && cr.ok !== null && cr.ok !== undefined ? cr.ok : Math.abs(rd - exp) <= Math.max(2, exp * 0.01));
+          row(p.hex, p.symbol, label, rd, exp, 'p' + i, ok, extra);
+        });
+      }
+      t.appendChild(tb);
+      wrap.appendChild(t);
+      if (chk && chk.unmatchedEntries && chk.unmatchedEntries.length && hasKey()) {
+        wrap.appendChild(el('p', 'muted xs-read-note', plural(chk.unmatchedEntries.length, 'key colour') +
+          ' had no squares in the picture.'));
+      }
+      return wrap;
+    }
+
+    /** No key: change a colour the reader named by nearest DMC. */
+    function openRename(i, p) {
+      C.openSheet({
+        title: 'Which colour is this?',
+        cls: 'sheet-xs-rename',
+        build: function (body, sapi) {
+          var row = el('div', 'xs-rename-head');
+          row.appendChild(swatch(p.hex, p.symbol));
+          row.appendChild(el('span', null, 'Read as ' + (p.brand || 'DMC') + ' ' + p.code + (p.name ? ' · ' + p.name : '') +
+            (resCounts ? ' · ' + comma(resCounts[i]) + ' stitches' : '')));
+          body.appendChild(row);
+          var prev = swatch(null, '?');
+          prev.classList.add('xs-swatch-big');
+          var name = el('p', 'muted', 'Type the DMC number from the key.');
+          var inp = C.textInput('', '310');
+          inp.setAttribute('inputmode', 'text');
+          var found = null;
+          on(inp, 'input', function () {
+            var code = inp.value.trim();
+            var f = code ? X.flossFor('DMC', code) : null;
+            found = f && f.hex ? { brand: 'DMC', code: f.code || code, name: f.name || '', hex: f.hex } : null;
+            prev.style.background = found ? '#' + found.hex : 'transparent';
+            prev.textContent = found ? '' : '?';
+            name.textContent = found ? 'DMC ' + found.code + ' · ' + found.name : (code ? 'No DMC colour ' + code + ' here.' : 'Type the DMC number from the key.');
+          });
+          body.appendChild(prev);
+          body.appendChild(field('DMC number', inp));
+          body.appendChild(name);
+          var use = button('btn primary block', 'Use this colour');
+          on(use, 'click', function () {
+            if (!found) { toast('Type a DMC number first'); return; }
+            renames['p' + i] = found;
+            sapi.close();
+            renderResult();
+          });
+          body.appendChild(use);
+          if (renames['p' + i]) {
+            var back = button('btn ghost block', 'Go back to what was read');
+            on(back, 'click', function () { delete renames['p' + i]; sapi.close(); renderResult(); });
+            body.appendChild(back);
+          }
+          window.setTimeout(function () { try { inp.focus(); } catch (e) { /* ignore */ } }, 0);
+        }
+      });
+    }
+
+    function glyphCanvas(gl, hex) {
+      if (!gl || !gl.w || !gl.h || !gl.data) return swatch(hex, '');
+      var c = document.createElement('canvas');
+      c.width = gl.w; c.height = gl.h;
+      c.className = 'xs-glyph';
+      c.setAttribute('aria-hidden', 'true');
+      try { c.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(gl.data), gl.w, gl.h), 0, 0); } catch (e) { return swatch(hex, ''); }
+      return c;
+    }
+
+    /** Classes with no key colour (or that the stitcher assigned), each with a picker. */
+    function unmatchedList() {
+      if (!hasKey() || !res || !Array.isArray(res.classes)) return null;
+      var list = res.classes.filter(function (c) {
+        return (c.entry === null || c.entry === undefined || c.how === 'user') && !(c.fabric && c.how !== 'user');
+      });
+      if (!list.length) return null;
+      var box = el('div', 'xs-unmatched');
+      var open = list.filter(function (c) { return c.how !== 'user'; }).length;
+      box.appendChild(el('h3', 'xs-h3', open
+        ? (open === 1 ? 'One kind of square has no key colour' : open + ' kinds of square have no key colour')
+        : 'Squares you matched by hand'));
+      box.appendChild(el('p', 'muted xs-read-note', 'Say what each one is. Nothing is guessed.'));
+      list.forEach(function (c) {
+        var row = el('div', 'xs-um-row');
+        row.appendChild(glyphCanvas(c.glyph, c.hex));
+        var txt = el('span', 'xs-um-text');
+        txt.appendChild(el('span', 'xs-um-n', comma(c.count) + (c.count === 1 ? ' square' : ' squares')));
+        row.appendChild(txt);
+        var sel = document.createElement('select');
+        sel.className = 'xs-um-pick';
+        sel.setAttribute('aria-label', 'What are these ' + comma(c.count) + ' squares?');
+        function opt(v, label) { var op = document.createElement('option'); op.value = v; op.textContent = label; sel.appendChild(op); }
+        opt('', 'Choose…');
+        o.key.forEach(function (e, i) {
+          opt('e' + i, (e.brand ? e.brand + ' ' : '') + e.code + (e.name ? ' · ' + e.name : '') +
+            (e.stitchCount ? ' (' + comma(e.stitchCount) + ')' : ''));
+        });
+        opt('fabric', 'Fabric (not stitched)');
+        opt('dmc', 'Another DMC colour…');
+        var cur = o.assign[c.id];
+        sel.value = cur === 'fabric' ? 'fabric' : (typeof cur === 'number' ? 'e' + cur : '');
+        var extra = el('div', 'xs-um-dmc');
+        extra.hidden = true;
+        on(sel, 'change', function () {
+          var v = sel.value;
+          if (v === 'dmc') { extra.hidden = false; return; }
+          extra.hidden = true;
+          if (!v) delete o.assign[c.id];
+          else o.assign[c.id] = v === 'fabric' ? 'fabric' : parseInt(v.slice(1), 10);
+          schedule(0);
+        });
+        var inp = C.textInput('', 'DMC number');
+        inp.setAttribute('aria-label', 'DMC number for these squares');
+        var add = button('btn', 'Use');
+        on(add, 'click', function () {
+          var code = inp.value.trim();
+          var f = code ? X.flossFor('DMC', code) : null;
+          if (!f) { toast(code ? 'No DMC colour ' + code + ' here' : 'Type a DMC number'); return; }
+          o.key.push({ symbol: '', brand: 'DMC', code: f.code || code, name: f.name || '', hex: f.hex || null,
+            strands: null, stitchCount: null, skeins: null, kind: 'cross' });
+          o.assign[c.id] = o.key.length - 1;
+          schedule(0);
+        });
+        extra.appendChild(inp);
+        extra.appendChild(add);
+        row.appendChild(sel);
+        box.appendChild(row);
+        box.appendChild(extra);
+      });
+      return box;
+    }
+
+    /* -- controls -- */
+    var wStep = null, hStep = null;
+    function syncSizeInputs(s) {
+      if (!s || !wStep) return;
+      wStep.set(s.w);
+      hStep.set(s.h);
+      var r = res || lastGood;
+      var how = o.size && src.size && sizeMatches(o.size, src.size) ? 'from the key'
+        : o.size ? 'as you typed it' : r && r.sizeSource === 'detected' ? 'found in the picture' : '';
+      if (n.sizeNote) n.sizeNote.textContent = how ? 'Size ' + how + '.' : '';
+      syncLatticeNote();
+    }
+
+    function syncLatticeNote() {
+      if (!n.latNote) return;
+      var lat = lattice();
+      n.latNote.textContent = lat
+        ? 'Each square is ' + lat.pitchX.toFixed(2) + ' × ' + lat.pitchY.toFixed(2) + ' pixels' +
+          (o.lattice ? ' (moved by you).' : '.')
+        : '';
+    }
+
+    function sizeChanged() {
+      var w = wStep.get(), h = hStep.get();
+      if (o.size && o.size.w === w && o.size.h === h) return;
+      o.size = { w: w, h: h };
+      o.lattice = null;                // refit the grid to the new size
+      syncSizeInputs(o.size);
+      schedule();
+    }
+
+    function nudge(dx, dy, dp) {
+      var lat = lattice();
+      if (!lat) { toast('Nothing to move yet'); return; }
+      var next = { x0: lat.x0, y0: lat.y0, pitchX: lat.pitchX, pitchY: lat.pitchY };
+      next.x0 += dx * lat.pitchX / 8;
+      next.y0 += dy * lat.pitchY / 8;
+      if (dp) {
+        next.pitchX *= 1 + dp * 0.002;
+        next.pitchY *= 1 + dp * 0.002;
+      }
+      o.lattice = next;
+      if (!o.size && (res || lastGood)) o.size = (res || lastGood).size;
+      syncLatticeNote();
+      invalidate();
+      schedule();
+    }
+
+    function syncFabric() {
+      if (!n.fabricNote) return;
+      if (o.fabric === 'auto') n.fabricNote.textContent = 'The colour that fills the background is taken as unstitched fabric.';
+      else if (o.fabric === 'none') n.fabricNote.textContent = 'Every square counts as a stitch.';
+      else n.fabricNote.textContent = 'Fabric: the colour you tapped (' + o.fabric + ').';
+      if (n.fabricSw) {
+        n.fabricSw.hidden = !/^#/.test(o.fabric);
+        n.fabricSw.style.background = /^#/.test(o.fabric) ? o.fabric : 'transparent';
+      }
+    }
+
+    function setShow(v) {
+      show = v;
+      if (n.showSeg) n.showSeg.set(v);
+      invalidate();
+    }
+
+    function setUse(ok) {
+      if (!api) return;
+      var b = api.dialog.querySelector('.sheet-foot .btn.primary');
+      if (b) b.disabled = !ok;
+    }
+
+    function use() {
+      if (!res || !res.ok || !res.data) { toast('Nothing has been read yet'); return; }
+      var chk = checkNow();
+      var go = function () {
+        applyRead(projectId, res, {
+          src: src, o: o, renames: renames, typed: typed, check: chk, keyMeta: keyMeta,
+          data: dataNow(), statusTo: setStatus
+        });
+      };
+      if (chk && chk.verdict === 'off') {
+        C.confirmSheet({
+          title: 'Use it with colours that are off?',
+          message: (chk.summary || '') + ' The chart may be wrong where those colours are. You can come back ' +
+            'to this check from the project.',
+          confirmText: 'Use it anyway',
+          cancelText: 'Keep checking'
+        }).then(function (ok) { if (ok) go(); });
+      } else {
+        go();
+      }
+    }
+
+    api = C.openSheet({
+      title: 'Read a chart picture',
+      cls: 'sheet-xs-read',
+      build: function (body) {
+        n.status = el('p', 'xs-read-status is-busy', 'Reading…');
+        n.status.setAttribute('role', 'status');
+        n.status.setAttribute('aria-live', 'polite');
+        body.appendChild(n.status);
+
+        n.showSeg = C.segmented([{ id: 'picture', label: 'The picture' }, { id: 'read', label: 'What was read' }],
+          show, function (v) { show = v; invalidate(); });
+        n.showSeg.node.classList.add('xs-read-seg');
+        body.appendChild(n.showSeg.node);
+
+        var frame = el('div', 'xs-read-frame');
+        n.canvas = document.createElement('canvas');
+        n.canvas.className = 'xs-read-canvas';
+        n.canvas.setAttribute('role', 'img');
+        n.canvas.setAttribute('aria-label', 'The picture with the grid that was found drawn over it. ' +
+          'Drag to move, pinch or + and − to zoom, 0 to fit.');
+        frame.appendChild(n.canvas);
+        body.appendChild(frame);
+        bindView(n.canvas);
+        if (window.ResizeObserver) {
+          n.ro = new window.ResizeObserver(function () { invalidate(); });
+          n.ro.observe(n.canvas);
+        }
+        var zr = el('div', 'xs-zoom');
+        var zo = button('btn ghost', '−', 'Zoom out');
+        var zf = button('btn ghost', 'Fit');
+        var zi = button('btn ghost', '+', 'Zoom in');
+        on(zo, 'click', function () { zoomBy(1 / 1.4); });
+        on(zf, 'click', function () { vs.laidOut = false; invalidate(); });
+        on(zi, 'click', function () { zoomBy(1.4); });
+        zr.appendChild(zo); zr.appendChild(zf); zr.appendChild(zi);
+        body.appendChild(zr);
+
+        n.results = el('div', 'xs-read-results');
+        body.appendChild(n.results);
+
+        /* adjust: size, grid, crop, fabric, how squares differ */
+        var adj = el('details', 'xs-advanced xs-read-adjust');
+        n.adjust = adj;
+        adj.appendChild(el('summary', null, 'Adjust the read'));
+
+        var two = el('div', 'xs-two');
+        var s0 = o.size || { w: 100, h: 100 };
+        wStep = C.stepper(s0.w, 1, 2000, 'width in stitches');
+        hStep = C.stepper(s0.h, 1, 2000, 'height in stitches');
+        two.appendChild(field('Width in stitches', wStep.node));
+        two.appendChild(field('Height in stitches', hStep.node));
+        adj.appendChild(two);
+        [wStep, hStep].forEach(function (sp) {
+          on(sp.node, 'click', function () { window.setTimeout(sizeChanged, 0); });
+          on(sp.input, 'change', sizeChanged);
+        });
+        n.sizeNote = el('p', 'muted xs-read-note', '');
+        adj.appendChild(n.sizeNote);
+
+        var nudgeBox = el('div', 'xs-nudge');
+        nudgeBox.setAttribute('role', 'group');
+        nudgeBox.setAttribute('aria-label', 'Move the grid');
+        [['←', 'Move the grid left', -1, 0, 0], ['→', 'Move the grid right', 1, 0, 0],
+         ['↑', 'Move the grid up', 0, -1, 0], ['↓', 'Move the grid down', 0, 1, 0]]
+          .forEach(function (b) {
+            var btn = button('btn ghost', b[0], b[1]);
+            btn.title = b[1];
+            on(btn, 'click', function () { nudge(b[2], b[3], b[4]); });
+            nudgeBox.appendChild(btn);
+          });
+        adj.appendChild(field('Move the grid', nudgeBox, 'If the lines sit between the squares instead of around them.'));
+        var pitchBox = el('div', 'xs-nudge');
+        pitchBox.setAttribute('role', 'group');
+        pitchBox.setAttribute('aria-label', 'Square size');
+        [['Smaller', 'Make the squares a little smaller', -1], ['Bigger', 'Make the squares a little bigger', 1]]
+          .forEach(function (b) {
+            var btn = button('btn ghost xs-nudge-word', b[0], b[1]);
+            on(btn, 'click', function () { nudge(0, 0, b[2]); });
+            pitchBox.appendChild(btn);
+          });
+        adj.appendChild(field('Square size', pitchBox, 'If the grid drifts off the squares towards one edge.'));
+        n.latNote = el('p', 'muted xs-read-note', '');
+        adj.appendChild(n.latNote);
+        var resetGrid = button('linkish', 'Let it find the grid again');
+        on(resetGrid, 'click', function () { o.lattice = null; syncLatticeNote(); schedule(0); });
+        adj.appendChild(resetGrid);
+
+        var fabSeg = C.segmented(
+          [{ id: 'auto', label: 'Find it' }, { id: 'none', label: 'None' }, { id: 'pick', label: 'Tap it' }],
+          /^#/.test(o.fabric) ? 'pick' : o.fabric,
+          function (v) {
+            if (v === 'pick') {
+              pickFabric = true;
+              n.canvas.classList.add('picking');
+              setShow('picture');
+              setStatus('Tap an unstitched square of fabric on the picture.', 'busy');
+              try { n.canvas.focus(); } catch (e) { /* ignore */ }
+              return;
+            }
+            pickFabric = false;
+            n.canvas.classList.remove('picking');
+            o.fabric = v;
+            syncFabric();
+            schedule(0);
+          });
+        var fabRow = el('div', 'xs-fabric-row');
+        fabRow.appendChild(fabSeg.node);
+        n.fabricSw = el('span', 'xs-swatch xs-swatch-sm');
+        n.fabricSw.hidden = true;
+        fabRow.appendChild(n.fabricSw);
+        adj.appendChild(field('Fabric', fabRow));
+        n.fabricNote = el('p', 'muted xs-read-note', '');
+        adj.appendChild(n.fabricNote);
+
+        var modeSeg = C.segmented(
+          [{ id: 'auto', label: 'Either' }, { id: 'colour', label: 'Colour' }, { id: 'symbol', label: 'Symbol' }],
+          o.mode, function (v) { o.mode = v; schedule(0); });
+        adj.appendChild(field('Squares differ by', modeSeg.node,
+          'Symbol is for black-and-white charts, where only the printed symbol tells colours apart.'));
+
+        if (projectKeyEntries) {
+          adj.appendChild(C.switchRow('Match to this project’s key',
+            plural(projectKeyEntries.length, 'colour') + ' already in the project.', true, function (v) {
+              o.key = v ? projectKeyEntries.map(copyEntry) : null;
+              o.assign = {};
+              schedule(0);
+            }));
+        }
+
+        var cropBox = el('details', 'xs-read-crop');
+        n.cropDetails = cropBox;
+        cropBox.appendChild(el('summary', null, 'Crop to the chart'));
+        n.cropper = makeCropFrame({
+          noun: 'picture',
+          onChange: function (c) { o.crop = c; o.lattice = null; schedule(); }
+        });
+        cropBox.appendChild(n.cropper.wrap);
+        cropBox.appendChild(n.cropper.row);
+        cropBox.appendChild(n.cropper.lockRow);
+        adj.appendChild(cropBox);
+        n.cropper.load(src.blob);
+        if (o.crop) n.cropper.set(o.crop);
+
+        body.appendChild(adj);
+        body.appendChild(el('p', 'muted xs-import-note', 'Everything is read on this device. ' +
+          'The colour key’s stitch counts are the check: when every colour matches, the chart is right.'));
+        syncFabric();
+        syncSizeInputs(o.size);
+      },
+      footer: [
+        { text: 'Cancel', cls: 'btn ghost', onClick: function (sa) { sa.close(); } },
+        { text: 'Use this chart', cls: 'btn primary', onClick: function () { use(); } }
+      ],
+      onClose: function () {
+        closed = true;
+        if (timer) window.clearTimeout(timer);
+        if (token) { try { R.cancel(token); } catch (e) { /* ignore */ } }
+        token = null;
+        if (n.ro) { try { n.ro.disconnect(); } catch (e) { /* ignore */ } }
+        if (n.cropper) n.cropper.destroy();
+        if (picUrl) { try { URL.revokeObjectURL(picUrl); } catch (e) { /* ignore */ } }
+        if (pic && typeof pic.close === 'function' && pic !== src.canvas) { try { pic.close(); } catch (e) { /* ignore */ } }
+      }
+    });
+    setUse(false);
+    decode();
+    schedule(0);
+  }
+
+  /**
+   * "Use this chart": one undoable step through Store.updateCraftData, the
+   * key's names / strands / printed counts kept, the source picture and the
+   * read's details saved in BlobStore so the stitcher can come back to them.
+   */
+  function applyRead(projectId, res, x) {
+    var d = x.data || res.data;
+    var keyed = x.o.key && x.o.key.length ? x.o.key : null;
+    var byCode = {};
+    if (keyed) keyed.forEach(function (e) { byCode[codeKey(e.brand, e.code)] = e; });
+    var chk = x.check || res.check || null;
+    var pal = (d.palette || []).map(function (e, i) {
+      var out = {};
+      for (var k in e) out[k] = e[k];
+      out.i = i;
+      var ke = byCode[codeKey(out.brand, out.code)];
+      if (ke) {
+        if (ke.name) out.name = ke.name;                 // the PDF's own colour name
+        if (ke.strands) out.strands = ke.strands;
+        if (ke.stitchCount) out.stitchCount = ke.stitchCount;
+        if (ke.skeins) out.skeins = ke.skeins;
+        if (ke.kind) out.kind = ke.kind;
+      } else if (!keyed && x.typed['p' + i] > 0) {
+        out.stitchCount = x.typed['p' + i];
+      }
+      return out;
+    });
+    /* Two colours the stitcher named the same floss become one. */
+    var seen = {}, remap = [], merged = [], dup = false;
+    pal.forEach(function (e, i) {
+      var k = codeKey(e.brand, e.code);
+      if (seen[k] !== undefined) { remap[i] = seen[k]; dup = true; return; }
+      seen[k] = merged.length;
+      remap[i] = merged.length;
+      e.i = merged.length;
+      merged.push(e);
+    });
+    if (dup && d.chart && d.chart.cells) {
+      var cellsArr = X.unpackCells(d.chart.cells);
+      for (var ci = 0; ci < cellsArr.length; ci++) if (cellsArr[ci] >= 0) cellsArr[ci] = remap[cellsArr[ci]];
+      var chart2 = {};
+      for (var ck in d.chart) chart2[ck] = d.chart[ck];
+      chart2.cells = X.packCells(cellsArr, d.chart.w, d.chart.h);
+      var d2 = {};
+      for (var dk in d) d2[dk] = d[dk];
+      d2.chart = chart2;
+      d = d2;
+      pal = merged;
+    }
+    var info = {
+      verdict: chk && chk.verdict ? chk.verdict : 'unchecked',
+      summary: chk && chk.summary ? chk.summary : '',
+      readTotal: chk && typeof chk.readTotal === 'number' ? chk.readTotal : null,
+      expectedTotal: chk && typeof chk.expectedTotal === 'number' ? chk.expectedTotal : null,
+      off: checkOff(chk),
+      colours: pal.length
+    };
+    var keys = readKeys(projectId);
+    var km = x.keyMeta || {};
+
+    Store.updateCraftData(projectId, function (cd) {
+      var raw = {};
+      for (var k in d) raw[k] = d[k];
+      raw.palette = pal;
+      var next = X.normalize(raw, null);
+      next.design.w = next.chart.w;
+      next.design.h = next.chart.h;
+      next.design.title = km.title || cd.design.title || (d.design && d.design.title) || '';
+      next.design.designer = cd.design.designer;
+      next.design.copyright = cd.design.copyright;
+      next.fabric = cd.fabric;
+      if (km.fabric && km.fabric.count) { next.fabric.count = km.fabric.count; next.fabric.countY = km.fabric.count; }
+      if (km.fabric && km.fabric.kind) next.fabric.kind = km.fabric.kind;
+      if (km.fabric && km.fabric.over) next.fabric.over = km.fabric.over;
+      next.strandsDefault = km.strands || cd.strandsDefault;
+      next.notesKey = cd.notesKey;
+      next.pages = cd.pages;
+      if (cd.progress && cd.progress.pageDone) next.progress.pageDone = cd.progress.pageDone;
+      next.stash = cd.stash || {};
+      next.parking = [];
+      next.sizeWarnedAt = 0;
+      next.source = {
+        kind: 'picture', fileName: String(x.src.name || ''), importedAt: Date.now(),
+        warnings: ((res.stats && res.stats.warnings) || []).slice(0, 12),
+        check: info, picture: keys.pic
+      };
+      return next;
+    });
+
+    var after = Store.project(projectId);
+    var meta = {
+      v: 1, fileName: String(x.src.name || ''), savedAt: Date.now(),
+      fp: after ? cellsPrint(dataOf(after).chart) : '',
+      check: info,
+      opts: {
+        size: res.size || x.o.size || null, lattice: x.o.lattice || null, crop: x.o.crop || null,
+        fabric: x.o.fabric, mode: x.o.mode, assign: x.o.assign, renames: x.renames, typed: x.typed
+      },
+      key: keyed, keyMeta: km
+    };
+    if (window.BlobStore && window.BlobStore.available && window.BlobStore.available()) {
+      var picBlob = x.src.blob;
+      window.BlobStore.put(keys.pic, picBlob).then(function () {
+        return window.BlobStore.put(keys.meta, new Blob([JSON.stringify(meta)], { type: 'application/json' }));
+      }).then(null, function () { /* the chart itself is saved; only the look-back is lost */ });
+    }
+
+    forgetCaches();
+    var dd = after ? dataOf(after) : null;
+    var msg = 'Chart read from the picture · ' + (dd ? dd.chart.w + ' × ' + dd.chart.h + ' · ' : '') +
+      plural(pal.length, 'colour');
+
+    if (x.src.pdf && x.src.pdf.handle && typeof x.src.pdf.handle.renderPage === 'function') {
+      /* keep the PDF's pages too, exactly as a PDF import does */
+      C.render();
+      if (x.statusTo) x.statusTo('Saving the PDF pages…', 'busy');
+      var line = el('p');
+      var pdf = x.src.pdf;
+      renderPages(projectId, pdf.handle, pdf.key || { design: {} }, pdf.progressLine || line, null).then(function () {
+        C.closeAllSheets();
+        C.render();
+        fb('done');
+        toast(msg, { ms: 4200 });
+        checkSize(projectId);
+      }, function () {
+        C.closeAllSheets();
+        C.render();
+        toast(msg, { ms: 4200 });
+      });
+      return;
+    }
+    C.closeAllSheets();
+    C.render();
+    fb('done');
+    toast(msg, { ms: 4200 });
+    checkSize(projectId);
+  }
+
+  /** Back into the review from the project's banner. */
+  function reopenRead(projectId) {
+    if (!readerAvailable()) { toast('Reading a chart picture is not available on this device'); return; }
+    if (!window.BlobStore || !window.BlobStore.available || !window.BlobStore.available()) {
+      toast('The picture is not kept on this device');
+      return;
+    }
+    var keys = readKeys(projectId);
+    /* craftData names the picture; an import that gave the project a new
+       id re-keys that name (Store's rekeyBlobs), and the details sit beside it */
+    var pr = Store.project(projectId);
+    var named = pr && pr.craftData && pr.craftData.source ? String(pr.craftData.source.picture || '') : '';
+    if (/:readsrc:0$/.test(named)) keys = { pic: named, meta: named.replace(/:readsrc:0$/, ':readsrc:meta') };
+    Promise.all([window.BlobStore.get(keys.pic), window.BlobStore.get(keys.meta)]).then(function (r) {
+      var blob = r[0];
+      if (!blob) { toast('The picture this chart was read from is not on this device any more'); return null; }
+      return readJsonBlob(r[1]).then(function (meta) {
+        meta = meta || {};
+        var p = Store.project(projectId);
+        var pk = p ? projectKey(dataOf(p)) : null;
+        openReadSheet(projectId, {
+          blob: blob, name: meta.fileName || 'Picture',
+          key: meta.key && meta.key.length ? meta.key : (pk ? pk.entries : null),
+          keyMeta: meta.keyMeta || (pk ? pk.meta : {}),
+          size: meta.opts && meta.opts.size ? meta.opts.size : null,
+          saved: meta.opts || null
+        });
+      });
+    }, function () { toast('The picture could not be loaded'); });
+  }
+
+  /** What the project's banner says, or null when this chart was not read from a picture. */
+  function readInfo(data) {
+    if (!hasChart(data)) return null;
+    /* craftData is the one source of truth (XStitch.normalize keeps
+       source.kind 'picture' and source.check since wave J), so the band
+       follows Undo / redo, a reload and an export / import like the chart. */
+    var so = data.source || {};
+    return so.kind === 'picture' && isObj(so.check) ? so.check : null;
+  }
+
+  function syncReadBand(project, data) {
+    var n = view && view.nodes;
+    if (!n || !n.readBand) return;
+    var info = readInfo(data);
+    if (info) {
+      n.readBand.hidden = false;
+      n.readBand.className = 'xs-read-band xs-verdict-' + (info.verdict || 'unchecked');
+      n.readBandText.textContent = readBannerText(info);
+    } else {
+      n.readBand.hidden = true;
+    }
   }
 
   /* ================================================================== *
@@ -5014,6 +7236,9 @@
     ];
     if (data.pages.length) {
       items.push({ icon: '📄', label: 'Chart pages', run: function () { openPagesSheet(project.id); } });
+    }
+    if (rowsAvailable(data)) {
+      items.push({ icon: '☰', label: 'Row by row', run: function () { openRowsSheet(project.id); } });
     }
     if (hasChart(data)) {
       items.push({ icon: '🖨', label: 'Printable chart', run: function () { openPrintSheet(project.id); } });
@@ -5125,6 +7350,19 @@
         'block you are in before moving on to the next block with that colour.'
     },
     {
+      q: 'Can it read a picture of a chart?',
+      a: 'Yes, when the picture shows one square per stitch: a screenshot of a chart, an image file, or ' +
+        'a PDF whose chart is a picture. Drop it into ⋯ → Import pattern (or paste a screenshot there), ' +
+        'or use “Read the chart from the page pictures” after opening the PDF. It finds the grid, reads ' +
+        'each square’s colour or symbol, and checks the result against the stitch counts printed in the ' +
+        'colour key: when every colour matches, the chart is right. When it is unsure it says so, outlines ' +
+        'the squares it could not read, and lets you fix the size, move the grid, pick the fabric colour ' +
+        'or say which colour a kind of square is. Everything happens on this device. It cannot yet read a ' +
+        'photo of a paper chart taken at an angle, a chart split across several pages, or backstitch. ' +
+        'Any project with a chart also has ☰ Row by row: the chart written out a row at a time ' +
+        '(“skip 3, 5 × DMC 310, …”), with a big Row done button and Copy as text.'
+    },
+    {
       q: 'Where are my chart images stored?',
       a: 'In the browser’s own storage on this device — never uploaded. Back up now (Settings) and ' +
         '⋯ → Send this project make a .thready file that carries them, along with your stitch ' +
@@ -5202,6 +7440,13 @@
               tryIt: 'give it a tap.'
             },
             {
+              target: '#xs-rows-btn',
+              title: 'Row by row',
+              body: 'The chart written out one row at a time: how many of each colour, in order, the way ' +
+                'you stitch it. A big Row done button marks the whole row on the chart, a second tap ' +
+                'unmarks it, and you can copy every row as text.'
+            },
+            {
               target: '.xs-key-card',
               title: 'The colour key',
               body: 'Tap a row to make it the current colour, ◉ to dim everything else on the ' +
@@ -5224,7 +7469,7 @@
    * 10. Registration
    * ================================================================== */
 
-  App.registerCraft({
+  var def = {
     id: CRAFT,
     name: 'Cross-stitch',
     emoji: '🧵',
@@ -5243,6 +7488,52 @@
     // What the New project sheet's drop zone accepts for this craft before
     // handing the file to openImportSheet (the same list its own zone takes).
     importAccept: ['.pdf', '.oxs', '.xml']
-  });
+  };
+  /* Wave J: read when the New project sheet mounts its zone, so the picture
+     types appear exactly when the chart reader is on this device. */
+  try {
+    Object.defineProperty(def, 'importAccept', {
+      enumerable: true, configurable: true,
+      get: function () { return importAcceptList(); }
+    });
+  } catch (e) { def.importAccept = importAcceptList(); }
+
+  App.registerCraft(def);
+
+  /* QA hooks (test/crafts.test.html and Browser-pane checks only; never
+     called by app code). The pure helpers, and the real entry points so a
+     walkthrough can feed a picture or a parsed key down the same path a
+     drop or a PDF import takes. */
+  window.XStitchApp = {
+    __test: {
+      readerAvailable: readerAvailable,
+      isImageFile: isImageFile,
+      importAcceptList: importAcceptList,
+      pickPdfPage: pickPdfPage,
+      pdfReadScale: pdfReadScale,
+      readBannerText: readBannerText,
+      unsureText: unsureText,
+      checkOff: checkOff,
+      cellsPrint: cellsPrint,
+      codeKey: codeKey,
+      normRowOpts: normRowOpts,
+      writtenOptsFor: writtenOptsFor,
+      rowOptsLabel: rowOptsLabel,
+      firstStitchX: firstStitchX,
+      rowsAvailable: rowsAvailable,
+      def: def,
+      handlePicture: function (projectId, file, setPreview) {
+        handlePicture(projectId, file, setPreview || function () {});
+      },
+      openReadSheet: openReadSheet,
+      openRowsSheet: openRowsSheet,
+      reopenRead: reopenRead,
+      /** A parsed key into the project exactly as a key-only PDF import applies it. */
+      applyKey: function (projectId, key) {
+        return applyPdf(projectId, { entries: key.entries.slice(), fabric: key.fabric, design: key.design,
+          strands: key.strandsDefault }, key, null, el('p'));
+      }
+    }
+  };
 
 })();
