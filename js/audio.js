@@ -130,8 +130,23 @@
     }
   }
 
+  /* The dev server is where automated testing happens, and its taps would
+     play through the owner's speakers. So localhost is silent unless a
+     developer opts in: localStorage['thready.devSound'] = '1'. The live
+     site and installed apps are unaffected. */
+  function devMuted() {
+    try {
+      var h = window.location.hostname;
+      if (h !== 'localhost' && h !== '127.0.0.1' && h !== '[::1]') return false;
+      return window.localStorage.getItem('thready.devSound') !== '1';
+    } catch (e) {
+      return false;
+    }
+  }
+
   function sound(fn) {
     if (!settings().sounds) return;
+    if (devMuted()) return;
     fn();
   }
 
