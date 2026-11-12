@@ -468,13 +468,137 @@ assertEqual(Store.part(Store.project(sheep.id), body.id).stitch, 4, 'undo still 
 restore();
 
 var summaryEl = document.getElementById('summary');
-var finalLine = passed + ' passed, ' + failed + ' failed';
-summaryEl.textContent = finalLine;
-summaryEl.className = failed === 0 ? 'ok' : 'bad';
-console.log(finalLine);
+summaryEl.textContent = 'running… (the cross-stitch module group loads in a frame)';
+
+function finish() {
+  if (finish.done) return;
+  finish.done = true;
+  var finalLine = passed + ' passed, ' + failed + ' failed';
+  summaryEl.textContent = finalLine;
+  summaryEl.className = failed === 0 ? 'ok' : 'bad';
+  console.log(finalLine);
+}
 
 // The debounced save may still be armed from the assertions above.
 window.setTimeout(restore, 400);
+
+/* ====================================================================== *
+ * 11. The cross-stitch module's registration surface (wave J)
+ *
+ * js/app-xstitch.js loads in its own frame with a stub App, so neither its
+ * craft nor js/xstitch.js's Store registration touches this page's Store.
+ * It checks what the module publishes to the shell and its pure helpers
+ * (window.XStitchApp.__test): the picture types in importAccept only while
+ * window.XSRead is there, the PDF page choice and render scale, the banner
+ * wording and the Row by row options.
+ * ====================================================================== */
+(function () {
+  function stub(withReader) {
+    return '<!DOCTYPE html><html><body>' +
+      '<script src="../js/xstitch.js"><\/script>' +
+      (withReader ? '<script src="../js/xstitch-read.js"><\/script>' : '') +
+      '<script>window.App = { registerCraft: function (d) { window.__def = d; return d; } };<\/script>' +
+      '<script src="../js/app-xstitch.js"><\/script>' +
+      '</body></html>';
+  }
+  var timer = window.setTimeout(function () {
+    group('11. Cross-stitch module (wave J)');
+    log(false, 'the cross-stitch module frame loaded in time');
+    finish();
+  }, 10000);
+
+  function withFrame(withReader, cb) {
+    var f = document.createElement('iframe');
+    f.style.display = 'none';
+    f.onload = function () { try { cb(f.contentWindow); } catch (e) { log(false, 'frame group threw', String(e && e.message)); } };
+    f.srcdoc = stub(withReader);
+    document.body.appendChild(f);
+  }
+
+  withFrame(false, function (w0) {
+    group('11. Cross-stitch module (wave J)');
+    var d0 = w0.__def;
+    assertTrue(!!d0 && d0.id === 'crossstitch', 'app-xstitch registers the cross-stitch craft');
+    assertEqual(d0 && d0.importAccept, ['.pdf', '.oxs', '.xml'],
+      'without the chart reader the drop zones take exactly what they did before');
+    assertTrue(!!(w0.XStitchApp && w0.XStitchApp.__test) && !w0.XStitchApp.__test.readerAvailable(),
+      'readerAvailable() is false without window.XSRead');
+
+    withFrame(true, function (w) {
+      window.clearTimeout(timer);
+      var d = w.__def, T = w.XStitchApp && w.XStitchApp.__test;
+      if (!T) { log(false, 'XStitchApp.__test is published'); finish(); return; }
+      assertTrue(T.readerAvailable(), 'readerAvailable() is true with js/xstitch-read.js loaded');
+      assertEqual(d.importAccept, ['.pdf', '.oxs', '.xml', '.png', '.jpg', '.jpeg', '.webp'],
+        'with the reader, importAccept adds the picture types (read when the New project zone mounts)');
+
+      assertTrue(T.isImageFile({ name: 'shot.PNG', type: '' }), 'isImageFile: by extension, any case');
+      assertTrue(T.isImageFile({ name: 'blob', type: 'image/webp' }), 'isImageFile: by type');
+      assertTrue(!T.isImageFile({ name: 'chart.pdf', type: 'application/pdf' }), 'isImageFile: a PDF is not a picture');
+      assertTrue(!T.isImageFile({ name: 'logo.svg', type: 'image/svg+xml' }), 'isImageFile: an SVG is not read as a chart picture');
+
+      var declared = { w: 144, h: 85 };
+      var cands = [
+        { n: 1, det: { ok: true, size: { w: 60, h: 80 }, confidence: 0.9, alternatives: [] } },
+        { n: 2, det: { ok: true, size: { w: 144, h: 85 }, confidence: 0.7, alternatives: [] } },
+        { n: 3, det: { ok: false, reason: 'no-grid' } }
+      ];
+      var pick = T.pickPdfPage(cands, declared);
+      assertEqual(pick.best && pick.best.n, 2, 'pickPdfPage prefers the page whose grid is the declared design size');
+      assertTrue(pick.match, '… and says it matched');
+      assertEqual(pick.tile && pick.tile.n, 1, '… and notices a page that holds only part of the design');
+      var pick2 = T.pickPdfPage([{ n: 4, det: { ok: true, size: { w: 72, h: 42 }, confidence: 0.8,
+        alternatives: [{ w: 144, h: 85, confidence: 0.5 }] } }], declared);
+      assertTrue(pick2.match, 'pickPdfPage: a declared size among the alternatives (half pitch) counts as a match');
+      assertEqual(T.pickPdfPage([cands[2]], declared).best, null, 'pickPdfPage: no grid on any page is no pick');
+      assertEqual(T.pickPdfPage(cands, null).best.n, 1, 'pickPdfPage: with no declared size the most confident grid wins');
+
+      var base = { w: 612, h: 792 };
+      var s = T.pdfReadScale(base, 4, 1);
+      assertTrue(Math.abs(4 * s - 8.8) < 0.01, 'pdfReadScale: 4 px squares at scale 1 are drawn at 8.8 px (at least 8)');
+      assertEqual(T.pdfReadScale(base, 12, 1.5), 1.5, 'pdfReadScale: squares already 8 px or more keep the scale');
+      var capped = T.pdfReadScale(base, 0.5, 1);
+      assertTrue(Math.max(base.w, base.h) * capped <= 4096 + 1e-6 && base.w * base.h * capped * capped <= 16e6 + 1,
+        'pdfReadScale: capped at 4096 px a side and 16 MP');
+
+      assertEqual(T.readBannerText({ verdict: 'exact', summary: 'All 6 colours match the key exactly (5,721 stitches).' }),
+        'Read from a picture. All 6 colours match the key exactly (5,721 stitches).', 'banner: exact uses the check summary');
+      assertEqual(T.readBannerText({ verdict: 'off', off: 2, summary: '…' }),
+        'Read from a picture. 2 colours are off; open the chart check.', 'banner: off says how many and where to go');
+      assertEqual(T.readBannerText({ verdict: 'off', off: 1 }),
+        'Read from a picture. 1 colour is off; open the chart check.', 'banner: one colour off');
+      assertTrue(/no stitch counts/.test(T.readBannerText({ verdict: 'unchecked' })), 'banner: unchecked says the key had no counts');
+      assertEqual(T.unsureText(37), '37 squares are unsure. They are outlined on “What was read”.', 'unsure line: plural');
+      assertEqual(T.unsureText(1).indexOf('1 square is unsure'), 0, 'unsure line: one square');
+      assertEqual(T.checkOff({ rows: [{ expected: 10, ok: true }, { expected: 5, ok: false }, { expected: null, ok: null }] }), 1,
+        'checkOff: a row with no printed count (ok null) is unchecked, not off');
+      assertEqual(T.codeKey('DMC', '04'), T.codeKey('DMC', '4'), 'codeKey: DMC 04 and 4 are the same floss');
+
+      var a = { w: 2, h: 2, cells: { data: 'abc' } }, b2 = { w: 2, h: 2, cells: { data: 'abd' } };
+      assertTrue(T.cellsPrint(a) === T.cellsPrint({ w: 2, h: 2, cells: { data: 'abc' } }) && T.cellsPrint(a) !== T.cellsPrint(b2),
+        'cellsPrint: the same cells print the same, other cells do not');
+      assertEqual(T.cellsPrint(null), '', 'cellsPrint: no chart, no print');
+
+      assertEqual(T.normRowOpts(null), { from: 'top', dir: 'ltr', one: false, skipEmpty: true }, 'Row by row defaults');
+      assertEqual(T.normRowOpts({ from: 'bottom', dir: 'serpentine', one: true, skipEmpty: false }),
+        { from: 'bottom', dir: 'serpentine', one: true, skipEmpty: false }, 'Row by row options round-trip');
+      var data = { palette: [{ code: '310' }, { code: '842' }], current: { paletteIndex: 1 } };
+      assertEqual(T.writtenOptsFor(T.normRowOpts({ one: true }), data).color, 1, 'one colour at a time uses the current colour');
+      assertEqual(T.writtenOptsFor(T.normRowOpts({}), data).color, null, 'all colours: no colour filter');
+      assertEqual(T.firstStitchX({ rtl: true, runs: [{ p: -1, n: 3, x: 9 }, { p: 0, n: 2, x: 6 }] }), 6,
+        'firstStitchX: the column the first stitch is worked at (an rtl run starts at its right end)');
+
+      var X = w.XStitch;
+      if (X && typeof X.writtenRows === 'function') {
+        var chart = { v: 1, chart: { w: 3, h: 2, cells: X.packCells([0, -1, 1, -1, -1, -1], 3, 2), part: [], back: [], knots: [] },
+          palette: [{ code: '310' }, { code: '842' }] };
+        assertTrue(T.rowsAvailable(chart), 'rowsAvailable: a chart with cells and XStitch.writtenRows');
+      }
+      assertTrue(!T.rowsAvailable({ chart: null }), 'rowsAvailable: no chart, no Row by row');
+      finish();
+    });
+  });
+})();
 </script>
 </body>
 </html>

@@ -1,0 +1,1015 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>XSRead tests</title>
+<style>
+  body { font: 14px/1.4 Menlo, Consolas, monospace; background:#111; color:#eee; padding:16px; }
+  .pass { color:#7bd389; }
+  .fail { color:#ff6b6b; background:#2a1414; }
+  .note { color:#c9a227; }
+  .skip { color:#888; }
+  .group { margin-top:18px; font-weight:bold; color:#9cf; border-bottom:1px solid #333; padding-bottom:4px; }
+  #summary { margin-top:20px; font-size:18px; font-weight:bold; }
+  #summary.ok { color:#7bd389; }
+  #summary.bad { color:#ff6b6b; }
+  #summary.run { color:#9cf; }
+  table.t { border-collapse:collapse; margin:6px 0 10px; font-size:12px; }
+  table.t th, table.t td { border:1px solid #333; padding:2px 6px; text-align:right; }
+  table.t th { color:#9cf; background:#1a1a1a; }
+  table.t td.l, table.t th.l { text-align:left; }
+
+  /* ---- visual QA panel ---- */
+  .panel { border:1px solid #333; border-radius:8px; padding:12px; margin:12px 0 22px; background:#161616; }
+  .panel h2 { margin:0 0 8px; font-size:15px; color:#9cf; }
+  .panel .row { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-bottom:8px; }
+  .panel button { font:inherit; background:#2a2a2a; color:#eee; border:1px solid #444; border-radius:6px; padding:5px 9px; cursor:pointer; }
+  .panel button:hover { background:#383838; }
+  .panel label { color:#aaa; }
+  .panel input[type=number] { width:64px; font:inherit; background:#222; color:#eee; border:1px solid #444; border-radius:4px; padding:3px 5px; }
+  .panel select { font:inherit; background:#222; color:#eee; border:1px solid #444; border-radius:4px; padding:3px 5px; }
+  #drop { border:2px dashed #444; border-radius:8px; padding:10px; color:#888; text-align:center; }
+  #drop.over { border-color:#9cf; color:#9cf; }
+  .shots { display:flex; gap:16px; flex-wrap:wrap; align-items:flex-start; }
+  .shot { text-align:center; max-width:100%; }
+  .shot canvas { image-rendering: pixelated; border:1px solid #333; background:#fff; display:block; max-width:100%; }
+  .shot .cap { color:#888; font-size:12px; margin-top:4px; }
+  #vstats { margin:10px 0; color:#ddd; white-space:pre-wrap; }
+  #vclasses { display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; }
+  .sw { display:flex; align-items:center; gap:5px; border:1px solid #333; border-radius:5px; padding:3px 6px; background:#1d1d1d; font-size:12px; }
+  .sw i { width:16px; height:16px; border-radius:3px; display:inline-block; border:1px solid #0006; }
+  .sw canvas { width:18px; height:18px; image-rendering:pixelated; border:1px solid #0006; }
+</style>
+</head>
+<body>
+<h1>XSRead test suite</h1>
+<p class="note">Synthetic charts are generated in code. The real-picture sections read <code>../tmp-pdf</code> at
+runtime (gitignored, copyrighted, never committed) and skip when the files are absent. <code>?all=1</code> reads every
+chart page of the vector fixtures (default: three pages each); <code>?quick=1</code> skips the fixture sections.</p>
+
+<div class="panel">
+  <h2>Visual QA — read a chart picture</h2>
+  <div class="row">
+    <div id="drop">Drop a chart picture here, or <input type="file" id="q-file" accept="image/*"></div>
+    <button id="q-pot">Owner's potatoes (dev fixture)</button>
+    <button id="q-syn1">Synthetic: stitched 6 px</button>
+    <button id="q-syn2">Synthetic: symbols B&amp;W</button>
+    <button id="q-syn3">Synthetic: blocks + grid + symbols</button>
+  </div>
+  <div class="row">
+    <label>size w <input type="number" id="q-w" min="0" max="2000" value=""></label>
+    <label>h <input type="number" id="q-h" min="0" max="2000" value=""></label>
+    <label>fabric <select id="q-fab"><option value="auto">auto</option><option value="none">none</option></select></label>
+    <label>mode <select id="q-mode"><option value="auto">auto</option><option value="colour">colour</option><option value="symbol">symbol</option></select></label>
+    <label><input type="checkbox" id="q-key"> potatoes key</label>
+    <label><input type="checkbox" id="q-nw"> no worker</label>
+    <button id="q-run">Read</button>
+    <button id="q-cancel">Cancel</button>
+  </div>
+  <div id="vstats">Pick a source above.</div>
+  <div class="shots">
+    <div class="shot"><canvas id="q-src" width="10" height="10"></canvas><div class="cap">picture + the lattice read (red: chart edge, cyan: every 10th line)</div></div>
+    <div class="shot"><canvas id="q-out" width="10" height="10"></canvas><div class="cap">what was read (unsure squares outlined in magenta)</div></div>
+  </div>
+  <div id="vcheck"></div>
+  <div id="vclasses"></div>
+</div>
+
+<div id="out"></div>
+<div id="summary" class="run">running…</div>
+
+<script>
+// The Browser pane caches ../js/*.js hard, so always load what is on disk.
+document.write('<scr' + 'ipt src="../js/xstitch.js?v=' + Date.now() + '"><\/scr' + 'ipt>');
+document.write('<scr' + 'ipt src="../js/xstitch-read.js?v=' + Date.now() + '"><\/scr' + 'ipt>');
+</script>
+<script src="../js/vendor/pdf.min.js"></script>
+<script src="../js/pdftext.js"></script>
+<script>
+'use strict';
+
+/* pdftext.js points the pdf.js worker at a page-relative path; pin it from /test/. */
+(function () {
+  if (!window.pdfjsLib || !window.pdfjsLib.GlobalWorkerOptions) return;
+  var src = '../js/vendor/pdf.worker.min.js';
+  try {
+    Object.defineProperty(window.pdfjsLib.GlobalWorkerOptions, 'workerSrc', {
+      get: function () { return src; }, set: function () { /* ignore */ }, configurable: true
+    });
+  } catch (e) { window.pdfjsLib.GlobalWorkerOptions.workerSrc = src; }
+})();
+
+/* ---------------------------------------------------------------- *
+ * harness
+ * ---------------------------------------------------------------- */
+var out = document.getElementById('out');
+var passed = 0, failed = 0, skipped = 0;
+var QS = location.search;
+var ALL = /[?&]all=1/.test(QS), QUICK = /[?&]quick=1/.test(QS);
+
+function el(tag, cls, text) { var e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
+function log(ok, label, detail) {
+  if (ok) passed++; else failed++;
+  var line = (ok ? 'PASS' : 'FAIL') + ' - ' + label + (detail ? '  (' + detail + ')' : '');
+  out.appendChild(el('div', ok ? 'pass' : 'fail', line));
+  if (ok) console.log(line); else console.error(line);
+}
+function eq(a, b, label) {
+  var ok = JSON.stringify(a) === JSON.stringify(b);
+  log(ok, label, ok ? '' : 'got ' + JSON.stringify(a) + ', want ' + JSON.stringify(b));
+}
+function note(text) { out.appendChild(el('div', 'note', '·   ' + text)); console.log('·   ' + text); }
+function skip(text) { skipped++; out.appendChild(el('div', 'skip', 'SKIP - ' + text)); }
+function group(title) { out.appendChild(el('div', 'group', title)); console.log('== ' + title + ' =='); }
+function table(rows, head) {
+  var t = el('table', 't'), tr = el('tr');
+  head.forEach(function (h, i) { tr.appendChild(el('th', i === 0 ? 'l' : '', h)); });
+  t.appendChild(tr);
+  rows.forEach(function (r) {
+    var row = el('tr');
+    r.forEach(function (c, i) { row.appendChild(el('td', i === 0 ? 'l' : '', c == null ? '' : String(c))); });
+    t.appendChild(row);
+  });
+  out.appendChild(t);
+}
+function pct(x) { return x == null ? '' : (Math.round(x * 10000) / 100) + '%'; }
+
+/* ---------------------------------------------------------------- *
+ * synthetic charts
+ * ---------------------------------------------------------------- */
+function rng(seed) {
+  var s = seed >>> 0 || 1;
+  return function () { s ^= s << 13; s >>>= 0; s ^= s >>> 17; s ^= s << 5; s >>>= 0; return s / 4294967296; };
+}
+
+/** n DMC colours far apart from each other and from the fabric (deterministic). */
+function pickPalette(n, seed, fabricHex, minDE) {
+  var X = window.XStitch, R = rng(seed), tbl = X.FLOSS.dmc, res = [], tries = 0;
+  var fab = X.hexToLab('#' + fabricHex);
+  while (res.length < n && tries < 20000) {
+    tries++;
+    var f = tbl[Math.floor(R() * tbl.length)];
+    if (!/^\d{3,4}$/.test(f.code)) continue;
+    var lab = X.hexToLab('#' + f.hex);
+    if (X.deltaE76(lab, fab) < minDE) continue;
+    var okc = true;
+    for (var i = 0; i < res.length; i++) if (X.deltaE76(lab, res[i].lab) < minDE) { okc = false; break; }
+    if (okc) res.push({ code: f.code, name: f.name, hex: f.hex, lab: lab });
+  }
+  return res;
+}
+
+/** a grid: Int16Array, -1 = fabric. kinds: shapes | confetti | details | sparse */
+function makeGrid(w, h, n, kind, seed) {
+  var R = rng(seed), g = new Int16Array(w * h), i, x, y, k;
+  for (i = 0; i < g.length; i++) g[i] = -1;
+  if (kind === 'confetti') {
+    for (i = 0; i < g.length; i++) g[i] = R() < 0.4 ? -1 : Math.floor(R() * n);
+  } else if (kind === 'details') {
+    for (i = 0; i < g.length; i++) if (R() < 0.12) g[i] = Math.floor(R() * n);
+  } else if (kind === 'sparse') {
+    for (k = 0; k < 6; k++) g[Math.floor(R() * h) * w + Math.floor(R() * w)] = k % n;
+  } else {
+    for (k = 0; k < 14; k++) {
+      var c = k % n, x0 = Math.floor(R() * w), y0 = Math.floor(R() * h);
+      var rw = 2 + Math.floor(R() * w / 3), rh = 2 + Math.floor(R() * h / 3), ell = R() < 0.5;
+      for (y = y0; y < Math.min(h, y0 + rh); y++) {
+        for (x = x0; x < Math.min(w, x0 + rw); x++) {
+          if (ell) {
+            var dx = (x - x0 - rw / 2) / (rw / 2), dy = (y - y0 - rh / 2) / (rh / 2);
+            if (dx * dx + dy * dy > 1) continue;
+          }
+          g[y * w + x] = c;
+        }
+      }
+    }
+    for (x = 0; x < w; x++) g[Math.floor(h * 0.8) * w + x] = (n - 1);
+    for (k = 0; k < 12; k++) g[Math.floor(R() * h) * w + Math.floor(R() * w)] = Math.floor(R() * n);
+  }
+  if (kind !== 'sparse') {
+    /* every colour appears, with distinct extra runs (the symbol reader matches by count) */
+    for (k = 0; k < n; k++) for (var e = 0; e <= k; e++) g[(h - 2) * w + 2 + ((k * (n + 2)) % Math.max(1, w - 4 - n)) + e] = k;
+  }
+  return g;
+}
+function countsOf(g, n) { var c = []; for (var k = 0; k < n; k++) c.push(0); for (var i = 0; i < g.length; i++) if (g[i] >= 0) c[g[i]]++; return c; }
+
+var GLYPHS = ['●', '▲', '■', '+', '×', '◆', '★', '=', '/', '~', '○', '△', 'Z', 'S', '#', 'V'];
+
+function rgbOf(hex) { return [parseInt(hex.slice(0, 2), 16), parseInt(hex.slice(2, 4), 16), parseInt(hex.slice(4, 6), 16)]; }
+function css(rgb, f) { f = f || 1; return 'rgb(' + rgb.map(function (v) { return Math.max(0, Math.min(255, Math.round(v * f))); }).join(',') + ')'; }
+
+/**
+ * render(spec) -> canvas
+ * spec: { grid, w, h, pal, style, px, py, fabric, page: bool, jitter }
+ */
+function render(s) {
+  var M = s.page ? Math.max(40, Math.round(s.px * 5)) : 0, T = s.page ? Math.max(60, Math.round(s.px * 8)) : 0;
+  var cw = Math.ceil(s.w * s.px), ch = Math.ceil(s.h * s.py);
+  var cv = document.createElement('canvas');
+  cv.width = cw + 2 * M; cv.height = ch + 2 * M + T;
+  var c = cv.getContext('2d');
+  c.fillStyle = '#ffffff'; c.fillRect(0, 0, cv.width, cv.height);
+  var ox = M, oy = M + T;
+  /* the publishing software's RGB is not the DMC table's */
+  var inks = s.pal.map(function (p, i) {
+    var rgb = rgbOf(p.hex);
+    var j = s.jitter == null ? 6 : s.jitter;
+    return [rgb[0] + (((i * 37) % 13) - 6) / 6 * j, rgb[1] + (((i * 53) % 11) - 5) / 5 * j, rgb[2] + (((i * 71) % 9) - 4) / 4 * j];
+  });
+  var fab = rgbOf(s.fabric);
+  if (s.page) {
+    c.fillStyle = '#222'; c.font = Math.round(T * 0.35) + 'px sans-serif';
+    c.fillText('Synthetic chart · ' + s.w + ' x ' + s.h, ox, M + T * 0.45);
+    c.fillStyle = '#555'; c.fillRect(ox, M + T * 0.7, cw, 1.5);
+  }
+  var x, y, X, Y;
+  var style = s.style;
+  c.fillStyle = css(fab); c.fillRect(ox, oy, s.w * s.px, s.h * s.py);
+  if (style === 'stitched') {
+    /* aida-ish weave: holes at the vertices, a little texture */
+    for (y = 0; y <= s.h; y++) {
+      for (x = 0; x <= s.w; x++) {
+        c.fillStyle = css(fab, 0.86);
+        var hr = Math.max(0.6, s.px * 0.12);
+        c.fillRect(ox + x * s.px - hr / 2, oy + y * s.py - hr / 2, hr, hr);
+      }
+    }
+    for (y = 0; y < s.h; y++) {
+      c.fillStyle = css(fab, 0.97);
+      c.fillRect(ox, oy + (y + 0.45) * s.py, s.w * s.px, Math.max(0.5, s.py * 0.12));
+    }
+  }
+  for (y = 0; y < s.h; y++) {
+    for (x = 0; x < s.w; x++) {
+      var v = s.grid[y * s.w + x];
+      X = ox + x * s.px; Y = oy + y * s.py;
+      if (style === 'symbols-bw') {
+        if (v >= 0) {
+          c.fillStyle = '#000'; c.font = 'bold ' + Math.round(s.py * 0.78) + 'px sans-serif';
+          c.textAlign = 'center'; c.textBaseline = 'middle';
+          c.fillText(GLYPHS[v % GLYPHS.length], X + s.px / 2, Y + s.py / 2 + s.py * 0.04);
+        }
+        continue;
+      }
+      if (v < 0) continue;
+      var ink = inks[v];
+      if (style === 'stitched') {
+        c.lineCap = 'round';
+        c.lineWidth = s.px * 0.36;
+        c.strokeStyle = css(ink, 0.85);
+        c.beginPath(); c.moveTo(X + s.px * 0.2, Y + s.py * 0.2); c.lineTo(X + s.px * 0.8, Y + s.py * 0.8); c.stroke();
+        c.strokeStyle = css(ink, 1);
+        c.beginPath(); c.moveTo(X + s.px * 0.8, Y + s.py * 0.2); c.lineTo(X + s.px * 0.2, Y + s.py * 0.8); c.stroke();
+        c.lineWidth = Math.max(0.5, s.px * 0.08);
+        c.strokeStyle = css(ink, 1.12);
+        c.beginPath(); c.moveTo(X + s.px * 0.75, Y + s.py * 0.27); c.lineTo(X + s.px * 0.3, Y + s.py * 0.72); c.stroke();
+      } else {
+        c.fillStyle = css(ink); c.fillRect(X, Y, s.px, s.py);
+        if (style === 'blocks-symbols' || style === 'blocks-grid-symbols') {
+          var Lm = 0.2126 * ink[0] + 0.7152 * ink[1] + 0.0722 * ink[2];
+          c.fillStyle = Lm < 110 ? '#fff' : '#000'; c.font = Math.round(s.py * 0.62) + 'px sans-serif';
+          c.textAlign = 'center'; c.textBaseline = 'middle';
+          c.fillText(GLYPHS[v % GLYPHS.length], X + s.px / 2, Y + s.py / 2 + s.py * 0.04);
+        }
+      }
+    }
+  }
+  if (style === 'blocks-grid' || style === 'blocks-grid-symbols' || style === 'symbols-bw') {
+    for (x = 0; x <= s.w; x++) {
+      var bold = x % 10 === 0 || x === s.w;
+      c.fillStyle = bold ? '#333' : 'rgba(110,110,110,0.9)';
+      var lw = bold ? Math.max(1.5, s.px * 0.14) : 1;
+      c.fillRect(ox + x * s.px - lw / 2, oy - (bold ? lw / 2 : 0), lw, s.h * s.py + (bold ? lw : 0));
+    }
+    for (y = 0; y <= s.h; y++) {
+      var bold2 = y % 10 === 0 || y === s.h;
+      c.fillStyle = bold2 ? '#333' : 'rgba(110,110,110,0.9)';
+      var lw2 = bold2 ? Math.max(1.5, s.py * 0.14) : 1;
+      c.fillRect(ox - (bold2 ? lw2 / 2 : 0), oy + y * s.py - lw2 / 2, s.w * s.px + (bold2 ? lw2 : 0), lw2);
+    }
+  }
+  if (s.page) {
+    /* rulers, a little away from the grid; a caption under it */
+    c.fillStyle = '#444'; c.font = Math.max(9, Math.round(Math.min(s.px, 14) * 0.9)) + 'px sans-serif';
+    c.textAlign = 'center'; c.textBaseline = 'alphabetic';
+    for (x = 10; x <= s.w; x += 10) c.fillText(String(x), ox + x * s.px, oy - Math.max(6, s.py * 0.6));
+    c.textAlign = 'right'; c.textBaseline = 'middle';
+    for (y = 10; y <= s.h; y += 10) c.fillText(String(y), ox - Math.max(5, s.px * 0.6), oy + y * s.py);
+    c.textAlign = 'left'; c.textBaseline = 'alphabetic';
+    c.fillText('Design size: ' + s.w + ' x ' + s.h + ' stitches', ox, oy + s.h * s.py + M * 0.7);
+  }
+  return cv;
+}
+
+function degrade(cv, how) {
+  var p = Promise.resolve(cv);
+  if (how.blur) {
+    p = p.then(function (src) {
+      var d = document.createElement('canvas'); d.width = src.width; d.height = src.height;
+      var c = d.getContext('2d'); c.fillStyle = '#fff'; c.fillRect(0, 0, d.width, d.height);
+      c.filter = 'blur(' + how.blur + 'px)'; c.drawImage(src, 0, 0); return d;
+    });
+  }
+  if (how.jpeg || how.webp) {
+    p = p.then(function (src) {
+      return new Promise(function (res) {
+        src.toBlob(function (b) {
+          createImageBitmap(b).then(function (bmp) {
+            var d = document.createElement('canvas'); d.width = bmp.width; d.height = bmp.height;
+            d.getContext('2d').drawImage(bmp, 0, 0); res(d);
+          });
+        }, how.webp ? 'image/webp' : 'image/jpeg', how.jpeg || how.webp);
+      });
+    });
+  }
+  return p;
+}
+
+function keyFor(pal, counts) {
+  return pal.map(function (p, i) { return { brand: 'DMC', code: p.code, name: p.name, hex: p.hex, stitchCount: counts[i], kind: 'cross' }; });
+}
+
+/** share of squares read exactly (cells are palette = key-entry indices; -1 fabric) */
+function cellAgree(r, g) {
+  if (!r.ok || !r.cells || r.cells.length !== g.length) return 0;
+  var ok = 0;
+  for (var i = 0; i < g.length; i++) if (r.cells[i] === g[i]) ok++;
+  return ok / g.length;
+}
+
+/* ---------------------------------------------------------------- *
+ * 1. API surface and failure values
+ * ---------------------------------------------------------------- */
+function apiTests() {
+  group('API, failure values, the Check shape');
+  var R = window.XSRead;
+  log(!!R, 'window.XSRead exists');
+  log(typeof R.version === 'string' && R.version.length > 0, 'version is a string', R.version);
+  eq(R.isAvailable(), true, 'isAvailable() in a browser with XStitch loaded');
+  ['read', 'detect', 'cancel'].forEach(function (f) { log(typeof R[f] === 'function', f + ' is a function'); });
+
+  var C = R._core();
+  var as = C.hungarian(new Float64Array([4, 1, 3, 2, 0, 5, 3, 2, 2]), 3);
+  eq(Array.from(as), [1, 0, 2], 'hungarian: the minimum-cost assignment (1 + 2 + 2)');
+  log(Math.abs(C.de2000(50, 2.6772, -79.7751, 50, 0, -82.7485) - 2.0425) < 1e-3, 'CIEDE2000 matches the Sharma test pair (2.0425)');
+  log(String(R._workerSrc()).indexOf('xsrWorkerBody(XSReadCore());') > 0, 'the worker source is built from the two self-contained functions');
+
+  var chk = R._buildCheck([
+    { code: '310', brand: 'DMC', name: 'Black', stitchCount: 10 },
+    { code: '321', brand: 'DMC', name: 'Red', stitchCount: 200 },
+    { code: '666', brand: 'DMC', name: 'Bright red' }
+  ], { 0: 10, 1: 196, 2: 5 }, 1, 211);
+  eq(Object.keys(chk).sort(), ['agree', 'exact', 'expectedTotal', 'hasCounts', 'readTotal', 'rows', 'summary', 'unmatchedClasses', 'unmatchedEntries', 'verdict'],
+    'fallback Check has exactly the §3 fields');
+  eq([chk.rows[0].ok, chk.rows[1].ok, chk.rows[1].delta, chk.rows[2].expected, chk.rows[2].ok, chk.rows[2].delta], [true, false, -4, null, null, null],
+    'Check rows: exact; off by 4 of 200 (over max(2, 1 %)); null fields where the key prints no count');
+  eq(chk.verdict, 'off', 'verdict off when a row is out of tolerance');
+  log(/1 of 2 colours match; DMC 321 reads 196 of 200/.test(chk.summary), 'summary names the worst row', chk.summary);
+
+  var tasks = [];
+  tasks.push(R.read(null, {}).then(function (r) {
+    eq([r.ok, r.reason], [false, 'no-image'], 'read(null) -> no-image, no throw');
+    log(typeof r.message === 'string' && r.message.length > 5, 'with a plain message', r.message);
+  }));
+  tasks.push(R.read(new Blob(['hello'], { type: 'text/plain' }), {}).then(function (r) { eq([r.ok, r.reason], [false, 'no-image'], 'a text file -> no-image'); }));
+  tasks.push(R.read(new Blob([new Uint8Array([1, 2, 3])], { type: 'image/png' }), {}).then(function (r) { eq([r.ok, r.reason], [false, 'no-image'], 'undecodable bytes -> no-image'); }));
+  var tiny = document.createElement('canvas'); tiny.width = 8; tiny.height = 8;
+  tasks.push(R.read(tiny, {}).then(function (r) { eq([r.ok, r.reason], [false, 'too-small'], 'an 8 x 8 picture -> too-small'); }));
+  var blank = document.createElement('canvas'); blank.width = 400; blank.height = 300;
+  var bc = blank.getContext('2d'); bc.fillStyle = '#fff'; bc.fillRect(0, 0, 400, 300);
+  tasks.push(R.read(blank, {}).then(function (r) { eq([r.ok, r.reason], [false, 'no-grid'], 'a blank page -> no-grid'); }));
+  var ph = document.createElement('canvas'); ph.width = 480; ph.height = 360;
+  var pc = ph.getContext('2d'), gr = pc.createRadialGradient(200, 160, 10, 240, 180, 300);
+  gr.addColorStop(0, '#f5c27a'); gr.addColorStop(0.5, '#4a7fb5'); gr.addColorStop(1, '#203020');
+  pc.fillStyle = gr; pc.fillRect(0, 0, 480, 360);
+  tasks.push(R.detect(ph, {}).then(function (r) {
+    log(!r.ok || r.confidence < 0.5, 'a smooth photo is not a confident chart', r.ok ? 'confidence ' + r.confidence : r.reason);
+  }));
+  var pal = pickPalette(4, 5, 'f0ece4', 20), g = makeGrid(120, 90, 4, 'confetti', 9);
+  var small = render({ grid: g, w: 120, h: 90, pal: pal, style: 'blocks', px: 2.4, py: 2.4, fabric: 'f0ece4', page: true });
+  tasks.push(R.read(small, { size: { w: 120, h: 90 } }).then(function (r) {
+    eq([r.ok, r.reason], [false, 'too-small'], 'a 2.4 px pitch with a declared size -> too-small');
+    log(/bigger picture/i.test(r.message || ''), 'and asks for a bigger picture', r.message);
+  }));
+  return Promise.all(tasks);
+}
+
+/* ---------------------------------------------------------------- *
+ * 2. Synthetic coverage
+ * ---------------------------------------------------------------- */
+var STYLES = ['blocks', 'blocks-grid', 'blocks-symbols', 'blocks-grid-symbols', 'stitched', 'symbols-bw'];
+var PITCHES = [3.5, 4.5, 6, 8.3, 13.7, 25, 40];
+var DEGRADE = [
+  { name: 'clean', how: {} },
+  { name: 'jpeg 0.8', how: { jpeg: 0.8 } },
+  { name: 'blur 0.6 + webp 0.8', how: { blur: 0.6, webp: 0.8 } }
+];
+
+function synthCase(style, pitch, deg, kind, seed, withSize) {
+  var w = pitch >= 25 ? 36 : 64, h = pitch >= 25 ? 28 : 46, n = style === 'symbols-bw' ? 6 : 7;
+  var fabric = style === 'stitched' ? 'e6dde4' : (style === 'symbols-bw' ? 'ffffff' : 'f3eee2');
+  var pal = pickPalette(n, seed, fabric, 22);
+  var g = makeGrid(w, h, n, kind, seed + 1);
+  var counts = countsOf(g, n);
+  var cv = render({ grid: g, w: w, h: h, pal: pal, style: style, px: pitch, py: pitch * 1.013, fabric: fabric, page: true });
+  return degrade(cv, deg.how).then(function (img) {
+    var opts = { key: keyFor(pal, counts), size: withSize ? { w: w, h: h } : null };
+    return XSRead.read(img, opts).then(function (r) {
+      return { r: r, g: g, w: w, h: h, agree: cellAgree(r, g), sizeOk: r.ok && r.size.w === w && r.size.h === h };
+    });
+  });
+}
+
+function synthTests() {
+  group('Synthetic: every style x pitch (3.5..40 px, y pitch +1.3 %) x degradation, on a page with title and rulers, declared size, key with counts');
+  var chain = Promise.resolve();
+  var per = {}, order = [];
+  STYLES.forEach(function (style) {
+    PITCHES.forEach(function (p) {
+      DEGRADE.forEach(function (deg, di) {
+        chain = chain.then(function () {
+          return synthCase(style, p, deg, 'shapes', 11 + di * 7 + Math.round(p), true).then(function (c) {
+            var key = style + ' @ ' + p;
+            if (!per[key]) { per[key] = { style: style, p: p, res: [] }; order.push(key); }
+            per[key].res.push({ agree: c.agree, ok: c.r.ok, reason: c.r.reason, verdict: c.r.check ? c.r.check.verdict : '' });
+            /* what is asserted is what is achieved (see docs/wave-j/reader.md):
+               colour styles exact from 8 px clean or JPEG, and exact at 6 px
+               clean; a black-and-white symbol chart needs symbols big enough
+               to tell apart, exact from 13 px. Below that the rate is
+               measured and printed in the table. */
+            var sym = style === 'symbols-bw';
+            var exactFrom = sym ? 13 : (di === 0 ? 6 : (di === 1 ? 8 : 1e9));
+            if (p >= exactFrom) {
+              eq([c.r.ok, c.agree], [true, 1], key + ' px, ' + deg.name + ': every square read exactly');
+            } else if (!sym && di === 1 && p >= 6) {
+              log(c.r.ok && c.agree >= 0.98, key + ' px, ' + deg.name + ': at least 98 % of squares', pct(c.agree));
+            } else if (!sym && di === 2 && p >= 8) {
+              log(c.r.ok && c.agree >= 0.995, key + ' px, ' + deg.name + ': at least 99.5 % of squares', pct(c.agree));
+            } else if (sym && p >= 13) {
+              log(c.r.ok && c.agree >= 0.995, key + ' px, ' + deg.name + ': at least 99.5 % of squares', pct(c.agree));
+            }
+          });
+        });
+      });
+    });
+  });
+  return chain.then(function () {
+    var rows = order.map(function (k) {
+      var e = per[k];
+      return [e.style, e.p].concat(e.res.map(function (x) { return x.ok ? pct(x.agree) + ' ' + x.verdict : x.reason; }));
+    });
+    note('Recovery rate (share of squares exactly right) per style / pitch / degradation:');
+    table(rows, ['style', 'pitch px'].concat(DEGRADE.map(function (d) { return d.name; })));
+  });
+}
+
+function synthKinds() {
+  group('Synthetic: chart contents (stitched look and gridded blocks with symbols, 8 px, JPEG 0.85), declared and detected size');
+  var chain = Promise.resolve(), rows = [];
+  ['shapes', 'confetti', 'details', 'sparse'].forEach(function (kind, ki) {
+    ['stitched', 'blocks-grid-symbols'].forEach(function (style) {
+      [true, false].forEach(function (withSize) {
+        chain = chain.then(function () {
+          return synthCase(style, 8, { how: { jpeg: 0.85 } }, kind, 101 + ki, withSize).then(function (c) {
+            rows.push([kind, style, withSize ? 'declared' : 'detected', c.r.ok ? c.r.size.w + ' x ' + c.r.size.h : c.r.reason, pct(c.agree), c.r.check ? c.r.check.verdict : '']);
+            if (kind === 'sparse' && !withSize && style === 'stitched') {
+              /* six stitches on an unlined ground: the size is the fabric box */
+              log(!c.r.ok || c.agree === 1 || !c.sizeOk, kind + ' / ' + style + ' / no size: exact, or not claimed as the full chart',
+                c.r.ok ? c.r.size.w + ' x ' + c.r.size.h + ' ' + pct(c.agree) : c.r.reason);
+            } else if (kind === 'confetti') {
+              /* every square a different colour from its neighbours, through
+                 JPEG's half-resolution colour: the hardest content there is */
+              log(c.r.ok && c.sizeOk && c.agree >= 0.99, kind + ' / ' + style + ' / ' + (withSize ? 'declared' : 'detected') + ' size: at least 99 %', pct(c.agree));
+            } else {
+              eq([c.r.ok, c.sizeOk, c.agree], [true, true, 1], kind + ' / ' + style + ' / ' + (withSize ? 'declared' : 'detected') + ' size: exact');
+            }
+          });
+        });
+      });
+    });
+  });
+  return chain.then(function () { table(rows, ['contents', 'style', 'size', 'read size', 'squares right', 'check']); });
+}
+
+function synthMisc() {
+  group('Synthetic: fabric, no key, symbols, near colours, determinism, worker vs main thread, cancel, budgets');
+  var tasks = Promise.resolve();
+  var pal = pickPalette(6, 41, 'f3eee2', 22), w = 50, h = 40;
+  var g = makeGrid(w, h, 6, 'shapes', 42), counts = countsOf(g, 6);
+  var cv = render({ grid: g, w: w, h: h, pal: pal, style: 'blocks-grid', px: 9.2, py: 9.2, fabric: 'f3eee2', page: true });
+
+  tasks = tasks.then(function () {
+    return XSRead.read(cv, {}).then(function (r) {
+      eq([r.ok, r.size], [true, { w: w, h: h }], 'no key, no size: the size is detected');
+      eq(r.sizeSource, 'detected', 'sizeSource detected');
+      eq(r.classes.filter(function (c) { return c.fabric; }).length, 1, 'one class is the fabric');
+      log(r.classes.filter(function (c) { return !c.fabric; }).every(function (c) { return c.how === 'nearest-dmc' && c.entry === null; }),
+        'with no key every colour is named by nearest DMC (how: nearest-dmc)');
+      eq(r.classes.length, 7, 'six colours plus fabric');
+      var codes = r.data.palette.map(function (p) { return p.code; });
+      eq(codes.length, codes.filter(function (c, i) { return codes.indexOf(c) === i; }).length, 'no two classes share a DMC code');
+      eq(r.check.verdict, 'unchecked', 'Check verdict unchecked without a key');
+      log(r.preview && r.preview.w >= w && r.preview.data.length === r.preview.w * r.preview.h * 4, 'a preview image comes back', r.preview && (r.preview.w + ' x ' + r.preview.h));
+      eq(r.cellConf.length, w * h, 'cellConf has one byte per square');
+      log(r.data && r.data.chart && r.data.chart.w === w && r.data.palette.length === 6, 'data is a normalised XSData', r.data && r.data.palette.length);
+    });
+  });
+  tasks = tasks.then(function () {
+    return XSRead.read(cv, { key: keyFor(pal, counts), fabric: 'none' }).then(function (r) {
+      log(r.ok && r.classes.every(function (c) { return !c.fabric; }), 'fabric: none -> no class is fabric');
+      log(r.check.verdict !== 'exact', 'and the check says the read does not match the key', r.check.summary);
+    });
+  });
+  tasks = tasks.then(function () {
+    return XSRead.read(cv, { key: keyFor(pal, counts), fabric: '#f3eee2' }).then(function (r) {
+      eq([r.ok, r.check.verdict, cellAgree(r, g)], [true, 'exact', 1], 'fabric given as a colour: exact');
+    });
+  });
+  tasks = tasks.then(function () {
+    return XSRead.read(cv, { key: keyFor(pal, counts) }).then(function (r) {
+      eq(r.check.verdict, 'exact', 'key with counts, size detected: exact');
+      var a = r.classes.filter(function (c) { return c.entry === 0; })[0], b = r.classes.filter(function (c) { return c.entry === 1; })[0];
+      var as = {}; as[a.id] = 1; as[b.id] = 0;
+      return XSRead.read(cv, { key: keyFor(pal, counts), assign: as }).then(function (r2) {
+        var a2 = r2.classes.filter(function (c) { return c.id === a.id; })[0];
+        eq([a2.entry, a2.how], [1, 'user'], 'opts.assign: the user\'s class -> entry choice wins');
+        eq(r2.check.verdict, 'off', 'and the check then shows the swap');
+      });
+    });
+  });
+  tasks = tasks.then(function () {
+    var k = keyFor(pal, counts).map(function (e) { var c = Object.assign({}, e); delete c.stitchCount; return c; });
+    return XSRead.read(cv, { key: k, size: { w: w, h: h } }).then(function (r) {
+      eq([r.check.hasCounts, r.check.verdict], [false, 'unchecked'], 'a key with no counts: unchecked');
+      eq(cellAgree(r, g), 1, 'and colour matching alone (inks 6 RGB off the table) still reads every square right');
+    });
+  });
+  tasks = tasks.then(function () {
+    var X = window.XStitch;
+    var near = [{ code: '400', name: 'a', hex: '8a5a3c' }, { code: '301', name: 'b', hex: '93623f' }, { code: '312', name: 'c', hex: '2b4f8a' }];
+    near.forEach(function (p) { p.lab = X.hexToLab('#' + p.hex); });
+    var dEab = X.deltaE76(near[0].lab, near[1].lab);
+    var runs = [['shapes', 1], ['details', 1], ['confetti', 0.95]];
+    var ch = Promise.resolve();
+    runs.forEach(function (rk) {
+      ch = ch.then(function () {
+        var g2 = makeGrid(40, 30, 3, rk[0], 5), c2 = countsOf(g2, 3);
+        var cv2 = render({ grid: g2, w: 40, h: 30, pal: near, style: 'blocks', px: 10, py: 10, fabric: 'f3eee2', page: true, jitter: 0 });
+        return degrade(cv2, { jpeg: 0.9 }).then(function (img) {
+          return XSRead.read(img, { key: keyFor(near, c2), size: { w: 40, h: 30 } }).then(function (r) {
+            var a = cellAgree(r, g2);
+            if (rk[1] === 1) eq([r.ok, a], [true, 1], 'two colours ' + dEab.toFixed(1) + ' dE apart stay two when the key has both (' + rk[0] + ', JPEG 0.9): exact');
+            else log(r.ok && a >= rk[1], 'two colours ' + dEab.toFixed(1) + ' dE apart, confetti through JPEG colour subsampling: at least ' + pct(rk[1]), pct(a));
+          });
+        });
+      });
+    });
+    return ch;
+  });
+  tasks = tasks.then(function () {
+    var p6 = pickPalette(6, 61, 'ffffff', 10), g3 = makeGrid(48, 36, 6, 'shapes', 62), c3 = countsOf(g3, 6);
+    var cv3 = render({ grid: g3, w: 48, h: 36, pal: p6, style: 'symbols-bw', px: 14, py: 14, fabric: 'ffffff', page: true });
+    return XSRead.read(cv3, { key: keyFor(p6, c3), size: { w: 48, h: 36 } }).then(function (r) {
+      eq([r.ok, r.style, r.stats.mode], [true, 'symbols-bw', 'symbol'], 'a black-and-white symbol chart is read by shape');
+      eq(cellAgree(r, g3), 1, 'every square right, classes matched to the key by stitch count');
+      log(r.classes.every(function (c) { return c.glyph && c.glyph.data && c.glyph.w > 0; }), 'every symbol class carries its glyph');
+      var k2 = keyFor(p6, c3); delete k2[2].stitchCount;
+      return XSRead.read(cv3, { key: k2, size: { w: 48, h: 36 } }).then(function (r2) {
+        var un = r2.classes.filter(function (c) { return c.entry === null; });
+        eq(un.length, 1, 'a symbol whose key row has no count stays unmatched (never guessed)');
+        log(!!(un[0] && un[0].glyph), 'with a glyph for the app to ask about');
+        eq(r2.check.unmatchedClasses, 1, 'and the check counts it');
+      });
+    });
+  });
+  tasks = tasks.then(function () {
+    var k = keyFor(pal, counts);
+    return Promise.all([XSRead.read(cv, { key: k }), XSRead.read(cv, { key: k }), XSRead.read(cv, { key: k, noWorker: true })]).then(function (rs) {
+      var same = function (a, b) {
+        return a.ok && b.ok && JSON.stringify(Array.from(a.cells)) === JSON.stringify(Array.from(b.cells)) &&
+          JSON.stringify(a.classes) === JSON.stringify(b.classes) && JSON.stringify(a.lattice) === JSON.stringify(b.lattice);
+      };
+      log(same(rs[0], rs[1]), 'same input, same opts -> identical result');
+      log(rs[0].stats.worker === true && rs[2].stats.worker === false, 'one ran in the worker, one on the main thread');
+      log(same(rs[0], rs[2]), 'worker and main-thread fallback agree exactly');
+    });
+  });
+  tasks = tasks.then(function () {
+    return XSRead.detect(cv, {}).then(function (d) {
+      eq([d.ok, d.size, d.style], [true, { w: w, h: h }, 'blocks-grid'], 'detect: size and style');
+      log(d.lattice && Math.abs(d.lattice.pitchX - 9.2) < 0.02, 'detect: sub-pixel pitch', d.lattice && d.lattice.pitchX.toFixed(3));
+      log(Array.isArray(d.alternatives) && d.alternatives.some(function (a) { return a.w === w * 2; }), 'alternatives offer the half pitch', JSON.stringify(d.alternatives));
+      log(d.data === undefined, 'detect returns no chart data');
+    });
+  });
+  tasks = tasks.then(function () {
+    var big = render({ grid: makeGrid(200, 150, 6, 'confetti', 3), w: 200, h: 150, pal: pal, style: 'stitched', px: 9, py: 9, fabric: 'e6dde4', page: true });
+    var p = XSRead.read(big, { token: 'cx1', key: keyFor(pal, [1, 1, 1, 1, 1, 1]) });
+    var t0 = performance.now();
+    setTimeout(function () { XSRead.cancel('cx1'); }, 60);
+    return p.then(function (r) {
+      eq([r.ok, r.reason], [false, 'cancelled'], 'cancel(token) stops a running read');
+      log(performance.now() - t0 < 600, 'promptly', Math.round(performance.now() - t0) + ' ms');
+      eq(r.token, 'cx1', 'the result carries the token');
+      return XSRead.read(cv, {}).then(function (r2) { log(r2.ok, 'the next read after a cancel still works'); });
+    });
+  });
+  tasks = tasks.then(function () {
+    var p8 = pickPalette(12, 81, 'e6dde4', 18), gw = 240, gh = 180;
+    var gb = makeGrid(gw, gh, 12, 'shapes', 82), cb = countsOf(gb, 12);
+    var bigcv = render({ grid: gb, w: gw, h: gh, pal: p8, style: 'stitched', px: 8, py: 8, fabric: 'e6dde4', page: false });
+    var pad = document.createElement('canvas'); pad.width = 2000; pad.height = 1500;
+    var pc2 = pad.getContext('2d'); pc2.fillStyle = '#fff'; pc2.fillRect(0, 0, 2000, 1500); pc2.drawImage(bigcv, 40, 40);
+    /* a cold worker parses and compiles the core first: time that once,
+       then time warm calls, which is what the review screen's re-runs see */
+    var t0 = performance.now(), cold = 0;
+    return XSRead.detect(pad, {}).then(function () {
+      cold = Math.round(performance.now() - t0);
+      return XSRead.detect(pad, {});
+    }).then(function () {
+      var t1 = performance.now();
+      return XSRead.detect(pad, {});
+    }).then(function () {
+      var t1 = performance.now();
+      return XSRead.detect(pad, {}).then(function (d) { return { d: d, ms: Math.round(performance.now() - t1) }; });
+    }).then(function (dd) {
+      var d = dd.d, dms = dd.ms;
+      note('detect on this picture: first call ' + cold + ' ms, third call ' + dms + ' ms (the worker was already running)');
+      var t2 = performance.now();
+      return XSRead.read(pad, { key: keyFor(p8, cb), size: { w: gw, h: gh } }).then(function (r) {
+        var rms = Math.round(performance.now() - t2);
+        var t3 = performance.now();
+        return XSRead.read(pad, {}).then(function (r3) {
+          var nms = Math.round(performance.now() - t3);
+          note('2000 x 1500 px, 240 x 180 stitched, 12 colours: detect ' + dms + ' ms, read with key + size ' + rms + ' ms ' +
+            JSON.stringify(r.stats.phases) + ', read with nothing given ' + nms + ' ms');
+          eq([d.ok, d.size], [true, { w: gw, h: gh }], 'detect finds 240 x 180 on the 2000 x 1500 picture');
+          log(dms < 300, 'detect under 300 ms', dms + ' ms');
+          log(rms < 1500, 'read under 1.5 s (worker, key with counts: candidate lattices included)', rms + ' ms');
+          log(nms < 1500, 'read under 1.5 s with nothing given', nms + ' ms');
+          eq([r.check.verdict, cellAgree(r, gb)], ['exact', 1], 'and the big read is exact');
+          log(r3.ok && r3.size.w === gw && r3.size.h === gh, 'and with nothing given finds 240 x 180', r3.ok ? r3.size.w + ' x ' + r3.size.h : r3.reason);
+        });
+      });
+    });
+  });
+  return tasks;
+}
+
+/* ---------------------------------------------------------------- *
+ * 3. The acceptance case
+ * ---------------------------------------------------------------- */
+function fetchBlob(path) { return fetch(path, { cache: 'no-store' }).then(function (r) { return r.ok ? r.blob() : null; }).catch(function () { return null; }); }
+function fetchJson(path) { return fetch(path, { cache: 'no-store' }).then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }); }
+
+function potatoKey(kj) {
+  if (window.XStitch.parseKey && kj.keyTextAsPrinted) {
+    var k = window.XStitch.parseKey(kj.keyTextAsPrinted);
+    if (k && k.entries && k.entries.length === kj.entries.length) return k.entries;
+  }
+  return kj.entries.map(function (e) { return { brand: e.brand, code: e.code, name: e.name, stitchCount: e.stitches }; });
+}
+
+function potatoes() {
+  group('Acceptance: the owner\'s potatoes screenshot (tmp-pdf/xs-potatoes-preview.webp)');
+  return Promise.all([fetchBlob('../tmp-pdf/xs-potatoes-preview.webp'), fetchJson('../tmp-pdf/xs-potatoes.key.json')]).then(function (a) {
+    var blob = a[0], kj = a[1];
+    if (!blob || !kj) { skip('xs-potatoes-preview.webp / xs-potatoes.key.json'); return; }
+    var key = potatoKey(kj), size = { w: kj.design.w, h: kj.design.h };
+    var runs = [
+      { label: 'key + declared size', o: { key: key, size: size } },
+      { label: 'key, no size', o: { key: key } },
+      { label: 'no key, no size', o: {} }
+    ];
+    var chain = Promise.resolve(), res = [];
+    runs.forEach(function (run) {
+      chain = chain.then(function () {
+        var t0 = performance.now();
+        return XSRead.read(blob, run.o).then(function (r) { r._wall = Math.round(performance.now() - t0); res.push(r); });
+      });
+    });
+    return chain.then(function () {
+      var r0 = res[0], r1 = res[1], r2 = res[2];
+      var rows = key.map(function (e, i) {
+        var cells = ['DMC ' + e.code + ' ' + (e.name || ''), e.stitchCount];
+        [r0, r1].forEach(function (r) {
+          var row = r.ok ? r.check.rows.filter(function (x) { return x.entry === i; })[0] : null;
+          cells.push(row ? row.read : '-');
+          cells.push(row && row.expected ? pct(Math.abs(row.read - row.expected) / row.expected) : '');
+        });
+        return cells;
+      });
+      var tot = function (r) { return r.ok ? r.check.readTotal : '-'; };
+      var off = function (r) { return r.ok ? pct(Math.abs(r.check.readTotal - kj.totalStitches) / kj.totalStitches) : ''; };
+      rows.push(['TOTAL', kj.totalStitches, tot(r0), off(r0), tot(r1), off(r1)]);
+      table(rows, ['colour', 'printed', 'read (size given)', 'off', 'read (no size)', 'off']);
+      res.forEach(function (r, i) {
+        note(runs[i].label + ': ' + (r.ok ? r.size.w + ' x ' + r.size.h + ' (' + r.sizeSource + '), style ' + r.style + ', ' + r.classes.length + ' classes, ' +
+          'lattice ' + r.lattice.x0.toFixed(2) + ',' + r.lattice.y0.toFixed(2) + ' pitch ' + r.lattice.pitchX.toFixed(4) + ' x ' + r.lattice.pitchY.toFixed(4) +
+          ', confidence ' + r.confidence + ', ' + r.lowCells + ' unsure squares, ' + r._wall + ' ms wall; ' + (r.check ? r.check.summary : '') : r.reason + ': ' + r.message));
+      });
+      [r0, r1].forEach(function (r, i) {
+        var tag = runs[i].label + ': ';
+        eq([r.ok, r.size], [true, size], tag + 'reads as 144 x 85');
+        if (!r.ok) return;
+        var worst = 0;
+        r.check.rows.forEach(function (row) { if (row.expected) worst = Math.max(worst, Math.abs(row.read - row.expected) / row.expected); });
+        log(worst <= 0.02, tag + 'every colour within 2 % of the printed count', 'worst ' + pct(worst));
+        log(Math.abs(r.check.readTotal - kj.totalStitches) <= kj.totalStitches * 0.01, tag + 'total within 1 %', r.check.readTotal + ' of ' + kj.totalStitches);
+        log(r.check.rows.every(function (row) { return Math.abs(row.read - row.expected) <= 3; }), tag + 'achieved: every colour within 3 stitches of the key');
+        log(r.check.verdict === 'close' || r.check.verdict === 'exact', tag + 'verdict close or exact', r.check.verdict);
+        eq(r.classes.filter(function (c) { return c.fabric; }).length, 1, tag + 'the lilac ground is the fabric');
+      });
+      eq([r2.ok, r2.size], [true, size], 'no key, no size: still 144 x 85');
+      if (r2.ok) {
+        log(Math.abs(r2.check.readTotal - kj.totalStitches) <= kj.totalStitches * 0.01, 'no key: the stitched total is within 1 % of 5,721', r2.check.readTotal);
+        note('no key, classes: ' + r2.classes.map(function (c) { return (c.fabric ? 'fabric ' : '') + c.count + ' #' + c.hex; }).join(', '));
+      }
+    });
+  });
+}
+
+/* ---------------------------------------------------------------- *
+ * 4. Vector truth: KG-Chart pages read by extractGrid vs the same page rendered
+ * ---------------------------------------------------------------- */
+var VECTOR = ['xs-pacman', 'xs-portal', 'xs-typechar', 'xs-pokemon-tl', 'xs-pokemon-tr', 'xs-pokemon-bl', 'xs-pokemon-br'];
+var vectorRows = [];
+
+function shimRaf() {
+  /* pdf.js page drawing waits on requestAnimationFrame, which never fires
+     while the pane is hidden: this tab only, never in source */
+  if (window.__rafShim) return;
+  window.__rafShim = true;
+  window.requestAnimationFrame = function (f) { return setTimeout(function () { f(performance.now()); }, 16); };
+}
+
+/** partition agreement: each of my classes maps to the extractGrid ink it overlaps most */
+function partitionAgree(r, g, rg) {
+  var n = rg.w * rg.h, m = {}, i;
+  for (i = 0; i < n; i++) {
+    var b = g.cells[(Math.floor(i / rg.w) + rg.y) * g.w + (i % rg.w) + rg.x];
+    var k = r.cells[i] + '|' + b;
+    m[k] = (m[k] || 0) + 1;
+  }
+  var best = {};
+  Object.keys(m).forEach(function (k) { var a = k.split('|')[0]; if (!best[a] || best[a] < m[k]) best[a] = m[k]; });
+  var ok = 0;
+  Object.keys(best).forEach(function (a) { ok += best[a]; });
+  return ok / n;
+}
+
+function vectorFixture(name) {
+  return fetchBlob('../tmp-pdf/' + name + '.pdf').then(function (blob) {
+    if (!blob) { skip(name + '.pdf'); return; }
+    shimRaf();
+    return window.PdfText.open(new File([blob], name + '.pdf', { type: 'application/pdf' })).then(function (hd) {
+      var want = ALL ? 1e9 : 3, done = 0, page = 1, sum = { cells: 0, a: [0, 0, 0], pages: 0 };
+      function next() {
+        page++;
+        if (done >= want || page > hd.numPages || page > (ALL ? 1e9 : 12)) return Promise.resolve();
+        return window.XStitch.extractGrid(hd.doc, page, {}).then(function (g) {
+          if (!g.regions || !g.regions.length || !g.w) return next();
+          var rg = g.regions[0].region;
+          if (rg.fx == null) return next();
+          return hd.renderPage(page, { scale: 2 }).then(function (cv) {
+            var crop = { x: rg.fx * cv.width, y: rg.fy * cv.height, w: rg.fw * cv.width, h: rg.fh * cv.height };
+            /* no key here (partition compare), and the Pokemon quadrants use over a
+               hundred colours across the chart, so the photo guard is raised */
+            var modes = [{ crop: crop, size: { w: rg.w, h: rg.h }, maxColors: 150 }, { size: { w: rg.w, h: rg.h }, maxColors: 150 }, { maxColors: 150 }];
+            var res = [], ch = Promise.resolve();
+            modes.forEach(function (o) {
+              ch = ch.then(function () { return XSRead.read(cv, o).then(function (r) { res.push(r); }); });
+            });
+            return ch.then(function () {
+              done++;
+              sum.pages++;
+              sum.cells += rg.w * rg.h;
+              var line = [name + ' p' + page, rg.w + ' x ' + rg.h, g.colors, (crop.w / rg.w).toFixed(2)];
+              res.forEach(function (r, i) {
+                var hit = r.ok && r.size.w === rg.w && r.size.h === rg.h;
+                var a = hit ? partitionAgree(r, g, rg) : 0;
+                sum.a[i] += a * rg.w * rg.h;
+                line.push(r.ok ? (hit ? pct(a) : 'size ' + r.size.w + 'x' + r.size.h) : r.reason);
+              });
+              line.push(res.map(function (r) { return r.ms; }).join(' / '));
+              vectorRows.push(line);
+              var a0 = res[0].ok ? partitionAgree(res[0], g, rg) : 0;
+              var exactFix = name === 'xs-pacman' || name === 'xs-portal' || name === 'xs-typechar';
+              if (exactFix) eq(a0, 1, name + ' p' + page + ': crop + size, every square agrees with extractGrid');
+              else log(a0 >= 0.995, name + ' p' + page + ': crop + size, at least 99.5 % of squares agree with extractGrid', pct(a0));
+              log(res[2].ok && res[2].size.w === rg.w && res[2].size.h === rg.h, name + ' p' + page + ': with nothing given, the page\'s ' + rg.w + ' x ' + rg.h + ' is found',
+                res[2].ok ? res[2].size.w + ' x ' + res[2].size.h : res[2].reason);
+              return next();
+            });
+          });
+        }, function () { return next(); });
+      }
+      return next().then(function () {
+        try { hd.destroy(); } catch (e) { /* ignore */ }
+        if (!sum.pages) { skip(name + ': no chart page found'); return; }
+        vectorRows.push([name + ' (pages read)', sum.pages + ' pages', '', '', pct(sum.a[0] / sum.cells), pct(sum.a[1] / sum.cells), pct(sum.a[2] / sum.cells), '']);
+      });
+    });
+  });
+}
+
+function vectorTests() {
+  group('Vector truth: KG-Chart pages (extractGrid on the PDF vs XSRead on the same page rendered at 2x)');
+  if (!window.PdfText || !window.pdfjsLib) { skip('pdf.js not loaded'); return Promise.resolve(); }
+  var chain = Promise.resolve();
+  VECTOR.forEach(function (nm) { chain = chain.then(function () { return vectorFixture(nm); }); });
+  return chain.then(function () {
+    if (vectorRows.length) table(vectorRows, ['page', 'squares', 'inks', 'px/stitch', 'crop + size', 'size only', 'nothing given', 'ms']);
+  });
+}
+
+/* ---------------------------------------------------------------- *
+ * 5. Image-only fixtures: report what happens
+ * ---------------------------------------------------------------- */
+var IMAGE_ONLY = ['xs-satsuma-stayhome-color', 'xs-satsuma-stayhome-bw', 'xs-satsuma-summersflight-color', 'xs-satsuma-summersflight-bw',
+  'xs-satsuma-sunshine', 'xs-tinymodernist-autumn', 'xs-dmc-2168', 'xs-dmc-2173'];
+var imageRows = [];
+
+function imageOnlyTests() {
+  group('Image-only fixtures (no assertion beyond: does not throw, says something)');
+  if (!window.PdfText || !window.pdfjsLib) { skip('pdf.js not loaded'); return Promise.resolve(); }
+  shimRaf();
+  var chain = Promise.resolve();
+  IMAGE_ONLY.forEach(function (name) {
+    chain = chain.then(function () {
+      return fetchBlob('../tmp-pdf/' + name + '.pdf').then(function (blob) {
+        if (!blob) { skip(name + '.pdf'); return; }
+        return window.PdfText.open(new File([blob], name + '.pdf', { type: 'application/pdf' })).then(function (hd) {
+          var pages = Math.min(hd.numPages, 3), p = 0;
+          function one() {
+            p++;
+            if (p > pages) return Promise.resolve();
+            return hd.renderPage(p, { maxWidth: 2200 }).then(function (cv) {
+              var t0 = performance.now();
+              return XSRead.read(cv, {}).then(function (r) {
+                var ms = Math.round(performance.now() - t0);
+                log(r && typeof r.ok === 'boolean' && (r.ok || (typeof r.message === 'string' && r.message.length > 10)),
+                  name + ' p' + p + ': a result, not a throw' + (r.ok ? '' : ', with a message'));
+                imageRows.push([name + ' p' + p, cv.width + ' x ' + cv.height, r.ok ? 'yes' : r.reason,
+                  r.ok ? r.size.w + ' x ' + r.size.h : '', r.ok ? r.lattice.pitchX.toFixed(2) : '', r.ok ? r.style : '',
+                  r.ok ? r.classes.length : '', r.ok ? r.confidence : '', r.ok ? r.lowCells : '', ms, r.ok ? (r.stats.warnings.join('; ') || '') : r.message]);
+                return one();
+              });
+            }, function (e) { imageRows.push([name + ' p' + p, 'render failed', String(e && e.message)]); return one(); });
+          }
+          return one().then(function () { try { hd.destroy(); } catch (e) { /* ignore */ } });
+        });
+      });
+    });
+  });
+  return chain.then(function () {
+    if (imageRows.length) table(imageRows, ['page', 'render px', 'ok', 'size', 'pitch', 'style', 'classes', 'confidence', 'unsure', 'ms', 'warnings / message']);
+  });
+}
+
+/* ---------------------------------------------------------------- *
+ * run
+ * ---------------------------------------------------------------- */
+function finish() {
+  var s = document.getElementById('summary');
+  s.textContent = passed + ' passed, ' + failed + ' failed' + (skipped ? ', ' + skipped + ' skipped' : '');
+  s.className = failed ? 'bad' : 'ok';
+  console.log(s.textContent);
+}
+
+if (/[?&]norun=1/.test(QS)) {
+  document.getElementById('summary').textContent = 'not run (norun=1)';
+} else {
+  out.textContent = '';
+  var chain = Promise.resolve()
+    .then(apiTests)
+    .then(potatoes)
+    .then(synthTests)
+    .then(synthKinds)
+    .then(synthMisc);
+  if (!QUICK) chain = chain.then(vectorTests).then(imageOnlyTests);
+  chain.catch(function (e) { log(false, 'suite threw', String(e && e.stack || e)); }).then(finish);
+}
+
+/* ---------------------------------------------------------------- *
+ * visual QA panel
+ * ---------------------------------------------------------------- */
+(function () {
+  var source = null, potKey = null, token = null;
+  var $ = function (id) { return document.getElementById(id); };
+  function setSource(s, label, size) {
+    source = s;
+    $('q-w').value = size ? size.w : ''; $('q-h').value = size ? size.h : '';
+    $('vstats').textContent = label + ' — reading…';
+    run();
+  }
+  function opts() {
+    var o = { fabric: $('q-fab').value, mode: $('q-mode').value, noWorker: $('q-nw').checked };
+    var w = +$('q-w').value, h = +$('q-h').value;
+    if (w > 1 && h > 1) o.size = { w: w, h: h };
+    if ($('q-key').checked && potKey) o.key = potKey;
+    return o;
+  }
+  function run() {
+    if (!source) return;
+    if (token) XSRead.cancel(token);
+    var o = opts();
+    token = o.token = 'qa' + Date.now();
+    XSRead.read(source, o, function (p) { $('vstats').textContent = 'reading… ' + p.phase + ' ' + p.pct + '%'; }).then(draw);
+  }
+  function toCanvas(src) {
+    return new Promise(function (res) {
+      if (src instanceof HTMLCanvasElement) { res(src); return; }
+      createImageBitmap(src).then(function (b) { var c = document.createElement('canvas'); c.width = b.width; c.height = b.height; c.getContext('2d').drawImage(b, 0, 0); res(c); });
+    });
+  }
+  function draw(r) {
+    if (r.reason === 'cancelled') return;
+    toCanvas(source).then(function (img) {
+      var sc = Math.min(1, 640 / img.width), cv = $('q-src');
+      cv.width = Math.round(img.width * sc); cv.height = Math.round(img.height * sc);
+      var c = cv.getContext('2d');
+      c.drawImage(img, 0, 0, cv.width, cv.height);
+      if (!r.ok) { $('vstats').textContent = r.reason + ': ' + r.message; $('vcheck').textContent = ''; $('vclasses').textContent = ''; return; }
+      var L = r.lattice, x, y;
+      c.lineWidth = 1;
+      for (x = 0; x <= r.size.w; x++) {
+        c.strokeStyle = (x === 0 || x === r.size.w) ? 'rgba(255,0,0,0.9)' : (x % 10 ? 'rgba(0,180,255,0.25)' : 'rgba(0,220,255,0.8)');
+        c.beginPath(); c.moveTo((L.x0 + x * L.pitchX) * sc, L.y0 * sc); c.lineTo((L.x0 + x * L.pitchX) * sc, (L.y0 + r.size.h * L.pitchY) * sc); c.stroke();
+      }
+      for (y = 0; y <= r.size.h; y++) {
+        c.strokeStyle = (y === 0 || y === r.size.h) ? 'rgba(255,0,0,0.9)' : (y % 10 ? 'rgba(0,180,255,0.25)' : 'rgba(0,220,255,0.8)');
+        c.beginPath(); c.moveTo(L.x0 * sc, (L.y0 + y * L.pitchY) * sc); c.lineTo((L.x0 + r.size.w * L.pitchX) * sc, (L.y0 + y * L.pitchY) * sc); c.stroke();
+      }
+      var pv = r.preview, oc = $('q-out');
+      oc.width = pv.w; oc.height = pv.h;
+      var oc2 = oc.getContext('2d');
+      oc2.putImageData(new ImageData(new Uint8ClampedArray(pv.data), pv.w, pv.h), 0, 0);
+      var s = pv.scale || 1;
+      oc2.strokeStyle = 'rgba(255,0,255,0.9)';
+      for (var i = 0; i < r.cellConf.length; i++) {
+        if (r.cellConf[i] < XSRead.LOW_CONF) oc2.strokeRect((i % r.size.w) * s + 0.5, Math.floor(i / r.size.w) * s + 0.5, Math.max(1, s - 1), Math.max(1, s - 1));
+      }
+      oc.style.width = Math.min(640, pv.w * Math.max(1, Math.floor(640 / pv.w))) + 'px';
+      $('vstats').textContent = r.size.w + ' x ' + r.size.h + ' (' + r.sizeSource + ') · style ' + r.style + ' · confidence ' + r.confidence +
+        ' · ' + r.classes.length + ' classes · ' + r.lowCells + ' unsure squares · ' + r.ms + ' ms (' + (r.stats.worker ? 'worker' : 'main thread') + ')\n' +
+        'lattice x0 ' + L.x0.toFixed(2) + ' y0 ' + L.y0.toFixed(2) + ' pitch ' + L.pitchX.toFixed(3) + ' x ' + L.pitchY.toFixed(3) +
+        (r.alternatives.length ? ' · or ' + r.alternatives.map(function (a) { return a.w + ' x ' + a.h; }).join(', ') : '') + '\n' +
+        r.check.summary + (r.stats.warnings.length ? '\n' + r.stats.warnings.join('; ') : '');
+      var t = el('table', 't'), tr = el('tr');
+      ['colour', 'read', 'printed', 'diff'].forEach(function (h) { tr.appendChild(el('th', 'l', h)); });
+      t.appendChild(tr);
+      r.check.rows.forEach(function (row) {
+        var rr = el('tr');
+        rr.appendChild(el('td', 'l', (row.brand || '') + ' ' + row.code + ' ' + row.name));
+        rr.appendChild(el('td', '', row.read)); rr.appendChild(el('td', '', row.expected == null ? '' : row.expected));
+        rr.appendChild(el('td', '', row.delta == null ? '' : (row.ok ? '✓ ' : '') + (row.delta > 0 ? '+' : '') + row.delta));
+        t.appendChild(rr);
+      });
+      $('vcheck').innerHTML = ''; if (r.check.rows.length) $('vcheck').appendChild(t);
+      var box = $('vclasses'); box.innerHTML = '';
+      r.classes.forEach(function (k) {
+        var d = el('span', 'sw');
+        if (k.glyph) {
+          var gc = document.createElement('canvas'); gc.width = k.glyph.w; gc.height = k.glyph.h;
+          gc.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(k.glyph.data), k.glyph.w, k.glyph.h), 0, 0);
+          d.appendChild(gc);
+        } else { var sw = el('i'); sw.style.background = '#' + (k.hex || '888'); d.appendChild(sw); }
+        var pal = k.entry != null && r.data ? r.data.palette[k.entry] : null;
+        d.appendChild(document.createTextNode('#' + k.id + ' ' + k.count + (k.fabric ? ' fabric' : '') +
+          (pal ? ' → ' + pal.code : (k.fabric ? '' : (k.how === 'nearest-dmc' ? ' ~DMC' : ' unmatched'))) + (k.how ? ' (' + k.how + ')' : '')));
+        box.appendChild(d);
+      });
+    });
+  }
+  function synth(style, pitch) {
+    var n = 6, fab = style === 'stitched' ? 'e6dde4' : (style === 'symbols-bw' ? 'ffffff' : 'f3eee2');
+    var pal = pickPalette(n, 7, fab, 22), g = makeGrid(60, 44, n, 'shapes', 8);
+    var cv = render({ grid: g, w: 60, h: 44, pal: pal, style: style, px: pitch, py: pitch * 1.01, fabric: fab, page: true });
+    degrade(cv, { jpeg: 0.85 }).then(function (img) { $('q-key').checked = false; setSource(img, 'synthetic ' + style + ' ' + pitch + ' px', null); });
+  }
+  $('q-file').addEventListener('change', function (e) { var f = e.target.files && e.target.files[0]; if (f) setSource(f, f.name, null); });
+  var drop = $('drop');
+  drop.addEventListener('dragover', function (e) { e.preventDefault(); drop.className = 'over'; });
+  drop.addEventListener('dragleave', function () { drop.className = ''; });
+  drop.addEventListener('drop', function (e) { e.preventDefault(); drop.className = ''; var f = e.dataTransfer.files && e.dataTransfer.files[0]; if (f) setSource(f, f.name, null); });
+  $('q-pot').addEventListener('click', function () {
+    Promise.all([fetchBlob('../tmp-pdf/xs-potatoes-preview.webp'), fetchJson('../tmp-pdf/xs-potatoes.key.json')]).then(function (a) {
+      if (!a[0]) { $('vstats').textContent = 'tmp-pdf/xs-potatoes-preview.webp is not on this machine.'; return; }
+      potKey = a[1] ? potatoKey(a[1]) : null;
+      $('q-key').checked = !!potKey;
+      setSource(a[0], 'potatoes', a[1] ? a[1].design : null);
+    });
+  });
+  $('q-syn1').addEventListener('click', function () { synth('stitched', 6.2); });
+  $('q-syn2').addEventListener('click', function () { synth('symbols-bw', 13); });
+  $('q-syn3').addEventListener('click', function () { synth('blocks-grid-symbols', 11.3); });
+  $('q-run').addEventListener('click', run);
+  $('q-cancel').addEventListener('click', function () { if (token) XSRead.cancel(token); });
+  ['q-fab', 'q-mode', 'q-key', 'q-nw'].forEach(function (id) { $(id).addEventListener('change', run); });
+})();
+</script>
+</body>
+</html>

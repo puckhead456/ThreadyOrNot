@@ -18,7 +18,7 @@
                                  "clear the service worker" ritual, ever
      any host    /tmp-pdf/ /test/  never touched by the cache at all
 */
-const CACHE_VERSION = 'hc8a04e21e9';
+const CACHE_VERSION = 'h4fec121dc6';
 const CACHE_NAME = 'stitchkeeper-' + CACHE_VERSION;
 
 const PRECACHE_URLS = [
@@ -49,6 +49,7 @@ const PRECACHE_URLS = [
   './js/zip.js',
   './js/xstitch.js',
   './js/xstitch-photo.js',
+  './js/xstitch-read.js',
   './js/sewing.js',
   './js/app.js',
   './js/app-knitting.js',

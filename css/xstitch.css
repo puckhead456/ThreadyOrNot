@@ -651,6 +651,287 @@
 }
 
 /* --------------------------------------------------------------------------
+   4. Wave J: read a chart picture, and Row by row
+   -------------------------------------------------------------------------- */
+
+.xs-read-item { align-items: flex-start; text-align: left; }
+.xs-read-item-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.xs-read-item-sub { font-size: 12px; }
+.xs-pic-card .btn { margin-top: 8px; }
+.xs-pdfpic { margin-top: 4px; }
+
+.xs-swatch-sm { width: 24px; height: 24px; font-size: 13px; }
+
+/* status line: reading… / what was read / what went wrong */
+.xs-read-status {
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.xs-read-status.is-busy { color: var(--text-muted); font-weight: 400; }
+.xs-read-status.is-bad { color: var(--danger); }
+
+.xs-read-seg { flex: 0 0 auto; margin-bottom: 8px; }
+.xs-read-seg button { flex: 1 1 0; font-size: 12px; }
+
+.xs-read-frame {
+  flex: 0 0 auto;
+  height: 42vh;
+  min-height: 200px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  overflow: hidden;
+}
+.xs-read-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: grab;
+}
+.xs-read-canvas.picking { cursor: crosshair; }
+.xs-read-canvas:focus-visible { outline: 3px solid var(--primary); outline-offset: -3px; }
+
+.xs-read-results { margin-top: 10px; }
+.xs-read-note { font-size: 12px; margin: 4px 0 8px; }
+.xs-read-fail p { margin: 0 0 8px; }
+
+/* the verdict line, coloured by how the counts came out */
+.xs-verdict {
+  margin: 0 0 8px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  border-left-width: 5px;
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 700;
+}
+.xs-verdict-exact, .xs-verdict-close { border-color: var(--success); }
+.xs-verdict-off { border-color: var(--danger); }
+.xs-verdict-unchecked { border-color: var(--accent-2); }
+
+.xs-unsure { font-size: 13px; margin: 0 0 8px; color: var(--text-muted); }
+.xs-unsure.has-unsure { color: var(--text); }
+
+.xs-count-wrap { margin: 4px 0 10px; overflow-x: auto; }
+.xs-count-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+.xs-count-table th, .xs-count-table td {
+  padding: 6px 4px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: middle;
+}
+.xs-count-table thead th { font-size: 11px; color: var(--text-muted); font-weight: 700; }
+.xs-count-table .num { text-align: right; white-space: nowrap; }
+.xs-count-name { font-weight: 400; }
+.xs-count-name .xs-swatch { margin-right: 6px; vertical-align: middle; }
+.xs-count-label { font-weight: 700; }
+.xs-count-sub { display: block; font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+.xs-count-mark { text-align: right; white-space: nowrap; font-weight: 700; min-width: 44px; }
+.xs-count-table tr.off .xs-count-mark { color: var(--danger); }
+.xs-mark-ok { color: var(--success); }
+.xs-mark-near { font-size: 11px; font-weight: 400; color: var(--text-muted); }
+.xs-count-in { width: 76px; min-height: 36px; text-align: right; }
+.xs-fix { font-size: 11px; padding: 0; min-height: 0; }
+
+.xs-unmatched {
+  margin: 8px 0;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+.xs-um-row { display: flex; align-items: center; gap: 10px; padding: 6px 0; }
+.xs-glyph {
+  flex: 0 0 auto;
+  width: 36px;
+  height: 36px;
+  image-rendering: pixelated;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface);
+}
+.xs-um-text { flex: 1 1 auto; min-width: 0; font-size: 13px; }
+.xs-um-n { font-weight: 700; }
+.xs-um-pick {
+  flex: 0 1 52%;
+  min-width: 0;
+  min-height: 40px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.xs-um-dmc { display: flex; gap: 8px; margin: 0 0 6px 46px; }
+.xs-um-dmc input { flex: 1 1 auto; min-width: 0; }
+
+.xs-rename-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; font-size: 13px; }
+
+.xs-read-adjust { flex: 0 0 auto; }
+.xs-nudge { display: flex; flex-wrap: wrap; gap: 6px; }
+.xs-nudge .btn { flex: 1 1 0; min-width: 44px; min-height: 44px; padding: 4px; font-size: 17px; }
+.xs-nudge .xs-nudge-word { font-size: 13px; }
+.xs-fabric-row { display: flex; align-items: center; gap: 8px; }
+.xs-fabric-row .seg { flex: 1 1 auto; }
+.xs-fabric-row .seg button { font-size: 12px; }
+.xs-read-crop { margin: 8px 0; }
+.xs-read-crop summary { cursor: pointer; padding: 8px 0; font-weight: 700; font-size: 14px; }
+
+/* the project's banner for a chart read from a picture */
+.xs-read-band {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 12px;
+  min-height: 44px;
+  text-align: left;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--surface-2);
+  border: none;
+  border-top: 1px solid var(--border);
+  border-left: 5px solid var(--accent-2);
+}
+.xs-read-band.xs-verdict-exact, .xs-read-band.xs-verdict-close { border-left-color: var(--success); }
+.xs-read-band.xs-verdict-off { border-left-color: var(--danger); }
+.xs-read-band-text { flex: 1 1 auto; min-width: 0; }
+.xs-read-band-go { flex: 0 0 auto; font-size: 18px; color: var(--text-muted); }
+.xs-read-band:focus-visible { outline: 3px solid var(--primary); outline-offset: -3px; }
+
+/* Row by row */
+.xs-tap-actions .xs-rows-btn { min-width: 0; font-size: 13px; padding-left: 10px; padding-right: 10px; }
+.xs-row-opts { flex: 0 0 auto; margin-top: 0; }
+.xs-row-opts summary { display: flex; flex-direction: column; gap: 2px; }
+.xs-row-opts-sum { font-size: 12px; font-weight: 400; }
+.xs-row-opts .seg button { font-size: 12px; }
+
+.xs-row-cols {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding: 2px 0 8px;
+}
+.xs-row-col {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 44px;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12px;
+}
+.xs-row-col.on { border-color: var(--primary); box-shadow: inset 0 0 0 2px var(--primary); }
+
+.xs-row-now {
+  flex: 0 0 auto;
+  padding: 12px;
+  border-radius: var(--radius);
+  border: 2px solid var(--primary);
+  background: var(--surface);
+  color: var(--text);
+}
+.xs-row-now.done { border-color: var(--success); }
+.xs-row-now-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 10px; margin-bottom: 8px; }
+.xs-row-now-n { font-family: var(--font-display); font-size: 22px; font-weight: 700; }
+.xs-row-now-sub { font-size: 13px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+
+.xs-runs { display: flex; flex-wrap: wrap; gap: 4px; }
+.xs-run {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 6px 2px 2px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  font-size: 12px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  color: var(--text);
+}
+.xs-run-sw {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 11px;
+}
+.xs-run-skip { padding: 2px 8px; font-weight: 400; color: var(--text-muted); background: transparent; border-style: dashed; }
+/* Counts are numbers: a system face keeps them compact under the pixel
+   display themes (Press Start 2P is a full em per digit). */
+.xs-run { font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; }
+/* readable at arm's length; a long row scrolls inside the card so Row done
+   stays on screen */
+.xs-runs-big { gap: 6px; max-height: 30vh; overflow-y: auto; overscroll-behavior: contain; }
+.xs-runs-big .xs-run { font-size: 20px; padding: 4px 10px 4px 4px; }
+.xs-runs-big .xs-run-sw { width: 30px; height: 30px; font-size: 17px; }
+.xs-runs-big .xs-run-skip { padding: 4px 10px; font-size: 16px; }
+
+.xs-row-done { margin-top: 12px; min-height: 64px; font-size: 18px; }
+.xs-row-done.is-done { font-size: 15px; }
+.xs-row-nav { display: flex; gap: 8px; margin-top: 8px; }
+.xs-row-nav .btn { flex: 1 1 0; min-height: 48px; min-width: 0; }
+.xs-row-copy { flex: 0 0 auto; display: flex; gap: 8px; margin: 10px 0; }
+.xs-row-copy .btn { flex: 1 1 0; min-height: 44px; min-width: 0; font-size: 13px; }
+
+.xs-row-list {
+  position: relative;          /* offsetTop of the rows is measured from here */
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 46vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 2px;
+}
+.xs-row-item {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  padding: 8px 10px;
+  text-align: left;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+}
+.xs-row-item.current { border-color: var(--primary); box-shadow: inset 0 0 0 2px var(--primary); }
+.xs-row-item.done { opacity: 0.62; }
+.xs-row-item.done.current { opacity: 1; }
+.xs-row-item-head { display: flex; align-items: baseline; gap: 10px; }
+.xs-row-item-n { font-weight: 700; font-size: 14px; }
+.xs-row-item-sub { font-size: 12px; color: var(--text-muted); flex: 1 1 auto; font-variant-numeric: tabular-nums; }
+.xs-row-more { min-height: 44px; }
+
+/* --------------------------------------------------------------------------
    Wider screens: the chart gets more room, the key sits beside it.
    -------------------------------------------------------------------------- */
 
@@ -659,6 +940,12 @@
   .xs-chart-wrap.xs-full { height: 64vh; }
   .xs-page-frame { height: 40vh; max-height: 420px; }
   #xs-stitch-btn { min-height: 240px; }
+  .xs-read-frame { height: 50vh; }
+}
+
+@media (max-height: 680px) {
+  .xs-read-frame { height: 34vh; min-height: 170px; }
+  .xs-row-done { min-height: 56px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -615,6 +615,11 @@ var TEXT_FIXTURES = [
       eq(crossGot, crossTruth, n + ': all nine cross-stitch colours, in the order the sheet prints them');
       log(!!findEntry(k, '19') && findEntry(k, '19').kind === 'cross',
         n + ': DMC 19 (a 2017 shade, "N 19 n/a") is a cross-stitch row');
+      /* Wave J: the 2017 shades are in the floss table now (approximate). */
+      eq(findEntry(k, '19') && findEntry(k, '19').hex, X.hexFor('DMC', '19'),
+        n + ': and DMC 19 has its swatch (wave J)');
+      eq(k.warnings.filter(function (w) { return /no colour data for DMC 19/.test(w); }).length, 0,
+        n + ': so there is no "no colour data for DMC 19" warning');
       log(!!findEntry(k, '3799') && findEntry(k, '3799').kind === 'cross',
         n + ': and the 3799 cross row (the last in the key) is read');
       eq(everyCodeKnown(k), true, n + ': every code is a real DMC colour (19 is a 2017 shade)');
@@ -1207,6 +1212,82 @@ function runGridFixture(fx) {
   });
 }
 
+/* -------------------------------------------------------------------- *
+ * Wave J: the owner's "Floss list" key (xs-potatoes). The PDF is not on
+ * this machine; tmp-pdf/xs-potatoes.key.json holds the key as read off the
+ * owner's screenshot. It is loaded at runtime and skipped when absent;
+ * nothing from it is written into this file.
+ * -------------------------------------------------------------------- */
+
+function runPotatoesKey() {
+  h('h3', 'xs-potatoes - "Floss list for crosses" (transcribed key, wave J)');
+  return fetch('../tmp-pdf/xs-potatoes.key.json', { cache: 'no-store' }).then(function (res) {
+    return res.ok ? res.json() : null;
+  }).catch(function () { return null; }).then(function (j) {
+    if (!j || typeof j.keyTextAsPrinted !== 'string') { skip('xs-potatoes key'); return; }
+    var n = 'xs-potatoes';
+    var want = (j.entries || []).map(function (e) { return e.code + '|' + e.name + '|' + e.stitches; });
+    var sig = function (k) {
+      return k.entries.map(function (e) { return e.code + '|' + e.name + '|' + e.stitchCount; });
+    };
+    var text = j.keyTextAsPrinted + '\n' + (j.previewTextAsPrinted || '');
+    var t0 = performance.now();
+    var k = X.parseKey(text);
+    var ms = Math.round(performance.now() - t0);
+    reportKey(n, k, { source: 'xs-potatoes.key.json', chars: text.length, parseMs: ms });
+    table(k.entries.map(function (e) {
+      return [e.brand + ' ' + e.code, e.name, e.stitchCount, e.strands, e.kind, e.hex];
+    }), ['floss', 'name', 'stitches', 'strands', 'kind', 'hex']);
+    eq(k.entries.length, 6, n + ': six colours');
+    eq(sig(k), want, n + ': codes, the PDF\'s own names and stitch counts, in key order');
+    eq(k.entries.reduce(function (s, e) { return s + (e.stitchCount || 0); }, 0), 5721,
+      n + ': the counts add up to 5,721');
+    eq(j.totalStitches, 5721, n + ': which is the total the transcription records');
+    eq(k.strandsDefault, 2, n + ': "Use 2 strands of thread for cross stitch" is 2 strands');
+    eq(k.entries.map(function (e) { return e.strands; }), [2, 2, 2, 2, 2, 2], n + ': on every row');
+    eq(k.entries.every(function (e) { return e.brand === 'DMC' && e.kind === 'cross'; }), true,
+      n + ': all DMC cross stitch');
+    eq(k.entries.every(function (e) { return !!e.hex; }), true, n + ': every row has a swatch, DMC 04 included');
+    eq([k.design.w, k.design.h], [144, 85], n + ': design size 144 x 85 (from the preview page text)');
+    var ds = X.designSize(j.previewTextAsPrinted || '');
+    eq(ds && [ds.w, ds.h], [144, 85], n + ': designSize reads it on its own');
+    eq(j.design && [j.design.w, j.design.h], [144, 85], n + ': as the transcription records');
+    log(k.confidence >= 0.6, n + ': confident', String(k.confidence));
+
+    /* The extractor's real output is unknown: the same key with the symbol
+       column arriving as private-use codes, the row number glued to the
+       brand, and thousands separators, must read the same. */
+    var lines = j.keyTextAsPrinted.split('\n');
+    var mangled = lines.map(function (l) {
+      return l.replace(/^(\d+) DMC /, function (all, num) {
+        var pua = String.fromCharCode(0xE000 + Number(num));
+        return Number(num) % 2 ? num + ' ' + pua + ' ' + pua + ' DMC ' : num + 'DMC ';
+      }).replace(/(\d)(\d{3})$/, '$1,$2');
+    }).join('\n');
+    eq(sig(X.parseKey(mangled)), want, n + ': the same with symbol junk, glued row numbers and "1,839"');
+    var perCell = [];
+    lines.forEach(function (l) {
+      var m = /^(\d+) (DMC \d+) (.+) (\d+)$/.exec(l);
+      if (m) perCell.push(m[1], m[2], m[3], m[4]); else perCell.push(l);
+    });
+    eq(sig(X.parseKey(perCell.join('\n'))), want, n + ': and with one cell per line');
+
+    /* The key as the checksum: a synthetic chart with exactly the key's
+       counts checks exact; one stitch moved checks close. */
+    var cells = [], i;
+    k.entries.forEach(function (e, ei) { for (i = 0; i < e.stitchCount; i++) cells.push(ei); });
+    while (cells.length < 144 * 85) cells.push(-1);
+    var data = X.normalize({ palette: k.entries, chart: { w: 144, h: 85, cells: cells } }, null);
+    var chk = X.checkCounts(data, k.entries);
+    eq([chk.verdict, chk.readTotal, chk.expectedTotal], ['exact', 5721, 5721], n + ': checkCounts on a chart with those counts: exact');
+    eq(chk.summary, 'All 6 colours match the key exactly (5,721 stitches).', n + ': in plain words');
+    cells[0] = 1;
+    var near = X.checkCounts(X.normalize({ palette: k.entries, chart: { w: 144, h: 85, cells: cells } }, null), k.entries);
+    eq(near.verdict, 'close', n + ': one stitch read as the wrong colour: close');
+    info(near.summary);
+  });
+}
+
 /* -------------------------------------------------------------------- */
 
 function finish() {
@@ -1224,6 +1305,7 @@ var chain = Promise.resolve();
 TEXT_FIXTURES.forEach(function (fx) {
   chain = chain.then(function () { return runTextFixture(fx); });
 });
+chain = chain.then(function () { h('h2', 'Floss list key (wave J)'); return runPotatoesKey(); });
 chain = chain.then(function () { h('h2', 'OXS fixtures (parseOXS / toOXS)'); });
 OXS_FIXTURES.forEach(function (fx) {
   chain = chain.then(function () { return runOxsFixture(fx); });
