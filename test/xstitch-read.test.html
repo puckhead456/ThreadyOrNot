@@ -278,13 +278,13 @@ function render(s) {
   }
   if (style === 'blocks-grid' || style === 'blocks-grid-symbols' || style === 'symbols-bw') {
     for (x = 0; x <= s.w; x++) {
-      var bold = x % 10 === 0 || x === s.w;
+      var fr = s.frame || 0, bold = (x >= fr && x <= s.w - fr && ((x + (s.ox || 0) - fr) % 10 === 0 || (s.edgeBold !== false && x === s.w - fr)));
       c.fillStyle = bold ? '#333' : 'rgba(110,110,110,0.9)';
       var lw = bold ? Math.max(1.5, s.px * 0.14) : 1;
       c.fillRect(ox + x * s.px - lw / 2, oy - (bold ? lw / 2 : 0), lw, s.h * s.py + (bold ? lw : 0));
     }
     for (y = 0; y <= s.h; y++) {
-      var bold2 = y % 10 === 0 || y === s.h;
+      var fr2 = s.frame || 0, bold2 = (y >= fr2 && y <= s.h - fr2 && ((y + (s.oy || 0) - fr2) % 10 === 0 || (s.edgeBold !== false && y === s.h - fr2)));
       c.fillStyle = bold2 ? '#333' : 'rgba(110,110,110,0.9)';
       var lw2 = bold2 ? Math.max(1.5, s.py * 0.14) : 1;
       c.fillRect(ox - (bold2 ? lw2 / 2 : 0), oy + y * s.py - lw2 / 2, s.w * s.px + (bold2 ? lw2 : 0), lw2);
@@ -460,6 +460,11 @@ function synthTests() {
       var e = per[k];
       return [e.style, e.p].concat(e.res.map(function (x) { return x.ok ? pct(x.agree) + ' ' + x.verdict : x.reason; }));
     });
+    STYLES.forEach(function (st) {
+      var mn = 1, from = st === 'symbols-bw' ? 13 : 6;
+      order.forEach(function (k) { var e = per[k]; if (e.style === st && e.p >= from) mn = Math.min(mn, e.res[0].ok ? e.res[0].agree : 0); });
+      ledger('synthetic ' + st + ', clean, ' + from + ' px and up', 'worst squares right', pct(mn), '100%', mn === 1);
+    });
     note('Recovery rate (share of squares exactly right) per style / pitch / degradation:');
     table(rows, ['style', 'pitch px'].concat(DEGRADE.map(function (d) { return d.name; })));
   });
@@ -632,11 +637,15 @@ function synthMisc() {
       var t1 = performance.now();
       return XSRead.detect(pad, {});
     }).then(function () {
-      var t1 = performance.now();
-      return XSRead.detect(pad, {}).then(function (d) { return { d: d, ms: Math.round(performance.now() - t1) }; });
+      /* the median of three warm calls: this machine is shared and one call can stall */
+      var times = [], dlast = null, ch3 = Promise.resolve();
+      [0, 1, 2].forEach(function () {
+        ch3 = ch3.then(function () { var t1 = performance.now(); return XSRead.detect(pad, {}).then(function (d) { dlast = d; times.push(Math.round(performance.now() - t1)); }); });
+      });
+      return ch3.then(function () { times.sort(function (a, b) { return a - b; }); return { d: dlast, ms: times[1], all: times }; });
     }).then(function (dd) {
       var d = dd.d, dms = dd.ms;
-      note('detect on this picture: first call ' + cold + ' ms, third call ' + dms + ' ms (the worker was already running)');
+      note('detect on this picture: first call ' + cold + ' ms, warm calls ' + dd.all.join(' / ') + ' ms, median ' + dms + ' ms (the worker was already running)');
       var t2 = performance.now();
       return XSRead.read(pad, { key: keyFor(p8, cb), size: { w: gw, h: gh } }).then(function (r) {
         var rms = Math.round(performance.now() - t2);
@@ -646,7 +655,8 @@ function synthMisc() {
           note('2000 x 1500 px, 240 x 180 stitched, 12 colours: detect ' + dms + ' ms, read with key + size ' + rms + ' ms ' +
             JSON.stringify(r.stats.phases) + ', read with nothing given ' + nms + ' ms');
           eq([d.ok, d.size], [true, { w: gw, h: gh }], 'detect finds 240 x 180 on the 2000 x 1500 picture');
-          log(dms < 300, 'detect under 300 ms', dms + ' ms');
+          /* wave K: the page segmenter runs inside detect; the brief's budget is 400 ms warm */
+          log(dms < 400, 'detect under 400 ms (segmenter included)', dms + ' ms');
           log(rms < 1500, 'read under 1.5 s (worker, key with counts: candidate lattices included)', rms + ' ms');
           log(nms < 1500, 'read under 1.5 s with nothing given', nms + ' ms');
           eq([r.check.verdict, cellAgree(r, gb)], ['exact', 1], 'and the big read is exact');
@@ -656,6 +666,201 @@ function synthMisc() {
     });
   });
   return tasks;
+}
+
+/* ---------------------------------------------------------------- *
+ * Wave K: segmenter, honest size, colour cap, tiles
+ * ---------------------------------------------------------------- */
+var LEDGER = [];   /* [case, metric, value, threshold, pass] — printed at the end */
+function ledger(name, metric, value, thr, pass) {
+  LEDGER.push([name, metric, value, thr, pass]);
+  log(pass, 'ledger: ' + name + ' — ' + metric + ' ' + value + ' (needs ' + thr + ')');
+}
+
+/** a colour key panel: rows of swatch + symbol + text, on its own canvas */
+function keyPanel(pal, px) {
+  var rowH = Math.round(px * 2.2), cv = document.createElement('canvas');
+  cv.width = Math.round(px * 16); cv.height = rowH * pal.length + Math.round(px * 3);
+  var c = cv.getContext('2d');
+  c.fillStyle = '#fff'; c.fillRect(0, 0, cv.width, cv.height);
+  c.fillStyle = '#222'; c.font = Math.round(px * 1.1) + 'px sans-serif'; c.textBaseline = 'middle';
+  c.fillText('Colour key', px * 0.5, px * 1.2);
+  pal.forEach(function (p, i) {
+    var y = Math.round(px * 2.5) + i * rowH;
+    c.fillStyle = '#' + p.hex; c.fillRect(px * 0.5, y, px * 1.8, px * 1.5);
+    c.fillStyle = '#000'; c.font = Math.round(px) + 'px sans-serif'; c.textAlign = 'center';
+    c.fillText(GLYPHS[i % GLYPHS.length], px * 1.4, y + px * 0.8);
+    c.textAlign = 'left'; c.fillStyle = '#222';
+    c.fillText('DMC ' + p.code + '  ' + (p.name || '').slice(0, 14), px * 3, y + px * 0.8);
+  });
+  return cv;
+}
+
+/** a "photo": smooth gradients and noise, many colours, no lattice */
+function photoBlock(w, h, seed) {
+  var R = rng(seed), cv = document.createElement('canvas'); cv.width = w; cv.height = h;
+  var c = cv.getContext('2d'), g = c.createLinearGradient(0, 0, w, h);
+  g.addColorStop(0, '#c98a5a'); g.addColorStop(0.5, '#6d8f4e'); g.addColorStop(1, '#3a4f7a');
+  c.fillStyle = g; c.fillRect(0, 0, w, h);
+  var id = c.getImageData(0, 0, w, h);
+  for (var i = 0; i < id.data.length; i += 4) { var n = (R() - 0.5) * 40; id.data[i] += n; id.data[i + 1] += n; id.data[i + 2] += n * 0.7; }
+  c.putImageData(id, 0, 0);
+  c.fillStyle = 'rgba(255,240,200,0.5)';
+  for (var k = 0; k < 12; k++) { c.beginPath(); c.arc(R() * w, R() * h, 10 + R() * 40, 0, 7); c.fill(); }
+  return cv;
+}
+
+function waveKTests() {
+  group('Wave K: page segmenter, honest size, colour cap (synthetic)');
+  var chain = Promise.resolve();
+  var pal = pickPalette(8, 301, 'f3eee2', 22), w = 60, h = 44, g = makeGrid(w, h, 8, 'shapes', 302), counts = countsOf(g, 8);
+  var chartCv = render({ grid: g, w: w, h: h, pal: pal, style: 'blocks-grid-symbols', px: 12, py: 12, fabric: 'f3eee2', page: true });
+  /* a busy page: chart, a key panel close beside it, a photo above */
+  var key = keyPanel(pal, 12), photo = photoBlock(520, 300, 303);
+  var page = document.createElement('canvas');
+  page.width = chartCv.width + key.width + 30; page.height = chartCv.height + photo.height + 40;
+  var pc = page.getContext('2d');
+  pc.fillStyle = '#fff'; pc.fillRect(0, 0, page.width, page.height);
+  pc.drawImage(photo, 40, 20);
+  pc.drawImage(chartCv, 0, photo.height + 40);
+  pc.drawImage(key, chartCv.width + 10, photo.height + 60);
+  chain = chain.then(function () {
+    return XSRead.detect(page, {}).then(function (d) {
+      eq([d.ok, d.size], [true, { w: w, h: h }], 'busy page (chart + key panel beside it + photo above), nothing given: the chart\'s size is found');
+      log(Array.isArray(d.regions) && d.regions.some(function (r) { return r.chosen && r.kind === 'chart'; }), 'detect returns regions with the chosen chart', JSON.stringify((d.regions || []).map(function (r) { return r.kind; })));
+      log(d.regions.some(function (r) { return r.kind === 'key'; }), 'the key panel is recognised as a colour key');
+      log(d.region === d.regions.filter(function (r) { return r.chosen; })[0].id, 'region names the chosen region');
+      log(d.sizeVerdict === 'consistent' && d.sizeEvidence.some(function (e) { return e.kind === 'square' && e.ok; }), 'size evidence: square squares, consistent', d.sizeVerdict);
+      log(d.sizeEvidence.some(function (e) { return e.kind === 'bold10' && e.ok === true; }), 'size evidence: bold 10-lines on multiples of 10');
+      var other = d.regions.filter(function (r) { return !r.chosen; })[0];
+      if (!other) return;
+      return XSRead.read(page, { region: d.regions.filter(function (r) { return r.chosen; })[0], key: keyFor(pal, counts) }).then(function (r) {
+        eq([r.ok, r.check.verdict, cellAgree(r, g)], [true, 'exact', 1], 'read with opts.region from detect: exact');
+      });
+    });
+  });
+  chain = chain.then(function () {
+    return XSRead.read(page, { key: keyFor(pal, counts) }).then(function (r) {
+      ledger('busy page (synthetic)', 'squares right, nothing but the key given', pct(cellAgree(r, g)), '100%', r.ok && cellAgree(r, g) === 1);
+    });
+  });
+  chain = chain.then(function () {
+    /* a picture that is only a key */
+    return XSRead.detect(keyPanel(pal, 14), {}).then(function (d) {
+      eq([d.ok, d.reason], [false, 'looks-like-a-key'], 'a picture of a colour key alone: looks-like-a-key');
+      log(/colour key/.test(d.message || ''), 'with a plain message', d.message);
+    });
+  });
+  chain = chain.then(function () {
+    /* a wrong declared size: the squares are not square */
+    return XSRead.detect(chartCv, { size: { w: w, h: h + 8 } }).then(function (d) {
+      log(d.ok && d.sizeVerdict === 'doubtful' && d.sizeEvidence.some(function (e) { return e.kind === 'square' && e.ok === false; }),
+        'a wrong declared size: "the squares are not square", verdict doubtful', d.sizeVerdict);
+      return XSRead.detect(chartCv, { size: { w: w, h: h } }).then(function (d2) {
+        log(d2.confidence > d.confidence, 'and confidence is lower than with the right size', d.confidence + ' < ' + d2.confidence);
+        eq(d2.sizeVerdict, 'checked', 'right declared size: checked');
+      });
+    });
+  });
+  chain = chain.then(function () {
+    /* a gridded margin outside a thick frame (Tiny Modernist style) is trimmed */
+    var w2 = 40, h2 = 30, g2 = makeGrid(w2, h2, 5, 'shapes', 311), p5 = pickPalette(5, 312, 'ffffff', 22);
+    var big = new Int16Array((w2 + 4) * (h2 + 4));
+    for (var i = 0; i < big.length; i++) big[i] = -1;
+    for (var y = 0; y < h2; y++) for (var x = 0; x < w2; x++) big[(y + 2) * (w2 + 4) + x + 2] = g2[y * w2 + x];
+    var cv = render({ grid: big, w: w2 + 4, h: h2 + 4, pal: p5, style: 'blocks-grid', px: 12, py: 12, fabric: 'ffffff', page: true, frame: 2 });
+    return XSRead.detect(cv, {}).then(function (d) {
+      eq([d.ok, d.size], [true, { w: w2, h: h2 }], 'empty gridded margin outside a thick frame: the frame\'s ' + w2 + ' x ' + h2 + ' is reported');
+      log(d.sizeEvidence.some(function (e) { return e.kind === 'region'; }), 'and the evidence says the margin was left out');
+    });
+  });
+  chain = chain.then(function () {
+    /* colour cap: a 90-colour chart of flat squares reads with no key */
+    var many = [], X = window.XStitch, tbl = X.FLOSS.dmc;
+    for (var i = 0; i < tbl.length && many.length < 90; i += Math.max(1, Math.floor(tbl.length / 90))) if (/^\d{3,4}$/.test(tbl[i].code)) many.push({ code: tbl[i].code, name: tbl[i].name, hex: tbl[i].hex });
+    var R = rng(321), gg = new Int16Array(80 * 60);
+    for (var q = 0; q < gg.length; q++) gg[q] = Math.floor(R() * many.length);
+    for (q = 0; q < many.length; q++) gg[q] = q;   /* every colour appears */
+    var cv = render({ grid: gg, w: 80, h: 60, pal: many, style: 'blocks', px: 9, py: 9, fabric: 'ffffff', page: true, jitter: 0 });
+    return XSRead.read(cv, { size: { w: 80, h: 60 } }).then(function (r) {
+      log(r.ok && r.classes.length >= 80, 'colour cap: a ' + many.length + '-colour chart of flat squares is read with no key (no fixed 60 refusal)', r.ok ? r.classes.length + ' classes' : r.reason);
+      return XSRead.read(cv, { size: { w: 80, h: 60 }, maxColors: 60 }).then(function (r2) {
+        eq([r2.ok, r2.reason], [false, 'too-many-colors'], 'a cap the caller gives is still a hard cap');
+      });
+    });
+  });
+  chain = chain.then(function () {
+    return XSRead.read(photoBlock(640, 480, 331), { size: { w: 64, h: 48 } }).then(function (r) {
+      log(!r.ok ? r.reason === 'too-many-colors' : r.confidence < 0.5, 'a photo cut into squares is still refused (or not confident)', r.ok ? 'confidence ' + r.confidence : r.reason);
+    });
+  });
+  return chain;
+}
+
+/** cut a chart into overlapping page tiles and read them back */
+function tilesTests() {
+  group('Wave K: charts split across pages as pictures (synthetic tiles)');
+  var pal = pickPalette(7, 401, 'f3eee2', 22), W = 70, H = 56, g = makeGrid(W, H, 7, 'shapes', 402), counts = countsOf(g, 7);
+  function cut(x0, y0, tw, th) {
+    var t = new Int16Array(tw * th);
+    for (var y = 0; y < th; y++) for (var x = 0; x < tw; x++) t[y * tw + x] = g[(y0 + y) * W + x0 + x];
+    return t;
+  }
+  function tileCanvas(x0, y0, tw, th, deg) {
+    var cv = render({ grid: cut(x0, y0, tw, th), w: tw, h: th, pal: pal, style: 'blocks-grid-symbols', px: 11, py: 11, fabric: 'f3eee2', page: true, ox: x0, oy: y0, edgeBold: false });
+    return degrade(cv, deg || {});
+  }
+  var chain = Promise.resolve(), rows = [];
+  /* 2 x 2 pages, 3 squares repeated across each join */
+  var spec = [[0, 0, 38, 30], [35, 0, 35, 30], [0, 27, 38, 29], [35, 27, 35, 29]];
+  [{ name: 'clean', how: {} }, { name: 'jpeg 0.85', how: { jpeg: 0.85 } }].forEach(function (deg) {
+    chain = chain.then(function () {
+      return Promise.all(spec.map(function (s) { return tileCanvas(s[0], s[1], s[2], s[3], deg.how); })).then(function (cvs) {
+        return XSRead.readTiles(cvs, { key: keyFor(pal, counts) }).then(function (r) {
+          var agree = r.ok && r.size.w === W && r.size.h === H ? cellAgree(r, g) : 0;
+          rows.push(['2 x 2, overlap 3, ' + deg.name, r.ok ? r.size.w + ' x ' + r.size.h : r.reason, r.layout ? r.layout.cols + ' x ' + r.layout.rows : '',
+            r.seams ? r.seams.map(function (s) { return s.a + '|' + s.b + ' ' + s.overlap + ' ' + (s.agree === null ? '-' : pct(s.agree)); }).join(', ') : '', pct(agree), r.check ? r.check.verdict : '', r.ms]);
+          eq([r.ok, r.size, r.layout && r.layout.cols], [true, { w: W, h: H }, 2], 'tiles (' + deg.name + '): joined to ' + W + ' x ' + H + ' in 2 columns');
+          log(r.ok && r.seams.length === 4 && r.seams.every(function (s) { return s.overlap === 3 && s.ok !== false; }) && r.seams.filter(function (s) { return s.ok; }).length >= (deg.name === 'clean' ? 3 : 2),
+            'every join placed with its 3 repeated squares; those with stitches in the overlap agree (an all-fabric overlap takes its column\'s and stays unchecked)');
+          var need = deg.name === 'clean' ? 1 : 0.99;
+          ledger('tiles 2 x 2 (' + deg.name + ')', 'squares right', pct(agree), pct(need), agree >= need);
+          if (deg.name === 'clean') log(r.ok && r.check.verdict === 'exact', 'the whole chart checks against the key\'s counts', r.check && r.check.summary);
+          else note('JPEG tiles, whole-chart check: ' + (r.check && r.check.summary));
+        });
+      });
+    });
+  });
+  /* pages that only abut (no repeated squares): placed by order and the declared size */
+  chain = chain.then(function () {
+    var ab = [[0, 0, 40, 30], [40, 0, 30, 30], [0, 30, 40, 26], [40, 30, 30, 26]];
+    return Promise.all(ab.map(function (s) { return tileCanvas(s[0], s[1], s[2], s[3], {}); })).then(function (cvs) {
+      return XSRead.readTiles(cvs, { key: keyFor(pal, counts), size: { w: W, h: H } }).then(function (r) {
+        var agree = r.ok && r.size.w === W && r.size.h === H ? cellAgree(r, g) : 0;
+        rows.push(['2 x 2, abutting, size given', r.ok ? r.size.w + ' x ' + r.size.h : r.reason, r.layout ? r.layout.cols + ' x ' + r.layout.rows : '',
+          r.seams ? r.seams.map(function (s) { return s.a + '|' + s.b + ' ' + s.overlap + ' ' + s.how; }).join(', ') : '', pct(agree), r.check ? r.check.verdict : '', r.ms]);
+        eq([r.ok, r.size], [true, { w: W, h: H }], 'abutting pages with the declared size: joined to ' + W + ' x ' + H);
+        log(r.ok && r.seams.every(function (s) { return s.ok !== false; }) && r.stats.warnings.some(function (x) { return /could not be checked/.test(x); }),
+          'and the joins are reported as unchecked, not as agreeing', r.ok && r.stats.warnings.join('; '));
+        ledger('tiles 2 x 2 abutting, size given', 'squares right', pct(agree), '100%', agree === 1);
+      });
+    });
+  });
+  /* a cover photo first: left out, the join still exact; a wrong declared size: verdict off */
+  chain = chain.then(function () {
+    return Promise.all(spec.map(function (s) { return tileCanvas(s[0], s[1], s[2], s[3], {}); })).then(function (cvs) {
+      return XSRead.readTiles([photoBlock(600, 800, 405)].concat(cvs), { key: keyFor(pal, counts) }).then(function (r) {
+        var agree = r.ok && r.size.w === W && r.size.h === H ? cellAgree(r, g) : 0;
+        log(r.ok && r.tiles[0].ok === false && r.tiles[0].how === 'left-out' && agree === 1, 'a cover photo among the pages is left out (not a chart) and the join is still exact', r.ok ? r.stats.warnings[0] + ' · ' + pct(agree) : r.message);
+        rows.push(['photo + 2 x 2, overlap 3', r.ok ? r.size.w + ' x ' + r.size.h : r.reason, r.layout ? r.layout.cols + ' x ' + r.layout.rows : '', '', pct(agree), r.check ? r.check.verdict : '', r.ms]);
+        return XSRead.readTiles(cvs, { key: keyFor(pal, counts), size: { w: W + 10, h: H } }).then(function (r2) {
+          log(r2.ok && r2.check.verdict === 'off' && r2.sizeVerdict === 'doubtful' && r2.sizeOff && /not the 80 x 56/.test(r2.check.summary),
+            'a join that misses the declared size: Check verdict off, size doubtful, said in the summary', r2.ok ? r2.check.verdict + ' · ' + r2.check.summary : r2.reason);
+        });
+      });
+    });
+  });
+  return chain.then(function () { table(rows, ['case', 'size', 'layout', 'seams (a|b overlap agree)', 'squares right', 'check', 'ms']); });
 }
 
 /* ---------------------------------------------------------------- *
@@ -722,11 +927,43 @@ function potatoes() {
         log(r.check.verdict === 'close' || r.check.verdict === 'exact', tag + 'verdict close or exact', r.check.verdict);
         eq(r.classes.filter(function (c) { return c.fabric; }).length, 1, tag + 'the lilac ground is the fabric');
       });
+      if (r0.ok) {
+        var worst1 = 0; r0.check.rows.forEach(function (row) { if (row.expected) worst1 = Math.max(worst1, Math.abs(row.read - row.expected)); });
+        ledger('potatoes screenshot (acceptance)', 'total read / printed', r0.check.readTotal + ' / ' + kj.totalStitches, '5721 / 5721', r0.check.readTotal === kj.totalStitches);
+        ledger('potatoes screenshot (acceptance)', 'worst colour, stitches off', worst1, '<= 1', worst1 <= 1);
+      }
       eq([r2.ok, r2.size], [true, size], 'no key, no size: still 144 x 85');
+      /* a key read from a picture may miss some counts (DMC 04's, in the owner's
+         flow): those rows still claim their colour, unverified in the Check */
+      var drops = [[0], [0, 2]];
+      var chD = Promise.resolve();
+      drops.forEach(function (dr) {
+        chD = chD.then(function () {
+          var k2 = key.map(function (e, i) { var c2 = Object.assign({}, e); if (dr.indexOf(i) >= 0) { delete c2.stitchCount; delete c2.stitches; } return c2; });
+          return XSRead.read(blob, { key: k2, size: size }).then(function (rp) {
+            var lab = dr.map(function (i) { return 'DMC ' + key[i].code; }).join(' + ');
+            var same = 0;
+            for (var q = 0; q < rp.cells.length; q++) if (rp.cells[q] === r0.cells[q]) same++;
+            log(rp.ok && same / rp.cells.length >= 0.999, 'key with no count for ' + lab + ': the read matches the full-key read', pct(same / rp.cells.length));
+            var rowsOk = key.every(function (e, i) {
+              var row = rp.check.rows.filter(function (x) { return x.entry === i; })[0];
+              return row && Math.abs(row.read - kj.entries[i].stitches) <= 3;
+            });
+            log(rowsOk, 'key with no count for ' + lab + ': all six colours land on the right squares (each within 3 of the printed count)',
+              rp.check.rows.map(function (x) { return x.code + ' ' + x.read; }).join(', '));
+            var unv = dr.every(function (i) { var row = rp.check.rows.filter(function (x) { return x.entry === i; })[0]; return row && row.expected === null && row.ok === null && row.delta === null && row.pct === null; });
+            log(unv, 'and those rows are unverified in the Check (expected, ok, delta, pct all null)');
+            eq(rp.check.unmatchedClasses, 0, 'and no colour is left unmatched (' + lab + ')');
+            log(rp.classes.filter(function (c) { return dr.indexOf(c.entry) >= 0; }).every(function (c) { return c.how === 'colour'; }), 'matched by colour (how: colour)');
+            ledger('potatoes, key with no count for ' + lab, 'squares as the full-key read', pct(same / rp.cells.length), '99.9%', same / rp.cells.length >= 0.999);
+          });
+        });
+      });
       if (r2.ok) {
         log(Math.abs(r2.check.readTotal - kj.totalStitches) <= kj.totalStitches * 0.01, 'no key: the stitched total is within 1 % of 5,721', r2.check.readTotal);
         note('no key, classes: ' + r2.classes.map(function (c) { return (c.fabric ? 'fabric ' : '') + c.count + ' #' + c.hex; }).join(', '));
       }
+      return chD;
     });
   });
 }
@@ -810,6 +1047,8 @@ function vectorFixture(name) {
         try { hd.destroy(); } catch (e) { /* ignore */ }
         if (!sum.pages) { skip(name + ': no chart page found'); return; }
         vectorRows.push([name + ' (pages read)', sum.pages + ' pages', '', '', pct(sum.a[0] / sum.cells), pct(sum.a[1] / sum.cells), pct(sum.a[2] / sum.cells), '']);
+        var exactF = name === 'xs-pacman' || name === 'xs-portal' || name === 'xs-typechar', thrV = exactF ? 1 : 0.999;
+        ledger(name + ' (vector truth, ' + sum.pages + ' pages)', 'agreement with nothing given', pct(sum.a[2] / sum.cells), pct(thrV), sum.a[2] / sum.cells >= thrV - 1e-9);
       });
     });
   });
@@ -869,10 +1108,98 @@ function imageOnlyTests() {
   });
 }
 
+/* the named wave J failures, now rows of the ledger (truth: size from the pattern's own text) */
+function waveKFixtures() {
+  group('Wave K: busy pages and the key picture (tmp-pdf fixtures)');
+  if (!window.PdfText || !window.pdfjsLib) { skip('pdf.js not loaded'); return Promise.resolve(); }
+  shimRaf();
+  var cases = [
+    { f: 'xs-satsuma-stayhome-color', p: 1, want: { w: 70, h: 97 } },
+    { f: 'xs-satsuma-summersflight-color', p: 1, want: { w: 44, h: 70 } },
+    { f: 'xs-tinymodernist-autumn', p: 1, readable: true, photo: true },
+    { f: 'xs-tinymodernist-matryoshka', p: 1, photo: true, notBigger: { w: 89, h: 125 } },
+    { f: 'xs-dmc-2173', p: 1, refuse: true }
+  ];
+  var chain = Promise.resolve();
+  cases.forEach(function (cs) {
+    chain = chain.then(function () {
+      return fetchBlob('../tmp-pdf/' + cs.f + '.pdf').then(function (blob) {
+        if (!blob) { skip(cs.f + '.pdf'); return; }
+        return window.PdfText.open(new File([blob], cs.f + '.pdf', { type: 'application/pdf' })).then(function (hd) {
+          return hd.renderPage(cs.p, { maxWidth: 2200 }).then(function (cv) {
+            return XSRead.read(cv, {}).then(function (r) {
+              var nm = cs.f + ' p' + cs.p + ', nothing given';
+              note(nm + ': ' + (r.ok ? r.size.w + ' x ' + r.size.h + ', ' + r.classes.length + ' classes, verdict on size ' + r.sizeVerdict + ', regions ' +
+                r.regions.map(function (q) { return q.label + (q.chosen ? '*' : ''); }).join(', ') : r.reason + ': ' + r.message));
+              if (cs.want) ledger(nm, 'size', r.ok ? r.size.w + ' x ' + r.size.h : r.reason, cs.want.w + ' x ' + cs.want.h, r.ok && r.size.w === cs.want.w && r.size.h === cs.want.h);
+              if (cs.readable) ledger(nm, 'read (was refused: more than 60 colours)', r.ok ? 'read, ' + r.classes.length + ' classes' : r.reason, 'read', r.ok);
+              if (cs.photo) ledger(nm, 'the photo is left out', r.ok && r.regions.some(function (q) { return q.kind === 'photo' && !q.chosen; }) ? 'yes' : 'no', 'yes',
+                r.ok && r.regions.some(function (q) { return q.kind === 'photo' && !q.chosen; }));
+              if (cs.notBigger) ledger(nm, 'size smaller than the whole page\'s ' + cs.notBigger.w + ' x ' + cs.notBigger.h, r.ok ? r.size.w + ' x ' + r.size.h : r.reason, '< ' + cs.notBigger.h + ' rows', r.ok && r.size.h < cs.notBigger.h);
+              if (cs.refuse) ledger(nm + ' (a photo page)', 'refused or not confident', r.ok ? 'confidence ' + r.confidence : r.reason, 'refused', !r.ok || r.confidence < 0.5);
+            });
+          }).then(function () { try { hd.destroy(); } catch (e) { /* ignore */ } });
+        });
+      });
+    });
+  });
+  /* the audit's wrong sizes: a wrong size may happen, but never confident */
+  [{ f: 'xs-satsuma-stayhome-color', p: 1, mw: 3200, want: { w: 70, h: 97 } }, { f: 'xs-satsuma-stayhome-color', p: 1, mw: 1600, want: { w: 70, h: 97 } },
+   { f: 'xs-wocs-robin', p: 1, mw: 1600, want: { w: 79, h: 40 }, either: true }].forEach(function (cs) {
+    chain = chain.then(function () {
+      return fetchBlob('../tmp-pdf/' + cs.f + '.pdf').then(function (blob) {
+        if (!blob) { skip(cs.f + '.pdf'); return; }
+        return window.PdfText.open(new File([blob], cs.f + '.pdf', { type: 'application/pdf' })).then(function (hd) {
+          return hd.renderPage(cs.p, { maxWidth: cs.mw }).then(function (cv) {
+            return XSRead.read(cv, {}).then(function (r) {
+              var right = r.ok && ((r.size.w === cs.want.w && r.size.h === cs.want.h) || (cs.either && r.size.w === cs.want.h && r.size.h === cs.want.w));
+              var honest = r.ok && (right || r.sizeVerdict === 'doubtful');
+              ledger(cs.f + ' p' + cs.p + ' at ' + cs.mw + ' px', 'size, or flagged doubtful', r.ok ? r.size.w + ' x ' + r.size.h + ' ' + r.sizeVerdict : r.reason, cs.want.w + ' x ' + cs.want.h + ' or doubtful', honest);
+              if (!right && r.ok) note(cs.f + ' at ' + cs.mw + ' px: ' + r.sizeEvidence.filter(function (e) { return e.ok === false; }).map(function (e) { return e.detail; }).join(' '));
+            });
+          }).then(function () { try { hd.destroy(); } catch (e) { /* ignore */ } });
+        });
+      });
+    });
+  });
+  /* the first real multi-page picture chart (FQS sampler, 138 x 172 over 5 pages, page 1 a cover) */
+  chain = chain.then(function () {
+    return fetchBlob('../tmp-pdf/xs-fqs-celebration-sampler.pdf').then(function (blob) {
+      if (!blob) { skip('xs-fqs-celebration-sampler.pdf'); return; }
+      return window.PdfText.open(new File([blob], 's.pdf', { type: 'application/pdf' })).then(function (hd) {
+        var cvs = [], ch2 = Promise.resolve();
+        for (var p = 1; p <= hd.numPages; p++) (function (pp) { ch2 = ch2.then(function () { return hd.renderPage(pp, { maxWidth: 2000 }).then(function (cv) { cvs.push(cv); }); }); })(p);
+        return ch2.then(function () {
+          return XSRead.readTiles(cvs, { size: { w: 138, h: 172 } }).then(function (r) {
+            var right = r.ok && r.size.w === 138 && r.size.h === 172;
+            note('FQS sampler, 5 pages: ' + (r.ok ? r.size.w + ' x ' + r.size.h + ', layout ' + r.layout.cols + ' x ' + r.layout.rows + ', ' + r.check.verdict + ' · ' + r.check.summary + ' · ' + r.stats.warnings.join('; ') : r.reason + ': ' + r.message));
+            log(r.ok && r.tiles[0].ok === false, 'FQS sampler: the cover page is left out as not a chart');
+            log(right || (r.ok && r.check.verdict === 'off' && r.sizeVerdict === 'doubtful'), 'FQS sampler: the join is right, or says it is off', r.ok ? r.size.w + ' x ' + r.size.h + ' ' + r.check.verdict : r.reason);
+            ledger('xs-fqs-celebration-sampler (5 pages, readTiles)', 'joined size', r.ok ? r.size.w + ' x ' + r.size.h + ' (' + r.check.verdict + ')' : r.reason, '138 x 172, or verdict off', right || (r.ok && r.check.verdict === 'off'));
+          });
+        }).then(function () { try { hd.destroy(); } catch (e) { /* ignore */ } });
+      });
+    });
+  });
+  chain = chain.then(function () {
+    return fetchBlob('../tmp-pdf/xs-potatoes-key.png').then(function (blob) {
+      if (!blob) { skip('xs-potatoes-key.png'); return; }
+      return XSRead.detect(blob, {}).then(function (d) {
+        ledger('xs-potatoes-key.png (was read as a "6 x 3" chart)', 'reason', d.ok ? 'chart ' + d.size.w + ' x ' + d.size.h : d.reason, 'looks-like-a-key', !d.ok && d.reason === 'looks-like-a-key');
+      });
+    });
+  });
+  return chain;
+}
+
 /* ---------------------------------------------------------------- *
  * run
  * ---------------------------------------------------------------- */
 function finish() {
+  if (LEDGER.length) {
+    group('Accuracy ledger (R6): every picture-reading case, its measure and its pass mark');
+    table(LEDGER.map(function (r) { return [r[0], r[1], r[2], r[3], r[4] ? 'pass' : 'FAIL']; }), ['case', 'measure', 'now', 'needs', '']);
+  }
   var s = document.getElementById('summary');
   s.textContent = passed + ' passed, ' + failed + ' failed' + (skipped ? ', ' + skipped + ' skipped' : '');
   s.className = failed ? 'bad' : 'ok';
@@ -888,8 +1215,10 @@ if (/[?&]norun=1/.test(QS)) {
     .then(potatoes)
     .then(synthTests)
     .then(synthKinds)
-    .then(synthMisc);
-  if (!QUICK) chain = chain.then(vectorTests).then(imageOnlyTests);
+    .then(synthMisc)
+    .then(waveKTests)
+    .then(tilesTests);
+  if (!QUICK) chain = chain.then(vectorTests).then(imageOnlyTests).then(waveKFixtures);
   chain.catch(function (e) { log(false, 'suite threw', String(e && e.stack || e)); }).then(finish);
 }
 

@@ -324,13 +324,17 @@ for (var lw = 0; lw < 60; lw++) longStep.push('Keep pressing the seam allowance 
 var longParsed = S.parseSteps(longStep.join('\n'));
 // Wave E (sewing-audit): a long step carries on over up to three cards at a
 // sentence break instead of losing its end; only a runaway is shortened.
-assertEqual(longParsed.length, 3, 'a very long step carries on over three cards, no more');
+// Wave K (sew-audit #20): no step loses text any more; it carries on over as many cards as it needs.
+assertTrue(longParsed.length >= 5, 'wave K: a very long step carries on over as many cards as it needs (' + longParsed.length + ')');
 assertTrue(longParsed.every(function (s) { return s.text.length <= 810; }), 'each card is capped near 800 characters');
 assertTrue(longParsed.every(function (s) { return s.n === 1; }), 'every card keeps the printed step number');
 assertTrue(/^\(continued\) /.test(longParsed[1].text), 'the second card says it continues');
 assertTrue(/\.$/.test(longParsed[0].text), 'the first card ends at a sentence break');
 assertTrue(hasWarning(longParsed.warnings, 'second card'), 'the split is warned about');
-assertTrue(hasWarning(longParsed.warnings, 'shortened'), 'and a runaway past three cards is still shortened');
+assertFalse(hasWarning(longParsed.warnings, 'shortened'), 'wave K: nothing is shortened');
+assertEqual(longParsed.map(function (s) { return s.text.replace(/^\(continued\) /, ''); }).join(' ').split('Keep pressing').length - 1, 60,
+  'wave K: all 60 sentences are on the cards');
+assertFalse(longParsed.some(function (s) { return /…$/.test(s.text); }), 'wave K: no card ends in an ellipsis');
 var twoCard = ['1. Press the seam allowance carefully.'];
 for (var lw2 = 0; lw2 < 16; lw2++) twoCard.push('Keep pressing the seam allowance carefully all the way along.');
 twoCard.push('Hand sew or blind stitch the hem.');
@@ -818,7 +822,8 @@ assertTrue(b.notions.length >= 6, 'hardware and interfacing blocks both contribu
 assertTrue(notionMatching(b.notions, 'D-rings').kind === 'hardware', 'D-rings are hardware');
 assertTrue(notionMatching(b.notions, 'Shape Flex').kind === 'interfacing', 'Shape Flex is interfacing');
 assertEqual(b.sizes, null, 'a bag has no size chart');
-assertTrue(hasWarning(b.warnings, 'size chart'), 'the missing size chart is warned about');
+// Wave K (P14): a bag has no size chart to miss, so it is no longer warned about.
+assertFalse(hasWarning(b.warnings, 'size chart'), 'wave K: a bag is not warned about a size chart');
 
 // =======================================================================
 group('parse() - edge cases from the research table');
@@ -2472,7 +2477,7 @@ group('Wave F: cut counts in pieces, mirrored and on-fold rows explained');
     { piece: 'Sleeve', qty: 2, cutCount: 2, grain: 'mirrored' },
     { piece: 'Front', qty: 1, cutCount: 0, onFold: true }
   ] }, null);
-  assertEqual(S.cutTotals(d), { cut: 5, total: 59, rows: 3, rowsDone: 1 }, 'wave F: 5 of 59 pieces, 1 of 3 rows');
+  assertEqual(S.cutTotals(d), { cut: 5, total: 59, rows: 3, rowsDone: 1, strips: 0, stripsCut: 0 }, 'wave F: 5 of 59 pieces, 1 of 3 rows');
   assertTrue(/ 5 of 59 cut$/.test(' ' + S.summary({ craftData: d })), 'wave F: the home card counts pieces, not rows');
   assertTrue(/^2 mirrored = 1 pair/.test(S.cutHint(d.cutting[1])), 'wave F: "2 mirrored" is one pair');
   assertTrue(/^4 mirrored = 2 pairs/.test(S.cutHint({ qty: 4, grain: 'reversed' })), 'wave F: four reversed are two pairs');
@@ -2618,6 +2623,516 @@ group('Wave F: seam-allowance reminders and cutting-layout pages');
   assertEqual(S.layoutPages(''), [], 'wave F: no text, no pages');
   assertEqual(S.layoutPages('=== PAGE 8 ===\nPRINTING THE PDF\nCUTTING TIPS\nCUTTING LAYOUTS\nTRACE\nFollow the layout on the next page.\n=== PAGE 9 ===\nCUTTING LAYOUTS'),
     [9], 'wave F: a side heading in a stack of headings is not the layout page');
+})();
+
+// =======================================================================
+group('Wave K: numbers, units and glued dual-unit cells');
+// =======================================================================
+(function () {
+  assertSubset(S.measure('33 1/2"'), { value: 33.5, unit: 'in' }, 'wave K: 33 1/2" is inches');
+  assertSubset(S.measure('84cm'), { value: 84, unit: 'cm', mm: 840 }, 'wave K: 84cm');
+  assertSubset(S.measure('1½ yd'), { value: 1.5, unit: 'yd' }, 'wave K: a glyph fraction');
+  assertSubset(S.measure('97', 'cm'), { value: 97, unit: 'cm' }, 'wave K: a bare number takes the default unit');
+  assertEqual(S.measure('97'), null, 'wave K: and no default unit, no measure');
+  assertSubset(S.dualCell('84cm/33"'), { cm: 84, inch: 33, ok: true }, 'wave K: a dual cell agrees');
+  assertSubset(S.dualCell('76 cm/30'), { cm: 76, inch: 30, ok: true }, 'wave K: a missing inch mark still reads');
+  assertSubset(S.dualCell('90cm/30"'), { ok: false }, 'wave K: cm and inches that disagree are flagged');
+  assertSubset(S.amountOf('1.9 m / 2 1/4 yd'), { m: 1.9, yd: 2.25 }, 'wave K: metres and yards');
+  assertSubset(S.amountOf('⅜ yd.'), { m: null, yd: 0.375 }, 'wave K: glyph yards, no metres invented');
+  assertSubset(S.amountOf('2/3 yard (0.61m)'), { m: 0.61 }, 'wave K: yards with metres in brackets');
+  assertSubset(S.amountOf('1.7 m / 1 yd 3/4'), { m: 1.7, yd: 1.75 }, 'wave K: a trailing yard fraction');
+  assertSubset(S.amountOf('F8'), { precut: 'fat eighth' }, 'wave K: a precut');
+  assertEqual(S.splitGlued('14256'), [142, 56], 'wave K: 14256 is 142 cm / 56"');
+  assertEqual(S.splitGlued('10240'), [102, 40], 'wave K: 10240 is 102 / 40');
+  assertEqual(S.splitGlued('1425'), null, 'wave K: 1425 has no split where cm and inches agree');
+  // Moda's fraction glyphs come out glued to the whole number.
+  assertSubset(S.measure('21/2"'), { value: 2.5, unit: 'in' }, 'wave K: "21/2"" is 2 1/2", never 21');
+  assertTrue(Math.abs(S.amountOf('12/3 YARDS').yd - 5 / 3) < 1e-9, 'wave K: "12/3 YARDS" is 1 2/3 yards');
+  assertSubset(S.dims('21/2"x 41/2" rectangle'), { w: 2.5, h: 4.5 }, 'wave K: glued fractions in dimensions');
+  assertSubset(S.measure('3/4"'), { value: 0.75 }, 'wave K: a plain fraction is unchanged');
+})();
+
+// =======================================================================
+group('Wave K: size charts (P4) and the size advisor (P3)');
+// =======================================================================
+(function () {
+  // A transposed chart printed bottom-up with glued cells, as the bathers do.
+  var tr = '=== PAGE 1 ===\nL 97 38 81 32 10742\nM 92 36 76 30 10240\nS 87 34 71 28 97 38\nXS 82 32 66 26 92 36\nCMINCHESCMINCHESCMINCHES\nHIP\nBUST\nWAIST\n' +
+    'L 82 32 1/275 29 1/282 32 1/2\nM 77 30 1/270 27 1/277 30 1/2\nS 72 28 1/265 25 1/272 28 1/2\nXS 67 26 1/260 23 1/267 26 1/2\n' +
+    'SIZE CHART: BODY MEASUREMENTSBUST WAIST AND HIPS FINISHED MEASUREMENTS. The pattern has negative ease.\n';
+  var c = S.readSizeChart(tr);
+  assertTrue(!!c && c.orientation === 'transposed', 'wave K: a size-first chart is read as transposed');
+  assertEqual(c.labels, ['XS', 'S', 'M', 'L'], 'wave K: sizes in chart order, not the printed bottom-up order');
+  assertEqual(c.rows.map(function (r) { return r.label + '/' + r.kind; }),
+    ['Bust/body', 'Waist/body', 'Hip/body', 'Bust/finished', 'Waist/finished', 'Hip/finished'], 'wave K: columns named from the caption, body before finished');
+  assertEqual(c.rows[0].cells.map(function (x) { return x.cm; }), [82, 87, 92, 97], 'wave K: body bust per size');
+  assertEqual(c.rows[2].cells[3].cm, 107, 'wave K: the glued 10742 is 107 cm');
+  assertEqual(c.rows[4].cells[2].inch, 27.5, 'wave K: a fraction glued to the next cell belongs to the inches before it');
+  assertEqual(c.check.verdict, 'exact', 'wave K: the chart checks itself clean');
+  var p = S.parse(tr);
+  assertTrue(p.sizes && p.sizes.chart.length === 3, 'wave K: parse() fills the empty body chart from it');
+  var bad = S.checkChart({ labels: ['S', 'M', 'L'], rows: [{ label: 'Bust', kind: 'body', cells: [{ mm: 900, ok: true }, { mm: 880, ok: true }, { mm: 960, ok: true }] }] });
+  assertEqual(bad.verdict, 'off', 'wave K: a row that shrinks with the size is off');
+  // Row charts with a between-sizes rule.
+  var rowText = '=== PAGE 3 ===\nIf your body measurements are in between sizes, we recommend that you choose the larger size. ' +
+    'If your measurements are only slightly different than our size chart, then choose the closest size.\n' +
+    'SIZE CHART (cm)\n36 38 40 42 44\nBust 84 88 92 96 100\nWaist 66 70 74 78 82\nHip 90 94 98 102 106\n';
+  var rp = S.parse(rowText);
+  var rule = S.sizeRule(rp.sourceText);
+  assertSubset(rule, { prefer: 'larger', slightly: true, page: 3 }, 'wave K: the designer\'s rule is quoted with its page');
+  var adv = S.suggestSize(rp, [{ label: 'Bust', value: '97 cm' }, { label: 'Waist', value: '79 cm' }, { label: 'Hips', value: '104' }]);
+  assertEqual(adv.suggestion.size, '42', 'wave K: 97 / 79 / 104 suggests 42');
+  assertEqual(adv.suggestion.blend, [{ label: 'Hip', size: '44' }], 'wave K: with a 44 hip (between sizes, so the larger)');
+  assertFalse(adv.chosen, 'wave K: advice is never a choice');
+  var exact = S.suggestSize(rp, [{ label: 'Bust', value: '88 cm' }]);
+  assertEqual(exact.rows[0].at, 'exact', 'wave K: an exact measurement');
+  assertEqual(S.suggestSize(rp, [{ label: 'Bust', value: '120 cm' }]).rows[0].at, 'above', 'wave K: beyond the largest size');
+  assertEqual(S.suggestSize(rp, [{ label: 'Bust', value: { toString: function () { return ''; } } }]).suggestion, null, 'wave K: nothing readable, no advice');
+  var inch = S.suggestSize(rp, { Bust: { value: 37.8, unit: 'in' } });
+  assertEqual(inch.rows[0].size, '42', 'wave K: inches against a cm chart (96 cm)');
+  var noRule = S.suggestSize(rp, [{ label: 'Hip', value: '103 cm' }], { rule: null });
+  assertTrue(/no rule/.test(noRule.rows[0].why), 'wave K: without a rule the closer size, and it says so');
+  var neg = S.suggestSize(c, [{ label: 'Bust', value: '92 cm' }], { rule: null });
+  assertTrue(neg.ease.length === 1 && neg.ease[0].negative && neg.ease[0].mm === -150, 'wave K: negative ease is shown (-15 cm)');
+})();
+
+// =======================================================================
+group('Wave K: resolve every per-size number once');
+// =======================================================================
+(function () {
+  var d = S.normalize({
+    size: { sizeLabels: ['S', 'M', 'L'], chosen: 'M' },
+    measurements: { finished: [
+      { label: 'Waistband Elastic · cm', values: ['60', '66', '70.'] },
+      { label: 'Waistband Elastic · inches', values: ['23 1/2', '26', '27 3/4'] },
+      { label: 'Finished length', values: ['100', '102', '104'] }] },
+    fabric: [{ name: 'Main', width: '150 cm', amounts: ['1.5 m', '1.6 m', '1.8 m'] }, { name: 'Lining', amounts: ['1 m'] }],
+    steps: [{ text: 'Cut the strap 50 (55, 60) cm long.', n: 1 }, { text: 'Cut 2 (3, 3, 4) ties.', n: 2 }],
+    notions: [{ text: 'Elastic 1 (1, 2) m' }]
+  }, null);
+  var r = S.resolveSize(d, 'M');
+  assertEqual(r.index, 1, 'wave K: size M is the second size');
+  var el = r.items.filter(function (i) { return i.where === 'elastic'; })[0];
+  assertEqual(el.value, '66 cm / 26"', 'wave K: a cm row and an inch row are one elastic length');
+  assertTrue(r.items.some(function (i) { return i.where === 'fabric' && i.value === '1.6 m'; }), 'wave K: the fabric for M');
+  assertTrue(r.items.some(function (i) { return i.where === 'fabric' && /every size/.test(i.text); }), 'wave K: a one-amount row is the same for every size');
+  assertTrue(r.items.some(function (i) { return i.where === 'step' && i.value === '55 cm' && i.step === 1; }), 'wave K: a per-size run inside a step');
+  assertTrue(r.items.some(function (i) { return i.where === 'notion' && i.value === '1 m'; }), 'wave K: and inside a notion');
+  assertTrue(r.unresolved.some(function (u) { return /4 numbers for 3 sizes/.test(u.why); }), 'wave K: a run that does not line up is reported, not guessed');
+  var lr = S.resolveSize(d, 'L');
+  assertTrue(lr.items.some(function (i) { return i.check && /cut off/.test(i.check); }), 'wave K: a cut-off "70." is flagged with the inch figure');
+  assertTrue(S.resolveSize(d, 'XXL').unresolved.length === 1, 'wave K: a size not in the chart is one honest line');
+})();
+
+// =======================================================================
+group('Wave K: fabric calculator and shopping list v2 (P13)');
+// =======================================================================
+(function () {
+  var d = S.normalize({
+    size: { sizeLabels: ['36', '38'], chosen: '38' },
+    fabric: [
+      { name: 'Fabric', width: '115cm / 45"', amounts: ['2.3 m / 2.5 yd', '2.4 m / 3 yd'] },
+      { name: 'Fabric', width: '150cm / 60"', amounts: ['1.9 m / 2 1/4 yd', '1.9 m / 2 1/4 yd'] },
+      { name: 'Fusing', amounts: ['0.10 m / 4"'] }],
+    notions: [{ text: 'Lightweight fusing' }, { text: 'Invisible zip 55 cm' }],
+    sourceText: '=== PAGE 2 ===\nAdditional Recommendations\n- Template plastic\n- 100% cotton thread\n'
+  }, null);
+  var n = S.fabricNeed(d, { width: { value: 140, unit: 'cm' } });
+  var main = n.lines.filter(function (l) { return l.name === 'Fabric'; });
+  assertEqual(main.length, 1, 'wave K: one line for my width');
+  assertEqual(main[0].printedWidth, '115cm / 45"', 'wave K: 140 cm uses the 115 cm figure (the widest not wider than mine)');
+  assertEqual(main[0].amount.m, 2.4, 'wave K: at size 38');
+  var narrow = S.fabricNeed(d, { width: { value: 90, unit: 'cm' } });
+  assertTrue(narrow.uncovered.some(function (u) { return /narrower than every width/.test(u.why); }), 'wave K: narrower than every printed width says so');
+  var shr = S.fabricNeed(d, { width: { value: 150, unit: 'cm' }, shrinkPct: 5 });
+  var l150 = shr.lines.filter(function (l) { return l.name === 'Fabric'; })[0];
+  assertEqual(l150.shrink.amount.m, 2, 'wave K: 1.9 m + 5% rounds up to 2 m');
+  assertTrue(l150.approx && /^≈/.test(l150.shrink.amount.text), 'wave K: and is marked ≈');
+  var nap = S.fabricNeed(d, { width: { value: 150, unit: 'cm' }, nap: true });
+  assertEqual(nap.lines[0].nap, 'not printed', 'wave K: no nap figure printed: said, not invented');
+  var napD = S.normalize({ fabric: [{ name: 'Velvet', width: '140 cm', amounts: ['2 m'] }, { name: 'Velvet (with nap)', width: '140 cm', amounts: ['2.4 m'] }] }, null);
+  assertEqual(S.fabricNeed(napD, { nap: true }).lines[0].amount.m, 2.4, 'wave K: a printed nap figure is used');
+  var imp = S.fabricNeed(S.normalize({ fabric: [{ name: 'Main', amounts: ['2 m'] }] }, null), { unit: 'imperial' });
+  assertTrue(imp.lines[0].amount.approxOther && /≈ 2 1\/4 yd/.test(imp.lines[0].amount.text), 'wave K: a converted unit is marked ≈');
+  var list = S.shoppingListV2(d, {});
+  assertEqual(list.filter(function (l) { return /fusing/i.test(l.text); }).length, 1, 'wave K: the fusing is listed once');
+  assertTrue(list.some(function (l) { return l.section === 'other' && l.text === 'Template plastic'; }), 'wave K: extra recommendations reach the list');
+  assertFalse(list.some(function (l) { return l.text === 'Thread to match'; }), 'wave K: thread already recommended, no generic line');
+  var merged = S.mergeShopping([['Zip 20 cm', 'Thread to match'], ['Thread to match']]);
+  assertEqual(merged.map(function (m) { return m.text; }), ['Zip 20 cm', 'Thread to match (×2)'], 'wave K: one list across projects');
+})();
+
+// =======================================================================
+group('Wave K: cutting board, interfacing products, strips (P6 / P7)');
+// =======================================================================
+(function () {
+  var bag = '=== PAGE 1 ===\nMaterials Needed:\n- 1 yard fusible Pellon® Shape-flex® SF101 interfacing\n- 1 yard sew-in Pellon® Peltex® 70 stabilizer\n' +
+    'Fuse woven interfacing to the exterior Flap, lining Panels and Handle. Sew the bag.\n=== PAGE 2 ===\nPanel\nCut 2 Exterior Fabric\nCut 2 Pellon\n' +
+    '=== PAGE 3 ===\nPanel Stabilizer\nCut 2 Pellon® Peltex®\n=== PAGE 4 ===\nCut 1 Pellon\n®\nPeltex\n®\nFlap Stabilizer\n';
+  var rows = [
+    { piece: 'Panel', qty: 2, material: 'interfacing', line: 'Cut 2 Pellon' },
+    { piece: 'Panel Stabilizer', qty: 2, material: 'interfacing', line: 'Cut 2 Pellon Peltex' },
+    { piece: 'Flap Stabilizer', qty: 1, material: 'interfacing', line: 'Cut 1 Pellon' }];
+  var notions = [{ text: '1 yard fusible Pellon® Shape-flex® SF101 interfacing' }, { text: '1 yard sew-in Pellon® Peltex® 70 stabilizer' }];
+  assertSubset(S.cutProduct(rows[1], { notions: notions }), { application: 'sew-in', from: 'cut line' }, 'wave K: Peltex on the cut line is sew-in');
+  assertSubset(S.cutProduct(rows[0], { notions: notions }), { application: 'fusible', from: 'only one on the list' }, 'wave K: a fabric piece\'s Pellon is the one interfacing');
+  assertSubset(S.cutProduct(rows[2], { notions: notions }), { application: 'sew-in', from: 'piece name' }, 'wave K: a stabilizer piece takes the stabilizer');
+  assertEqual(S.cutProduct({ piece: 'Front', material: 'main', line: 'Cut 2' }, {}), null, 'wave K: a fabric piece has no product');
+  var p = S.parse(bag);
+  var f = S.fuseList(p.sourceText);
+  assertEqual(f.length, 1, 'wave K: one fuse sentence');
+  assertEqual(f[0].pieces, ['exterior Flap', 'lining Panels', 'Handle'], 'wave K: the pieces to fuse');
+  assertEqual(S.fuseList('Prep by fusing fabric A to the fusible fleece.')[0].pieces, ['fabric A'], 'wave K: "fuse fabric to the fleece" names the fabric');
+  // Strips and subcuts.
+  assertSubset(S.dims('3 1/2" x WOF strip'), { w: 3.5, wof: true }, 'wave K: a WOF strip');
+  assertSubset(S.dims('6 3/4" tall x 7 5/8" wide'), { w: 6.75, h: 7.625 }, 'wave K: tall x wide');
+  assertSubset(S.dims('5 1/4" square'), { w: 5.25, h: 5.25 }, 'wave K: a square');
+  var cut = S.linkSubcuts([
+    { piece: '3 1/2" x WOF strip', qty: 2, note: 'Fabric E' },
+    { piece: '3 1/2" square', qty: 24, note: 'Fabric E, subcut', subcut: true },
+    { piece: '2 1/2" x WOF strip', qty: 7, note: 'Fabric H' }]);
+  assertEqual(cut[1].parent, 0, 'wave K: the squares point at their strip');
+  assertEqual(cut[2].parent, undefined, 'wave K: a strip with no subcuts is a finished cut');
+  var ck = S.stripCheck(cut[0], [cut[1]], { wof: 40 });
+  assertSubset(ck, { perStrip: 11, yield: 22, need: 24, verdict: 'off', minWof: 42 }, 'wave K: 2 strips × 11 = 22 < 24 at 40"; works at 42"');
+  assertEqual(S.stripCheck(cut[0], [cut[1]], { wof: 42 }).verdict, 'close', 'wave K: at 42" it fits with nothing to spare');
+  assertEqual(S.stripCheck(cut[0], [{ piece: '3 1/2" square', qty: 10 }], { wof: 42 }).verdict, 'exact', 'wave K: room to spare is exact');
+  assertEqual(S.stripCheck(cut[0], [{ piece: '1 1/4" x 12 1/2" strip', qty: 4 }], {}).verdict, 'unchecked', 'wave K: a subcut not cut across the strip is not checked');
+  var d = S.normalize({ cutting: [
+    { id: 'a', piece: '3 1/2" x WOF strip', qty: 2, cutCount: 2 },
+    { id: 'b', piece: '3 1/2" square', qty: 24, cutCount: 5, subcut: true, parentId: 'a' },
+    { id: 'c', piece: 'Border', qty: 4, cutCount: 0, parentId: 'zz' }] }, null);
+  assertEqual(S.cutTotals(d), { cut: 5, total: 28, rows: 3, rowsDone: 1, strips: 2, stripsCut: 2 }, 'wave K: the strip is counted apart, not as a piece');
+  assertEqual(d.cutting[2].parentId, undefined, 'wave K: a parentId that points nowhere is dropped');
+  var board = S.cuttingBoard({ cuttingList: p.cuttingList.concat([{ piece: 'Panel', qty: 2, material: 'lining' }]), notions: p.notions, sourceText: p.sourceText, kind: 'bag', sizes: null });
+  assertTrue(board.groups.some(function (g) { return g.kind === 'interfacing' && g.application === 'sew-in'; }), 'wave K: a sew-in group on the board');
+  assertTrue(board.groups.some(function (g) { return g.kind === 'interfacing' && g.application === 'fusible'; }), 'wave K: and a fusible one');
+  assertEqual(board.fuse.length, 1, 'wave K: the board carries the fuse card');
+  var tote = S.cuttingBoard({ cuttingList: [], notions: [{ text: 'Fusible Fleece (2) 10" x 12" rectangles' }], sourceText: '', sizes: null });
+  assertTrue(tote.groups[0].rows[0].qty === 2 && /rectangle/.test(tote.groups[0].rows[0].piece), 'wave K: a notion that is really a cut piece joins the board');
+})();
+
+// =======================================================================
+group('Wave K: the pattern sheet as data (P5)');
+// =======================================================================
+(function () {
+  var pages = [];
+  // A synthetic 2 × 3 sheet: tiles carry their own label and their neighbours'.
+  var labels = ['1 a', '1 a 1 b', '1 b 1 c', '1 a 2 a', '2 a 2 b 1 b', '2 b 1 c'];
+  var extra = [
+    'ACME PATTERNS\nSHIRT DRESS\nPOCKE T\n1 PAIR MAIN', 'ACME PATTERNS\nSHIRT DRESS\n4\nFRONT\n1 ON FOLD MAIN\n1 ON FOLD LINING',
+    'ACME PATTERNS\nSHIRT DRESS\nYOKE\n1 x MAIN\n1 x FUSING', 'SIDE P', 'IDE PANEL\n1 PAIR MAIN', 'PATTERN GRID MEASURES: 2.5cm x 2.5cm.\nPlease set page\nscaling to none.'];
+  for (var i = 0; i < 6; i++) pages.push('=== PAGE ' + (i + 1) + ' ===\n' + labels[i] + '\n' + extra[i]);
+  var sh = S.readSheet(pages.join('\n'), { pageSizes: [{ w: 595, h: 842 }], layers: ['Size 8', 'Size 10', 'Print for all sizes', 'Notes'] });
+  var names = sh.pieces.map(function (p) { return p.name; });
+  assertEqual(names, ['Pocket', 'Front', 'Yoke', 'Side Panel'], 'wave K: pieces read; a split label joined; a kerned letter rejoined');
+  assertEqual(sh.pieces[1].cuts.map(function (c) { return c.qty + c.how + ' ' + c.material; }), ['1fold main', '1fold lining'], 'wave K: per-fabric counts');
+  assertEqual(sh.pieces[1].number, 4, 'wave K: the piece number');
+  assertTrue(!!sh.tiles && sh.tiles.rows === 2 && sh.tiles.cols === 3 && sh.tiles.marks === 'tiles', 'wave K: a 2 × 3 tape-up map');
+  assertEqual(sh.test[0].size, '2.5cm x 2.5cm', 'wave K: the test square');
+  assertEqual(sh.print, ['Please set page scaling to none.'], 'wave K: the print setting as one sentence, not line fragments');
+  assertEqual(sh.layers, { sizes: ['Size 8', 'Size 10'], always: ['Print for all sizes'], other: ['Notes'] }, 'wave K: layer names as sizes');
+  assertEqual(sh.paper, 'A4/Letter', 'wave K: home-printer paper');
+  assertEqual(S.readSheet('=== PAGE 1 ===\nAPRON\n', { pageSizes: [{ w: 2384, h: 3370 }] }).paper, 'A0', 'wave K: an A0 page is a copy-shop file');
+  // Joins: labels between tiles (2 × 2 grid with one join each way).
+  var joins = ['1A', '1A', '1A', '1A'].map(function (l, i) { return '=== PAGE ' + (i + 1) + ' ===\n' + l; }).join('\n');
+  var jt = S.readSheet(joins).tiles;
+  assertTrue(!!jt && jt.marks === 'joins' && jt.rows === 2 && jt.cols === 2, 'wave K: registration marks at the joins make a 2 × 2 grid');
+  var one = ['Page 1A', 'Page 1B', 'Page 2A'].map(function (l, i) { return '=== PAGE ' + (i + 1) + ' ===\n' + l; }).join('\n');
+  var ot = S.readSheet(one).tiles;
+  assertTrue(!!ot && ot.tiles.length === 3 && ot.missing.join(',') === '2B', 'wave K: one label per page, and a gap stays a gap');
+  assertEqual(S.parse(pages.join('\n')).steps.length, 0, 'wave K: a sheet never gives steps');
+  var bd = S.normalize({ steps: [{ text: 'Sew it.' }] }, null);
+  assertTrue(S.attachSheet(bd, sh), 'wave K: a sheet joins a booklet project');
+  bd.sheet.taped['1A'] = true;
+  S.attachSheet(bd, sh);
+  assertTrue(bd.sheet.taped['1A'] && bd.sheet.pieces.length === 4, 'wave K: re-adding keeps the taped tiles');
+  var back = S.normalize(JSON.parse(JSON.stringify(bd)), null);
+  assertTrue(back.sheet.tiles.rows === 2 && back.sheet.taped['1A'], 'wave K: the sheet survives normalize');
+  assertFalse(S.attachSheet(bd, {}), 'wave K: an empty sheet is refused');
+  var tiledSteps = S.parse(pages.join('\n').replace('ACME PATTERNS\nSHIRT DRESS\nPOCKE T', 'PRINTING\n1. Print at 100%.\n2. Tape the pages together.\nPOCKE T'));
+  assertEqual(tiledSteps.kind, 'sheet', 'wave K: printing instructions on a tiled sheet do not make it a booklet');
+})();
+
+// =======================================================================
+group('Wave K: quilt maths (P7–P9)');
+// =======================================================================
+(function () {
+  var b = S.quilt.binding({ w: 70, h: 80, stripWidth: 1.5 });
+  assertEqual(b.length, 310, 'wave K: (70 + 80) × 2 + 10 = 310');
+  assertEqual(b.strips, 8, 'wave K: 8 strips at 40"');
+  assertTrue(/310"/.test(b.why), 'wave K: with its formula');
+  var bk = S.quilt.backing({ w: 70, h: 80 });
+  assertSubset(bk, { widths: 2, lengthIn: 176, yards: 5 }, 'wave K: two widths of 42" × 88" = 4.9 yd, rounded up to 5 yd');
+  assertSubset(S.quilt.batting({ w: 64.5, h: 64.5 }), { w: 72.5, h: 72.5 }, 'wave K: batting 4" each side');
+  assertEqual(S.quilt.hst(3, 2).cut[0].size, 3.875, 'wave K: HST two at a time: finished + 7/8');
+  assertEqual(S.quilt.hst(3, 8).cut[0].size, 7.75, 'wave K: eight at a time: 2 × (finished + 7/8)');
+  assertEqual(S.quilt.hst(3, 4).cut[0].size, 5.5, 'wave K: four at a time: √2 × 3.5 + 0.5 = 5.45, up to 5 1/2');
+  assertEqual(S.quilt.hst(3, 4).yield, 4, 'wave K: and makes four');
+  assertEqual(S.quilt.qst(3).cut[0].size, 4.25, 'wave K: QST finished + 1 1/4');
+  assertEqual(S.quilt.hst(6, 2, { trim: true }).cut[0].size, 7, 'wave K: cut-big-and-trim HST: finished + 1"');
+  assertEqual(S.quilt.qst(9, { trim: true }).cut[0].size, 10.5, 'wave K: cut-big-and-trim QST: finished + 1 1/2"');
+  var uc = S.unitCutCheck('=== PAGE 1 ===\nCUT: (6) 7" SQUARES FOR HST\n6 1/2" HST (6" FINISHED)\n=== PAGE 2 ===\n(4) 3 7/8" SQUARES FOR HST\n3 1/2" HST (3" FINISHED)\n=== PAGE 3 ===\n(2) 4 1/2" SQUARES FOR HST\n3 1/2" HST (3" FINISHED)');
+  assertEqual(uc.rows.map(function (r) { return r.verdict + '@' + r.page; }), ['close@1', 'exact@2', 'off@3'], 'wave K: printed HST squares checked: trim, exact, differs');
+  assertEqual(uc.verdict, 'off', 'wave K: one that differs makes the check off');
+  var mf = S.quiltFacts('=== PAGE 1 ===\nSize: 58"x 83"\nBinding ⅝ yard\nBacking 5 yards\nCutting:\nWOF means width of fabric. Quilt as desired.\nBinding: cut 8–2½"x WOF\n');
+  assertSubset(mf.finished, { w: 58, h: 83 }, 'wave K: "Size: 58"x 83"" is the finished size');
+  assertEqual(mf.binding.check.verdict, 'exact', 'wave K: "Binding: cut 8–2½"x WOF" is checked');
+  assertEqual(mf.backing.check.verdict, 'close', 'wave K: 1/8 yd under with 4" a side but enough with 3": close');
+  assertEqual(S.quiltFacts('Cut Size: 3/4" x 7"\nquilt binding WOF').finished, null, 'wave K: a "Cut Size" is not the quilt');
+  var g4 = S.quilt.geese(4, 2, 4);
+  assertEqual([g4.cut[0].size, g4.cut[1].size, g4.yield], [5.25, 2.875, 4], 'wave K: geese four at a time');
+  var g1 = S.quilt.geese(4, 2, 1);
+  assertEqual([g1.cut[0].size.w, g1.cut[0].size.h, g1.cut[1].size], [4.5, 2.5, 2.5], 'wave K: geese one at a time');
+  var rz = S.quilt.resize({ w: 60, h: 70, block: { w: 10, h: 10 }, addRows: 1 });
+  assertSubset(rz, { w: 60, h: 80, approx: true }, 'wave K: a row of 10" blocks');
+  assertEqual(S.quilt.binding({ w: 0, h: 10 }), null, 'wave K: no size, no answer');
+  var text = '=== PAGE 1 ===\nFINISHED SIZE | 70" × 80"\nFabric Requirements\nFabric A Abc-P-1 3/4 yd.\nBACKING FABRIC\nAbc-P-2 5 1/2yds (Suggested)\n' +
+    'Cutting\nWOF means width of fabric.\n- seven (7) 10 1/2" squares from fabric A.\n=== PAGE 2 ===\nBinding\n- cut enough strips 1 1/2" wide by the width of\nthe fabric A to make a final strip 310" long.\n';
+  var qf = S.quiltFacts(S.parse(text));
+  assertSubset(qf.finished, { w: 70, h: 80 }, 'wave K: the finished size is captured');
+  assertEqual(qf.binding.check.verdict, 'exact', 'wave K: the formula reproduces the printed 310"');
+  assertEqual(qf.backing.check.verdict, 'exact', 'wave K: and the printed backing covers the formula');
+  var us = S.unitSizes('Make a total of 4 Unit 2a\n(7 5/8" x 6 1/4" unfinished). Make (1) each Units 1a-1c (6 1/2" x 12 1/2" unfinished). Block 3 (12 1/2" square unfinished).');
+  assertSubset(us['Unit 2a'], { w: 7.625, h: 6.25 }, 'wave K: a unit\'s unfinished size');
+  assertTrue(!!us['Unit 1b'], 'wave K: a range of units shares its size');
+  assertSubset(us['Block 3'], { w: 12.5, h: 12.5 }, 'wave K: a square block');
+})();
+
+// =======================================================================
+group('Wave K: units live in their step (P10), the quilt top (P11)');
+// =======================================================================
+(function () {
+  var text = '=== PAGE 1 ===\nCutting\nFabric A, cut:\n(2) 3 1/2" x WOF; subcut\n(24) 3 1/2" squares\nInstructions\n' +
+    '1. Sew the squares into pairs. Make a total of 12 Unit 1 (3 1/2" x 6 1/2" unfinished).\n' +
+    '2. Join two Unit 1. Make 6 Unit 2. In the same manner, make 4Unit 3.\n3. Sew the units into rows. Join rows 1-4 with the binding. Quilt as desired.\n' +
+    '=== PAGE 2 ===\nQuilt Layout\nB1\nB2\nB2\n';
+  var p = S.parse(text);
+  assertEqual(p.kind, 'quilt', 'wave K: a quilt');
+  var u1 = p.units.filter(function (u) { return u.name === 'Unit 1'; })[0];
+  assertSubset(u1, { step: 1, stepIndex: 0 }, 'wave K: Unit 1 lives in step 1');
+  assertEqual(u1.size, '3 1/2" x 6 1/2" unfinished', 'wave K: with its unfinished size');
+  assertEqual(p.units.filter(function (u) { return u.name === 'Unit 3'; })[0].step, 2, 'wave K: "make 4Unit 3" with no space');
+  var d = S.toCraftData(p);
+  assertTrue(d.units.every(function (u) { return u.stepKey && typeof u.step === 'number'; }), 'wave K: craftData keeps the step and its identity');
+  assertEqual(S.unitsForStep(d, 1).map(function (u) { return u.name; }), ['Unit 2', 'Unit 3'], 'wave K: step 2 makes Units 2 and 3');
+  d.currentStep = 1;
+  d.units[1].done = 6;
+  assertEqual(S.activeUnit(d).unit.name, 'Unit 3', 'wave K: the big button counts the first unfinished unit of this step');
+  d.currentStep = 2;
+  assertEqual(S.activeUnit(d), null, 'wave K: a step that makes nothing has no unit');
+  var again = S.normalize(JSON.parse(JSON.stringify(d)), null);
+  assertEqual(again.units[0].size, u1.size, 'wave K: the size survives normalize');
+  var top = S.quiltTop(p);
+  assertEqual(top.source, 'labels', 'wave K: block labels on the layout page');
+  assertEqual(top.blocks.map(function (b) { return b.label + '×' + b.count; }), ['B1×1', 'B2×2'], 'wave K: B1 once, B2 twice');
+  assertEqual(top.counts.rows, 4, 'wave K: "Join rows 1-4" counted');
+  var rows = S.quiltTop({ sourceText: 'Join them:\n- Row 1: B (3¼"), L, F (4½"), L, E.\n- Row 2: E (2½"), L, O.', cuttingList: [], sizes: null, fabric: [{ name: 'Fabric B Abc-P-1208', amounts: [] }] });
+  assertEqual(rows.rows.length, 2, 'wave K: rows of fabric letters');
+  assertEqual(rows.rows[0].cells[0], { fabric: 'B', size: '3 1/4"' }, 'wave K: each cell a fabric and a size');
+  assertEqual(rows.fabrics[0], { letter: 'B', name: '', code: 'ABC-P-1208' }, 'wave K: letters matched to codes');
+})();
+
+// =======================================================================
+group('Wave K: kind, name, per-step set-up, glossary, timer (P14–P16)');
+// =======================================================================
+(function () {
+  assertEqual(S.vocab('quilt').unit, 'block', 'wave K: quilt vocabulary');
+  assertFalse(S.vocab('bag').showSizes, 'wave K: a bag shows no size row');
+  assertEqual(S.projectName({ meta: { patternName: 'GATHERED SUNDRESS # 1301' } }, 'sew-sundress'), 'Gathered Sundress', 'wave K: the parsed name, tidied');
+  assertEqual(S.projectName({ meta: { patternName: '' } }, 'x'), '', 'wave K: unknown stays blank');
+  var d = S.normalize({ kind: 'bag', seamAllowance: { text: 'Seam allowance 1 cm', mm: 10, exceptions: [] } }, null);
+  assertEqual(d.kind, 'bag', 'wave K: kind is kept by normalize');
+  assertEqual(S.normalize({ kind: 'spaceship' }, null).kind, undefined, 'wave K: and a bad kind is not');
+  var sw = S.normalize({ swatchColours: { 0: '#A1B2C3', 1: 'red', x: '#000000' },
+    swatches: [{ index: 2, blobKey: 'p:1:swatch:2', colour: '#112233', spread: 0.4, clean: true }, { index: 3 }],
+    quiltModel: { mode: 'vector', page: 12, patches: [], blocks: [], rows: [] } }, null);
+  assertEqual(sw.swatchColours, { 0: '#a1b2c3' }, 'wave K: the sewist\'s colour chips are kept (bad ones dropped)');
+  assertEqual(sw.swatches.length, 1, 'wave K: captured swatches with a blob key are kept');
+  assertEqual(sw.quiltModel.page, 12, 'wave K: a stored quilt-top model is kept');
+  assertEqual(S.normalize({ quiltModel: { mode: 'guess' } }, null).quiltModel, undefined, 'wave K: a model of an unknown mode is not');
+  var a = S.stepSetup('Sew across the wider short edge at 1/2" seam allowance. Trim the seam allowance down to about 1/8" and press.', d);
+  assertSubset(a.sa, { mm: 13, inches: '1/2', source: 'step' }, 'wave K: the step\'s own seam allowance wins');
+  assertEqual(a.trims[0].text, 'trim to 1/8"', 'wave K: trim to 1/8"');
+  assertTrue(a.press, 'wave K: press');
+  var b = S.stepSetup('Topstitch around the flap 1/4" from the edge.', d);
+  assertEqual(b.sa.source, 'pattern', 'wave K: else the pattern\'s seam allowance');
+  assertEqual(b.topstitch[0].text, 'topstitch 1/4"', 'wave K: the topstitch distance');
+  assertEqual(S.stepSetup('Using a zipper foot, sew the zip in.', d).foot, 'zipper', 'wave K: a named foot');
+  assertEqual(S.stepSetup('Sew along the edge of the zipper.', d).footWhy, 'the step sews in a zip', 'wave K: a zip step suggests the zipper foot, and says why');
+  assertTrue(S.stepSetup('Fuse the interfacing.', d).chips.some(function (c) { return c.kind === 'fuse'; }), 'wave K: a fuse chip');
+  var g = S.glossary('=== PAGE 4 ===\nPATTERN SYMBOLS:\nGrainline: Lay the arrow parallel to the selvage.\nNotches: Clip into the fabric\nat these marks.\n=== PAGE 6 ===\nUnderstitch the facing. Understitch again. Edgestitch the hem.');
+  assertEqual(g.booklet.map(function (x) { return x.term; }), ['Grainline', 'Notches'], 'wave K: the booklet\'s own symbol key');
+  assertTrue(/at these marks/.test(g.booklet[1].text), 'wave K: a definition over two lines');
+  assertEqual(g.inPattern[0], { term: 'understitch', count: 2, def: g.inPattern[0].def }, 'wave K: terms counted, most used first');
+  assertEqual(S.pressTimer('Fuse the interfacing to the panel.', null), { kind: 'fuse', seconds: null, why: 'set the time your interfacing\'s instructions give' }, 'wave K: no fusing time invented');
+  assertEqual(S.pressTimer('Fuse it.', 12).seconds, 12, 'wave K: the sewist\'s own time');
+  assertEqual(S.pressTimer('Sew the seam.', 12), null, 'wave K: no timer on a plain seam');
+})();
+
+// =======================================================================
+group('Wave K: fitting log (P17), milestones (P19)');
+// =======================================================================
+(function () {
+  var d = S.normalize({}, null);
+  var e = S.addAlteration(d, { at: 'lengthen/shorten line', amount: { value: 3, unit: 'cm' }, piece: 'Front Skirt', why: 'I am tall' });
+  assertTrue(!!e && d.fitting.length === 1 && /^\d{4}-\d\d-\d\d$/.test(e.date), 'wave K: an alteration is one line, dated');
+  assertEqual(S.addAlteration(d, {}), null, 'wave K: an empty entry is refused');
+  var again = S.normalize(JSON.parse(JSON.stringify(d)), null);
+  assertEqual(again.fitting[0].amount, { value: 3, unit: 'cm' }, 'wave K: the log survives normalize');
+  var next = S.normalize({}, null);
+  assertEqual(S.carryAlterations(again, next), 1, 'wave K: carried to the next make');
+  assertTrue(next.fitting[0].carried, 'wave K: marked as carried');
+  assertEqual(S.carryAlterations(again, next), 0, 'wave K: not twice');
+  var before = S.normalize({ kind: 'quilt', cutting: [{ piece: 'Square', qty: 2, cutCount: 1 }],
+    steps: [{ text: 'Sew the blocks to complete the quilt top.', done: false }, { text: 'Layer backing, batting and top.' }, { text: 'Sew the binding on.' }] }, null);
+  var after = JSON.parse(JSON.stringify(before));
+  after.cutting[0].cutCount = 2;
+  after.steps[0].done = true;
+  assertEqual(S.milestones(before, after), ['all-cut', 'top-finished'], 'wave K: everything cut and the top finished');
+  var bound = JSON.parse(JSON.stringify(after));
+  bound.steps[2].done = true;
+  assertEqual(S.milestones(after, bound), ['binding-on'], 'wave K: binding on, once');
+  var hem = S.normalize({ kind: 'garment', steps: [{ text: 'Sew the side seams.', done: true }, { text: 'Hem the skirt.' }] }, null);
+  var hem2 = JSON.parse(JSON.stringify(hem)); hem2.steps[1].done = true;
+  assertEqual(S.milestones(hem, hem2), ['hemmed'], 'wave K: hemmed');
+})();
+
+// =======================================================================
+group('Wave K: what was missed (gap 8)');
+// =======================================================================
+(function () {
+  var text = '=== PAGE 1 ===\nSize Chart\nInstructions\n1. Sew the front darts and press them towards the centre.\n2. Sew the back darts and press them towards the centre.\n' +
+    '=== PAGE 2 ===\n4. Sew the side seams and press them open well.\nRepeat the seam on the lining pieces as well please.\n=== PAGE 3 ===\n';
+  var p = S.parse(text);
+  var c = S.importCheck(p, { emptyPages: [3], pages: 3 });
+  assertEqual(c.verdict, 'off', 'wave K: a missing step is off');
+  assertTrue(c.rows.some(function (r) { return r.label === 'Step 3' && r.page === 1; }), 'wave K: step 3 is named, with the page around it');
+  assertTrue(/Read 3 of 4 steps · step 3 missing/.test(c.summary), 'wave K: "Read 3 of 4 steps · step 3 missing"');
+  // A sentence the extraction kept but no step took (the tote's "Cut off your zipper excess.").
+  var lost = { kind: 'bag', cuttingList: [{ piece: 'Panel', qty: 2 }], sizes: null, sourceText: '=== PAGE 2 ===\nSew the panels together along the long sides.\n' +
+    'Cut off your zipper excess now.\nTurn the bag right side out and press it.\n',
+    steps: [{ n: 1, page: 2, marker: 'none', text: 'Sew the panels together along the long sides.' }, { n: 2, page: 2, marker: 'none', text: 'Turn the bag right side out and press it.' }] };
+  var lc = S.importCheck(lost, {});
+  assertTrue(lc.rows.some(function (r) { return r.label === 'Not in any step' && r.page === 2 && /Cut off your zipper/.test(r.why); }), 'wave K: a sentence that reached no step is named with its page');
+  assertFalse(lc.rows.some(function (r) { return r.label === 'Not in any step' && /Turn the bag/.test(r.why); }), 'wave K: and a sentence in a step is not');
+  assertTrue(c.rows.some(function (r) { return r.label === 'Page 3' && r.verdict === 'unknown'; }), 'wave K: a picture-only page');
+  assertTrue(c.rows.some(function (r) { return r.label === 'Cutting list'; }), 'wave K: no cutting list is a row');
+  var img = S.importCheck(S.parse('=== PAGE 1 ===\nWEST END JACKET\n'), { emptyPages: [2, 3, 4, 5], pages: 5 });
+  assertTrue(img.verdict === 'off' && /pictures of text/.test(img.summary), 'wave K: an image-only booklet says so');
+  assertEqual(S.importCheck(null).verdict, 'unchecked', 'wave K: nothing read, nothing checked');
+})();
+
+// =======================================================================
+group('Wave K: step edits and notes keyed to the step (gap 7)');
+// =======================================================================
+(function () {
+  var p = S.parse('Instructions\n1. Sew the front darts and press.\n2. Sew the shoulder seams and press.\n3. Hem the sleeves.\n');
+  var d = S.toCraftData(p);
+  var k0 = S.stepKey(d.steps[1]);
+  assertTrue(S.editStep(d, 1, 'Sew the shoulder seams at 1 cm and press.'), 'wave K: a step is edited');
+  assertTrue(d.steps[1].edited && S.stepKey(d.steps[1]) === k0, 'wave K: its identity does not change with the edit');
+  assertTrue(S.setStepNote(d, 2, 'used 2 cm hem'), 'wave K: a note on a step');
+  assertFalse(S.editStep(d, 1, ''), 'wave K: an empty edit is refused');
+  d.steps[1].done = true;
+  var saved = S.normalize(JSON.parse(JSON.stringify(d)), null);
+  assertEqual(saved.steps[2].note, 'used 2 cm hem', 'wave K: the note survives normalize');
+  var re = S.toCraftData(p, saved);
+  assertEqual(re.steps[1].text, 'Sew the shoulder seams at 1 cm and press.', 'wave K: a re-import keeps the edit');
+  assertTrue(re.steps[1].done, 'wave K: and its tick');
+  assertEqual(re.steps[2].note, 'used 2 cm hem', 'wave K: and the note');
+  var changed = S.parse('Instructions\n1. Sew the front darts and press.\n2. Sew the shoulder seams and press.\n3. Hem the sleeves by 3 cm.\n');
+  var re2 = S.toCraftData(changed, saved);
+  assertTrue(re2.steps[2].note === 'used 2 cm hem' && re2.steps[2].noteStale, 'wave K: a note on a step whose text changed is kept, flagged');
+  assertTrue(S.setStepNote(re2, 2, ''), 'wave K: a note can be removed');
+  assertEqual(re2.steps[2].note, undefined, 'wave K: and is gone');
+})();
+
+// =======================================================================
+group('Wave K: step figures, the one-sentence rule, inventories, nap');
+// =======================================================================
+(function () {
+  var d = S.normalize({ steps: [
+    { text: 'Sew the darts. Press them.', n: 1, fig: { kind: 'crop', page: 6, blobKey: 'p:abc:fig:6:x1', confidence: 0.9, reason: 'caption "Figure 3"' } },
+    { text: 'Hem it.', n: 2, fig: { kind: 'page', page: 7, rect: { x0: 0.1, y0: 0.2, x1: 0.6, y1: 0.5 } } },
+    { text: 'Bind it.', n: 3, fig: { kind: 'page', page: 7, rect: { x0: 0.5, y0: 0.2, x1: 0.4, y1: 0.5 } } },
+    { text: 'Press it.', n: 4, fig: { kind: 'crop', blobKey: 'elsewhere' } }] }, null);
+  assertEqual(d.steps[0].fig, { kind: 'crop', page: 6, blobKey: 'p:abc:fig:6:x1', confidence: 0.9, reason: 'caption "Figure 3"' }, 'wave K: a clean crop is kept');
+  assertEqual(d.steps[1].fig.rect, { x0: 0.1, y0: 0.2, x1: 0.6, y1: 0.5 }, 'wave K: a framed page is kept');
+  assertEqual([d.steps[2].fig, d.steps[3].fig], [undefined, undefined], 'wave K: a back-to-front frame and a foreign blob key are not');
+  S.splitStep(d, 0, 1);
+  assertTrue(!!d.steps[0].fig && !d.steps[1].fig, 'wave K: a split keeps the drawing on the first card');
+  S.mergeSteps(d, 0);
+  assertEqual(d.steps[0].fig.blobKey, 'p:abc:fig:6:x1', 'wave K: a merge keeps it too');
+  var noFig = S.normalize({ steps: [{ text: 'A.', n: 1 }, { text: 'B.', n: 2, fig: { kind: 'page', page: 2, rect: { x0: 0, y0: 0, x1: 1, y1: 1 } } }] }, null);
+  S.mergeSteps(noFig, 0);
+  assertEqual(noFig.steps[0].fig.page, 2, 'wave K: merged onto a card without one, the second card\'s drawing comes up');
+  var p = S.parse('Instructions\n1. Sew the darts.\n2. Hem it.\n');
+  var dd = S.toCraftData(p);
+  dd.steps[1].fig = { kind: 'page', page: 1, rect: { x0: 0, y0: 0, x1: 1, y1: 0.5 } };
+  assertEqual(S.toCraftData(p, dd).steps[1].fig.rect.y1, 0.5, 'wave K: the drawing survives a re-import');
+  // The rule is the one sentence that states it.
+  var long = 'CHOOSING YOUR SIZE\nUse your waist measurement to trace the waistband and if your hip measurement is more than 2 sizes out from your waist,\n' +
+    'then grade between the sizes. The pants are generous. Refer to the finished measurements.\n';
+  var r = S.sizeRule(long);
+  assertTrue(r && r.prefer === 'grade' && /^Use your waist/.test(r.text) && !/generous/.test(r.text), 'wave K: one sentence, not its neighbours');
+  var runOn = S.sizeRule('Some intro words that run on and on without any full stop at all across the paragraph boundary and keep going about fabric and colour and thread and needles and pins and scissors and more words still to pad it out ' +
+    'If your body measurements are in between sizes choose the larger size.');
+  assertTrue(runOn.text.length < 200 && /between sizes/.test(runOn.text), 'wave K: a run-on "sentence" is cut back to the clause with the rule');
+  var withSl = S.sizeRule('If you are between sizes, choose the larger size. If your measurements are only slightly different than our chart, choose the closest size.');
+  assertTrue(withSl.slightly && !/slightly/.test(withSl.text) && /slightly/.test(withSl.slightlyText), 'wave K: the "slightly different" rule is quoted on its own');
+  // A numbered piece inventory in the booklet.
+  var inv = S.parse('PATTERN PIECE INVENTORY\n1 – Front body, cut x1 pair\n2 – Back body, cut x1\n4 – Cuff (long), cut x2 pair + interfacing\n');
+  assertEqual(inv.cuttingList.map(function (c) { return c.qty + ' ' + c.piece + ' ' + c.material; }),
+    ['2 Front body main', '1 Back body main', '4 Cuff main', '4 Cuff interfacing'], 'wave K: "cut x2 pair + interfacing" is 4 cuffs and 4 of interfacing');
+  assertEqual(inv.cuttingList[2].note, 'long', 'wave K: the bracket is the note');
+  var robe = S.parse('Cutting\n1. From the Main Fleece, cut:\n- 1 (19" x 48"), Robe Front.\n- 1 (35" x 48"), Robe Back.\n2. From the Lining Fleece, cut:\n- 2 (10" x 7"), Pocket Bands.\n- 2 Hood Linings*, 1 main,\n1 reverse\n' +
+    'To make the Curvy size, make the following adjustments when cutting:\n- 2 (21" x 48"), Robe Fronts.\nAll other cutting and construction processes are the same.\n');
+  var rc = robe.cuttingList.map(function (c) { return c.qty + ' ' + c.piece + ' ' + c.material + (c.grain ? ' ' + c.grain : '') + ' / ' + c.note; });
+  assertEqual(rc, ['1 Robe Front main / Main Fleece', '1 Robe Back main / Main Fleece', '2 Pocket Band lining / Lining Fleece',
+    '2 Hood Lining lining mirrored / Lining Fleece, 1 main, 1 reverse', '2 Robe Front main / Curvy size only'], 'wave K: count (dims), name rows; 1 main + 1 reverse; the alternative size marked');
+  assertEqual(S.parse('Fabric Requirements\n- 3 yards Fleece Blossom, Robe and Hood\n- 1 1/2 yards Fleece Natural, Bands\nSuggested Notions\n- Thread\n').fabric.map(function (f) { return f.amounts[0]; }),
+    ['3 yards', '1 1/2 yards'], 'wave K: bulleted yardage with no table');
+  assertTrue(S.stepSetup('With right sides together and nap running down, sew the band.', null).chips.some(function (c) { return c.kind === 'nap'; }), 'wave K: a nap-direction chip');
+  assertEqual(S.napNotes('=== PAGE 2 ===\nNote: Have nap on sleeves run down from shoulders. Sew the seam.').length, 1, 'wave K: the booklet\'s nap sentences');
+})();
+
+// =======================================================================
+group('Wave K: sew-audit engine defects');
+// =======================================================================
+(function () {
+  // 1. A rule that opens a page belongs to that page, with its "slightly" companion.
+  var r = S.sizeRule('=== PAGE 1 ===\nIntro.\n=== PAGE 2 ===\nIf you are between sizes, choose the larger size. If your measurements are only slightly different, choose the closest size.\n');
+  assertSubset(r, { page: 2, slightly: true, prefer: 'larger' }, 'audit K1: the rule is on page 2 and keeps its "slightly different" rule');
+  var chart = '=== PAGE 2 ===\nIf you are between sizes, choose the larger size. If your measurements are only slightly different, choose the closest size.\n' +
+    'SIZE CHART (cm)\n36 38 40 42 44\nBust 84 88 92 96 100\nWaist 66 70 74 78 82\nHip 90 94 98 102 106\n';
+  var adv = S.suggestSize(S.parse('=== PAGE 1 ===\nIntro.\n' + chart), [{ label: 'Bust', value: '97 cm' }, { label: 'Waist', value: '79 cm' }, { label: 'Hip', value: '104 cm' }]);
+  assertEqual([adv.suggestion.size, adv.suggestion.blend[0].size], ['42', '44'], 'audit K1: so 97 / 79 / 104 is 42 with a 44 hip, not 44');
+  // 4. 'SIZE CHART (cm)' states the unit.
+  var sc = S.readSizeChart(S.parse(chart));
+  assertTrue(sc.units === 'cm' && !sc.unitGuessed && !sc.check.rows.some(function (x) { return x.label === 'Unit'; }), 'audit K4: "SIZE CHART (cm)" is cm, not a guess');
+  // 3. Names and kinds: not sure beats wrong.
+  [['Binding 5/8 yard', ''], ['Paper', ''], ['BELLA', ''], ['SIZE TABLE', ''], ['background square on top of the star block. Pin', ''],
+   ['GATHERED SUNDRESS # 1301', 'Gathered Sundress'], ['Quick Sew Bag', 'Quick Sew Bag'], ['The Albion Blouse', 'The Albion Blouse'], ['Harmony Quilt', 'Harmony Quilt']].forEach(function (c) {
+    assertEqual(S.projectName({ meta: { patternName: c[0] } }, 'x.pdf'), c[1], 'audit K3: name from "' + c[0] + '"');
+  });
+  var bag = S.parse('=== PAGE 1 ===\nSupplies\nBag & Straps: one yard\nLining: ¾ yard\nQuick Sew Bag\nCutting\nBag & Straps:\n1–22"x width of fabric\n2–6"x 30" strips\n' +
+    '1 Stitch the Timtex to the wrong side using a ¼" seam on all four sides.\n2 Place right sides together and stitch a ½" seam down both sides.\n');
+  assertEqual(bag.kind, 'bag', 'audit K3: a pattern named "… Bag" is a bag');
+  assertTrue(bag.fabric.some(function (f) { return f.name === 'Bag & Straps' && f.amounts[0] === 'one yard'; }), 'audit K3: "Bag & Straps: one yard" is fabric');
+  assertFalse(bag.notions.some(function (n) { return /yard/.test(n.text); }), 'audit K3: and not a notion');
+  assertEqual(S.detectKind('Block 4: Make three. Flying Geese. Quilt in a Day ruler. Press the cuff seam.', false), 'quilt', 'audit K3: flying geese + quilt outweigh a garment word');
+  // 5. Sheet pieces: a layout page repeating every piece, size labels glued to a name.
+  var sheet = S.readSheet('=== PAGE 1 ===\nPATTERN LAYOUT\ncut 2 ARMHOLE BINDING\nSize: LSize: MSize: XLFRONT\ncut 1 on fold\nSize: SBACK\ncut 2 mirrored\nACME TOP\n' +
+    '=== PAGE 2 ===\nACME TOP\nFRONT\ncut 1 on fold\n=== PAGE 3 ===\nACME TOP\nBACK\ncut 2 mirrored\n=== PAGE 4 ===\nACME TOP\ncut 2 ARMHOLE BINDING\n');
+  assertEqual(sheet.pieces.map(function (p) { return p.name + ' ' + p.cuts.map(function (c) { return c.qty + c.how; }).join('+'); }),
+    ['Armhole Binding 2x', 'Front 1fold', 'Back 2mirror'], 'audit K5: one row per piece, the layout page\'s repeat merged, mirrored kept');
+  var t10 = S.readSheet('=== PAGE 1 ===\n10 centimeters - Our patterns are layered.\nScale choose Custom scale: 100% (or Scaling: None or\nActual Size) to print true to size.\n');
+  assertEqual(t10.test[0].size, '10 centimeters', 'audit K5: the test ruler label, not the sentence it is glued to');
+  assertEqual(t10.print, ['Scale choose Custom scale: 100% (or Scaling: None or Actual Size) to print true to size.'], 'audit K5: the print note as one sentence');
+  // The interleave warning never says "1 columns".
+  var w = S.parseSteps('1. Sew a.\n3. Sew c.\n2. Sew b.\n5. Sew e.\n4. Sew d.\n7. Sew g.\n6. Sew f.', { columns: 1 }).warnings.join(' ');
+  assertFalse(/1 columns/.test(w), 'audit: no "(1 columns detected)"');
 })();
 
 // =======================================================================

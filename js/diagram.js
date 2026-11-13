@@ -160,6 +160,7 @@
   var DIP_SPAN = 0.45;
   var R_MIN = 0.42;        // smallest ring radius
   var MAX_SLICES = 160;    // per-ring slice cap (subsample beyond)
+  var _sliceCap = MAX_SLICES;  // wave K: lowered while a whole garment is prepared (normalizePieces)
   var SEGS = 4;            // angular segments per stitch
   var ROWS = 2;            // vertical segments per band (3 vertex rows)
   var COLS = SEGS + 1;     // 5 vertex columns
@@ -286,6 +287,8 @@
 
   function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
   function r3(v) { return typeof v === 'number' && isFinite(v) ? Math.round(v * 1000) / 1000 : v; }
+  // the nearest power of two (4…1024): wave K mipmaps its bake textures, and WebGL1 needs them square-ish powers of two
+  function pow2(v) { return Math.min(1024, Math.max(4, Math.pow(2, Math.round(Math.log(Math.max(v, 1)) / Math.LN2)))); }
   function lerp(a, b, t) { return a + (b - a) * t; }
   function easeOutCubic(t) { var u = 1 - t; return 1 - u * u * u; }
   function smoothstep(a, b, x) {
@@ -390,6 +393,7 @@
     'varying vec3 vColor;',
     'varying vec3 vView;',
     'varying vec2 vUV;',
+    'varying float vSlice;',
     'void main() {',
     '  float s = abs(aSlice - uAnimSlice) < 0.5 ? uAnimScale : 1.0;',
     '  vec3 p = aAnchor + aOffset * s;',
@@ -398,6 +402,7 @@
     '  vNormal = uNormalMat * aNormal;',
     '  vColor = aColor;',
     '  vUV = aUV;',
+    '  vSlice = aSlice;',
     '  gl_Position = uProj * vp;',
     '  gl_PointSize = 2.0;',
     '}'
@@ -440,6 +445,19 @@
     /* Ply: a faint twist of fibre running along the legs of the V, only when
        a stitch is big enough on screen (>= ~14 device px) to carry it. */
     'uniform float uPly;',
+    /* Wave K (K2): a flat piece of a whole garment drawn coarse, its relief
+       baked face-on into an albedo + normal texture. uBakeU = (s at the row's
+       start, signed row width, sheet radius Rc, slices); uBakeV = the row's
+       y bottom / top; uBakeR = the texture's x0, x span, y0, y span (sheet
+       units); uBakeB = the piece's own "up" in view space. */
+    'varying float vSlice;',
+    'uniform float uBaked;',
+    'uniform sampler2D uAtlasA;',
+    'uniform sampler2D uAtlasN;',
+    'uniform vec4 uBakeU;',
+    'uniform vec2 uBakeV;',
+    'uniform vec4 uBakeR;',
+    'uniform vec3 uBakeB;',
     'void main() {',
     // contact shadow: vColor.r carries the falloff weight, ink is plain black
     '  if (uShadow > 0.5) {',
@@ -450,8 +468,21 @@
     '  if (uWire > 0.5) {',
     '    c = uFlat;',
     '  } else {',
-    '    vec3 base = mix(vColor, uTint, uTintMix);',
+    '    vec3 alb = vColor;',
     '    vec3 N = normalize(vNormal);',
+    '    if (uBaked > 0.5) {',
+    '      float sp = uBakeU.x + uBakeU.y * (vSlice + vUV.x) / uBakeU.w;',
+    '      float sx = uBakeU.z * sin(sp / uBakeU.z);',
+    '      float sy = mix(uBakeV.x, uBakeV.y, vUV.y);',
+    '      vec2 at = vec2((sx - uBakeR.x) / uBakeR.y, (sy - uBakeR.z) / uBakeR.w);',
+    '      vec3 ta = texture2D(uAtlasA, at).rgb;',
+    '      alb = ta * ta;',                       // stored as sqrt(linear)
+    '      vec3 tn = texture2D(uAtlasN, at).rgb * 2.0 - 1.0;',
+    '      vec3 B = normalize(uBakeB - N * dot(uBakeB, N));',
+    '      vec3 T = cross(B, N);',
+    '      N = normalize(T * tn.x + B * tn.y + N * max(tn.z, 0.05));',
+    '    }',
+    '    vec3 base = mix(alb, uTint, uTintMix);',
     '    vec3 V = normalize(-vView);',
     '    float facing = dot(N, V);',
     // 1.0 where we are looking at the wrong side of the fabric: the inside of
@@ -1027,6 +1058,10 @@
     var raw = m.geoRaw ? m.geoRaw[cur] : null;
     if (typeof dev.row === 'number' && raw && typeof raw.row === 'number' && dev.row !== raw.row) return -1;
     if (!(r.count > dev.expected) || !(r.n > 0)) return -1;
+    // wave K: a heel-flap row's held slices come first; the count is the worked ones
+    if (r.knit && r.heldSlices > 0) {
+      return clamp(r.heldSlices + Math.round(dev.expected / r.count * r.workSlices), 0, r.n);
+    }
     return clamp(Math.round(dev.expected / r.count * r.n), 0, r.n);
   }
 
@@ -1062,13 +1097,16 @@
      the point is walked through the slices, so a wide stitch turns the piece
      further than a narrow one and the front is where the fabric really ends;
      for a round of equal stitches it is exactly 2π·index/count. */
-  function followAngle(index, count, a0, aw) {
+  function followAngle(index, count, a0, aw, held) {
     count = +count;
     if (!(count > 0) || !isFinite(count)) return 0;
     var i = clamp(+index || 0, 0, count);
     if (!a0 || !aw || !a0.length || aw.length !== a0.length) return TAU * i / count;
     var n = a0.length;
-    var f = i / count * n;
+    /* wave K: a heel-flap row draws its HELD stitches first (prepKnitRound),
+       so the stitches worked start after them */
+    var hs = clamp(held | 0, 0, n);
+    var f = hs + i / count * (n - hs);
     var k = Math.floor(f);
     if (k >= n) return a0[n - 1] + aw[n - 1];
     return a0[k] + (f - k) * aw[k];
@@ -1082,6 +1120,81 @@
     if (!isFinite(target)) return ref;
     if (!isFinite(ref)) return target;
     return target + TAU * Math.round((ref - target) / TAU);
+  }
+
+  /* ---- Follow on the bend (wave K, K4). On a sock bent at the heel the
+     yaw alone turns the piece about the LEG, so a stitch on the foot never
+     came round to the front. Follow mode now also tilts the piece so the
+     working segment's axis stands upright — the smallest turn that takes the
+     local axis (DiagramGeo.followFrame) to the vertical the piece was drawn
+     upright in — and the yaw turns about that. A tilt is a rotation vector
+     `v` (axis × angle) and a centre `c`, the point the working axis passes
+     through, so that axis goes through the frame's own; p → R(v)·(p − c).
+     Within one bend the axis never changes, so easing v and c linearly is
+     exactly easing the angle. */
+  function rotVec(v, out) {
+    var o = out || new Array(9);
+    var a = Math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+    if (!(a > 1e-12)) { o[0] = 1; o[1] = 0; o[2] = 0; o[3] = 0; o[4] = 1; o[5] = 0; o[6] = 0; o[7] = 0; o[8] = 1; return o; }
+    var x = v[0] / a, y = v[1] / a, z = v[2] / a, c = Math.cos(a), s = Math.sin(a), t = 1 - c;
+    o[0] = c + x * x * t; o[1] = x * y * t - z * s; o[2] = x * z * t + y * s;
+    o[3] = y * x * t + z * s; o[4] = c + y * y * t; o[5] = y * z * t - x * s;
+    o[6] = z * x * t - y * s; o[7] = z * y * t + x * s; o[8] = c + z * z * t;
+    return o;
+  }
+  var _tiltM = new Array(9);
+  var PIECES_BUDGET = 140000;  // vertices for a whole garment at the lowest relief tier (wave K)
+  var TILT_SHADOW_OFF = 0.3;   // rad of tilt by which the contact shadow is gone
+  function mat3v(m, x, y, z, out) {
+    out[0] = m[0] * x + m[1] * y + m[2] * z;
+    out[1] = m[3] * x + m[4] * y + m[5] * z;
+    out[2] = m[6] * x + m[7] * y + m[8] * z;
+    return out;
+  }
+  /* Which way is "up" for a bent piece: the vertical of its most upright
+     segment (a top-down sock's leg is the first band, a toe-up's the last). */
+  function tiltUp(geo) {
+    if (geo._tiltUp) return geo._tiltUp;
+    var Geo = geoOf(), bs = geo.bands || [], best = 0, up = 1;
+    for (var i = 0; i < bs.length; i++) {
+      if (!bs[i]) continue;
+      var m = Geo.frameAt(geo.warp, (bs[i].yTop + bs[i].yBot) / 2);
+      if (Math.abs(m[4]) > best + 1e-9) { best = Math.abs(m[4]); up = m[4] < 0 ? -1 : 1; }
+      if (best > 0.9999) break;
+    }
+    geo._tiltUp = up;
+    return up;
+  }
+  /* The tilt for band i of a laid-out piece: { v, c, m (the tilt), frame
+     (the warp's own turn there), deg }; null when nothing is bent. Pure. */
+  function followTilt(geo, i) {
+    var Geo = geoOf();
+    if (!geo || !Geo || !Geo.followFrame || geo.mode === 'rows') return null;
+    var F = null;
+    try { F = Geo.followFrame(geo, i); } catch (e) { F = null; }
+    if (!F) return null;
+    var up = tiltUp(geo);
+    var dx = F.m[1], dy = F.m[4], dz = F.m[7];
+    // the smallest turn taking d to (0, up, 0): about d × up·ŷ
+    var ax = -dz * up, az = dx * up;
+    var s = Math.sqrt(ax * ax + az * az), cs = dy * up;
+    var ang = Math.atan2(s, cs), v;
+    if (s > 1e-9) v = [ax / s * ang, 0, az / s * ang];
+    else v = cs < 0 ? [Math.PI, 0, 0] : [0, 0, 0];
+    // the axis line through the working round, minus its run along the axis
+    var c = F.c, cd = c[0] * dx + c[1] * dy + c[2] * dz;
+    var cp = [c[0] - cd * dx, c[1] - cd * dy, c[2] - cd * dz];
+    return { v: v, c: cp, m: rotVec(v), frame: F.m, deg: ang * 180 / Math.PI };
+  }
+  /* The yaw that brings walked angle `a` of band i to the front once the
+     band's tilt is applied: from the stitch's own direction on the finished
+     piece, so it is right whichever way the warp turned the tube. */
+  var _aim = [0, 0, 0], _aim2 = [0, 0, 0];
+  function followAim(tl, a) {
+    if (!tl) return followYawFor(a);
+    mat3v(tl.frame, Math.cos(a), 0, Math.sin(a), _aim);
+    mat3v(tl.m, _aim[0], _aim[1], _aim[2], _aim2);
+    return Math.atan2(-_aim2[0], _aim2[2]);
   }
 
   /* The yaw follow mode lands on after a change: stitch `index` of `count` at
@@ -1174,13 +1287,13 @@
        so a round of `sc, ch 3` drew as 20 smeared quarter-stitches with the
        spaces lost. `done` still maps onto slices by proportion. */
     var nRec = stitches && stitches.length > count ? stitches.length : count;
-    var n = count > 0 ? Math.min(nRec, MAX_SLICES) : 0;
+    var n = count > 0 ? Math.min(nRec, _sliceCap) : 0;
 
     /* Fast path for the tap loop: the caller normally hands back the very same
        stitches array and only moves `done`, so nothing but the draw range
        changes. Reuse the prepared round instead of re-parsing every colour. */
     if (prev && prev.ref === stitches && prev.count === count && prev.base === base &&
-        prev.height === height && prev.ghost === ghost) {
+        prev.height === height && prev.ghost === ghost && (prev.cap || MAX_SLICES) === _sliceCap) {
       prev.done = done;
       prev.doneSlices = count > 0 ? Math.round(done / count * n) : 0;
       return prev;
@@ -1258,7 +1371,8 @@
       jit: jit, keys: keys, descs: descs, reliefPeak: peak || 1,
       height: height, ghost: ghost,
       ref: stitches, base: base,
-      hash: (h ^ seed) >>> 0
+      hash: ((h ^ seed) + (_sliceCap !== MAX_SLICES ? _sliceCap * 7919 : 0)) >>> 0,
+      cap: _sliceCap
     };
   }
 
@@ -1299,7 +1413,8 @@
     if (pull) for (var pk = 0; pk < pull.length; pk++) if (pull[pk]) twKey = (twKey * 31 + pk * 3 + 1) | 0;
 
     if (prev && prev.knit && prev.ref === stitches && prev.count === count && prev.base === base &&
-        prev.height === height && prev.ghost === ghost && prev.padKey === padKey && prev.mir === mir && prev.twKey === twKey) {
+        prev.height === height && prev.ghost === ghost && prev.padKey === padKey && prev.mir === mir && prev.twKey === twKey &&
+        (prev.cap || MAX_SLICES) === _sliceCap) {
       prev.done = done;
       prev.doneSlices = count > 0 ? prev.heldSlices + Math.round(done / count * prev.workSlices) : 0;
       return prev;
@@ -1328,13 +1443,15 @@
       sW.push(sW.length ? sW[sW.length - 1] : 1);
     }
     var nWork = sRec.length;
+    var sWsum = 0;
+    for (var swi = 0; swi < sW.length; swi++) sWsum += sW[swi];
     var nHeld = 0, wHeld = 1;
     if (pad && pad.ring > pad.count && count > 0) {
       nHeld = pad.ring - pad.count;
       wHeld = Math.max(0.05, (pad.ringP - pad.P) / nHeld);
     }
     var total = nWork + nHeld;
-    var n = count > 0 ? Math.min(total, MAX_SLICES) : 0;
+    var n = count > 0 ? Math.min(total, _sliceCap) : 0;
     var heldSlices = total > 0 ? Math.round(n * nHeld / total) : 0;
     var workSlices = n - heldSlices;
 
@@ -1369,6 +1486,10 @@
         var si = workSlices > 0 ? Math.min(nWork - 1, Math.floor(wi * nWork / workSlices)) : 0;
         rec = sRec[si]; sub = sSub[si]; subN = sN[si];
         ww = sW[si] * nWork / Math.max(1, workSlices);
+        /* wave K: a row drawn coarse (a whole garment) has even slices — one
+           slice is several stitches, and its baked fabric carries their real
+           widths — so slice j starts exactly j/n of the way along the row */
+        if (_sliceCap !== MAX_SLICES && workSlices < nWork) ww = sWsum / Math.max(1, workSlices);
       }
       var c = (rec && rec.c) || base;
       jit[i] = 1 + noise11(seed, i * 3) * JIT_AMP;
@@ -1393,13 +1514,73 @@
       jit: jit, keys: keys, descs: descs, reliefPeak: peak || 1,
       height: height, ghost: ghost,
       ref: stitches, base: base,
-      hash: (h ^ seed) >>> 0,
+      hash: ((h ^ seed) + (_sliceCap !== MAX_SLICES ? _sliceCap * 7919 : 0)) >>> 0, cap: _sliceCap,
       knit: true, padKey: padKey, mir: mir, twKey: twKey, heldSlices: heldSlices, workSlices: workSlices
     };
   }
 
-  function normalizeModel(model, prev) {
+  /* Wave K (K1): the whole piece — `DiagramGeo.assemble(...).model`, a list
+     of pieces each with its own model and its own placed layout (`layout`,
+     whose warp already holds the wrap / roll / place). Every piece is
+     normalized on its own, then the rounds and bands are put end to end;
+     a band remembers its piece's mode, its index inside the piece (a row's
+     direction) and its piece's warp, which is all the band builder needs. */
+  function normalizePieces(m, prev) {
+    var list = m.pieces || [], rounds = [], raw = [], bands = [], off = 0, i, k;
+    var prevP = prev && prev.pieceList ? prev.pieceList : [];
+    var pieceList = [], pieceOf = [];
+    /* The budget (measured: a plain pullover is ~40k stitches, 720k vertices
+       at the lowest relief tier, 840 ms to build). The whole garment is
+       seen at about a pixel or two a stitch, where the relief and the
+       stitch texture have already faded out, so each row is drawn with at
+       most `cap` slices — the silhouette, the seams and the colours stay,
+       and the viewer's vertex budget holds. */
+    var lowVps = (LOD_TIERS[0].segs + 1) * (LOD_TIERS[0].rows[0] + 1), want = 0;
+    for (k = 0; k < list.length; k++) {
+      var pk = list[k];
+      if (!pk || !pk.model || !pk.model.rounds) continue;
+      want += pk.model.rounds.length * lowVps * (pk.model.mode === 'rows' ? 2 : 1);
+    }
+    var cap = want > 0 ? clamp(Math.floor(PIECES_BUDGET / want), 6, MAX_SLICES) : MAX_SLICES;
+    // a host (or a test) may ask for a coarser drawing outright
+    if (m.sliceCap > 0) cap = clamp(Math.floor(m.sliceCap), 2, cap);
+    for (k = 0; k < list.length; k++) {
+      var pc = list[k];
+      if (!pc || !pc.model || !pc.layout) continue;
+      var pp = prevP[pieceList.length];
+      _sliceCap = cap;
+      var sub;
+      try { sub = normalizeModel(pc.model, pp && pp.id === pc.id && pp.layout === pc.layout ? pp.norm : null, pc.layout); }
+      finally { _sliceCap = MAX_SLICES; }
+      var capped = false;
+      for (i = 0; i < sub.rounds.length; i++) if (sub.rounds[i].n < sub.rounds[i].count) { capped = true; break; }
+      pieceList.push({ id: pc.id, layout: pc.layout, norm: sub, from: off, model: pc.model, state: pc.state || 'todo',
+        capped: capped, n: sub.rounds.length });
+      for (i = 0; i < sub.rounds.length; i++) {
+        pieceOf.push(pieceList.length - 1);
+        var b = pc.layout.bands[i] || null;
+        if (b) { b.pmode = sub.mode; b.pindex = i; b.pwarp = pc.layout.warp; }
+        rounds.push(sub.rounds[i]);
+        raw.push(sub.geoRaw[i]);
+        bands.push(b);
+      }
+      if (sub.rounds.length) sub.rounds[0].seam = 0;
+      off += sub.rounds.length;
+    }
+    var mode = m.kind === 'board' ? 'rows' : 'rounds';
+    var current = clamp(m.current == null || m.current < 0 ? rounds.length - 1 : m.current | 0, 0, Math.max(0, rounds.length - 1));
+    return {
+      mode: mode, rounds: rounds, current: current, defaultColor: m.defaultColor || DEFAULT_YARN,
+      shape: null, geo: { mode: mode, bands: bands, warp: null, pieces: true }, geoRaw: raw, geoShape: null,
+      geoCounts: countsOf(raw), pieces: true, pieceKind: m.kind || 'board', pieceList: pieceList, pieceOf: pieceOf, sliceCap: cap,
+      finished: m.finished != null ? !!m.finished : finishedOf(rounds, current),
+      deviation: null
+    };
+  }
+
+  function normalizeModel(model, prev, layoutGiven) {
     var m = model || {};
+    if (m.pieces && !layoutGiven) return normalizePieces(m, prev);
     var mode = m.mode === 'rows' ? 'rows' : 'rounds';
     var src = m.rounds || [];
     var def = m.defaultColor || DEFAULT_YARN;
@@ -1432,12 +1613,12 @@
        very same round objects with only `done` moved, so reuse it — a 60x60
        piece costs ~0.9 ms to classify and a tap must not pay that. */
     var shape = m.shape || null;
-    var geo = (prev && sameGeoInput(prev, mode, raw, shape))
+    var geo = layoutGiven || ((prev && sameGeoInput(prev, mode, raw, shape))
       ? prev.geo
       : geoLayout({
         mode: mode, rounds: raw, current: current, defaultColor: def,
         shape: shape, window: m.window || null, deviation: m.deviation || null
-      });
+      }));
     /* A round whose yarn differs from the round above it gets a hard seam in
        the shader (02 #7 / 05 #6): at button size a colour change used to wash
        out into a soft gradient, which is exactly the moment an amigurumi
@@ -1454,7 +1635,9 @@
          target) is only as long as what has been tapped, so it is always
          "full"; it is the round being worked, never a finish. */
       finished: m.finished != null ? !!m.finished : (anyCountless(raw) ? false : finishedOf(rounds, current)),
-      deviation: m.deviation && typeof m.deviation === 'object' ? m.deviation : null
+      deviation: m.deviation && typeof m.deviation === 'object' ? m.deviation : null,
+      // wave K: a chained sock's sections, so setDone can find a section's rounds
+      sections: Array.isArray(m.sections) ? m.sections : null
     };
   }
 
@@ -2233,10 +2416,72 @@
         tex: gl.getUniformLocation(p, 'uTex'),
         seam: gl.getUniformLocation(p, 'uSeam'),
         texV: gl.getUniformLocation(p, 'uTexV'),
-        ply: gl.getUniformLocation(p, 'uPly')
+        ply: gl.getUniformLocation(p, 'uPly'),
+        // wave K (K2)
+        baked: gl.getUniformLocation(p, 'uBaked'),
+        atlasA: gl.getUniformLocation(p, 'uAtlasA'),
+        atlasN: gl.getUniformLocation(p, 'uAtlasN'),
+        bakeU: gl.getUniformLocation(p, 'uBakeU'),
+        bakeV: gl.getUniformLocation(p, 'uBakeV'),
+        bakeR: gl.getUniformLocation(p, 'uBakeR'),
+        bakeB: gl.getUniformLocation(p, 'uBakeB')
       }
     };
   }
+
+  /* Wave K (K2): the bake. A flat piece's full-detail rows drawn face-on,
+     orthographically, into a texture: pass 0 writes the albedo (the vertex
+     colour, AO included, as sqrt of linear), pass 1 the sheet-space normal.
+     uRect maps sheet x / y to the texture; uDy moves a row built once to
+     every row that repeats it. */
+  var BAKE_VERT = [
+    'attribute vec3 aAnchor;',
+    'attribute vec3 aOffset;',
+    'attribute vec3 aNormal;',
+    'attribute vec3 aColor;',
+    'uniform vec4 uRect;',
+    'uniform float uDy;',
+    'uniform float uZs;',
+    'varying vec3 vN;',
+    'varying vec3 vC;',
+    'void main() {',
+    '  vec3 p = aAnchor + aOffset;',
+    '  vN = aNormal; vC = aColor;',
+    '  gl_Position = vec4((p.x - uRect.x) / uRect.y * 2.0 - 1.0, (p.y + uDy - uRect.z) / uRect.w * 2.0 - 1.0, -p.z * uZs, 1.0);',
+    '}'
+  ].join('\n');
+  var BAKE_FRAG = [
+    'precision mediump float;',
+    'varying vec3 vN;',
+    'varying vec3 vC;',
+    'uniform float uMode;',
+    'void main() {',
+    '  if (uMode < 0.5) gl_FragColor = vec4(sqrt(clamp(vC, 0.0, 1.0)), 1.0);',
+    '  else { vec3 n = normalize(vN); if (n.z < 0.0) n = -n; gl_FragColor = vec4(n * 0.5 + 0.5, 1.0); }',
+    '}'
+  ].join('\n');
+  function makeBakeProgram(gl) {
+    var vs = compile(gl, gl.VERTEX_SHADER, BAKE_VERT);
+    var fs = compile(gl, gl.FRAGMENT_SHADER, BAKE_FRAG);
+    var p = gl.createProgram();
+    gl.attachShader(p, vs); gl.attachShader(p, fs);
+    gl.bindAttribLocation(p, 0, 'aAnchor');
+    gl.bindAttribLocation(p, 1, 'aOffset');
+    gl.bindAttribLocation(p, 2, 'aNormal');
+    gl.bindAttribLocation(p, 3, 'aColor');
+    gl.linkProgram(p);
+    gl.deleteShader(vs); gl.deleteShader(fs);
+    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) { gl.deleteProgram(p); return null; }
+    return {
+      program: p,
+      u: { rect: gl.getUniformLocation(p, 'uRect'), dy: gl.getUniformLocation(p, 'uDy'),
+        zs: gl.getUniformLocation(p, 'uZs'), mode: gl.getUniformLocation(p, 'uMode') }
+    };
+  }
+  var BAKE_PX = 4;           // texels per sheet unit at least: 4 a stitch (the proposal's figure)
+  var BAKE_MAX = 1024;       // texture side cap
+  var BAKE_TIER = 1;         // 'mid' relief: the V, rib, cable strands, eyelets
+  var BAKE_STEP_MS = 8;      // bake work per frame, off the tap path
 
   /* ================================================================= mount */
 
@@ -2301,6 +2546,12 @@
       // camera
       yaw: -0.35, pitch: PITCH,
       spinVel: 0,
+      /* Follow on the bend (wave K): the tilt on screen (rotation vector and
+         centre, see followTilt), the one it is easing to, and the band
+         extents seen through that target tilt (the fit reads those). */
+      tiltV: [0, 0, 0], tiltC: [0, 0, 0], tiltAnim: null,
+      tiltTo: null, tiltExt: null, tiltBand: -1,
+      bakes: [], bakeProg: null, bakeMs: 0, noBake: opts.bake === false,
       /* Follow mode (wave F): the piece turns with the taps instead of on a
          clock. `followAnim` eases the yaw to the stitch being worked;
          `followKey` is what the last sync followed (round, row, done, count),
@@ -2451,6 +2702,7 @@
     /* ---------------------------------------------------------- geometry */
 
     function rebuild(model, forceTier) {
+      state.stats.rebuilds = (state.stats.rebuilds || 0) + 1;   // wave K: setDone must never add to this
       var t0 = now();
       var mode = model.mode;
       var rounds = model.rounds;
@@ -2506,11 +2758,13 @@
         var r = rounds[i];
         var b = bands[i];
         if (!b) { freeChunk(state.chunks[i]); state.chunks[i] = null; state.hashes[i] = 0; continue; }
+        // wave K (K1): a band of the whole piece carries its piece's mode, index and warp
+        var bmode = b.pmode || mode, bidx = b.pindex != null ? b.pindex : i, bwarp = b.pwarp || geo.warp;
         var h = r.hash;
         h = hashNum(h, b.rTop * 97); h = hashNum(h, b.rBot * 97);
         h = hashNum(h, b.yTop * 97); h = hashNum(h, b.yBot * 97);
-        h = hashNum(h, mode === 'rows' ? 2 : 1);
-        h = hashNum(h, i & 1);
+        h = hashNum(h, bmode === 'rows' ? 2 : 1);
+        h = hashNum(h, bidx & 1);
         // the cross-section class, so a ring that becomes a polygon rebuilds
         h = hashNum(h, b.sig || 0);
         h = hashNum(h, (b.x0 || 0) * 97);
@@ -2524,8 +2778,8 @@
            the end of a finished piece) left it null, so `geo.closedTop` below
            threw and setModel died before it ever applied the fit. The viewer
            then drew every finished amigurumi at scale 1, spilling off frame. */
-        var bandGeo = buildRoundBand(mode, r, b, i, tier);
-        if (bandGeo && geo.warp) warpGeo(bandGeo, geo.warp, b);
+        var bandGeo = buildRoundBand(bmode, r, b, bidx, tier);
+        if (bandGeo && bwarp) warpGeo(bandGeo, bwarp, b);
         if (!bandGeo) { freeChunk(state.chunks[i]); state.chunks[i] = null; state.hashes[i] = h; continue; }
         state.chunks[i] = uploadChunk(bandGeo, state.chunks[i]);
         state.hashes[i] = h;
@@ -2592,7 +2846,7 @@
       var aY0 = Infinity, aY1 = -Infinity, aR = 0;
       var sY0 = Infinity, sR = 0, sAny = false;
       for (i = 0; i < rounds.length; i++) {
-        if (!bandExtent(i, _ext)) continue;
+        if (!bandExtent(i, _ext, true)) continue;
         if (_ext.rad > aR) aR = _ext.rad;
         if (_ext.ymin < aY0) aY0 = _ext.ymin;
         if (_ext.ymax > aY1) aY1 = _ext.ymax;
@@ -2636,7 +2890,7 @@
 
     /* Worst-case extent of one band under rotation: a radius about the
        vertical axis plus a y range. Shared by the fit and the ghost fade. */
-    function bandExtent(i, out) {
+    function bandExtent(i, out, upright) {
       var r = state.model.rounds[i], b = state.bands[i];
       if (!b || !r || r.count <= 0) return null;
       /* wave H: a warped knitted band carries its own extent (DiagramGeo
@@ -2646,11 +2900,13 @@
           : bumpAmpOf(b, 1) * Math.max(1, r.reliefPeak || 1);
         var capR = (i === 0 && state.capChunk) || (i === state.botBand && state.botChunk)
           ? Math.max(Math.abs(b.rTop), Math.abs(b.rBot)) * 0.55 : 0;
+        // wave K: seen through follow mode's tilt when one is set
+        var ex = (!upright && state.tiltExt && state.tiltExt[i]) || b.ext;
         // a bent piece reaches out sideways (a foot), where perspective swells
         // the near side of the tube at the frame's edge: keep 8% more room
-        out.rad = b.ext.rad * WARP_FIT_PAD + marg + capR;
-        out.ymin = b.ext.ymin - marg - capR;
-        out.ymax = b.ext.ymax + marg + capR;
+        out.rad = ex.rad * WARP_FIT_PAD + marg + capR;
+        out.ymin = ex.ymin - marg - capR;
+        out.ymax = ex.ymax + marg + capR;
         return out;
       }
       if (state.model.mode === 'rows') {
@@ -2773,7 +3029,9 @@
          geometry is asked for a fit with no current row. */
       var curY = null;
       var cb = state.bands[clamp(state.model.current, 0, Math.max(0, state.bands.length - 1))];
-      if (cb) curY = cb.ext ? (cb.ext.ymin + cb.ext.ymax) / 2 : (cb.yTop + cb.yBot) / 2;
+      // (wave K: seen through follow mode's tilt when one is set)
+      var cbx = cb ? ((state.tiltExt && state.tiltExt[clamp(state.model.current, 0, Math.max(0, state.bands.length - 1))]) || cb.ext) : null;
+      if (cb) curY = cbx ? (cbx.ymin + cbx.ymax) / 2 : (cb.yTop + cb.yBot) / 2;
       if (state.fitFinished || state.fitPurpose === 'button') curY = null;
 
       /* DiagramGeo.fit owns the two clamps: (a) a 42-round tail fits by height
@@ -2871,6 +3129,21 @@
 
       // panX: rows-mode follow slides the sheet along world x (see followPan)
       var cx = state.fit.cx + state.panX, ccy = state.fit.cy, ccz = state.fit.cz;
+      /* wave K: follow mode's tilt. view = cam · T with T(p) = Rt·(p − c),
+         and the fit's centre (in the tilted frame) taken back to the model's:
+         c + Rtᵀ·centre. */
+      var tv = state.tiltV;
+      if (tv[0] || tv[1] || tv[2] || state.tiltC[0] || state.tiltC[1] || state.tiltC[2]) {
+        var Rt = rotVec(tv, _tiltM);
+        var q00 = r00 * Rt[0] + r01 * Rt[3] + r02 * Rt[6], q01 = r00 * Rt[1] + r01 * Rt[4] + r02 * Rt[7], q02 = r00 * Rt[2] + r01 * Rt[5] + r02 * Rt[8];
+        var q10 = r10 * Rt[0] + r11 * Rt[3] + r12 * Rt[6], q11 = r10 * Rt[1] + r11 * Rt[4] + r12 * Rt[7], q12 = r10 * Rt[2] + r11 * Rt[5] + r12 * Rt[8];
+        var q20 = r20 * Rt[0] + r21 * Rt[3] + r22 * Rt[6], q21 = r20 * Rt[1] + r21 * Rt[4] + r22 * Rt[7], q22 = r20 * Rt[2] + r21 * Rt[5] + r22 * Rt[8];
+        var mx = state.tiltC[0] + Rt[0] * cx + Rt[3] * ccy + Rt[6] * ccz;
+        var my = state.tiltC[1] + Rt[1] * cx + Rt[4] * ccy + Rt[7] * ccz;
+        var mz = state.tiltC[2] + Rt[2] * cx + Rt[5] * ccy + Rt[8] * ccz;
+        r00 = q00; r01 = q01; r02 = q02; r10 = q10; r11 = q11; r12 = q12; r20 = q20; r21 = q21; r22 = q22;
+        cx = mx; ccy = my; ccz = mz;
+      }
       // view = T(0,0,-d) * R * S(s) * T(-c)
       var m = view;
       m[0] = r00 * s; m[1] = r10 * s; m[2] = r20 * s; m[3] = 0;
@@ -2937,7 +3210,8 @@
         var lodPx = stitchPxAt(state.fitTo.scale);
         var want = lodFor(lodPx, state.lod, state.fitPurpose, state.model.rounds,
           state.model.mode === 'rows', state.bands);
-        if (want !== state.lod) {
+        // a snapshot (wave K) renders bigger for a moment: never re-tier for it
+        if (want !== state.lod && !state.snapping) {
           state.lodPx = lodPx;
           state.lodSwitches++;
           rebuild(state.model, want);
@@ -3019,6 +3293,14 @@
         draws++; tris += bc.triCount / 3;
       }
 
+      /* wave K: a whole garment's pieces. A coarse piece never paints the
+         per-slice V (a slice there is several stitches); a baked one samples
+         its fabric (K2). */
+      var pieceOf = state.model.pieces ? state.model.pieceOf : null, lastPk = -1, texV0 = state.lod === 0 ? 1 : 0;
+      var ply0 = state.lod >= 2 ? smoothstep(12, 26, stitchPx) : 0;
+      gl.uniform1f(u.baked, 0);
+      gl.uniform1i(u.atlasA, 0);
+      gl.uniform1i(u.atlasN, 1);
       for (i = 0; i < state.chunks.length; i++) {
         var c = state.chunks[i];
         if (!c) continue;
@@ -3026,6 +3308,34 @@
         if (r.ghost) continue;
         var solid = Math.min(r.doneSlices, c.n);
         if (solid <= 0) continue;
+        if (pieceOf) {
+          var pk = pieceOf[i], plc = state.model.pieceList[pk], bk = null;
+          for (var bq = 0; bq < state.bakes.length; bq++) if (state.bakes[bq].piece === pk && state.bakes[bq].ready) { bk = state.bakes[bq]; break; }
+          if (pk !== lastPk) {
+            lastPk = pk;
+            gl.uniform1f(u.texV, plc.capped ? 0 : texV0);
+            gl.uniform1f(u.ply, plc.capped ? 0 : ply0);
+            gl.uniform1f(u.baked, bk ? 1 : 0);
+            if (bk) {
+              gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, bk.texA);
+              gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, bk.texN);
+              gl.activeTexture(gl.TEXTURE0);
+              gl.uniform4f(u.bakeR, bk.rect[0], bk.rect[1], bk.rect[2], bk.rect[3]);
+              var pw = plc.layout.warp, pm = pw && pw.place ? pw.place.m : null;
+              var ux = pm ? pm[1] : 0, uy = pm ? pm[4] : 1, uz = pm ? pm[7] : 0;
+              gl.uniform3f(u.bakeB, nrm[0] * ux + nrm[3] * uy + nrm[6] * uz, nrm[1] * ux + nrm[4] * uy + nrm[7] * uz,
+                nrm[2] * ux + nrm[5] * uy + nrm[8] * uz);
+            }
+          }
+          if (bk) {
+            var bb = state.bands[i];
+            var bW = bb.width > 0 ? bb.width : r.n * SW, bL = bb.x0 != null ? bb.x0 : -bW / 2;
+            var bRtl = ((bb.pindex != null ? bb.pindex : i) & 1) === 1;
+            var bSh = r.knit ? 0 : (bRtl ? 0.25 * SW : -0.25 * SW);
+            gl.uniform4f(u.bakeU, (bRtl ? bL + bW : bL) + bSh, bRtl ? -bW : bW, bb.Rc > 0 ? bb.Rc : 1e6, r.n);
+            gl.uniform2f(u.bakeV, bb.yBot, bb.yTop);
+          }
+        }
         bindChunk(gl, c);
         gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, c.tbo);
         gl.uniform1f(u.animSlice, animBand === i ? animSlice : -1);
@@ -3056,14 +3366,22 @@
         }
       }
       gl.uniform1f(u.seam, 0);
+      if (pieceOf) {
+        gl.uniform1f(u.baked, 0);
+        gl.uniform1f(u.texV, texV0);
+        gl.uniform1f(u.ply, ply0);
+      }
 
       /* pass 1b: contact shadow. It lies on a horizontal plane, so it only
          makes sense while the camera is above the piece; it fades out as the
          view comes level and never appears when looking from below. */
       gl.depthMask(false);
       if (state.shadowChunk && state.shadowFade > 0) {
+        var tva = state.tiltV, tAng = Math.sqrt(tva[0] * tva[0] + tva[1] * tva[1] + tva[2] * tva[2]);
         var shA = SHADOW_ALPHA * state.shadowFade *
-          smoothstep(SHADOW_PITCH_IN, SHADOW_PITCH_FULL, state.pitch + state.userPitch);
+          smoothstep(SHADOW_PITCH_IN, SHADOW_PITCH_FULL, state.pitch + state.userPitch) *
+          // wave K: a piece tilted by follow mode no longer stands on that plane
+          (1 - smoothstep(0, TILT_SHADOW_OFF, tAng));
         if (shA > 0.004) {
           var sc = state.shadowChunk;
           bindChunk(gl, sc);
@@ -3285,6 +3603,8 @@
         finished: finished, yaw: null, angle: null, pan: 0
       };
       if (finished) return out;
+      // wave K (K1): the whole piece does not turn with the taps; the part does
+      if (m.pieces) { out.key = 'pieces'; out.reason = 'pieces'; return out; }
       /* A working round nothing sized (no parsed count, no counter target:
          Store marks it `countless`) is only as long as what has been tapped,
          so every tap would "close" it and 360/count means nothing. Do not
@@ -3299,8 +3619,10 @@
         out.pan = rowsPan(ci, r, a0 ? c : null);
         return out;
       }
-      out.angle = followAngle(r.done, r.count, a0, a0 ? c.aw : null);
-      out.yaw = followYawFor(out.angle);
+      out.angle = followAngle(r.done, r.count, a0, a0 ? c.aw : null, r.knit ? r.heldSlices : 0);
+      // wave K: on a bent piece, the band's tilt and the stitch's real direction
+      out.tilt = followTilt(state.geo, ci);
+      out.yaw = out.tilt ? followAim(out.tilt, out.angle) : followYawFor(out.angle);
       return out;
     }
 
@@ -3376,6 +3698,381 @@
       kick();
     }
 
+    /* ---- Wave K (K2): baked fabric for a whole garment ----------------------
+       A whole garment draws every row with a few coarse slices (the vertex
+       budget), which loses the cables, the rib and the lace. So each flat
+       piece that is drawn coarse and is not a ghost gets its relief baked
+       once, face-on, at BAKE_PX texels a unit into an albedo and a normal
+       texture, and its coarse rows sample them (the fragment shader's
+       uBaked path). Only DISTINCT rows are built — a row with the same
+       stitches, width and direction as one already built is drawn again
+       moved up — so a stockinette back costs a handful of rows, a cable
+       panel one repeat. The work runs BAKE_STEP_MS a frame, never on a tap;
+       until a piece is ready it is drawn as it was. */
+    function disposeBakes() {
+      var gl = state.gl, bs = state.bakes || [];
+      for (var i = 0; i < bs.length; i++) freeBake(bs[i]);
+      state.bakes = [];
+      if (gl && state.bakeProg) { try { gl.deleteProgram(state.bakeProg.program); } catch (e) { /* ignore */ } }
+      state.bakeProg = null;
+    }
+    function freeBake(b) {
+      var gl = state.gl;
+      if (!b || !gl) return;
+      [b.texA, b.texN].forEach(function (t) { if (t) gl.deleteTexture(t); });
+      [b.fbA, b.fbN].forEach(function (f) { if (f) gl.deleteFramebuffer(f); });
+      if (b.depth) gl.deleteRenderbuffer(b.depth);
+      freeBakeRows(b);
+    }
+    function freeBakeRows(b) {
+      if (!b.built) return;
+      for (var k in b.built) if (Object.prototype.hasOwnProperty.call(b.built, k)) freeChunk(b.built[k].chunk);
+      b.built = null;
+    }
+    /* What a row looks like, without its progress, its ghost flag or its
+       per-row yarn wobble: the stitch descriptors and the yarn of each record. */
+    function rowSig(r) {
+      if (r.bakeSig != null) return r.bakeSig;
+      var h = hashNum(hashStr(2166136261, r.base), r.n);
+      for (var i = 0; i < r.keys.length; i++) h = hashStr(h, r.keys[i]);
+      var ref = r.ref || [];
+      for (i = 0; i < ref.length; i++) if (ref[i] && ref[i].c) h = hashStr(hashNum(h, i), ref[i].c);
+      r.bakeSig = h;
+      return h;
+    }
+    function bakeKeyOf(pl) {
+      var h = 2166136261, rs = pl.norm.rounds;
+      for (var i = 0; i < rs.length; i++) h = hashNum(h, rowSig(rs[i]) % 1e6);
+      return pl.id + ':' + h + ':' + pl.layout.bands.length;
+    }
+    function bakeTarget(gl, w, h) {
+      var tex = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      return tex;
+    }
+    /* Which pieces want a bake now: drawn coarse, flat, not a ghost. A bake
+       whose piece is unchanged is kept; the rest are dropped. */
+    function planBakes() {
+      var m = state.model, gl = state.gl, keep = [], old = state.bakes || [];
+      if (!gl || !m.pieces || state.noBake) { for (var o = 0; o < old.length; o++) freeBake(old[o]); state.bakes = []; return; }
+      var Geo = geoOf();
+      m.pieceList.forEach(function (pl, k) {
+        if (!pl.capped || pl.state === 'todo' || pl.norm.mode !== 'rows' || !Geo) return;
+        var key = bakeKeyOf(pl), had = null;
+        for (var q = 0; q < old.length; q++) if (old[q] && old[q].key === key) { had = old[q]; old[q] = null; break; }
+        if (had) { had.piece = k; keep.push(had); return; }
+        keep.push(newBake(pl, k, key));
+      });
+      for (var j = 0; j < old.length; j++) if (old[j]) freeBake(old[j]);
+      state.bakes = keep;
+    }
+    function newBake(pl, k, key) {
+      var L = pl.layout, Geo = geoOf();
+      // the piece flat: its own warp (a short-row field) without wrap / roll / place
+      var fw = null, wk;
+      if (L.warp) {
+        fw = {};
+        for (wk in L.warp) if (Object.prototype.hasOwnProperty.call(L.warp, wk)) fw[wk] = L.warp[wk];
+        fw.wrap = null; fw.roll = null; fw.place = null;
+      }
+      var x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity, p = [0, 0, 0];
+      L.bands.forEach(function (b) {
+        if (!b) return;
+        var Rc = b.Rc > 0 ? b.Rc : 1e6;
+        [b.x0, b.x0 + b.width].forEach(function (s) {
+          [b.yBot, b.yTop].forEach(function (y) {
+            Geo.warpPoint(fw, b, Rc * Math.sin(s / Rc), y, Rc * Math.cos(s / Rc) - Rc, p);
+            x0 = Math.min(x0, p[0]); x1 = Math.max(x1, p[0]); y0 = Math.min(y0, p[1]); y1 = Math.max(y1, p[1]);
+          });
+        });
+      });
+      var pad = 0.6;
+      x0 -= pad; x1 += pad; y0 -= pad; y1 += pad;
+      /* texels a unit: at least BAKE_PX, and 1.5× what a stitch covers on
+         screen at the fit the piece is going to, so a bake never looks soft
+         in the frame it was made for; never past BAKE_MAX a side */
+      var onScreen = state.fitTo && state.fitTo.scale > 0 ? stitchPxAt(state.fitTo.scale) / SW : 0;
+      var want = Math.max(BAKE_PX, onScreen * 1.5);
+      var px = Math.min(want, BAKE_MAX / Math.max(1e-6, x1 - x0), BAKE_MAX / Math.max(1e-6, y1 - y0));
+      var w = pow2(Math.max(4, Math.ceil((x1 - x0) * px))), h = pow2(Math.max(4, Math.ceil((y1 - y0) * px)));
+      // the piece at full detail, for the bake only
+      var full;
+      try { full = normalizeModel(pl.model, null, { mode: 'rows', bands: L.bands, warp: fw }); }
+      catch (e) { full = null; }
+      return { key: key, piece: k, warp: fw, rect: [x0, x1 - x0, y0, y1 - y0], w: w, h: h,
+        full: full, next: 0, ready: false, built: {}, ms: 0, rowsBuilt: 0 };
+    }
+    function bakeBusy() {
+      var bs = state.bakes || [];
+      for (var i = 0; i < bs.length; i++) if (!bs[i].ready && !bs[i].failed) return true;
+      return false;
+    }
+    /* Bake for up to `budget` ms (Infinity: to the end). */
+    function bakeStep(budget) {
+      var gl = state.gl, bs = state.bakes || [];
+      if (!gl || !bs.length) return false;
+      var t0 = now(), did = false;
+      if (!state.bakeProg) {
+        state.bakeProg = makeBakeProgram(gl);
+        if (!state.bakeProg) { bs.forEach(function (b) { b.failed = true; }); return false; }
+      }
+      var bp = state.bakeProg;
+      for (var j = 0; j < bs.length && now() - t0 < budget; j++) {
+        var b = bs[j];
+        if (b.ready || b.failed) continue;
+        var pl = state.model.pieceList[b.piece], L = pl.layout;
+        if (!b.full) { b.failed = true; continue; }
+        if (!b.fbA) {
+          b.texA = bakeTarget(gl, b.w, b.h); b.texN = bakeTarget(gl, b.w, b.h);
+          b.depth = gl.createRenderbuffer();
+          gl.bindRenderbuffer(gl.RENDERBUFFER, b.depth);
+          gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, b.w, b.h);
+          b.fbA = gl.createFramebuffer(); b.fbN = gl.createFramebuffer();
+          [[b.fbA, b.texA], [b.fbN, b.texN]].forEach(function (fp) {
+            gl.bindFramebuffer(gl.FRAMEBUFFER, fp[0]);
+            gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, fp[1], 0);
+            gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, b.depth);
+            // the background is the piece's own yarn, flat, so a coarse edge never samples black
+            var bc = b.full.rounds.length ? b.full.rounds[0].col : [0.5, 0.5, 0.5];
+            if (fp[0] === b.fbA) gl.clearColor(Math.sqrt(bc[0]), Math.sqrt(bc[1]), Math.sqrt(bc[2]), 1);
+            else gl.clearColor(0.5, 0.5, 1, 1);
+            gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+          });
+          gl.clearColor(0, 0, 0, 0);
+          if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) { b.failed = true; continue; }
+        }
+        gl.useProgram(bp.program);
+        gl.uniform4f(bp.u.rect, b.rect[0], b.rect[1], b.rect[2], b.rect[3]);
+        gl.uniform1f(bp.u.zs, 0.02);
+        gl.viewport(0, 0, b.w, b.h);
+        gl.disable(gl.BLEND);
+        for (var a = 0; a < 4; a++) gl.enableVertexAttribArray(a);
+        gl.disableVertexAttribArray(4); gl.disableVertexAttribArray(5);
+        var rounds = b.full.rounds;
+        while (b.next < rounds.length && now() - t0 < budget) {
+          var i = b.next++, r = rounds[i], bd = L.bands[i];
+          if (!bd || !(r.n > 0)) continue;
+          // a row that repeats one already built is drawn again, moved
+          var uniq = !!(bd.field || (b.warp && b.warp.chevron));
+          var key = uniq ? 'i' + i : rowSig(r) + ':' + r3(bd.x0) + ':' + r3(bd.width) + ':' + (i & 1) + ':' + r3(bd.yTop - bd.yBot);
+          var e = b.built[key];
+          if (!e) {
+            var g = buildRoundBand('rows', r, bd, i, BAKE_TIER);
+            if (!g) continue;
+            if (b.warp) warpGeo(g, b.warp, bd);
+            e = b.built[key] = { chunk: uploadChunk(g, null), yBot: bd.yBot };
+            b.rowsBuilt++;
+          }
+          bindChunk(gl, e.chunk);
+          gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, e.chunk.tbo);
+          gl.uniform1f(bp.u.dy, uniq ? 0 : bd.yBot - e.yBot);
+          gl.bindFramebuffer(gl.FRAMEBUFFER, b.fbA);
+          gl.uniform1f(bp.u.mode, 0);
+          gl.drawElements(gl.TRIANGLES, e.chunk.triCount, gl.UNSIGNED_SHORT, 0);
+          gl.bindFramebuffer(gl.FRAMEBUFFER, b.fbN);
+          gl.uniform1f(bp.u.mode, 1);
+          gl.drawElements(gl.TRIANGLES, e.chunk.triCount, gl.UNSIGNED_SHORT, 0);
+          did = true;
+        }
+        if (b.next >= rounds.length) {
+          b.ready = true; freeBakeRows(b); b.full = null;
+          // mipmaps: a whole garment is seen at a pixel or two a stitch, where a
+          // plain linear lookup shimmers into moire (power-of-two sides, so WebGL1 can)
+          [b.texA, b.texN].forEach(function (t) {
+            gl.bindTexture(gl.TEXTURE_2D, t);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+            gl.generateMipmap(gl.TEXTURE_2D);
+          });
+          gl.bindTexture(gl.TEXTURE_2D, null);
+        }
+      }
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.enable(gl.BLEND);
+      gl.viewport(0, 0, state.w, state.h);
+      state.bakeMs = (state.bakeMs || 0) + (now() - t0);
+      return did;
+    }
+
+    /* Wave K: move the progress shown WITHOUT a rebuild. Every round of a
+       model is already built (a ghost is the same mesh drawn as a wire), so
+       a stitch tap or a row change in an assembled view only has to move
+       which rounds are solid, how much of the working round is drawn, and
+       where the glow is. `ref` names the part: a piece's `id` in a whole
+       garment, a section's `id` in a chained sock, or null for the whole
+       model. `round` is the round index INSIDE that part (its own
+       model's), `done` the stitches done on it. Rounds of that part before
+       it become worked, after it ghosts; other parts are left alone.
+       o.animate: 'stitch' pops the stitch just made (default when the same
+       round grows by one). Returns { ok, current, ms }. */
+    function setDone(ref, round, done, o) {
+      var t0 = now(), m = state.model;
+      if (state.destroyed || !m || !m.rounds.length) return { ok: false, current: -1, ms: 0 };
+      var from = 0, n = m.rounds.length, k;
+      if (ref != null && m.pieces) {
+        var pl = null;
+        for (k = 0; k < m.pieceList.length; k++) if (m.pieceList[k].id === ref) { pl = m.pieceList[k]; break; }
+        if (!pl) return { ok: false, current: m.current, ms: now() - t0 };
+        from = pl.from; n = pl.n;
+      } else if (ref != null && m.sections) {
+        var sc = null;
+        for (k = 0; k < m.sections.length; k++) if (m.sections[k].id === ref) { sc = m.sections[k]; break; }
+        if (!sc) return { ok: false, current: m.current, ms: now() - t0 };
+        from = sc.from; n = sc.to - sc.from + 1;
+      }
+      if (!(n > 0)) return { ok: false, current: m.current, ms: now() - t0 };
+      var idx = from + clamp(round | 0, 0, n - 1);
+      var prevCur = m.current, prevDone = m.rounds[idx] ? m.rounds[idx].done : 0;
+      for (var i = from; i < from + n; i++) {
+        var r = m.rounds[i];
+        if (!r) continue;
+        if (i < idx) { r.ghost = false; r.done = r.count; }
+        else if (i === idx) { r.ghost = false; r.done = clamp(done | 0, 0, r.count); }
+        else { r.ghost = true; r.done = 0; }
+        r.doneSlices = r.count > 0
+          ? (r.knit ? r.heldSlices + Math.round(r.done / r.count * r.workSlices) : Math.round(r.done / r.count * r.n))
+          : 0;
+      }
+      m.current = idx;
+      m.finished = !m.pieces && !m.sections ? finishedOf(m.rounds, idx) : false;
+      var r0 = m.rounds[idx];
+      var anim = (o && o.animate) || (prevCur === idx && r0.done === prevDone + 1 ? 'stitch' : 'none');
+      if (!state.reducedMotion && anim === 'stitch' && r0.doneSlices > 0) {
+        state.anim = { band: idx, slice: r0.doneSlices - 1, t0: now() };
+      }
+      kick();
+      var ms = now() - t0;
+      state.stats.setDoneMs = ms;
+      return { ok: true, current: idx, ms: ms };
+    }
+
+    /* Wave K: a still of the piece as it is now, for the share card. One
+       frame is rendered synchronously into the live canvas — at a bigger
+       drawing buffer when the still is bigger than the canvas, with no safe
+       insets and the fit at its target — read back in the same task (so
+       preserveDrawingBuffer is not needed and no rAF has to run: it works on
+       a hidden page), then the canvas is put back. The relief tier is held
+       while it renders, so nothing is rebuilt. Returns a new 2D canvas, or
+       null with no GL context or nothing drawn. */
+    function snapshot(o) {
+      o = o || {};
+      if (state.destroyed || !state.gl || !state.model.rounds.length) return null;
+      var doc = canvas.ownerDocument || global.document;
+      if (!doc || !doc.createElement) return null;
+      var size = clamp(Math.round(+o.size || 512), 64, 2048);
+      var crop = o.crop !== false;
+      var pad = o.pad != null && isFinite(+o.pad) ? clamp(+o.pad, 0, 0.4) : 0.06;
+      var w0 = state.w, h0 = state.h, dpr0 = state.dpr, ins0 = state.insets, fit0 = state.fit;
+      var fitTo0 = state.fitTo, fitT00 = state.fitT0;
+      var W, H;
+      if (w0 > 0 && h0 > 0) {
+        var k = clamp(size * 1.25 / Math.max(w0, h0), 1, 2048 / Math.max(w0, h0));
+        W = Math.round(w0 * k); H = Math.round(h0 * k);
+      } else { W = size; H = size; }
+      var out = null;
+      state.snapping = true;
+      try {
+        if (W !== canvas.width || H !== canvas.height) { canvas.width = W; canvas.height = H; }
+        state.w = W; state.h = H;
+        if (!(state.dpr > 0)) state.dpr = 1;
+        state.insets = { top: 0, right: 0, bottom: 0, left: 0 };
+        applyFit(computeFit(), true);
+        render(now());
+        var tmp = doc.createElement('canvas');
+        tmp.width = W; tmp.height = H;
+        var tc = tmp.getContext('2d');
+        tc.drawImage(canvas, 0, 0);
+        var x0 = 0, y0 = 0, x1 = W - 1, y1 = H - 1;
+        if (crop) {
+          var px = tc.getImageData(0, 0, W, H).data;
+          x0 = W; y0 = H; x1 = -1; y1 = -1;
+          for (var y = 0; y < H; y++) {
+            var row = y * W * 4;
+            for (var x = 0; x < W; x++) {
+              if (px[row + x * 4 + 3] > 8) {
+                if (x < x0) x0 = x; if (x > x1) x1 = x;
+                if (y < y0) y0 = y; if (y > y1) y1 = y;
+              }
+            }
+          }
+        }
+        if (x1 >= x0 && y1 >= y0) {
+          var bw = x1 - x0 + 1, bh = y1 - y0 + 1, m = Math.round(Math.max(bw, bh) * pad);
+          var sw = bw + 2 * m, sh = bh + 2 * m;
+          var s = size / Math.max(sw, sh);
+          out = doc.createElement('canvas');
+          out.width = Math.max(1, Math.round(sw * s)); out.height = Math.max(1, Math.round(sh * s));
+          var oc = out.getContext('2d');
+          if (o.background) { oc.fillStyle = String(o.background); oc.fillRect(0, 0, out.width, out.height); }
+          oc.imageSmoothingEnabled = true;
+          if ('imageSmoothingQuality' in oc) oc.imageSmoothingQuality = 'high';
+          oc.drawImage(tmp, x0, y0, bw, bh, m * s, m * s, bw * s, bh * s);
+        }
+      } catch (e) {
+        out = null;
+      }
+      // put the live canvas back as it was, and draw it again at once
+      if (canvas.width !== Math.max(w0, 1) || canvas.height !== Math.max(h0, 1)) {
+        if (w0 > 0 && h0 > 0) { canvas.width = w0; canvas.height = h0; }
+      }
+      state.w = w0; state.h = h0; state.dpr = dpr0; state.insets = ins0;
+      state.fit = fit0; state.fitTo = fitTo0; state.fitT0 = fitT00;
+      state.snapping = false;
+      if (w0 > 0 && h0 > 0) { try { render(now()); } catch (e2) { /* the next frame draws it */ } }
+      kick();
+      return out;
+    }
+
+    /* Wave K: aim the tilt at the band being worked (follow mode, a bent
+       piece, not finished), else back to upright. Returns true when the
+       target moved, so the caller refits. A tap on the same round moves
+       nothing here. */
+    function updateTilt(snap) {
+      var m = state.model, want = null, ci = -1;
+      if (state.follow && !state.fitFinished && !m.finished && m.mode === 'rounds' &&
+          state.geo && state.geo.warp && m.rounds.length) {
+        ci = clamp(m.current, 0, m.rounds.length - 1);
+        var raw = m.geoRaw ? m.geoRaw[ci] : null;
+        if (!(raw && raw.countless)) want = followTilt(state.geo, ci);
+      }
+      if (want && !(want.deg > 0.01) && !(Math.abs(want.c[0]) + Math.abs(want.c[1]) + Math.abs(want.c[2]) > 1e-6)) want = null;
+      var tv = want ? want.v : [0, 0, 0], tc = want ? want.c : [0, 0, 0];
+      var to = state.tiltTo;
+      function near(a, b) { return Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]) + Math.abs(a[2] - b[2]) < 1e-7; }
+      var cur = to || { v: state.tiltV, c: state.tiltC };
+      if (near(cur.v, tv) && near(cur.c, tc) && state.tiltGeo === state.geo) return false;
+      var moved = !(near(cur.v, tv) && near(cur.c, tc));
+      state.tiltTo = { v: tv, c: tc, deg: want ? want.deg : 0 };
+      state.tiltBand = want ? ci : -1;
+      state.tiltGeo = state.geo;
+      var Geo = geoOf();
+      state.tiltExt = want && Geo && Geo.extentsIn ? Geo.extentsIn(state.geo, state.bands, want.m, want.c) : null;
+      if (!moved) return true;
+      if (snap) {
+        state.tiltV = tv.slice(); state.tiltC = tc.slice(); state.tiltAnim = null;
+      } else {
+        var dv = Math.sqrt(Math.pow(tv[0] - state.tiltV[0], 2) + Math.pow(tv[1] - state.tiltV[1], 2) + Math.pow(tv[2] - state.tiltV[2], 2));
+        state.tiltAnim = { fromV: state.tiltV.slice(), fromC: state.tiltC.slice(), toV: tv, toC: tc,
+          t0: now(), dur: followDuration(dv) };
+      }
+      kick();
+      return true;
+    }
+    function tickTilt() {
+      var a = state.tiltAnim;
+      if (!a) return;
+      var el = now() - a.t0;
+      for (var k = 0; k < 3; k++) {
+        state.tiltV[k] = followEase(a.fromV[k], a.toV[k], el, a.dur, state.reducedMotion);
+        state.tiltC[k] = followEase(a.fromC[k], a.toC[k], el, a.dur, state.reducedMotion);
+      }
+      if (el >= a.dur || state.reducedMotion) state.tiltAnim = null;
+    }
+
     /* A finished piece in follow mode has no stitch to follow; it turns at
        the old auto-rotate rate after the usual pause (the coordinator's
        call, wave F), still without the glow and the wedge. */
@@ -3408,7 +4105,8 @@
       if (state.anim || state.glowAnim) return true;
       if (state.dragging) return true;
       if (Math.abs(state.spinVel) > 0.0005) return true;
-      if (state.followAnim || state.panAnim) return true;
+      if (state.followAnim || state.panAnim || state.tiltAnim) return true;
+      if (bakeBusy()) return true;
       /* Follow mode turns on events, not on a clock: between taps nothing
          moves and nothing is drawn, except a user pitch easing home. A
          finished piece is the exception — it turns slowly, as a trophy. */
@@ -3446,6 +4144,7 @@
         state.panX = followEase(pa.from, pa.to, pEl, pa.dur, state.reducedMotion);
         if (pEl >= pa.dur || state.reducedMotion) state.panAnim = null;
       }
+      tickTilt();
       if (state.yaw > TAU) shiftYaw(-TAU);
       if (state.yaw < -TAU) shiftYaw(TAU);
 
@@ -3458,6 +4157,8 @@
         if (Math.abs(state.userPitch) < 0.002) state.userPitch = 0;
       }
 
+      // wave K (K2): bake a little of a whole garment's fabric, never on a tap
+      if (bakeBusy() && bakeStep(BAKE_STEP_MS)) state.dirty = true;
       tickFit(t);
       state.dirty = false;
       render(t);
@@ -3575,6 +4276,7 @@
       state.shadowChunk = null;
       state.shadowHash = 0;
       state.hashes = [];
+      state.bakes = []; state.bakeProg = null;   // their textures went with the context
       state.lost = true;
       if (state.rafId) { global.cancelAnimationFrame(state.rafId); state.rafId = 0; }
       state.running = false;
@@ -3589,6 +4291,7 @@
         state.hashes = [];
         if (handle) handle.webgl = true;
         rebuild(state.model);
+        planBakes();
         applyFit(computeFit(), true);
         report('restored');
         kick();
@@ -3604,6 +4307,7 @@
       liveRec.dead = true;
       var gl = state.gl;
       if (!gl) return;
+      disposeBakes();
       disposeChunks();
       if (state.prog) {
         try { gl.deleteProgram(state.prog.program); } catch (e) { /* ignore */ }
@@ -3791,7 +4495,9 @@
       var next = normalizeModel(model, prev);
       state.model = next;
       rebuild(next);
+      updateTilt(!prev.rounds.length || state.reducedMotion);
       applyFit(computeFit(), !prev.rounds.length);
+      planBakes();    // wave K (K2): after the fit, which sets the bake's resolution
       /* Follow mode: the first model a canvas sees is faced at once; every
          later push eases to the absolute angle of the stitch being worked
          (a tap, an undo, a finished row, a jump — all the same rule). */
@@ -3837,6 +4543,7 @@
       canvas.removeEventListener('webglcontextrestored', onRestored, false);
       global.removeEventListener('resize', onWinResize);
       if (ro) { try { ro.disconnect(); } catch (e) { /* ignore */ } }
+      disposeBakes();
       disposeChunks();
       unregisterLive(liveRec);
       liveRec.dead = true;
@@ -3910,6 +4617,8 @@
         state.followKey = null;
         state.followYaw = null;    // the free spin moved the yaw: measure from it
         state.userTurned = false;
+        // wave K: the tilt follows the switch (a free spin is about the upright piece)
+        if (updateTilt(state.reducedMotion)) applyFit(computeFit(), false);
         if (on) {
           syncFollow('reset');
         } else {
@@ -3930,6 +4639,20 @@
       setSafeInsets: setSafeInsets,
       /** true while there is a working GL context on this canvas. */
       isLive: function () { return !!state.gl; },
+      /* Wave K: a still of the piece for the share card. See snapshot(). */
+      snapshot: function (o) { return snapshot(o); },
+      /* K2: finish any bake now (a test, a snapshot that must show the fabric). */
+      finishBake: function () { if (state.destroyed) return; while (bakeBusy()) { if (!bakeStep(Infinity) && bakeBusy()) break; } kick(); },
+      /* Wave K: move the progress of an assembled view (a whole garment, a
+         chained sock) or any model WITHOUT a rebuild. See setDone(). */
+      setDone: function (ref, round, done, o) { return setDone(ref, round, done, o); },
+      snapshotBlob: function (o) {
+        var c = snapshot(o);
+        return new Promise(function (res) {
+          if (!c || !c.toBlob) { res(null); return; }
+          try { c.toBlob(function (b) { res(b || null); }, 'image/png'); } catch (e) { res(null); }
+        });
+      },
       /* Host-driven rotation for a canvas that cannot see pointers itself.
          Works whether or not `interactive` is on. */
       dragStart: function () { if (!state.destroyed) dragBegin(); },
@@ -3950,6 +4673,7 @@
           submitMs: Math.round(s.submitMs * 100) / 100,
           buildMs: Math.round(s.buildMs * 100) / 100,
           rebuilt: s.rebuilt || 0,
+          rebuilds: s.rebuilds || 0,      // wave K: how many times the geometry was rebuilt in all
           triangles: s.triangles,
           drawCalls: s.drawCalls,
           chunks: s.chunks,
@@ -4027,7 +4751,14 @@
               reason: tg ? (tg.finished ? 'finished' : (tg.reason || '')) : '',
               userTurned: !!state.userTurned,
               pan: r3(state.panX),
-              key: state.followKey
+              key: state.followKey,
+              // wave K: the tilt that stands a bent piece's working segment up
+              tilt: {
+                on: !!(state.tiltTo && state.tiltTo.deg > 0.01),
+                deg: r3(state.tiltTo ? state.tiltTo.deg : 0),
+                band: state.tiltBand,
+                animating: !!state.tiltAnim
+              }
             };
           }()),
           /* geometry, so a test or the gallery can assert the reference table
@@ -4044,6 +4775,18 @@
             closedTop: !!state.geo.closedTop,
             closedBottom: !!state.geo.closedBottom,
             anchor: state.geo.anchor || null
+          } : null,
+          // wave K (K1): the whole piece on screen
+          pieces: state.model.pieces ? {
+            kind: state.model.pieceKind,
+            count: state.model.pieceList.length,
+            rounds: state.model.rounds.length, sliceCap: state.model.sliceCap, current: state.model.current,
+            // K2: the baked pieces (texels = both textures)
+            bake: (function () {
+              var bs = state.bakes || [], o = { jobs: bs.length, ready: 0, failed: 0, rowsBuilt: 0, texels: 0, ms: r3(state.bakeMs || 0) };
+              bs.forEach(function (b) { if (b.ready) o.ready++; if (b.failed) o.failed++; o.rowsBuilt += b.rowsBuilt; o.texels += 2 * b.w * b.h; });
+              return o;
+            }())
           } : null
         };
       }
@@ -4063,7 +4806,7 @@
 
   global.Diagram = {
     mount: mount,
-    version: '1.7.0',
+    version: '1.8.0',
     /* Follow mode's pure arithmetic (wave F), for hosts and the test page.
        angle(index, count[, a0, aw])  ring angle of the working point
        yawFor(angle)                  camera yaw that puts that angle in front
@@ -4082,7 +4825,12 @@
       duration: followDuration,
       ease: followEase,
       pan: followPan,
-      rotation: function (yaw, pitch) { return cameraRot(yaw, pitch || 0, null); }
+      rotation: function (yaw, pitch) { return cameraRot(yaw, pitch || 0, null); },
+      // wave K (K4): the tilt for band i of a laid-out piece, and the yaw
+      // that brings walked angle a of that band to the front under it
+      tilt: followTilt,
+      aim: followAim,
+      rotVec: function (v) { return rotVec(v, null); }
     },
     // exposed for tests / tuning
     _consts: {

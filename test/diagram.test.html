@@ -3244,6 +3244,405 @@ try { if (window.Knits && window.Store.registerCraftParser) window.Store.registe
         !G.layout(model([6, 12, 18, 24, 24, 24])).warp && !G.classify(model([6, 12, 18])).knit,
         'a crochet sphere has no `knit`, no `warp`');
 
+      /* ================================= follow mode on the bend (wave K, K4) */
+      (function k4Block() {
+        group('Knitting — follow mode on the bend: the foot rounds come to the front (wave K, K4)');
+        var FW = window.Diagram && window.Diagram.follow;
+        if (!FW || !FW.tilt || !G.followFrame) { ok('K4 exports (DiagramGeo.followFrame, Diagram.follow.tilt / aim)', false, 'missing'); return; }
+        var DEG = 180 / Math.PI;
+        // the stitch's real outward direction on the finished piece, through the warp
+        function normalAt(L, i, a) {
+          var b = L.bands[i], y = (b.yTop + b.yBot) / 2, r = (b.rTop + b.rBot) / 2;
+          var p0 = G.warpPoint(L.warp, b, r * Math.cos(a), y, r * Math.sin(a), [0, 0, 0]);
+          var p1 = G.warpPoint(L.warp, b, (r + 0.05) * Math.cos(a), y, (r + 0.05) * Math.sin(a), [0, 0, 0]);
+          var d = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]], l = Math.sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+          return [d[0] / l, d[1] / l, d[2] / l];
+        }
+        // degrees between that direction and the camera, for a given yaw and tilt (pitch 0, as wave F's test)
+        function offCam(nrm, yaw, tl) {
+          var R = FW.rotation(yaw, 0), M = tl ? tl.m : [1, 0, 0, 0, 1, 0, 0, 0, 1];
+          var v = [M[0] * nrm[0] + M[1] * nrm[1] + M[2] * nrm[2], M[3] * nrm[0] + M[4] * nrm[1] + M[5] * nrm[2], M[6] * nrm[0] + M[7] * nrm[1] + M[8] * nrm[2]];
+          var z = R[6] * v[0] + R[7] * v[1] + R[8] * v[2];
+          return Math.acos(Math.max(-1, Math.min(1, z))) * DEG;
+        }
+        function sweep(L, idx) {
+          var worstNew = 0, worstOld = 0;
+          idx.forEach(function (i) {
+            var tl = FW.tilt(L, i);
+            for (var q = 0; q < 12; q++) {
+              var a = q / 12 * 2 * Math.PI, nr = normalAt(L, i, a);
+              worstNew = Math.max(worstNew, offCam(nr, FW.aim(tl, a), tl));
+              worstOld = Math.max(worstOld, offCam(nr, FW.yawFor(a), null));
+            }
+          });
+          return { now: worstNew, before: worstOld };
+        }
+        var sk = G.layout(sockTopDown());
+        // rounds: leg 0-65, flap 66-97, turn 98-107, gusset 108-131, foot 132-171, toe 172-188
+        var foot = sweep(sk, [135, 150, 170]), leg = sweep(sk, [10, 40, 65]), heel = sweep(sk, [100, 108, 120]);
+        ok('a foot round: the working stitch faces the camera within 10° all the way round (it used to stay on the leg\'s axis)',
+          foot.now < 10 && foot.before > 45,
+          'foot rounds 135 / 150 / 170, 12 stitches round each: worst ' + n(foot.now, 2) + '° off the camera, was ' + n(foot.before, 1) + '°');
+        ok('the leg and the gusset rounds face the camera too',
+          leg.now < 10 && heel.now < 10,
+          'leg worst ' + n(leg.now, 2) + '° · heel turn and gusset worst ' + n(heel.now, 2) + '°');
+        var tLeg = FW.tilt(sk, 40), tFoot = FW.tilt(sk, 150);
+        var legSame = true;
+        for (var q = 0; q < 8; q++) {
+          var dq = (FW.aim(tLeg, q) - FW.yawFor(q)) / (2 * Math.PI);
+          if (Math.abs(dq - Math.round(dq)) > 1e-7) legSame = false;   // the same yaw, on some turn
+        }
+        ok('on the leg nothing changes: no tilt and wave F\'s yaw; on the foot the piece is stood up about 90°',
+          tLeg && tLeg.deg < 0.5 && legSame && tFoot && Math.abs(tFoot.deg - 90) < 10,
+          'tilt on the leg ' + (tLeg ? n(tLeg.deg, 3) : 'none') + '°, yaw identical ' + legSame + '; on the foot ' + (tFoot ? n(tFoot.deg, 1) : 'none') + '°');
+        // it blends through the heel: no jump between neighbouring rows
+        var maxStep = 0, prevDeg = 0, mono = true;
+        for (var i = 60; i < 140; i++) {
+          var t = FW.tilt(sk, i), d = t ? t.deg : 0;
+          if (i > 60) { maxStep = Math.max(maxStep, Math.abs(d - prevDeg)); if (d < prevDeg - 0.01) mono = false; }
+          prevDeg = d;
+        }
+        ok('the tilt blends through the heel row by row (never a jump), leg 0° to foot 90°',
+          maxStep < 6 && mono,
+          'largest step between neighbouring rows ' + n(maxStep, 2) + '°, never going back: ' + mono);
+        var tu = G.layout(sockToeUp());
+        // toe-up: toe 0-16, foot 17-56, gusset 57-76, heel 77-112, leg 113-166
+        var tuFoot = sweep(tu, [20, 40, 56]), tuLeg = sweep(tu, [120, 150]);
+        ok('a toe-up sock: foot rounds and leg rounds face the camera within 10°',
+          tuFoot.now < 10 && tuLeg.now < 10,
+          'foot worst ' + n(tuFoot.now, 2) + '° (was ' + n(tuFoot.before, 1) + '°) · leg worst ' + n(tuLeg.now, 2) + '° (was ' + n(tuLeg.before, 1) + '°)');
+        ok('an unbent piece gets no tilt (crochet sphere, a knitted tube)',
+          FW.tilt(G.layout(model([6, 12, 18, 24, 24, 24])), 3) === null &&
+          FW.tilt(G.layout(km([kr(kline(40, 'k')), kr(kline(40, 'k')), kr(kline(40, 'k'))], 'rounds')), 1) === null,
+          'followFrame null without a bend');
+        // the heel flap draws its held stitches first: the angle starts after them
+        var a0 = [], aw = [];
+        for (q = 0; q < 56; q++) { a0.push(q / 56 * 2 * Math.PI); aw.push(2 * Math.PI / 56); }
+        ok('a heel-flap row: the follow angle walks the 28 worked stitches after the 28 held ones',
+          Math.abs(FW.angle(0, 28, a0, aw, 28) - a0[28]) < 1e-9 && Math.abs(FW.angle(28, 28, a0, aw, 28) - 2 * Math.PI) < 1e-9 &&
+          Math.abs(FW.angle(14, 28, a0, aw) - a0[28]) < 1e-9,
+          'stitch 0 of 28 at ' + n(FW.angle(0, 28, a0, aw, 28) * DEG, 1) + '° (held 0–180°), 28 of 28 at ' + n(FW.angle(28, 28, a0, aw, 28) * DEG, 1) + '°; without `held` unchanged');
+        // a live handle: working on the foot stands the sock up, taps move only the yaw
+        var cv = document.createElement('canvas');
+        cv.style.cssText = 'position:absolute;left:-9999px;top:0;width:240px;height:240px';
+        document.body.appendChild(cv);
+        var h = null;
+        try {
+          h = window.Diagram.mount(cv, { follow: true, fitPurpose: 'viewer', reducedMotion: true });
+          var mm = sockTopDown();
+          mm.current = 150;
+          for (i = 0; i < mm.rounds.length; i++) {
+            if (i > 150) { mm.rounds[i].ghost = true; mm.rounds[i].done = 0; }
+          }
+          mm.rounds[150].done = 10;
+          h.setModel(mm, { animate: 'none' });
+          var s0 = h.getStats(), rebuilt = 0;
+          for (q = 11; q <= 16; q++) { mm.rounds[150].done = q; h.setModel(mm, { animate: 'stitch' }); rebuilt += h.getStats().rebuilt; }
+          var s1 = h.getStats();
+          mm.current = 40;
+          for (i = 41; i < mm.rounds.length; i++) { mm.rounds[i].ghost = true; mm.rounds[i].done = 0; }
+          var mm2 = JSON.parse(JSON.stringify(mm));
+          h.setModel(mm2, { animate: 'round' });
+          var s2 = h.getStats();
+          h.setFollow(false);
+          var s3 = h.getStats();
+          ok('a live handle on the foot: tilted ~90°, six taps rebuild nothing and keep the tilt; back on the leg, or follow off, no tilt',
+            s0.follow.tilt.on && Math.abs(s0.follow.tilt.deg - 90) < 10 && s0.follow.tilt.band === 150 && rebuilt === 0 &&
+            s1.follow.tilt.deg === s0.follow.tilt.deg && !s2.follow.tilt.on && !s3.follow.tilt.on,
+            'foot: tilt ' + s0.follow.tilt.deg + '° on band ' + s0.follow.tilt.band + ', ' + rebuilt + ' chunks rebuilt over 6 taps; leg: ' +
+            s2.follow.tilt.deg + '°; follow off: on ' + s3.follow.tilt.on);
+        } catch (e) {
+          ok('a live handle tilts on the foot', false, 'threw: ' + (e && e.message));
+        }
+        // snapshot() for the share card (wave K): a still, cropped, at the size asked, canvas put back
+        try {
+          var wBefore = cv.width, hBefore = cv.height;
+          var snap = h ? h.snapshot({ size: 400, background: '#102030' }) : null;
+          var live = h && h.isLive();
+          var px = null, opaque = 0, inked = 0;
+          if (snap) {
+            px = snap.getContext('2d').getImageData(0, 0, snap.width, snap.height).data;
+            for (q = 0; q < px.length; q += 4) { if (px[q + 3] === 255) opaque++; if (Math.abs(px[q] - 0x10) + Math.abs(px[q + 1] - 0x20) + Math.abs(px[q + 2] - 0x30) > 30) inked++; }
+          }
+          var snapT = h ? h.snapshot({ size: 128 }) : null, clear = 0;
+          if (snapT) { var pt = snapT.getContext('2d').getImageData(0, 0, 1, 1).data; clear = pt[3]; }
+          ok('snapshot(): a still of the piece, cropped to it, longest side = size, background optional, the live canvas put back',
+            live ? (!!snap && Math.max(snap.width, snap.height) === 400 && opaque === px.length / 4 && inked > 0.15 * opaque &&
+              !!snapT && Math.max(snapT.width, snapT.height) === 128 && clear === 0 &&
+              cv.width === wBefore && cv.height === hBefore) : snap === null,
+            live ? (snap ? snap.width + '×' + snap.height + ', ' + Math.round(inked / opaque * 100) + '% of it the piece, background filled; 128 px transparent corner alpha ' + clear +
+              '; canvas back at ' + cv.width + '×' + cv.height : 'returned null with a live context') : 'no GL context here: snapshot() is null, as documented');
+        } catch (e5) {
+          ok('snapshot() returns a still', false, 'threw: ' + (e5 && e5.message));
+        }
+        if (h) { try { h.destroy({ release: true }); } catch (e2) { /* ignore */ } }
+        if (cv.parentNode) cv.parentNode.removeChild(cv);
+      }());
+
+      /* ========================== stranded colour from the chart (wave K, K3) */
+      (function k3Block() {
+        group('Knitting — stranded colour from the chart, stitch by stitch (wave K, K3)');
+        if (!G.chartColors || !G.applyChart || !RX || !RX.normalize) { ok('K3 exports (DiagramGeo.chartColors / applyChart)', false, 'missing'); return; }
+        var PAL = { MC: '#f2ead8', CC1: '#b0302a', CC2: '#1f4f8f' };
+        // a chart row as KnitChart.rowCells hands it over: knitting order, `color` the key label
+        function cells(labels) {
+          return labels.map(function (l, i) {
+            if (l === '?') return { sym: '?1', c0: i, c1: i, stitch: null, text: '?', unknown: true, consumes: 1, produces: 1 };
+            return { sym: l, c0: i, c1: i, stitch: 'k', run: 'k', text: 'k', color: l, consumes: 1, produces: 1 };
+          });
+        }
+        // an 8-stitch Fair Isle repeat over a 56-stitch round: 7 repeats
+        var row = ['MC', 'CC1', 'CC1', 'MC', 'CC2', 'MC', 'CC1', 'MC'];
+        var rnd = kr(kline(56, 'k')), res = G.chartColors(rnd.stitches, cells(row), { palette: PAL, main: PAL.MC });
+        var bad = [];
+        for (var i = 0; i < 56; i++) if (res.colors[i] !== PAL[row[i % 8]]) bad.push(i + ':' + res.colors[i]);
+        ok('every stitch of the round takes its chart cell\'s colour, by repeat (8-stitch repeat × 7 on 56)',
+          bad.length === 0 && res.width === 8 && res.unknown === 0 && !res.partial,
+          bad.length ? 'wrong at ' + bad.slice(0, 6).join(', ') : '56 of 56 right · stitch 1 MC, 2–3 CC1, 5 CC2 …');
+        // an unread cell keeps the main colour and the round says so
+        var row2 = ['MC', 'CC1', '?', 'MC'];
+        var r2 = G.applyChart(rnd, cells(row2), { palette: PAL, main: PAL.MC });
+        var keep = true, cc = 0;
+        for (i = 0; i < 56; i++) {
+          var want = row2[i % 4] === '?' ? null : PAL[row2[i % 4]];
+          if ((r2.stitches[i].c || null) !== want) keep = false;
+          if (r2.stitches[i].c === PAL.CC1) cc++;
+        }
+        ok('an unknown cell (?n) keeps the main colour, never a guess; the round is marked chartPartial; the input is not changed',
+          keep && r2.chartPartial === true && cc === 14 && rnd.stitches[0].c === null && r2.stitches !== rnd.stitches,
+          '14 unread cells left at the round\'s colour, 14 CC1 · chartPartial ' + r2.chartPartial + ' · original records untouched');
+        // a label with no yarn colour stays main; an offset shifts the repeat; a cable record spans its stitches
+        var r3 = G.chartColors(kline(8, 'k'), cells(['MC', 'CC9']), { palette: PAL });
+        var r4 = G.chartColors(kline(4, 'k'), cells(['MC', 'CC1', 'CC2']), { palette: PAL, offset: 1 });
+        var cab = [kst('k'), kst('cable', null, 0.75, 3.4, { n: 4, name: 'C4F' }), kst('k')];
+        var r5 = G.chartColors(cab, cells(['MC', 'CC1', 'CC1', 'CC1', 'CC1', 'CC2']), { palette: PAL });
+        ok('a label the yarn list does not name stays main (counted unmatched); an offset shifts the repeat; a cable record takes the cell it starts on',
+          r3.colors[1] === null && r3.unmatched === 4 && r3.colors[0] === PAL.MC &&
+          r4.colors.join() === [PAL.CC1, PAL.CC2, PAL.MC, PAL.CC1].join() &&
+          r5.colors.join() === [PAL.MC, PAL.CC1, PAL.CC2].join(),
+          'CC9 unmatched ' + r3.unmatched + ' · offset 1 → CC1, CC2, MC, CC1 · k, C4F, k → MC, CC1, CC2');
+        // through the renderer: each slice's colour is its stitch's yarn
+        function lin(hex) {
+          var v = parseInt(hex.slice(1), 16), c = [(v >> 16) & 255, (v >> 8) & 255, v & 255];
+          return c.map(function (x) { x /= 255; return x <= 0.04045 ? x / 12.92 : Math.pow((x + 0.055) / 1.055, 2.4); });
+        }
+        var rs = [];
+        for (i = 0; i < 6; i++) {
+          var plain = kr(kline(56, 'k'));
+          rs.push(i === 3 ? G.applyChart(plain, cells(row), { palette: PAL, main: PAL.MC }) : plain);
+        }
+        var N = RX.normalize(km(rs, 'rounds')), cr = N.rounds[3], wrong = [];
+        for (i = 0; i < cr.n; i++) {
+          var best = null, bd = Infinity;
+          for (var key in PAL) {
+            var L = lin(PAL[key]), d = 0;
+            for (var q = 0; q < 3; q++) d += Math.abs(cr.col[i * 3 + q] - L[q]);
+            if (d < bd) { bd = d; best = key; }
+          }
+          if (best !== row[i % 8]) wrong.push(i + ':' + best);
+        }
+        ok('the renderer colours slice by slice: round 4 of the swatch shows the chart, the plain rounds stay one yarn',
+          cr.n === 56 && wrong.length === 0 && N.rounds[2].col[0] !== cr.col[3] && N.rounds[3].hash !== N.rounds[2].hash,
+          cr.n + ' slices, nearest yarn per slice ' + (wrong.length ? 'wrong at ' + wrong.slice(0, 5).join(', ') : 'right for all 56'));
+      }());
+
+      /* ============================ the whole piece, pieces first (wave K, K1) */
+      (function k1Block() {
+        group('Knitting — the whole piece: sock sections chained, a sweater assembled, the pieces board (wave K, K1)');
+        var KS = window.KnitSynth;
+        if (!G.assemble || !KS || !KS.sweaterParts) { ok('K1 exports (DiagramGeo.assemble, KnitSynth.sweaterParts)', false, 'missing'); return; }
+        var roles = ['Back', 'Front', 'Sleeves (make 2)', 'Neckband', 'Cuff', 'Leg', 'Heel Flap', 'Turn Heel', 'Gusset', 'Foot', 'Toe', 'Part 3', 'Left Front', 'Yoke']
+          .map(function (s) { return G.roleOf(s); });
+        ok('roles come from the part names; an unnamed part has none',
+          roles.join() === 'back,front,sleeve,neckband,cuff,leg,heel-flap,heel-turn,gusset,foot,toe,,left-front,yoke',
+          roles.map(function (r) { return r || '(none)'; }).join(', '));
+        // the sock imported as sections is one sock, on the bend the L already draws
+        var sp = KS.sockParts(5, 20), A = G.assemble(sp), sm = A.model;
+        var one = G.layout(KS.sockTopDown());
+        var Ls = A.kind === 'sock' ? G.layout(sm) : null;
+        ok('a sock in 7 sections (Cuff … Toe) is ONE sock: chained in work order, the heel bends 90° like the one-part sock',
+          A.kind === 'sock' && sm.rounds.length === 189 && A.checks.bends === 1 && Ls &&
+          Math.abs(Ls.knit.bends[0].phi - one.knit.bends[0].phi) < 1e-6 && Math.abs(Ls.knit.box.z1 - one.knit.box.z1) < 1e-6,
+          A.kind + ' · ' + (sm && sm.rounds ? sm.rounds.length : 0) + ' rounds from ' + (A.checks.sections || 0) + ' sections · bend ' +
+          (Ls ? n(Ls.knit.bends[0].phi * 180 / Math.PI, 1) : '?') + '° · foot reach ' + (Ls ? n(Ls.knit.box.z1, 2) : '?') + ' = one-part ' + n(one.knit.box.z1, 2));
+        var doneOK = true, ghostOK = true;
+        for (var i = 0; i < sm.rounds.length; i++) {
+          var r = sm.rounds[i];
+          if (i < 132 && (r.ghost || r.done !== r.count)) doneOK = false;
+          if (i > sm.current && !r.ghost) ghostOK = false;
+        }
+        ok('finished sections are solid, the section being worked is lit at its round, later ones are ghosts',
+          doneOK && ghostOK && sm.current === 132 + 20 && sm.rounds[66].side === 'rs',
+          'current round ' + sm.current + ' (Foot round 21) · heel-flap rows keep their side (' + sm.rounds[66].side + ')');
+        // the sweater
+        var parts = KS.sweaterParts(), S = G.assemble(parts), ck = S.checks;
+        ok('a set-in-sleeve pullover (Back, Front, Sleeves ×2, Neckband) is assembled: side seams meet within 0.5 stitch, the sleeve cap meets the armhole',
+          S.kind === 'sweater-flat' && ck.sideSeam < 0.5 && ck.capArmhole < 0.5 && ck.capInside === true && S.model.pieces.length === 5,
+          S.kind + ' · side seam gap ' + n(ck.sideSeam, 4) + ' st over every row below the underarm · sleeve underarm to body underarm ' +
+          n(ck.capArmhole, 4) + ' st · cap tops inside the armhole ' + ck.capInside + ' · ' + S.model.pieces.length + ' pieces (the sleeve twice)');
+        // the body: half an ellipse (depth 0.62 of width) whose half-perimeter is the back's 100 stitches
+        ok('the body is an elliptic tube round the chest: the back and the front each make half of its perimeter',
+          Math.abs(ck.bodyHalfWidth * 2 - 77.53) < 0.5,
+          'body width ' + n(ck.bodyHalfWidth * 2, 2) + ' for a 100-stitch back and front (Ramanujan: half-perimeter of 77.53 × 48.07 = 100)');
+        // honest failure: unknown roles and pieces that do not tile give the board
+        var p3 = KS.sweaterParts(); p3[2].name = 'Part 3';
+        var B1 = G.assemble(p3);
+        var p4 = KS.sweaterParts(); p4[1].model = KS.flatPiece([{ n: 140 }, { n: 140 }, { n: 140 }, { n: 140 }]);
+        var B2 = G.assemble(p4);
+        ok('an unnamed part, or a Front that does not go round the same body as the Back, gives the pieces board, never an invented garment',
+          B1.kind === 'board' && /Part 3/.test(B1.reason) && B2.kind === 'board' && /do not go round|not the same length/.test(B2.reason),
+          'Part 3 → ' + B1.kind + ' ("' + B1.reason + '") · a 140-stitch Front → ' + B2.kind + ' ("' + B2.reason + '")');
+        // the board: side by side, to scale, none overlapping, all on one baseline
+        /* the board, laid out for the frame: a phone (375 × 812) wraps it into
+           shelves, a wide desktop frame keeps one row; to scale, largest first,
+           no two pieces overlapping, each shelf on one baseline */
+        function boardOf(aspect) {
+          var Bd = G.assemble(KS.sweaterParts(), { kind: 'board', aspect: aspect }), boxes = [];
+          Bd.model.pieces.forEach(function (pc) { var b = pc.layout.pieceBox; boxes.push({ x0: b.x0, x1: b.x1, y0: b.y0, y1: b.y1, name: pc.name }); });
+          var overlap = false, X0 = Infinity, X1 = -Infinity, Y0 = Infinity, Y1 = -Infinity, bases = {};
+          boxes.forEach(function (a, p) {
+            X0 = Math.min(X0, a.x0); X1 = Math.max(X1, a.x1); Y0 = Math.min(Y0, a.y0); Y1 = Math.max(Y1, a.y1);
+            bases[Math.round(a.y0 * 1000)] = 1;
+            boxes.forEach(function (b, q) {
+              if (q <= p) return;
+              if (a.x0 < b.x1 - 1e-6 && b.x0 < a.x1 - 1e-6 && a.y0 < b.y1 - 1e-6 && b.y0 < a.y1 - 1e-6) overlap = true;
+            });
+          });
+          var W = X1 - X0, H = Y1 - Y0;
+          return { kind: Bd.kind, boxes: boxes, overlap: overlap, shelves: Object.keys(bases).length,
+            scale: Math.min(aspect / W, 1 / H), single: Math.min(aspect / (W * 0 + 1), 1) };
+        }
+        var phone = boardOf(375 / 812), wide = boardOf(1280 / 500);
+        var oneRowW = 0;
+        wide.boxes.forEach(function (b) { oneRowW += b.x1 - b.x0; });
+        oneRowW += 4 * (wide.boxes.length - 1);
+        var hMax = 0;
+        phone.boxes.forEach(function (b) { hMax = Math.max(hMax, b.y1 - b.y0); });
+        var oneRowScale = Math.min((375 / 812) / oneRowW, 1 / hMax);
+        ok('the pieces board fits the frame: a phone wraps it into shelves and draws it bigger than one row would; a wide frame keeps one row; largest first, to scale, nothing overlapping',
+          phone.kind === 'board' && phone.boxes.length === 5 && !phone.overlap && !wide.overlap &&
+          phone.shelves >= 2 && wide.shelves === 1 && phone.scale > 1.5 * oneRowScale &&
+          /Back|Front/.test(phone.boxes[0].name) && phone.boxes[4].name === 'Neckband' &&
+          Math.abs((phone.boxes[0].x1 - phone.boxes[0].x0) - (phone.boxes[1].x1 - phone.boxes[1].x0)) < 1e-6,
+          'phone: ' + phone.shelves + ' shelves, drawn ' + n(phone.scale / oneRowScale, 2) + '× as big as in one row · wide: ' + wide.shelves +
+          ' shelf · order ' + phone.boxes.map(function (b) { return b.name.replace(/ \(.*\)/, ''); }).join(', ') + ' · back = front width');
+        // the renderer draws it, inside the viewer's vertex budget, and a crochet model is unchanged
+        var cv = document.createElement('canvas');
+        cv.style.cssText = 'position:absolute;left:-9999px;top:0;width:300px;height:300px';
+        document.body.appendChild(cv);
+        var h = null;
+        try {
+          h = window.Diagram.mount(cv, { follow: true, fitPurpose: 'viewer', reducedMotion: true });
+          h.setModel(S.model, { animate: 'none' });
+          var st = h.getStats();
+          h.setModel(G.assemble(KS.sweaterParts(), { kind: 'board', aspect: 1 }).model, { animate: 'none' });
+          var st2 = h.getStats();
+          ok('the renderer draws the whole sweater and the board inside the viewer budget (160k vertices); follow mode does not turn the whole piece',
+            st.pieces && st.pieces.count === 5 && st.verts > 0 && st.verts <= 160000 && st2.verts <= 160000 && st.follow.key === 'pieces',
+            'sweater ' + st.verts + ' vertices (rows drawn at ≤ ' + st.pieces.sliceCap + ' slices), built in ' + n(st.buildMs, 0) + ' ms · board ' + st2.verts + ' · follow key ' + st.follow.key);
+          /* setDone (shell-ui's ask): a tap and a row change in the assembled
+             view move the progress with NO rebuild, and cost next to nothing */
+          h.setModel(S.model, { animate: 'none' });
+          var rb0 = h.getStats().rebuilds, t0 = performance.now(), res = null, worst = 0;
+          for (var tq = 1; tq <= 60; tq++) {
+            var t1 = performance.now();
+            res = h.setDone('sw-sleeve', 40 + Math.floor(tq / 20), tq % 20);
+            worst = Math.max(worst, performance.now() - t1);
+          }
+          var perCall = (performance.now() - t0) / 60, sd = h.getStats();
+          var sleeveFrom = S.model.pieces[0].model.rounds.length + S.model.pieces[1].model.rounds.length;
+          var bad = h.setDone('no-such-part', 3, 1);
+          // and a chained sock, by section id
+          h.setModel(G.assemble(KS.sockParts(5, 20)).model, { animate: 'none' });
+          var rb1 = h.getStats().rebuilds, rs = h.setDone('sock-6', 4, 10), sk = h.getStats();
+          ok('setDone moves progress in the assembled view without rebuilding: 60 taps and two row changes on the sleeve, a row change in a chained sock',
+            res && res.ok && sd.rebuilds === rb0 && sd.pieces.current === sleeveFrom + 43 && perCall < 1 &&
+            bad.ok === false && rs.ok && sk.rebuilds === rb1 && rs.current === 172 + 4,
+            'rebuilds before ' + rb0 + ' after ' + sd.rebuilds + ' · ' + n(perCall * 1000, 0) + ' µs a call (worst ' + n(worst, 2) + ' ms) · current = sleeve round ' +
+            (sd.pieces.current - sleeveFrom) + ' · unknown part refused · sock: section "Toe" round 5 → combined round ' + rs.current + ', rebuilds unchanged (' + sk.rebuilds + ')');
+        } catch (e) {
+          ok('the renderer draws the whole piece', false, 'threw: ' + (e && e.message));
+        }
+        if (h) { try { h.destroy({ release: true }); } catch (e2) { /* ignore */ } }
+        if (cv.parentNode) cv.parentNode.removeChild(cv);
+      }());
+
+      /* ===================== baked fabric for a whole garment (wave K, K2) */
+      (function k2Block() {
+        group('Knitting — baked fabric: a coarse whole-garment piece keeps its cables (wave K, K2)');
+        var KS = window.KnitSynth;
+        if (!G.assemble || !KS || !window.Diagram) { ok('K2 needs DiagramGeo.assemble and KnitSynth', false, 'missing'); return; }
+        function lum(c) {
+          var d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data, out = new Float32Array(c.width * c.height), al = new Uint8Array(c.width * c.height);
+          for (var q = 0, j = 0; q < d.length; q += 4, j++) { out[j] = 0.299 * d[q] + 0.587 * d[q + 1] + 0.114 * d[q + 2]; al[j] = d[q + 3] > 8 ? 1 : 0; }
+          return { l: out, a: al, w: c.width, h: c.height };
+        }
+        // mean SSIM over 8×8 windows (stride 4) inside the piece's bounding box
+        function ssim(A, B) {
+          var w = A.w, h = A.h, x0 = w, y0 = h, x1 = -1, y1 = -1, x, y;
+          for (y = 0; y < h; y++) for (x = 0; x < w; x++) if (A.a[y * w + x] || B.a[y * w + x]) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+          var C1 = Math.pow(0.01 * 255, 2), C2 = Math.pow(0.03 * 255, 2), sum = 0, cnt = 0;
+          for (y = y0; y + 8 <= y1 + 1; y += 4) {
+            for (x = x0; x + 8 <= x1 + 1; x += 4) {
+              var ma = 0, mb = 0, va = 0, vb = 0, cv = 0, k, l, n = 64;
+              for (k = 0; k < 8; k++) for (l = 0; l < 8; l++) { var ia = (y + k) * w + x + l; ma += A.l[ia]; mb += B.l[ia]; }
+              ma /= n; mb /= n;
+              for (k = 0; k < 8; k++) for (l = 0; l < 8; l++) {
+                var ib = (y + k) * w + x + l, da = A.l[ib] - ma, db = B.l[ib] - mb;
+                va += da * da; vb += db * db; cv += da * db;
+              }
+              va /= n - 1; vb /= n - 1; cv /= n - 1;
+              sum += ((2 * ma * mb + C1) * (2 * cv + C2)) / ((ma * ma + mb * mb + C1) * (va + vb + C2));
+              cnt++;
+            }
+          }
+          return cnt ? sum / cnt : 0;
+        }
+        function still(model, opts, slice, bake) {
+          var cv = document.createElement('canvas');
+          cv.style.cssText = 'position:absolute;left:-9999px;top:0;width:320px;height:320px';
+          document.body.appendChild(cv);
+          var h = null, out = null;
+          try {
+            h = window.Diagram.mount(cv, { follow: false, fitPurpose: 'viewer', reducedMotion: true, bake: bake });
+            if (!h.isLive()) return { live: false };
+            h.setModel(model, { animate: 'none', finished: true });
+            if (h.finishBake) h.finishBake();
+            var snap = h.snapshot({ size: 320, crop: false, background: '#000000' });
+            out = { live: true, img: snap ? lum(snap) : null, stats: h.getStats() };
+          } finally {
+            if (h) { try { h.destroy({ release: true }); } catch (e) { /* ignore */ } }
+            if (cv.parentNode) cv.parentNode.removeChild(cv);
+          }
+          return out;
+        }
+        try {
+          // the same piece through the same whole-piece path, drawn at full detail (the reference) and coarse
+          function piece(cap) {
+            var A = G.assemble([{ id: 'swatch', name: 'Back', makeCount: 1, state: 'done', model: KS.multiSwatch(['C6F', 'C6B', 'T3F'], 28, 4) }], 'board');
+            if (cap) A.model.sliceCap = cap;
+            return A.model;
+          }
+          var geom = still(piece(0)), baked = still(piece(6)), flat = still(piece(6), null, 6, false);
+          if (!geom.live) { ok('K2: no GL context here', true, 'skipped: the bake needs WebGL'); return; }
+          var sB = ssim(geom.img, baked.img), sF = ssim(geom.img, flat.img), bs = baked.stats.pieces.bake;
+          ok('a cable swatch drawn coarse (6 slices a row) and baked looks like the full geometry: SSIM ≥ 0.9 at viewer size; unbaked it does not',
+            sB >= 0.9 && sF < sB && bs.ready === 1,
+            'SSIM baked ' + n(sB, 3) + ' · coarse without the bake ' + n(sF, 3) + ' · geometry ' + geom.stats.verts + ' vertices, coarse ' +
+            baked.stats.verts + ' · bake: ' + bs.rowsBuilt + ' distinct rows built for 28, ' + bs.texels + ' texels, ' + n(bs.ms, 1) + ' ms');
+          // a whole pullover: every done flat piece baked, inside the budgets
+          var P = G.assemble(KS.sweaterParts({ sleeve: 'done', neckband: 'done' }));
+          var pw = still(P.model), pb = pw.stats.pieces.bake;
+          ok('a whole pullover: the four flat pieces baked from a few distinct rows each, textures ≤ 1024², vertices inside the viewer budget',
+            pb.ready === 4 && pb.failed === 0 && pb.rowsBuilt < 230 && pw.stats.verts <= 160000,
+            pb.ready + ' of ' + pb.jobs + ' baked · ' + pb.rowsBuilt + ' distinct rows built for ' + (132 * 2 + 2 * 98) + ' · ' +
+            Math.round(pb.texels * 4 / 1048576 * 10) / 10 + ' MB of texture · ' + n(pb.ms, 0) + ' ms in all (spread over frames, ' +
+            '8 ms a frame) · ' + pw.stats.verts + ' vertices');
+        } catch (e) {
+          ok('K2 bake runs', false, 'threw: ' + (e && e.message));
+        }
+      }());
+
       /* ================================================ the relief */
       group('Knitting — stitch relief: V, bump, rib, eyelet, decreases, cables, edges (wave H)');
       if (!RX || !RX.knitDescOf) { ok('Diagram._relief knitting hooks', false, 'js/diagram.js 1.6.0 not loaded'); return; }

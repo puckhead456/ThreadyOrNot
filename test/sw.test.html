@@ -73,7 +73,8 @@ function loadPolicy(href) {
       clients: { claim: function () {} }
     };
     var run = new Function('self', 'caches', 'console',
-      src + '\n;return { policy: self.swPolicy, version: CACHE_VERSION, dev: IS_DEV, precache: PRECACHE_URLS };');
+      src + '\n;return { policy: self.swPolicy, shouldDelete: self.swShouldDelete, cacheName: CACHE_NAME, ' +
+      'version: CACHE_VERSION, dev: IS_DEV, precache: PRECACHE_URLS };');
     return run(fakeSelf, undefined, window.console);
   });
 }
@@ -97,6 +98,20 @@ Promise.all([loadPolicy(PROD), loadPolicy(DEV)]).then(function (both) {
     'CACHE_VERSION is a generated hash (' + prod.version + ')');
   assertEqual(prod.dev, false, 'github.io is not dev');
   assertEqual(dev.dev, true, 'localhost is dev');
+
+  group('wave K: activate keeps the downloaded text reader');
+  assertEqual(typeof prod.shouldDelete, 'function', 'swShouldDelete is exported');
+  assertEqual(prod.shouldDelete('thready-ocr-v1'), false, 'prod: thready-ocr-v1 survives a deploy');
+  assertEqual(prod.shouldDelete('thready-ocr-v2'), false, 'prod: any thready-ocr-* survives');
+  assertEqual(dev.shouldDelete('thready-ocr-v1'), false, 'dev: thready-ocr-v1 survives a reload too');
+  assertEqual(prod.shouldDelete(prod.cacheName), false, 'prod: the current shell cache is kept');
+  assertEqual(prod.shouldDelete('stitchkeeper-h0000000000'), true, 'prod: an old shell cache is deleted');
+  assertEqual(dev.shouldDelete(dev.cacheName), true, 'dev: even the shell cache is deleted');
+  assertEqual(prod.shouldDelete('xthready-ocr-v1'), true, 'only names that START with thready-ocr- are kept');
+  assertEqual(P(req('https://puckhead456.github.io/ThreadyOrNot/js/vendor/tesseract/tesseract-core-lstm.wasm')).store, false,
+    'prod: the engine files are never written to the shell cache');
+  assertEqual(prod.precache.filter(function (u) { return /vendor\/tesseract/i.test(u); }).length, 0,
+    'PRECACHE_URLS holds nothing under js/vendor/tesseract/');
 
   group('production — same origin');
   assertEqual(P(req('https://puckhead456.github.io/ThreadyOrNot/js/app.js')).strategy, 'swr',
@@ -167,6 +182,29 @@ Promise.all([loadPolicy(PROD), loadPolicy(DEV)]).then(function (both) {
     assertEqual(srcs.length > 10 && missing.length === 0, true,
       'all ' + srcs.length + ' scripts in index.html are precached' + (missing.length ? ' — missing ' + missing.join(', ') : ''));
     assertEqual(precached.indexOf('js/zip.js') >= 0, true, 'including js/zip.js (the .thready backup)');
+
+    group('wave K: the new runtime files, and the opt-in OCR engine left out');
+    ['js/workmode.js', 'js/checksheet.js', 'js/sharecard.js', 'js/pageviewer.js',
+      'js/xstitch-render.js', 'js/xstitch-keyread.js', 'js/sew-figures.js', 'js/sew-quilt.js',
+      'js/app-xstitch-extras.js', 'js/app-sewing-extras.js', 'js/ocr.js'].forEach(function (f) {
+      assertEqual(srcs.indexOf(f) >= 0 && precached.indexOf(f) >= 0, true, f + ' is loaded by index.html and precached');
+    });
+    assertEqual(srcs.indexOf('js/workmode.js') < srcs.indexOf('js/app.js') &&
+      srcs.indexOf('js/pageviewer.js') < srcs.indexOf('js/app.js'), true, 'the shared surfaces load before app.js');
+    assertEqual(srcs.indexOf('js/xstitch.js') < srcs.indexOf('js/xstitch-keyread.js'), true, 'xstitch-keyread.js loads after xstitch.js');
+    assertEqual(srcs.indexOf('js/pdftext.js') < srcs.indexOf('js/sew-figures.js') &&
+      srcs.indexOf('js/blobstore.js') < srcs.indexOf('js/sew-figures.js'), true, 'sew-figures.js loads after pdftext.js and blobstore.js');
+    assertEqual(srcs.indexOf('js/app-xstitch.js') < srcs.indexOf('js/app-xstitch-extras.js') &&
+      srcs.indexOf('js/app-sewing.js') < srcs.indexOf('js/app-sewing-extras.js'), true, 'each extras file loads after its craft’s app file');
+    var links = [];
+    html.replace(/<link\s+rel="stylesheet"\s+href="\.\/([^"]+)"/g, function (m, s) { links.push(s); return m; });
+    ['css/xstitch-extras.css', 'css/sewing-extras.css', 'css/knitting.css'].forEach(function (f) {
+      assertEqual(links.indexOf(f) >= 0 && precached.indexOf(f) >= 0, true, f + ' is linked and precached');
+    });
+    var unlisted = links.filter(function (l) { return precached.indexOf(l) < 0; });
+    assertEqual(unlisted.join(', '), '', 'every local stylesheet is precached');
+    assertEqual(precached.filter(function (u) { return /vendor\/tesseract/i.test(u); }).length, 0,
+      'nothing under js/vendor/tesseract/ is precached (a one-time opt-in download)');
   });
 }).then(finish, function (err) {
   log(false, 'harness', String(err && err.message || err));

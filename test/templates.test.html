@@ -732,6 +732,65 @@ var gAfter = Store.project(gProj.id);
 assertEqual([gAfter.groups.length, gAfter.activeGroup, gAfter.parts[3].group, Store.template(gTpl.id).groups.length],
   [3, 'Keyring', 'Medium', 3], 'wave G: groups survive a backup round trip (project and template)');
 
+/* ====================================================================== */
+group('wave K: templates for every craft (craft hook, editor draft, size guard, backups)');
+/* ====================================================================== */
+(function () {
+  seed(null);
+  Store.registerCraft({
+    id: 'zzchart',
+    normalize: function (raw) {
+      var d = raw && typeof raw === 'object' ? raw : {};
+      return { palette: Array.isArray(d.palette) ? d.palette : [], fabric: d.fabric || { count: 14 },
+               progress: { done: d.progress && d.progress.done || '' }, chart: d.chart || null };
+    },
+    template: {
+      fromProject: function (p) {
+        var cd = p.craftData;
+        return { craftData: { palette: cd.palette, fabric: cd.fabric, chart: cd.chart }, checklist: ['Wash and press', 'Frame'], emoji: '🧵' };
+      },
+      blank: function () { return { palette: [], fabric: { count: 16 } }; }
+    }
+  });
+  var src = Store.createProject({ name: 'Sampler', craft: 'zzchart',
+    craftData: { palette: [{ code: '310' }, { code: '666' }], fabric: { count: 18 }, chart: { w: 2, h: 1, cells: 'ab' }, progress: { done: 'XYZ' } } });
+  var draft = Store.templateFromProject(src.id);
+  assertEqual(draft.craft, 'zzchart', 'a chart craft project drafts a template of its own craft');
+  assertEqual(draft.craftData, { palette: [{ code: '310' }, { code: '666' }], fabric: { count: 18 }, chart: { w: 2, h: 1, cells: 'ab' } },
+    'carrying what the craft hook says belongs in a template (progress dropped)');
+  assertEqual([draft.checklist, draft.emoji], [['Wash and press', 'Frame'], '🧵'], 'and its checklist and emoji');
+  var saved = Store.saveTemplate(draft);
+  assertEqual([saved.craft, saved.craftData.palette.length], ['zzchart', 2], 'saveTemplate keeps the craft and the seed');
+  assertTrue(Store.templates('zzchart').some(function (t) { return t.id === saved.id; }), 'templates(craft) lists it');
+  var made = Store.createProject({ templateId: saved.id, name: 'Sampler 2' });
+  assertEqual([made.craft, made.craftData.fabric.count, made.craftData.progress.done], ['zzchart', 18, ''],
+    'a project made from it starts from the seed, through the craft\'s normalize, with no progress');
+  var other = Store.templateFromProject(src.id, { fromProject: function () { return { craftData: { palette: [] } }; } });
+  assertEqual(other.craftData, { palette: [] }, 'opts.fromProject overrides the registered hook');
+  var blank = Store.templateDraft('zzchart');
+  assertEqual([blank.craft, blank.craftData, blank.parts.length], ['zzchart', { palette: [], fabric: { count: 16 } }, 1],
+    'templateDraft(craft) gives "+ New template" a blank seed from the hook');
+  assertEqual(Store.templateDraft('crochet').craftData, null, 'a craft with no hook drafts craftData null');
+  var cro = Store.createProject({ name: 'Plain crochet' });
+  assertEqual(Store.templateFromProject(cro.id).craftData, null, 'crochet drafts are unchanged (craftData null)');
+  var huge = { name: 'Huge', craft: 'zzchart', parts: [{ name: 'Main', makeCount: 1 }], checklist: [],
+    craftData: { chart: { cells: new Array(300 * 1024).join('a') } } };
+  var msg = '';
+  try { Store.saveTemplate(huge); } catch (e) { msg = e.message; }
+  assertTrue(/too big to keep as a template/.test(msg), 'a template over 256 KB of craftData is refused with a plain message', msg);
+  var back = Store.exportJSON();
+  seed(null);
+  Store.importJSON(back);
+  var t2 = Store.template(saved.id);
+  assertEqual([t2 && t2.craft, t2 && t2.craftData.palette.length, t2 && t2.checklist.length], ['zzchart', 2, 2],
+    'a craft template survives a backup round trip');
+  // leave nothing of ours behind, even if a late save fires after restore()
+  Store.projects().slice().forEach(function (p) { Store.deleteProject(p.id); });
+  Store.deleteTemplate(saved.id);
+  Store.clearUndo();
+  Store.flush();
+})();
+
 /* ---------------------------------------------------------------------- */
 restore();
 

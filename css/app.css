@@ -3038,3 +3038,210 @@ mark.size-mark {
 @media (min-width: 700px) {
   .work-panel { left: auto; width: 440px; }
 }
+
+/* --------------------------------------------------------------------------
+   Wave K — shared surfaces (docs/wave-k/api/shell-ui.md). Theme variables
+   only. The working mode for a #screen-craft craft (js/workmode.js), the
+   check sheet and its one badge style (js/checksheet.js), the share card
+   (js/sharecard.js) and the shared page viewer (js/pageviewer.js).
+   -------------------------------------------------------------------------- */
+
+/* the working mode on a craft's own screen: the craft paints .work-surface */
+#screen-craft.work-mode > .topbar,
+#screen-craft.work-mode > .craft-body,
+#screen-craft.work-mode > .bottombar { display: none; }
+.work-surface {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  overflow: hidden;
+  /* the HUD's glowing text was designed over --primary (the counter's stitch
+     button); a craft painting a light chart keeps its own frame inside insets */
+  background: var(--primary);
+  color: var(--primary-text);
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+.work-surface:focus-visible { outline: 3px solid var(--accent-2); outline-offset: -6px; }
+.work-reduced-motion .work-btn:active { transform: none; }
+.work-btn.work-accent { background: var(--accent); color: var(--accent-text); border: var(--tap-border); min-width: 96px; }
+.work-open { display: inline-flex; align-items: center; gap: 6px; }
+.work-open-glyph { font-size: 18px; line-height: 1; }
+
+/* the one badge: ✓ exact · ≈ computed / close · ≠ disagrees · ? unknown */
+.check-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  min-width: 24px;
+  height: 24px;
+  padding: 0 6px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 900;
+  line-height: 1;
+}
+.check-badge.check-exact { background: var(--success); color: var(--accent-text); border-color: transparent; }
+.check-badge.check-approx { background: var(--surface-2); color: var(--text); }
+.check-badge.check-off { background: var(--danger); color: #fff; border-color: transparent; }
+.check-badge.check-unknown { background: transparent; color: var(--text-muted); border-style: dashed; }
+.check-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  margin-top: 4px;
+  font-size: 13px;
+  line-height: 1.35;
+}
+.check-line-text { flex: 1 1 12em; min-width: 0; color: var(--text-muted); }
+.check-line.check-v-off .check-line-text { color: var(--danger); font-weight: 700; }
+.check-open { font-size: 13px; min-height: 32px; }
+.check-head { display: flex; align-items: flex-start; gap: 10px; }
+.check-head .check-badge { min-width: 32px; height: 32px; font-size: 18px; }
+.check-summary { margin: 4px 0 0; font-weight: 700; line-height: 1.35; }
+.check-off-note { margin: 8px 0 0; color: var(--danger); font-weight: 700; font-size: 14px; }
+.check-table-wrap { margin-top: 12px; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.check-table { width: 100%; border-collapse: collapse; font-size: 14px; }
+.check-table th {
+  text-align: left;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--border);
+}
+.check-table td { padding: 6px; vertical-align: top; border-bottom: 1px solid var(--border); }
+.check-col-badge { width: 32px; }
+.check-col-num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; font-weight: 700; }
+.check-col-label { min-width: 0; }
+.check-label { font-weight: 700; }
+.check-why { display: block; margin-top: 2px; font-size: 12px; color: var(--text-muted); line-height: 1.35; }
+.check-row-off .check-label { color: var(--danger); }
+.check-swatch {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  margin-right: 6px;
+  border-radius: 3px;
+  border: 1px solid var(--border);
+  vertical-align: -1px;
+}
+.check-page { display: inline-block; margin-top: 2px; font-size: 12px; min-height: 28px; }
+.check-note, .check-more { font-size: 12px; margin-top: 10px; }
+/* "off" demotes the primary button: secondary look, still there, still works */
+.btn.check-demoted { background: var(--surface-2); color: var(--text); border-style: dashed; }
+
+/* the share card */
+.share-card-wrap { display: flex; justify-content: center; }
+.share-card-canvas {
+  width: 100%;
+  max-width: min(100%, 420px);
+  height: auto;
+  aspect-ratio: 1 / 1;
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  background: var(--surface-2);
+}
+.share-card-status { text-align: center; font-size: 13px; }
+
+/* the shared page viewer */
+.pv-frame {
+  position: relative;
+  overflow: hidden;
+  touch-action: none;
+  background: var(--surface-2);
+  border-radius: var(--radius-sm);
+  cursor: grab;
+}
+.pv-frame:focus-visible { outline: 3px solid var(--accent-2); outline-offset: 2px; }
+.pv-stage { position: absolute; left: 0; top: 0; transform-origin: 0 0; will-change: transform; }
+.pv-img { display: block; width: 100%; height: 100%; user-select: none; -webkit-user-select: none; pointer-events: none; }
+.pv-mark {
+  position: absolute;
+  border: 2.5px solid var(--danger);
+  border-radius: 2px;
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.18);
+  pointer-events: none;
+}
+.pv-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  text-align: center;
+  color: var(--text-muted);
+}
+.pv-sheet-frame { height: min(62vh, 640px); }
+.pv-bar { display: flex; align-items: center; justify-content: center; gap: 12px; margin-top: 8px; }
+.pv-nav { min-width: 48px; min-height: 44px; font-size: 22px; border-radius: 999px; border: 1px solid var(--border); background: var(--surface-2); color: var(--text); }
+.pv-label { font-weight: 700; min-width: 0; text-align: center; }
+.pv-zoom { display: flex; justify-content: center; gap: 8px; margin-top: 8px; }
+.pv-zoom .btn { min-width: 56px; }
+@media (max-height: 700px) { .pv-sheet-frame { height: 52vh; } }
+
+/* craft-aware settings: the profile section */
+.profile-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin-top: 6px; }
+.profile-row .field-label { flex: 0 0 auto; }
+.restore-settings { display: flex; align-items: flex-start; gap: 8px; margin-top: 8px; }
+
+/* wave K: the opt-in text reader — OCR text is always marked "check it" */
+.ocr-read { outline: 1px dashed var(--border); outline-offset: 2px; }
+.ocr-flag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 6px 4px 0;
+  font-size: 12px;
+  font-weight: 800;
+  color: var(--text-muted);
+}
+.ocr-flag .check-badge { min-width: 20px; height: 20px; font-size: 12px; }
+.ocr-actions { display: flex; flex-direction: column; gap: 8px; }
+.ocr-progress .bar-fill { width: 0; }
+.ocr-offer { white-space: normal; text-align: center; }
+
+/* wave K: working mode with `surfaceUnderHud` (js/workmode.js) — the craft's
+   surface fills the whole screen and the HUD floats over it on scrims, so a
+   chart can use ~85% of a phone. api.insets() still reports the free area. */
+.work-under-hud .work-surface { background: var(--bg); color: var(--text); }
+.work-under-hud .work-head,
+.work-under-hud .work-stack,
+.work-under-hud .work-foot {
+  background: var(--overlay);
+  background: color-mix(in srgb, var(--primary) 82%, transparent);
+  -webkit-backdrop-filter: blur(3px);
+  backdrop-filter: blur(3px);
+}
+.work-under-hud .work-stack { padding-top: 4px; padding-bottom: 6px; border-radius: 0 0 var(--radius-sm) var(--radius-sm); }
+.work-under-hud .work-head { padding-bottom: 4px; }
+.work-under-hud .work-foot { padding-top: 4px; border-radius: var(--radius-sm) var(--radius-sm) 0 0; }
+.work-under-hud .work-foot:empty,
+.work-under-hud .work-stack:empty { background: none; -webkit-backdrop-filter: none; backdrop-filter: none; }
+.work-under-hud .work-btns { background: none; }
+@media (orientation: landscape) {
+  .work-under-hud .work-stack { border-radius: 0 var(--radius-sm) var(--radius-sm) 0; }
+}
+
+/* wave K (01 P13): on a long knitting row a tap counts a repeat — say so under the readout */
+.knit-tap-unit {
+  text-align: center;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-muted);
+  margin-top: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.knit-tap-unit[hidden] { display: none; }
+#screen-project.work-mode .knit-tap-unit { display: none; }
+.imp-both { margin-top: 6px; }

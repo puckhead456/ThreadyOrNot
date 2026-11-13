@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sewing gallery</title>
+<style>
+  body { margin: 0; font: 14px/1.45 system-ui, sans-serif; background: #ddd; color: #222; }
+  body.card { background: #888; }
+  #app { position: fixed; left: 0; top: 0; border: 0; background: #fff; }
+  .idx { padding: 16px; }
+  .idx h1 { font-size: 18px; margin: 0 0 8px; }
+  .idx form { margin: 8px 0 16px; }
+  .grid { display: flex; flex-wrap: wrap; gap: 16px; }
+  .cell { background: #fff; padding: 6px; border-radius: 6px; }
+  .cell a { display: block; font: 12px Menlo, Consolas, monospace; margin-bottom: 4px; }
+  .cell iframe { border: 1px solid #aaa; width: 375px; height: 812px; transform: scale(0.5); transform-origin: 0 0; margin-bottom: -406px; margin-right: -187px; }
+  .cell .box { width: 188px; height: 406px; overflow: hidden; }
+</style>
+</head>
+<body>
+<script>
+/*
+ * Sewing screens at exact phone size, for review and for headless screenshots.
+ *
+ *   sewing.gallery.html                                   index: every card, half size
+ *   sewing.gallery.html?card=step&theme=stardew-night&h=812   one card in a 375 × h frame
+ *
+ * Each card boots the real app (index.html) in an iframe of exactly 375 × h on its own
+ * private store key, builds a synthetic project in code (nothing copied from a real
+ * pattern), opens the screen or sheet, and sets document.title to "ready: <card>".
+ * Everything it makes (projects, its key, the one figure blob) is removed on pagehide and
+ * at the next boot of the same card. Themes: stardew-night (Stardrop Night), dragon-pixel
+ * (Pixel Wyrm), stardew-spring (Pelican Town Spring, light), and the other three.
+ */
+'use strict';
+var CARDS = [
+  ['step', 'Step card, garment, size chosen'],
+  ['step-fig', 'Step card with the step\'s own drawing'],
+  ['step-unit', 'Quilt step whose unit takes the big button'],
+  ['step-unit-fig', 'Quilt unit step with a drawing and a long text (the fold)'],
+  ['work', 'Sewing mode, garment'],
+  ['work-unit', 'Sewing mode counting a unit'],
+  ['size', 'Size & alterations with a suggestion'],
+  ['size-chart', 'Size & alterations scrolled to the chart'],
+  ['import', 'Import review after a paste'],
+  ['steps', 'Step list with the tools open'],
+  ['cutting', 'Cutting list with a nap note'],
+  ['notions', 'Notions'],
+  ['menu', 'The ⋯ menu of a quilt'],
+  ['bag', 'A bag\'s step screen'],
+  ['x-board', 'Extras: cutting board (quilt)'],
+  ['x-quilttop', 'Extras: quilt top'],
+  ['x-quiltcalc', 'Extras: quilt calculators'],
+  ['x-fabric', 'Extras: fabric and shopping list'],
+  ['x-swatches', 'Extras: fabric colours'],
+  ['x-timer', 'Extras: press and fuse timer'],
+  ['x-glossary', 'Extras: words in this pattern'],
+  ['x-fitting', 'Extras: fitting log']
+];
+var Q = new URLSearchParams(location.search);
+var CARD = Q.get('card');
+var THEME = Q.get('theme') || 'stardew-night';
+var H = parseInt(Q.get('h') || '812', 10) || 812;
+
+if (!CARD) {
+  var idx = document.createElement('div');
+  idx.className = 'idx';
+  idx.innerHTML = '<h1>Sewing gallery</h1><p>Each card is the real app in a 375 × ' + H + ' frame. Open a card on its own for a screenshot.</p>' +
+    '<form>Theme <select name="theme">' + ['stardew-night', 'dragon-pixel', 'stardew-spring', 'stardew-harvest', 'dragon-fury', 'dragon-throne'].map(function (t) {
+      return '<option' + (t === THEME ? ' selected' : '') + '>' + t + '</option>';
+    }).join('') + '</select> Height <select name="h"><option' + (H === 812 ? ' selected' : '') + '>812</option><option' + (H === 640 ? ' selected' : '') + '>640</option></select> <button>Show</button></form>';
+  var grid = document.createElement('div');
+  grid.className = 'grid';
+  CARDS.forEach(function (c) {
+    var url = 'sewing.gallery.html?card=' + c[0] + '&theme=' + THEME + '&h=' + H;
+    var cell = document.createElement('div');
+    cell.className = 'cell';
+    cell.innerHTML = '<a href="' + url + '">' + c[0] + '</a><div>' + c[1] + '</div><div class="box"><iframe loading="lazy" src="' + url + '"></iframe></div>';
+    grid.appendChild(cell);
+  });
+  idx.appendChild(grid);
+  document.body.appendChild(idx);
+} else {
+  document.body.className = 'card';
+  boot();
+}
+
+function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+/* ---------------------------------------------------------------- synthetic data */
+var GARMENT_TEXT = [
+  '=== PAGE 1 ===',
+  'TEST WRAP DRESS',
+  'All seam allowances are 1.5 cm unless otherwise stated.',
+  'If your body measurements are in between sizes, we recommend that you choose the larger size. ' +
+    'If your measurements are only slightly different than our size chart, then choose the closest size.',
+  '=== PAGE 2 ===',
+  'SIZE CHART (cm)',
+  '36 38 40 42 44',
+  'Bust 84 88 92 96 100',
+  'Waist 66 70 74 78 82',
+  'Hip 90 94 98 102 106',
+  'FINISHED GARMENT MEASUREMENTS (cm)',
+  '36 38 40 42 44',
+  'Bust 92 96 100 104 108',
+  'Waist 74 78 82 86 90',
+  'Hip 100 104 108 112 116',
+  'FABRIC REQUIREMENTS',
+  'NOTIONS',
+  '- Invisible zip 55 cm',
+  '- Lightweight fusible interfacing 50 cm',
+  '- Thread to match',
+  'Before you cut, make sure the nap of a velvet is running down on every piece.',
+  '=== PAGE 3 ===',
+  'INSTRUCTIONS',
+  '1. Fuse the interfacing to the wrong side of the facings. Press well.',
+  '2. Sew the bodice darts. Press the darts towards the centre.',
+  '3. Insert the invisible zip into the centre back seam using a zipper foot.',
+  '4. Turn up the hem by 50 (52, 54, 56, 58) cm from the waist seam and press.',
+  '5. Topstitch the hem 6 mm from the folded edge. Give the dress a final press.',
+  ''
+].join('\n');
+
+function quiltData() {
+  var cutting = [];
+  'ABCDEFGH'.split('').forEach(function (L, i) {
+    cutting.push({ id: 'q' + L + '1', piece: (2 + i % 3) + ' 1/2" x WOF strip', qty: 2 + i % 3, note: 'Fabric ' + L, material: 'other' });
+    cutting.push({ id: 'q' + L + '2', piece: (2 + i % 3) + ' 1/2" square', qty: 12 + i, note: 'Fabric ' + L + ', subcut', subcut: true, parentId: 'q' + L + '1', material: 'other' });
+  });
+  return {
+    kind: 'quilt',
+    fabric: 'ABCDEFGH'.split('').map(function (L, i) { return { name: 'Fabric ' + L + ' Test Print ' + (i + 1), amounts: [(i % 2 ? '1/2' : '3/4') + ' yd'] }; }),
+    cutting: cutting,
+    units: [
+      { id: 'u1', name: 'Unit 1a', target: 4, done: 1, step: 2, size: '6 1/2" x 12 1/2" unfinished' },
+      { id: 'u2', name: 'Unit 1b', target: 4, done: 0, step: 2, size: '6 1/2" x 6 1/2" unfinished' },
+      { id: 'u3', name: 'Unit 1c', target: 2, done: 0, step: 2 },
+      { id: 'u4', name: 'Unit 2', target: 8, done: 0, step: 3 }],
+    steps: [
+      { n: 1, text: 'Cut the strips and subcut the squares as listed.' },
+      { n: 2, text: 'Sew a Fabric A square to a Fabric B square along one edge. Press the seam towards the darker fabric. ' +
+        'Join two pairs to make a four-patch, matching the centre seams. Make a total of 4 Unit 1a (6 1/2" x 12 1/2" unfinished), then 4 Unit 1b and 2 Unit 1c.', page: 4 },
+      { n: 3, text: 'Join the units into blocks. Make 8 Unit 2.', page: 5 },
+      { n: 4, text: 'Sew the blocks into rows and the rows into the quilt top. Quilt as desired and bind.', page: 6 }],
+    currentStep: 1,
+    sourceText: '=== PAGE 1 ===\nFINISHED SIZE | 60" x 72"\nBinding\ncut 7 strips 2 1/2" x WOF from Fabric A.\n=== PAGE 2 ===\nQuilt Layout\nRow 1: A, B, C, D.\nRow 2: B, C, D, A.\n'
+  };
+}
+
+var BAG_DATA = {
+  kind: 'bag',
+  fabric: [{ name: 'Exterior', amounts: ['1/2 yd'] }, { name: 'Lining', amounts: ['1/2 yd'] }],
+  cutting: [
+    { id: 'b1', piece: 'Main Panel', qty: 2, material: 'main' },
+    { id: 'b2', piece: 'Main Panel', qty: 2, material: 'lining' },
+    { id: 'b3', piece: 'Main Panel', qty: 2, material: 'interfacing', product: 'Shape-flex SF101', application: 'fusible', productFrom: 'cut line' },
+    { id: 'b4', piece: 'Base', qty: 1, material: 'interfacing', product: 'Peltex 70', application: 'sew-in', productFrom: 'piece name' }],
+  notions: [{ text: '1 yard fusible Shape-flex SF101 interfacing' }, { text: '14" zipper' }, { text: '2 swivel hooks' }],
+  steps: [{ n: 1, text: 'Cut the main panels from the exterior and the lining.' }, { n: 2, text: 'Fuse the interfacing to the exterior Main Panels.' },
+    { n: 3, text: 'Sew across the wider short edge at 1/2" seam allowance. Topstitch 1/4" from the seam.' }],
+  currentStep: 2,
+  sourceText: '=== PAGE 2 ===\nFuse woven interfacing to the exterior Main Panels. Sew the bag.\n'
+};
+
+/* A drawing to stand in for a booklet crop: line art on white paper, as the crops are. */
+function fakeFigure(w) {
+  var c = w.document.createElement('canvas');
+  c.width = 480; c.height = 360;
+  var g = c.getContext('2d');
+  g.fillStyle = '#fff'; g.fillRect(0, 0, 480, 360);
+  g.strokeStyle = '#333'; g.lineWidth = 3;
+  g.strokeRect(60, 60, 160, 240); g.strokeRect(260, 60, 160, 240);
+  g.setLineDash([8, 6]); g.beginPath(); g.moveTo(220, 60); g.lineTo(220, 300); g.stroke();
+  g.setLineDash([]); g.font = '22px sans-serif'; g.fillStyle = '#333'; g.fillText('RS', 120, 190); g.fillText('WS', 320, 190);
+  return new Promise(function (r) { c.toBlob(r, 'image/png'); });
+}
+
+/* ---------------------------------------------------------------- one card */
+function boot() {
+  var KEY = 'stitchkeeper-wavek-sewgallery-' + CARD;
+  try { localStorage.removeItem(KEY); } catch (e) { /* ignore */ }
+  var f = document.createElement('iframe');
+  f.id = 'app';
+  f.style.width = '375px';
+  f.style.height = H + 'px';
+  f.title = 'The app at 375 × ' + H;
+  var made = [], blobs = [];
+  function cleanup() {
+    try {
+      var w = f.contentWindow;
+      made.forEach(function (id) { try { w.Store.deleteProject(id); } catch (e) { /* ignore */ } });
+      if (w.BlobStore && blobs.length) blobs.forEach(function (k) { try { w.BlobStore.delete(k); } catch (e) { /* ignore */ } });
+    } catch (e) { /* ignore */ }
+    try { localStorage.removeItem(KEY); } catch (e) { /* ignore */ }
+  }
+  window.addEventListener('pagehide', cleanup);
+  f.onload = function () {
+    var w = f.contentWindow, t0 = Date.now();
+    (function wait() {
+      if (!(w.App && w.Store && w.SewingApp && w.document.getElementById('screen-home'))) {
+        if (Date.now() - t0 < 30000) return setTimeout(wait, 100);
+        document.title = 'failed: ' + CARD;
+        return;
+      }
+      scene(w, w.document, KEY, made, blobs).then(function () {
+        document.title = 'ready: ' + CARD;
+      }, function (e) {
+        document.title = 'failed: ' + CARD + ': ' + (e && e.message);
+        var p = document.createElement('pre'); p.style.cssText = 'position:fixed;left:380px;top:0;color:#fff;white-space:pre-wrap;width:300px';
+        p.textContent = String(e && (e.stack || e.message) || e); document.body.appendChild(p);
+      });
+    })();
+  };
+  f.src = '../index.html';
+  document.body.appendChild(f);
+}
+
+async function scene(w, d, KEY, made, blobs) {
+  var Store = w.Store, App = w.App, SA = w.SewingApp, S = w.Sewing;
+  // pagehide cannot always reach the frame: sweep what earlier cards left (their keys, the
+  // stand-in drawing) before making anything new.
+  try {
+    Object.keys(localStorage).forEach(function (k) { if (/^stitchkeeper-wavek-sewgallery-/.test(k) && k !== KEY) localStorage.removeItem(k); });
+    // (raced: under --virtual-time-budget IndexedDB may never answer, and the card must still draw)
+    var stale = ((await Promise.race([w.BlobStore.keys(), sleep(1500).then(function () { return []; })])) || [])
+      .filter(function (k) { return /:fig:4:gallery$/.test(k); });
+    for (var si = 0; si < stale.length; si++) await w.BlobStore['delete'](stale[si]);
+  } catch (e) { /* ignore */ }
+  Store.__setKeyForTests(KEY);
+  App.closeAllSheets();
+  App.applyTheme(THEME, false);
+  try { Store.setSetting('welcomed', true); } catch (e) { /* ignore */ }
+  function mk(name, cd) { var p = Store.createProject({ craft: 'sewing', name: name, craftData: cd }); made.push(p.id); return p; }
+  function show(p) { Store.setActiveProject(p.id); App.render(); }
+  function sheetBody() { var all = d.querySelectorAll('dialog[open]'); var s = all[all.length - 1]; return s && s.querySelector('.sheet-body'); }
+  async function importText(p, text) {
+    SA.openSheet('import', p.id);
+    await sleep(120);
+    var all = d.querySelectorAll('dialog[open]'); var sh = all[all.length - 1];
+    sh.querySelector('.sw-paste-area').value = text;
+    Array.prototype.filter.call(sh.querySelectorAll('button'), function (b) { return /^Read this text$/.test(b.textContent); })[0].click();
+    await sleep(80);
+    return sh;
+  }
+  async function garment(withSize) {
+    var p = mk('Test Wrap Dress', {});
+    show(p);
+    var sh = await importText(p, GARMENT_TEXT);
+    Array.prototype.filter.call(sh.querySelectorAll('.sheet-foot button'), function (b) { return /Import/.test(b.textContent); })[0].click();
+    await sleep(200);
+    App.closeAllSheets();
+    if (withSize) {
+      Store.setMeasurement && (Store.setMeasurement('bust', 97, 'cm'), Store.setMeasurement('waist', 79, 'cm'), Store.setMeasurement('hip', 104, 'cm'));
+      SA.__test.chooseSize(p.id, '42');
+    }
+    return Store.project(p.id);
+  }
+  async function withFigure(p, index) {
+    var blob = await fakeFigure(w);
+    var key = 'p:' + p.id + ':fig:4:gallery';
+    // BlobStore checks instanceof Blob in its own window: rewrap in the app frame's Blob.
+    await w.BlobStore.put(key, new w.Blob([blob], { type: 'image/png' }));
+    blobs.push(key);
+    Store.updateCraftData(p.id, function (cd) { cd.steps[index].fig = { kind: 'crop', page: 4, blobKey: key }; }, { undo: false });
+  }
+  function toStep(p, i) { Store.updateCraftData(p.id, function (cd) { cd.currentStep = i; for (var k = 0; k < i; k++) cd.steps[k].done = true; }, { undo: false }); }
+
+  var c = CARD, p;
+  if (c === 'step' || c === 'step-fig' || c === 'work' || c === 'size' || c === 'size-chart' || c === 'steps' || c === 'cutting' || c === 'notions' || c === 'x-fabric' || c === 'x-glossary' || c === 'x-fitting' || c === 'x-timer') {
+    p = await garment(true);
+    if (c === 'step' || c === 'work') toStep(p, 3);
+    if (c === 'step-fig') { toStep(p, 1); await withFigure(Store.project(p.id), 1); }
+    show(Store.project(p.id));
+    await sleep(150);
+    if (c === 'work') { d.querySelector('.sw-work-open').click(); await sleep(150); }
+    if (c === 'size' || c === 'size-chart') {
+      SA.openSheet('size', p.id); await sleep(200);
+      if (c === 'size-chart') { var t = sheetBody().querySelector('.sw-table-wrap'); if (t) t.scrollIntoView({ block: 'start' }); }
+    }
+    if (c === 'steps') {
+      SA.openSheet('steps', p.id); await sleep(150);
+      var tool = sheetBody().querySelector('[data-focus-key="tool-1"]'); if (tool) tool.click(); await sleep(80);
+    }
+    if (c === 'cutting') {
+      Store.updateCraftData(p.id, function (cd) {
+        cd.cutting = [{ piece: 'Front Bodice', qty: 2, material: 'main', grain: 'mirrored' }, { piece: 'Back Bodice', qty: 1, material: 'main', fold: true },
+          { piece: 'Skirt Front', qty: 1, material: 'main' }, { piece: 'Facing', qty: 2, material: 'interfacing' }, { piece: 'Bodice Lining', qty: 2, material: 'lining' }];
+      }, { undo: false });
+      SA.openSheet('cutting', p.id); await sleep(150);
+    }
+    if (c === 'notions') { SA.openSheet('notions', p.id); await sleep(150); }
+    if (c === 'x-fabric') { w.SewingExtras.open('fabric', Store.project(p.id)); await sleep(150); }
+    if (c === 'x-glossary') { w.SewingExtras.open('glossary', Store.project(p.id)); await sleep(150); }
+    if (c === 'x-fitting') { w.SewingExtras.open('fitting', Store.project(p.id), { add: true }); await sleep(150); }
+    if (c === 'x-timer') { w.SewingExtras.open('timer', Store.project(p.id), { step: 0 }); await sleep(150); }
+  } else if (c === 'import') {
+    p = mk('Test Wrap Dress', {});
+    show(p);
+    await importText(p, GARMENT_TEXT);
+  } else if (c === 'bag') {
+    p = mk('Test Tote Bag', BAG_DATA);
+    show(p);
+    await sleep(150);
+  } else {
+    p = mk('Test Four Patch Quilt', quiltData());
+    if (c === 'step-unit-fig') await withFigure(p, 1);
+    show(Store.project(p.id));
+    await sleep(150);
+    if (c === 'work-unit') { d.querySelector('.sw-work-open').click(); await sleep(150); }
+    if (c === 'menu') { d.getElementById('c-menu').click(); await sleep(150); }
+    var X = { 'x-board': 'board', 'x-quilttop': 'quilttop', 'x-quiltcalc': 'quiltcalc', 'x-swatches': 'swatches' }[c];
+    if (X) { w.SewingExtras.open(X, Store.project(p.id)); await sleep(X === 'quilttop' ? 1200 : 200); }
+  }
+  // Toasts fade; give the figure blob and fonts a moment, then report the layout.
+  await sleep(400);
+  var btn = d.getElementById('sw-step-btn'), link = d.querySelector('.sw-step-link');
+  var r = function (n) { if (!n || n.hidden || !n.getClientRects().length) return null; var b = n.getBoundingClientRect(); return Math.round(b.top) + '–' + Math.round(b.bottom); };
+  w.__galleryReport = { card: c, button: r(btn), link: r(link), scrollW: d.documentElement.scrollWidth };
+  document.body.setAttribute('data-report', JSON.stringify(w.__galleryReport));
+}
+</script>
+</body>
+</html>

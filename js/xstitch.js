@@ -969,13 +969,17 @@
 
     var assignedAt = new Array(n);      // by lightness position
     var used = {};
+    /* Wave K (#1, 04 #7): with opts.distinct every shape family is used
+       once before any family is used twice, so ten colours never come out
+       as · ● ▪ : (two dots, two squares, two rounds). */
+    var famUse = {}, distinct = !!opts.distinct;
 
     for (var k = 0; k < order.length; k++) {
       var idx = order[k].i;
       var p = pos[idx];
       var before = p > 0 ? assignedAt[p - 1] : null;
       var after = p < n - 1 ? assignedAt[p + 1] : null;
-      var pick = null, fallback = null;
+      var pick = null, fallback = null, bestUse = Infinity;
       for (var s = 0; s < pool.length; s++) {
         var g = pool[s];
         if (used[g]) continue;
@@ -983,9 +987,11 @@
         var f = familyOf(g);
         if (before && familyOf(before) === f) continue;
         if (after && familyOf(after) === f) continue;
-        pick = g;
-        break;
+        if (!distinct) { pick = g; break; }
+        var fu = famUse[f] || 0;
+        if (fu < bestUse) { bestUse = fu; pick = g; if (!fu) break; }
       }
+      if (pick !== null) famUse[familyOf(pick)] = (famUse[familyOf(pick)] || 0) + 1;
       if (pick === null) pick = fallback;
       if (pick === null) pick = pool[(k % pool.length)];   // palette > pool: reuse
       else used[pick] = true;
@@ -1331,11 +1337,15 @@
     return n < 1 ? 1 : n;
   }
 
-  /** skeinRange(args) -> { low, high } — an honest range, not false precision. */
+  /**
+   * skeinRange(args) -> { low, high, mid } — an honest range, not false
+   * precision. Wave K: `mid` is the count at the geometric middle of the
+   * published yields (the "buy N" a stitcher can act on).
+   */
   function skeinRange(o) {
     o = isObj(o) ? o : {};
     var high = skeinsFor(o);
-    if (!high) return { low: 0, high: 0 };
+    if (!high) return { low: 0, high: 0, mid: 0 };
     var stitches = num(o.stitchCount, 0);
     var waste = num(o.waste, 0.2);
     if (!(waste >= 0)) waste = 0;
@@ -1344,7 +1354,10 @@
     var low = Math.ceil(stitches * len * (1 + waste) / per);
     if (low < 1) low = 1;
     if (low > high) low = high;
-    return { low: low, high: high };
+    var mid = Math.ceil(stitches * len * (1 + waste) / (usableCm(o.strands) * Math.sqrt(SKEIN_SPREAD)));
+    if (mid < low) mid = low;
+    if (mid > high) mid = high;
+    return { low: low, high: high, mid: mid };
   }
 
   /* ---- confetti ---------------------------------------------------- */
@@ -1757,7 +1770,7 @@
       var f = flossFor(brand || 'DMC', code);
       if (f) name = f.name;
     }
-    return {
+    var out = {
       i: clampInt(raw.i, 0, 9999, i),
       symbol: str(raw.symbol, ''),
       brand: brand,
@@ -1774,6 +1787,47 @@
       skeins: raw.skeins === null || raw.skeins === undefined
         ? 0 : clampInt(raw.skeins, 0, 9999, 0),
       have: !!raw.have
+    };
+    /* Wave K: each kept only when present, so older saves normalise
+       byte for byte as before. */
+    /* a printed 0 stays 0 (it was clamped up to 1 before the audit's D21);
+       an absent or unreadable count stays absent */
+    if (typeof raw.keyCount === 'number' && isFinite(raw.keyCount) && raw.keyCount >= 0) {
+      out.keyCount = clampInt(raw.keyCount, 0, 1e9, 0);
+    }
+    if (Array.isArray(raw.unresolved)) {
+      var ur = [];
+      for (var u = 0; u < raw.unresolved.length && ur.length < 16; u++) {
+        var uv = clampInt(raw.unresolved[u], 0, 9999, -1);
+        if (uv >= 0 && ur.indexOf(uv) < 0) ur.push(uv);
+      }
+      out.unresolved = ur;
+    }
+    var gl = normalizeGlyph(raw.glyph);
+    if (gl) out.glyph = gl;
+    return out;
+  }
+
+  var GLYPH_SOURCES = { 'pdf-path': 1, 'pdf-font': 1, picture: 1, user: 1 };
+
+  /**
+   * palette[i].glyph = { w, h, bits, path, clean, source } (R5; the shape of
+   * XSKeyRead's Glyph). bits: base64 of w*h bits (row-major from the top),
+   * at most 32 x 32; path: an SVG path in a 100 x 100 box, at most 1 KB.
+   */
+  function normalizeGlyph(g) {
+    if (!isObj(g)) return null;
+    var w = clampInt(g.w, 4, 32, 0), h = clampInt(g.h, 4, 32, 0);
+    var bits = str(g.bits, '').replace(/[^A-Za-z0-9+/=]/g, '');
+    var path = str(g.path, '');
+    if (!/^[MLHVCQZmlhvcqz0-9 .,\-]*$/.test(path) || path.length > 1024) path = '';
+    if ((!w || !h || !bits || bits.length > Math.ceil(w * h / 8 / 3) * 4 + 4) && !path) return null;
+    return {
+      w: w || 16, h: h || 16,
+      bits: w && h && bits.length <= Math.ceil(w * h / 8 / 3) * 4 + 4 ? bits : '',
+      path: path || null,
+      clean: g.clean === true,
+      source: GLYPH_SOURCES[g.source] ? g.source : 'user'
     };
   }
 
@@ -2013,6 +2067,9 @@
   function normalize(raw, project) {
     var d = isObj(raw) ? raw : {};
     var out = { v: 1 };
+    /* Wave K (#20): another counted-grid craft on the same engine. Absent
+       means cross-stitch, so older saves are unchanged. */
+    if (d.kind && d.kind !== 'cross' && KINDS[d.kind]) out.kind = d.kind;
 
     /* fabric */
     var f = isObj(d.fabric) ? d.fabric : {};
@@ -2146,6 +2203,17 @@
       pageDone: pageDone,
       blocks: blocks
     };
+    /* Wave K (#1): taps on a colour the chart has no square of, counted
+       against the key's printed count (totals().fromKey). Kept only when
+       present. */
+    if (isObj(pr.keyDone)) {
+      var kdOut = {}, kdk = Object.keys(pr.keyDone), anyKd = false;
+      for (var kq = 0; kq < kdk.length; kq++) {
+        var kix = clampInt(kdk[kq], 0, 9999, -1), kv = clampInt(pr.keyDone[kdk[kq]], 0, 1e9, 0);
+        if (kix >= 0 && kix < palette.length && kv > 0) { kdOut[kix] = kv; anyKd = true; }
+      }
+      if (anyKd) out.progress.keyDone = kdOut;
+    }
     if (mode === 'cells') {
       var st = progressStats(out);
       /* doneCount stays the popcount of `done` — the crosses — while
@@ -2183,15 +2251,56 @@
         var park = d.parking[pk];
         if (!isObj(park)) continue;
         var corner = park.corner;
-        parking.push({
+        var pkOut = {
           key: str(park.key, ''),
           symbol: str(park.symbol, ''),
           corner: (corner === 'tl' || corner === 'tr' || corner === 'bl' || corner === 'br') ? corner : 'tl',
           note: str(park.note, '')
-        });
+        };
+        /* Wave K (#3): where on the chart the thread is parked, and which
+           colour. Kept only when present (older saves unchanged). */
+        if (out.chart && park.x !== undefined && park.y !== undefined) {
+          var pkx = clampInt(park.x, 0, out.chart.w - 1, -1), pky = clampInt(park.y, 0, out.chart.h - 1, -1);
+          if (pkx >= 0 && pky >= 0) { pkOut.x = pkx; pkOut.y = pky; }
+        }
+        if (park.paletteIndex !== undefined && park.paletteIndex !== null) {
+          var pkp = clampInt(park.paletteIndex, 0, Math.max(0, palette.length - 1), -1);
+          if (pkp >= 0 && pkp < palette.length) pkOut.paletteIndex = pkp;
+        }
+        parking.push(pkOut);
       }
     }
     out.parking = parking;
+
+    /* Wave K (#21): the stitcher's goals (goalProgress reads them). Kept
+       only when present, so older saves normalise as before. */
+    if (Array.isArray(d.goals)) {
+      var goals = [], GOAL_KINDS = { perDay: 1, page: 1, colour: 1, total: 1 };
+      for (var gq = 0; gq < d.goals.length && goals.length < 50; gq++) {
+        var go = d.goals[gq];
+        if (!isObj(go) || !GOAL_KINDS[go.kind]) continue;
+        var gOut = { id: str(go.id, '').slice(0, 40) || ('g' + gq), kind: go.kind,
+          createdAt: clampInt(go.createdAt, 0, 1e15, 0) };
+        if (go.kind === 'perDay') gOut.n = clampInt(go.n, 1, 1e7, 100);
+        if (go.kind === 'page') {
+          var gp = clampInt(go.page, 0, 9999, -1);
+          if (gp < 0) continue;
+          gOut.page = gp;
+        }
+        if (go.kind === 'colour') {
+          var gc = clampInt(go.color, 0, 9999, -1);
+          if (gc < 0 || gc >= palette.length) continue;
+          gOut.color = gc;
+        }
+        var gby = clampInt(go.by, 0, 1e15, 0);
+        if (gby) gOut.by = gby;
+        var glab = str(go.label, '').replace(/\s+/g, ' ').trim().slice(0, 120);
+        if (glab) gOut.label = glab;
+        if (go.done === true) gOut.done = true;
+        goals.push(gOut);
+      }
+      out.goals = goals;
+    }
 
     /* stash */
     var stash = {};
@@ -4475,6 +4584,22 @@
       }
     }
 
+    /* Wave K (audit): a symbol font's glyph run that landed in the name
+       column ('Zlnn9999MM', 'fZZyYiiii' on the WOCS robin key) is never a
+       colour name. The name is left empty (the app shows the floss table's)
+       and the row says so. */
+    var soupNames = 0;
+    for (i = 0; i < entries.length; i++) {
+      if (entries[i].name && nameIsSoup(entries[i].name)) {
+        entries[i].name = '';
+        entries[i].nameUnreadable = true;
+        soupNames++;
+      }
+    }
+    if (soupNames) {
+      pushOnce(warnings, soupNames + ' colour ' + plural(soupNames, 'name') + ' could not be read (chart symbols where the name should be)');
+    }
+
     /* ---------------- confidence (B3.3 step 6) ---------------- */
     var nEntries = entries.length;
     var withCount = 0, withSymbol = 0, withName = 0;
@@ -4527,6 +4652,11 @@
     }
 
     if (!nEntries) pushOnce(warnings, 'no colour key found');
+    /* Wave K: a key in a brand we have no colour table for (J. & P. Coats
+       in the Orr books) is said so, not read as DMC numbers. */
+    if (!nEntries && /\bJ\.?\s*(?:&|and)\s*P\.?\s*Coats\b|\bCoats\s*(?:&|and)\s*Clark\b/i.test(String(text || ''))) {
+      pushOnce(warnings, 'the key gives J. & P. Coats numbers; there is no colour table for that brand, so its rows are left blank');
+    }
 
     /* What kind of thing did we just read? The importer needs one word for
        the banner, and 'none' is a perfectly good answer for a page of
@@ -4561,6 +4691,24 @@
    * declared, so `Z B5200 1 2401 white` drops the Anchor and Madeira numbers
    * instead of reading them as a colour name or a stitch count.
    */
+  /**
+   * nameIsSoup(name) -> true when a "name" is chart-symbol glyphs: a word
+   * that mixes letters and digits ('Zlnn9999MM'), or three of one character
+   * in a row ('fZZyYiiii', 'nnn'). No DMC, Anchor or Madeira name does either.
+   */
+  function nameIsSoup(name) {
+    var toks = String(name || '').split(/\s+/);
+    for (var i = 0; i < toks.length; i++) {
+      var t = toks[i];
+      if (!t) continue;
+      if (/\d/.test(t) && /[A-Za-z]/.test(t) && !/^[A-Za-z]?\d{1,4}[A-Za-z]?$/.test(t)) return true;
+      if (/(.)\1\1/.test(t)) return true;
+    }
+    return false;
+  }
+
+  var THREAD_WORD_RE =/^(?:cotton|coton|mouline|mouliné|stranded|floss|perle|pearl|retors|embroidery|special|art\.?)$/i;
+
   function parseKeyRow(rawLine, kind, brandRe, docBrand, defaultStrands, inBlock, altCols, dmcTable) {
     var cleaned = cleanKeyLine(rawLine);
     if (!cleaned) return null;
@@ -4617,10 +4765,15 @@
     var blendCode = null;
     var bm = /\b(\d{3,5}|B5200|Blanc|Ecru|White)\s*(?:\+|\/|&|\band\b)\s*(\d{3,5}|B5200|Blanc|Ecru|White)\b/i.exec(cleaned);
 
-    var i = 0, symbol = forcedSymbol, brand = '';
+    var i = 0, symbol = forcedSymbol, brand = '', threadWord = false;
     while (i < toks.length) {
       var t = toks[i];
       if (!brand && brandRe.test(t)) { brand = canonBrand(t) || t; i++; continue; }
+      /* Wave K (ocr follow-up): "DMC Cotton 816 garnet", the old printed
+         style an OCR'd Antique Pattern Library key reads as. A thread word
+         straight after the brand is skipped, but then the code must be one
+         the brand's table knows (checked below): never a guess. */
+      if (brand && !threadWord && THREAD_WORD_RE.test(t)) { threadWord = true; i++; continue; }
       if (CODE_TOKEN_RE.test(t)) break;
       if (i <= 2 && symbolish(t)) { if (!symbol) symbol = t; i++; continue; }
       return null;
@@ -4654,6 +4807,7 @@
     var codeOk = !!hex || !!brand || NAMED_CODE_RE.test(code) || newDmc ||
       /^\d{3,5}$/.test(code) || (!!docBrand && inBlock && /^\d{2}$/.test(code));
     if (!codeOk) return null;
+    if (threadWord && !hex) return null;
 
     /* ---- name + trailing numbers ---- */
     var rest = toks.slice(i);
@@ -4990,6 +5144,28 @@
       }
     }
 
+    /* Wave K (#19): done squares hatched, so the print shows what is left */
+    if (o.done) {
+      var hd = [];
+      for (y = 0; y < rows; y++) {
+        var hr = -1;
+        for (x = 0; x <= cols; x++) {
+          var ci2 = (y0 + y) * W + (x0 + x);
+          var on = x < cols && cells[ci2] >= 0 && ((o.done[ci2 >> 3] || 0) >> (ci2 & 7)) & 1;
+          if (on && hr < 0) hr = x;
+          if (!on && hr >= 0) {
+            hd.push('M' + (P.l + hr * C) + ' ' + (P.t + y * C) + 'h' + ((x - hr) * C) + 'v' + C + 'h-' + ((x - hr) * C) + 'z');
+            hr = -1;
+          }
+        }
+      }
+      if (hd.length) {
+        out.push('<defs><pattern id="hatch-' + xmlEsc(o.label).replace(/[^A-Za-z0-9]/g, '') + '" width="4" height="4" patternUnits="userSpaceOnUse">' +
+          '<path d="M0 4L4 0" stroke="#555555" stroke-width="0.8"/></pattern></defs>');
+        out.push('<path class="done" fill="url(#hatch-' + xmlEsc(o.label).replace(/[^A-Za-z0-9]/g, '') + ')" d="' + hd.join('') + '"/>');
+      }
+    }
+
     /* minor grid and 10x10 majors: one <path> each */
     var d = [], dm = [];
     for (x = 0; x <= cols; x++) {
@@ -5045,6 +5221,26 @@
       if (kp.x < x0 || kp.x > x0 + cols || kp.y < y0 || kp.y > y0 + rows) continue;
       out.push('<circle cx="' + round2(P.l + (kp.x - x0) * C) + '" cy="' +
         round2(P.t + (kp.y - y0) * C) + '" r="' + (C * 0.24) + '" fill="#111111"/>');
+    }
+
+    /* Wave K (#19): the overlap from the neighbouring pages, greyed */
+    if (o.core) {
+      var gx0 = (o.core.x0 - x0) * C, gy0 = (o.core.y0 - y0) * C, gx1 = (o.core.x1 + 1 - x0) * C, gy1 = (o.core.y1 + 1 - y0) * C;
+      out.push('<path class="overlap" fill="#ffffff" fill-opacity="0.6" fill-rule="evenodd" d="M' + P.l + ' ' + P.t +
+        'h' + (cols * C) + 'v' + (rows * C) + 'h-' + (cols * C) + 'z M' + (P.l + gx0) + ' ' + (P.t + gy0) +
+        'H' + (P.l + gx1) + 'V' + (P.t + gy1) + 'H' + (P.l + gx0) + 'z"/>');
+    }
+    /* parked threads: a corner triangle in the floss colour */
+    var parks = o.parking || [];
+    for (i = 0; i < parks.length; i++) {
+      var pk = parks[i];
+      if (typeof pk.x !== 'number' || pk.x < x0 || pk.x >= x0 + cols || pk.y < y0 || pk.y >= y0 + rows) continue;
+      var cx0 = P.l + (pk.x - x0) * C, cy0 = P.t + (pk.y - y0) * C, t3 = C * 0.55;
+      var corner = pk.corner || 'tl', fx = corner.charAt(1) === 'r' ? cx0 + C : cx0, fy = corner.charAt(0) === 'b' ? cy0 + C : cy0;
+      var sx = corner.charAt(1) === 'r' ? -t3 : t3, sy = corner.charAt(0) === 'b' ? -t3 : t3;
+      var pe = palette[pk.paletteIndex];
+      out.push('<path class="park" d="M' + fx + ' ' + fy + 'h' + sx + 'L' + fx + ' ' + (fy + sy) + 'Z" fill="' +
+        (pe ? printHex(pe) : '#111111') + '" stroke="#111111" stroke-width="0.4"/>');
     }
 
     /* margin numbering every 10 stitches, top/bottom and both sides */
@@ -5257,11 +5453,49 @@
       var back = Array.isArray(chart.back) ? chart.back : [];
       var knots = Array.isArray(chart.knots) ? chart.knots : [];
       var tilesX = Math.ceil(W / sppW), tilesY = Math.ceil(H / sppH);
-      for (var ty = 0; ty < tilesY; ty++) {
-        for (var tx = 0; tx < tilesX; tx++) {
-          var x0 = tx * sppW, y0 = ty * sppH;
-          var cols = Math.min(sppW, W - x0), rows = Math.min(sppH, H - y0);
-          var label = pageLabel(tx, ty);
+      /* Wave K (#19): "print what's left". The pattern's own page tiling
+         and numbers (p9 on paper is p9 here), done squares hatched, parked
+         threads marked, a greyed overlap from the neighbours; pages with
+         nothing left can be skipped. */
+      var tiles = [];
+      var regionPages = (Array.isArray(data.pages) ? data.pages : []).filter(function (p) { return p && p.region; });
+      if (opts.pageNumbers === 'original' && regionPages.length) {
+        regionPages.forEach(function (p) {
+          var lab = /(\d+)\s*$/.exec(str(p.label, ''));
+          tiles.push({ x0: p.region.x, y0: p.region.y, cols: Math.min(p.region.w, W - p.region.x), rows: Math.min(p.region.h, H - p.region.y),
+            label: 'p' + (lab ? lab[1] : (p.n + 1)) });
+        });
+      } else {
+        for (var ty0 = 0; ty0 < tilesY; ty0++) {
+          for (var tx0 = 0; tx0 < tilesX; tx0++) {
+            tiles.push({ x0: tx0 * sppW, y0: ty0 * sppH, cols: Math.min(sppW, W - tx0 * sppW), rows: Math.min(sppH, H - ty0 * sppH), label: pageLabel(tx0, ty0) });
+          }
+        }
+      }
+      var doneB = opts.progress && isObj(data.progress) && data.progress.mode !== 'counts' ? b64ToBytes(str(data.progress.done, '')) : null;
+      var ov = clampInt(opts.overlap, 0, 5, 0);
+      var parkList = opts.parking ? (Array.isArray(data.parking) ? data.parking : []) : [];
+      for (var tt = 0; tt < tiles.length; tt++) {
+        var T = tiles[tt];
+        var x0 = T.x0, y0 = T.y0, cols = T.cols, rows = T.rows, label = T.label, core = null;
+        if (cols <= 0 || rows <= 0) continue;
+        if (doneB && opts.remaining) {
+          var anyLeft = false;
+          for (var ry = y0; ry < y0 + rows && !anyLeft; ry++) {
+            for (var rx = x0; rx < x0 + cols; rx++) {
+              var ri = ry * W + rx;
+              if (c.cells[ri] >= 0 && !(((doneB[ri >> 3] || 0) >> (ri & 7)) & 1)) { anyLeft = true; break; }
+            }
+          }
+          if (!anyLeft) continue;
+        }
+        if (ov) {
+          core = { x0: x0, y0: y0, x1: x0 + cols - 1, y1: y0 + rows - 1 };
+          var nx0 = Math.max(0, x0 - ov), ny0 = Math.max(0, y0 - ov);
+          cols = Math.min(W, x0 + cols + ov) - nx0; rows = Math.min(H, y0 + rows + ov) - ny0;
+          x0 = nx0; y0 = ny0;
+        }
+        {
           var used = {}, anyUsed = false;
           for (var uy = 0; uy < rows; uy++) {
             for (var ux = 0; ux < cols; ux++) {
@@ -5276,7 +5510,8 @@
           html.push(tileSvg({
             cells: c.cells, W: W, x0: x0, y0: y0, cols: cols, rows: rows,
             color: color, syms: syms, palette: palette, back: back, knots: knots,
-            designW: W, designH: H, label: label
+            designW: W, designH: H, label: label,
+            done: doneB, core: core, parking: parkList
           }));
           if (withKey && anyUsed) html.push(keyStrip(palette, syms, used, color));
           html.push('</section>');
@@ -5306,18 +5541,178 @@
   /* pdf.js operator numbers; overridden from window.pdfjsLib.OPS when present. */
   var PDF_OPS_FALLBACK = {
     save: 10, restore: 11, transform: 12, rectangle: 19, constructPath: 91,
-    setFillRGBColor: 59, setFillGray: 57, setFillCMYKColor: 61
+    setFillRGBColor: 59, setFillGray: 57, setFillCMYKColor: 61,
+    /* wave K: what a path is painted with, and its segment codes */
+    fill: 22, eoFill: 23, fillStroke: 24, eoFillStroke: 25, closeFillStroke: 26,
+    closeEOFillStroke: 27, stroke: 20, closeStroke: 21,
+    moveTo: 13, lineTo: 14, curveTo: 15, curveTo2: 16, curveTo3: 17, closePath: 18,
+    setLineWidth: 2, setStrokeRGBColor: 58, setStrokeGray: 56, setStrokeCMYKColor: 60
   };
 
   function pdfOps() {
     var O = window.pdfjsLib && window.pdfjsLib.OPS;
     if (!O || typeof O.constructPath !== 'number') return PDF_OPS_FALLBACK;
-    return {
-      save: O.save, restore: O.restore, transform: O.transform,
-      rectangle: O.rectangle, constructPath: O.constructPath,
-      setFillRGBColor: O.setFillRGBColor, setFillGray: O.setFillGray,
-      setFillCMYKColor: O.setFillCMYKColor
-    };
+    var out = {};
+    for (var k in PDF_OPS_FALLBACK) {
+      if (PDF_OPS_FALLBACK.hasOwnProperty(k)) out[k] = typeof O[k] === 'number' ? O[k] : PDF_OPS_FALLBACK[k];
+    }
+    return out;
+  }
+
+  /* ---- wave K: the symbol drawn in a cell, as a signature -------------- *
+   * KG-Chart draws each cell's symbol as filled paths over the coloured
+   * square (white on dark squares, near-black on light ones). Two key
+   * colours that the PDF prints in ONE RGB (pacman: DMC 349 and DMC 3843 are
+   * both 5b5b5b on the symbol pages) are still told apart by that symbol, so
+   * the reader keeps, per cell, an 8 x 8 coverage mask of whatever is drawn
+   * inside it. The mask ignores the symbol's own colour (it flips with the
+   * square's lightness) and is scale-free, so a key swatch's symbol and a
+   * chart cell's symbol give the same mask.
+   * ------------------------------------------------------------------- */
+  /* 16 samples a side: KG's thinnest bar is ~0.084 of a cell, so a coarser
+     grid can fall between its edges and lose the symbol (measured: at 8 x 8
+     pacman's DMC 3843 "-" vanished in some cells). */
+  var SIG_N = 16;
+  var SIG_NEAR = 3;       // maskNear: the same symbol rasterised a hair apart
+  var SIG_FAR = 16;       // maskNear: further than this is not the legend's symbol
+
+  /** Polygons (flat [x,y,...] in page space) of one constructPath. */
+  function pathPolys(codes, co, ctm, OPS) {
+    var polys = [], cur = null, j = 0;
+    function pt(x, y) {
+      cur.push(x * ctm[0] + y * ctm[2] + ctm[4], x * ctm[1] + y * ctm[3] + ctm[5]);
+    }
+    for (var q = 0; q < codes.length; q++) {
+      var c = codes[q];
+      if (c === OPS.rectangle) {
+        var rx = co[j], ry = co[j + 1], rw = co[j + 2], rh = co[j + 3];
+        j += 4;
+        cur = [];
+        pt(rx, ry); pt(rx + rw, ry); pt(rx + rw, ry + rh); pt(rx, ry + rh);
+        polys.push(cur); cur = null;
+      } else if (c === OPS.moveTo) {
+        cur = []; polys.push(cur); pt(co[j], co[j + 1]); j += 2;
+      } else if (c === OPS.lineTo) {
+        if (!cur) { cur = []; polys.push(cur); }
+        pt(co[j], co[j + 1]); j += 2;
+      } else if (c === OPS.curveTo) {
+        if (!cur) { cur = []; polys.push(cur); }
+        pt(co[j], co[j + 1]); pt(co[j + 2], co[j + 3]); pt(co[j + 4], co[j + 5]); j += 6;
+      } else if (c === OPS.curveTo2 || c === OPS.curveTo3) {
+        if (!cur) { cur = []; polys.push(cur); }
+        pt(co[j], co[j + 1]); pt(co[j + 2], co[j + 3]); j += 4;
+      } else if (c === OPS.closePath) {
+        cur = null;
+      }
+    }
+    var out = [];
+    for (var p = 0; p < polys.length; p++) if (polys[p].length >= 6) out.push(polys[p]);
+    return out;
+  }
+
+  /** A collected shape's polygons (an axis-aligned rect builds them on demand). */
+  function shapePolys(s) {
+    if (!s.polys) s.polys = [[s.x0, s.y0, s.x1, s.y0, s.x1, s.y1, s.x0, s.y1]];
+    return s.polys;
+  }
+
+  function polysBox(polys) {
+    var x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (var p = 0; p < polys.length; p++) {
+      var a = polys[p];
+      for (var k = 0; k < a.length; k += 2) {
+        if (a[k] < x0) x0 = a[k];
+        if (a[k] > x1) x1 = a[k];
+        if (a[k + 1] < y0) y0 = a[k + 1];
+        if (a[k + 1] > y1) y1 = a[k + 1];
+      }
+    }
+    return { x0: x0, y0: y0, x1: x1, y1: y1 };
+  }
+
+  /** Even-odd point-in-polygon over one shape's sub-polygons. */
+  function insideShape(polys, x, y) {
+    var inside = false;
+    for (var p = 0; p < polys.length; p++) {
+      var a = polys[p], n = a.length;
+      for (var i = 0, k = n - 2; i < n; k = i, i += 2) {
+        var yi = a[i + 1], yk = a[k + 1];
+        if ((yi > y) !== (yk > y) && x < (a[k] - a[i]) * (y - yi) / (yk - yi) + a[i]) inside = !inside;
+      }
+    }
+    return inside;
+  }
+
+  /**
+   * shapeMask(shapes, box) -> 16 hex chars (64 bits, row-major from the TOP
+   * of the box) or '' when nothing covers a sample. `box` is in page space
+   * (y up), `shapes` an array of polygon lists.
+   */
+  function shapeMask(shapes, box) {
+    var bw = box.x1 - box.x0, bh = box.y1 - box.y0;
+    if (!(bw > 0) || !(bh > 0) || !shapes.length) return '';
+    var bits = [], any = false;
+    for (var r = 0; r < SIG_N; r++) {
+      var y = box.y1 - (r + 0.5) * bh / SIG_N;
+      var byte = 0;
+      for (var c = 0; c < SIG_N; c++) {
+        var x = box.x0 + (c + 0.5) * bw / SIG_N;
+        for (var s = 0; s < shapes.length; s++) {
+          if (insideShape(shapes[s], x, y)) { byte |= (1 << c); any = true; break; }
+        }
+      }
+      bits.push(byte);
+    }
+    if (!any) return '';
+    var hex = '', W = SIG_N / 4;
+    for (var b = 0; b < bits.length; b++) {
+      var hs = bits[b].toString(16);
+      while (hs.length < W) hs = '0' + hs;
+      hex += hs;
+    }
+    return hex;
+  }
+
+  function maskRows(m) {
+    var W = SIG_N / 4, rows = [];
+    for (var i = 0; i < SIG_N; i++) rows.push(m ? parseInt(m.substr(i * W, W), 16) || 0 : 0);
+    return rows;
+  }
+  function popc(x) { var d = 0; while (x) { d += x & 1; x >>>= 1; } return d; }
+
+  /**
+   * maskNear(a, b) -> inked samples of either mask that are more than one
+   * sample away from any inked sample of the other. A thin bar rasterised
+   * one column over costs nothing; a missing or extra stroke costs its length.
+   */
+  function maskNear(a, b) {
+    if (a === b) return 0;
+    var ra = maskRows(a), rb = maskRows(b), full = (1 << SIG_N) - 1;
+    function dil(rows, i) {
+      var v = 0;
+      for (var d = -1; d <= 1; d++) {
+        var r = rows[i + d];
+        if (r === undefined) continue;
+        v |= r | (r << 1) | (r >>> 1);
+      }
+      return v & full;
+    }
+    var n = 0;
+    for (var i = 0; i < SIG_N; i++) {
+      n += popc(ra[i] & ~dil(rb, i) & full) + popc(rb[i] & ~dil(ra, i) & full);
+    }
+    return n;
+  }
+
+  /** Hamming distance between two masks ('' is the empty mask). */
+  function maskDist(a, b) {
+    if (a === b) return 0;
+    var d = 0, W = SIG_N / 4;
+    for (var i = 0; i < SIG_N; i++) {
+      var x = (a ? parseInt(a.substr(i * W, W), 16) || 0 : 0) ^ (b ? parseInt(b.substr(i * W, W), 16) || 0 : 0);
+      while (x) { d += x & 1; x >>= 1; }
+    }
+    return d;
   }
 
   function mulCtm(a, b) {
@@ -5402,14 +5797,72 @@
   }
 
   /** Every axis-aligned rectangle on a page, in page space, with its fill. */
-  function collectRects(ops, OPS) {
+  function colourOf(f, a, OPS) {
+    if (f === OPS.setFillRGBColor || f === OPS.setStrokeRGBColor) return hex6(a[0], a[1], a[2]);
+    if (f === OPS.setFillGray || f === OPS.setStrokeGray) {
+      var g = Math.round(num(a[0], 0) * 255);
+      return hex6(g, g, g);
+    }
+    var cc = num(a[0], 0), mm = num(a[1], 0), yy = num(a[2], 0), kk = num(a[3], 0);
+    return hex6(Math.round(255 * (1 - Math.min(1, cc + kk))),
+      Math.round(255 * (1 - Math.min(1, mm + kk))),
+      Math.round(255 * (1 - Math.min(1, yy + kk))));
+  }
+
+  function collectRects(ops, OPS, wantSegs) {
     var ctm = [1, 0, 0, 1, 0, 0], stack = [], fill = '000000';
     var rects = [], sizes = {};
+    /* wave K: every filled shape (for the cell symbols and the key swatches)
+       and every stroked straight segment (for backstitch), in page space */
+    var shapes = [], segs = [], stroke = '000000', lw = 1, lwStack = [];
+    var FILLS = {}, STROKES = {};
+    FILLS[OPS.fill] = FILLS[OPS.eoFill] = FILLS[OPS.fillStroke] = FILLS[OPS.eoFillStroke] = 1;
+    FILLS[OPS.closeFillStroke] = FILLS[OPS.closeEOFillStroke] = 1;
+    STROKES[OPS.stroke] = STROKES[OPS.closeStroke] = STROKES[OPS.fillStroke] = STROKES[OPS.eoFillStroke] = 1;
+    STROKES[OPS.closeFillStroke] = STROKES[OPS.closeEOFillStroke] = 1;
     var fns = ops.fnArray, args = ops.argsArray;
     for (var i = 0; i < fns.length; i++) {
       var f = fns[i], a = args[i];
-      if (f === OPS.save) { stack.push(ctm.slice()); }
-      else if (f === OPS.restore) { if (stack.length) ctm = stack.pop(); }
+      if (f === OPS.constructPath && a && a[0] && a[1]) {
+        var paint = fns[i + 1];
+        if (FILLS[paint] && a[0].length === 1 && a[0][0] === OPS.rectangle && !ctm[1] && !ctm[2]) {
+          /* the common case (every lattice square): no polygon until one is
+             needed (rectPolys) */
+          var qx0 = a[1][0] * ctm[0] + a[1][1] * ctm[2] + ctm[4];
+          var qy0 = a[1][0] * ctm[1] + a[1][1] * ctm[3] + ctm[5];
+          var qx1 = qx0 + a[1][2] * ctm[0], qy1 = qy0 + a[1][3] * ctm[3];
+          shapes.push({ polys: null, x0: Math.min(qx0, qx1), y0: Math.min(qy0, qy1),
+            x1: Math.max(qx0, qx1), y1: Math.max(qy0, qy1), hex: fill, rect: true, curve: false });
+        } else if (FILLS[paint]) {
+          var sp = pathPolys(a[0], a[1], ctm, OPS);
+          if (sp.length) {
+            var sb = polysBox(sp);
+            var curve = false;
+            for (var cq = 0; cq < a[0].length; cq++) {
+              if (a[0][cq] === OPS.curveTo || a[0][cq] === OPS.curveTo2 || a[0][cq] === OPS.curveTo3) { curve = true; break; }
+            }
+            shapes.push({ polys: sp, x0: sb.x0, y0: sb.y0, x1: sb.x1, y1: sb.y1, hex: fill,
+              rect: a[0].length === 1 && a[0][0] === OPS.rectangle, curve: curve });
+          }
+        }
+        if (wantSegs && STROKES[paint]) {
+          var lp = pathPolys(a[0], a[1], ctm, OPS);
+          var scale = Math.sqrt(Math.abs(ctm[0] * ctm[3] - ctm[1] * ctm[2])) || 1;
+          for (var li = 0; li < lp.length; li++) {
+            var L = lp[li];
+            for (var lk = 0; lk + 3 < L.length; lk += 2) {
+              segs.push({ x1: L[lk], y1: L[lk + 1], x2: L[lk + 2], y2: L[lk + 3], hex: stroke, width: lw * scale });
+            }
+          }
+        }
+      }
+      if (f === OPS.setStrokeRGBColor || f === OPS.setStrokeGray || f === OPS.setStrokeCMYKColor) {
+        stroke = colourOf(f, a, OPS);
+      } else if (f === OPS.setLineWidth) {
+        lw = num(a[0], 1);
+      }
+      if (f === OPS.save) { stack.push(ctm.slice()); lwStack.push(lw); }
+      else if (f === OPS.restore) { if (stack.length) ctm = stack.pop(); if (lwStack.length) lw = lwStack.pop(); }
       else if (f === OPS.transform) { ctm = mulCtm([a[0], a[1], a[2], a[3], a[4], a[5]], ctm); }
       else if (f === OPS.setFillRGBColor) { fill = hex6(a[0], a[1], a[2]); }
       else if (f === OPS.setFillGray) {
@@ -5442,7 +5895,7 @@
         }
       }
     }
-    return { rects: rects, sizes: sizes };
+    return { rects: rects, sizes: sizes, shapes: shapes, segs: segs };
   }
 
   /** Single-character text items on a page, keyed by font + glyph. */
@@ -5603,10 +6056,26 @@
     var gc = Math.ceil(cols / K), gr = Math.ceil(rows / K);
     if (!lat.forced && (gc < 10 || gr < 10)) return null;
     if (gc < 1 || gr < 1) return null;
-    var grid = [];
+    var grid = [], mixed = 0;
     for (var gy = 0; gy < gr; gy++) {
-      for (var gx = 0; gx < gc; gx++) grid.push(sub[(gy * K) * cols + (gx * K)]);
+      for (var gx = 0; gx < gc; gx++) {
+        var v0 = sub[(gy * K) * cols + (gx * K)];
+        grid.push(v0);
+        /* Wave K: a square whose sub-squares differ is a fractional stitch
+           (KG-Chart's quarters); counted so the read can say so */
+        if (K > 1) {
+          var diff = false;
+          for (var dy = 0; dy < K && !diff; dy++) {
+            for (var dx = 0; dx < K; dx++) {
+              var yy = gy * K + dy, xx = gx * K + dx;
+              if (yy < rows && xx < cols && sub[yy * cols + xx] !== v0) { diff = true; break; }
+            }
+          }
+          if (diff) mixed++;
+        }
+      }
     }
+    lat.mixed = mixed;
     lat.K = K;
     lat.gc = gc;
     lat.gr = gr;
@@ -5690,9 +6159,9 @@
    * { pending: marks, hint, nums } when it looks like one but was too narrow
    * to fit a lattice to on its own, or null.
    */
-  function extractPage(page, OPS) {
+  function extractPage(page, OPS, wantSegs) {
     return page.getOperatorList().then(function (ops) {
-      var col = collectRects(ops, OPS);
+      var col = collectRects(ops, OPS, wantSegs);
       var dom = modeKey(col.sizes);
       var lat = null, source = 'rects', keep = null;
       if (dom.value !== null && dom.votes >= 40) {
@@ -5727,18 +6196,682 @@
           tile.source = source;
           tile.place = placeTile(tile, g.nums);
           tile.pageBox = box;
+          tile.sig = tileSigs(tile, col.shapes, g.marks);
+          tile.segs = col.segs.length <= 50000 ? col.segs : [];
+          tile.dots = tileDots(tile, col.shapes);
           return { tile: tile };
         }
         if (keep && keep.length >= 40 && keep.length <= 20000 && hint > 0) {
-          return { pending: keep, hint: hint, nums: g.nums, pageBox: box };
+          return { pending: keep, hint: hint, nums: g.nums, pageBox: box, shapes: col.shapes, marks: g.marks, segs: col.segs };
         }
+        var leg = legendOf(col.shapes);
+        if (leg) return { legend: leg };
         return null;
       });
     }, function () { return null; });
   }
 
+  /* ---- wave K: tile geometry, cell symbols, knots, the key's swatches ---- */
+
+  /** A page-space point -> fractional (c, r) in the tile's cells, r from the top. */
+  function tileCellOf(t, x, y) {
+    var left = t.fx.origin + t.minA * t.fx.pitch;
+    var top = t.fy.origin + (t.maxB + 1) * t.fy.pitch;
+    return { c: (x - left) / t.cellW, r: (top - y) / t.cellH };
+  }
+
+  /** The page-space box of tile cell (col, row). */
+  function tileCellBox(t, col, row) {
+    var left = t.fx.origin + t.minA * t.fx.pitch;
+    var top = t.fy.origin + (t.maxB + 1) * t.fy.pitch;
+    return { x0: left + col * t.cellW, x1: left + (col + 1) * t.cellW,
+      y1: top - row * t.cellH, y0: top - (row + 1) * t.cellH };
+  }
+
+  /** A filled shape that is one of the lattice's own squares (or quarters). */
+  function isLatticeSquare(t, s) {
+    if (!s.rect) return false;
+    var w = s.x1 - s.x0, h = s.y1 - s.y0;
+    return (Math.abs(w - t.fx.pitch) <= t.fx.pitch * 0.25 && Math.abs(h - t.fy.pitch) <= t.fy.pitch * 0.25) ||
+      (Math.abs(w - t.cellW) <= t.cellW * 0.25 && Math.abs(h - t.cellH) <= t.cellH * 0.25);
+  }
+
+  /** A small round blob sitting on a lattice vertex: a French knot or a bead. */
+  function isVertexDot(t, s) {
+    if (!s.curve) return false;
+    var w = s.x1 - s.x0, h = s.y1 - s.y0;
+    if (w > t.cellW * 0.75 || h > t.cellH * 0.75) return false;
+    var p = tileCellOf(t, (s.x0 + s.x1) / 2, (s.y0 + s.y1) / 2);
+    return Math.abs(p.c * 2 - Math.round(p.c * 2)) < 0.3 && Math.abs(p.r * 2 - Math.round(p.r * 2)) < 0.3 &&
+      (Math.abs(p.c - Math.round(p.c)) < 0.15 || Math.abs(p.r - Math.round(p.r)) < 0.15);
+  }
+
+  /**
+   * tileSigs(tile, shapes, textMarks) -> string[gc * gr]
+   * Per cell, the 8 x 8 mask of the symbol drawn inside it ('' for none),
+   * plus '|' + font glyph id when a text glyph sits in the cell.
+   */
+  function tileSigs(t, shapes, textMarks) {
+    var n = t.gc * t.gr, sig = new Array(n), per = {}, i, k;
+    t.sigPolys = t.sigPolys || {};
+    for (i = 0; i < n; i++) sig[i] = '';
+    for (i = 0; i < shapes.length; i++) {
+      var s = shapes[i];
+      if (isLatticeSquare(t, s)) continue;
+      if (s.x1 - s.x0 > t.cellW * 1.1 || s.y1 - s.y0 > t.cellH * 1.1) continue;
+      if (isVertexDot(t, s)) continue;
+      var p = tileCellOf(t, (s.x0 + s.x1) / 2, (s.y0 + s.y1) / 2);
+      var col = Math.floor(p.c), row = Math.floor(p.r);
+      if (col < 0 || row < 0 || col >= t.gc || row >= t.gr) continue;
+      var idx = row * t.gc + col;
+      (per[idx] = per[idx] || []).push(shapePolys(s));
+    }
+    var cache = {}, keys = Object.keys(per);
+    for (k = 0; k < keys.length; k++) {
+      var ci = +keys[k], cr = Math.floor(ci / t.gc), cc = ci - cr * t.gc;
+      var box = tileCellBox(t, cc, cr), list = per[ci];
+      /* the same symbol at the same place in its cell gives the same key */
+      var qk = [];
+      for (var a = 0; a < list.length; a++) {
+        for (var b = 0; b < list[a].length; b++) {
+          var poly = list[a][b], q = [];
+          for (var v = 0; v < poly.length; v += 2) {
+            q.push(Math.round((poly[v] - box.x0) / t.cellW * 32), Math.round((poly[v + 1] - box.y0) / t.cellH * 32));
+          }
+          qk.push(q.join(','));
+        }
+      }
+      var key = qk.sort().join(';');
+      if (!cache.hasOwnProperty(key)) {
+        cache[key] = shapeMask(list, box);
+        /* one drawing of each symbol, in a unit box (y down), for R5 */
+        if (cache[key] && !t.sigPolys[cache[key]]) t.sigPolys[cache[key]] = unitPolys(list, box);
+      }
+      sig[ci] = cache[key];
+    }
+    if (t.source !== 'glyphs' && textMarks && textMarks.length) {
+      for (i = 0; i < textMarks.length; i++) {
+        var m = textMarks[i];
+        var tp = tileCellOf(t, m.x + t.cellW * 0.3, m.y + t.cellH * 0.3);
+        var tc = Math.floor(tp.c), tr = Math.floor(tp.r);
+        if (tc < 0 || tr < 0 || tc >= t.gc || tr >= t.gr) continue;
+        sig[tr * t.gc + tc] += '|' + m.id;
+      }
+    }
+    return sig;
+  }
+
+  /** Knots / beads on a tile, in tile cells (x, y on the half-cell lattice). */
+  function tileDots(t, shapes) {
+    var out = [];
+    for (var i = 0; i < shapes.length; i++) {
+      var s = shapes[i];
+      if (!isVertexDot(t, s)) continue;
+      var p = tileCellOf(t, (s.x0 + s.x1) / 2, (s.y0 + s.y1) / 2);
+      out.push({ x: Math.round(p.c * 2) / 2, y: Math.round(p.r * 2) / 2, r: (s.x1 - s.x0) / 2 / t.cellW, hex: s.hex });
+    }
+    return out;
+  }
+
+  /**
+   * legendOf(shapes) -> { rows: [{ hex, mask, box }] } | null
+   * A KG-Chart key page draws one swatch square per colour in a column, each
+   * with the colour's symbol drawn on it, top to bottom in key order.
+   */
+  function legendOf(shapes) {
+    var squares = [], i, j;
+    for (i = 0; i < shapes.length; i++) {
+      var s = shapes[i];
+      if (!s.rect) continue;
+      var w = s.x1 - s.x0, h = s.y1 - s.y0;
+      if (!(w > 2) || Math.abs(w - h) > w * 0.08) continue;
+      squares.push(s);
+    }
+    /* a key has tens of swatches, not thousands (a page of thousands of
+       squares that did not read as a chart is not a key either) */
+    if (squares.length < 2 || squares.length > 1500 || shapes.length > 30000) return null;
+    /* the biggest column of same-size squares */
+    var best = null;
+    for (i = 0; i < squares.length; i++) {
+      var col = [squares[i]], wi = squares[i].x1 - squares[i].x0;
+      for (j = 0; j < squares.length; j++) {
+        if (j === i) continue;
+        var wj = squares[j].x1 - squares[j].x0;
+        if (Math.abs(wj - wi) <= wi * 0.05 && Math.abs(squares[j].x0 - squares[i].x0) <= wi * 0.1) col.push(squares[j]);
+      }
+      if (!best || col.length > best.length) best = col;
+      if (best.length > squares.length / 2) break;
+    }
+    if (!best || best.length < 2) return null;
+    best.sort(function (a, b) { return b.y1 - a.y1 || a.x0 - b.x0; });
+    /* drop exact duplicates (a square drawn twice) */
+    var uniq = [];
+    for (i = 0; i < best.length; i++) {
+      if (uniq.length && Math.abs(uniq[uniq.length - 1].y1 - best[i].y1) < (best[i].y1 - best[i].y0) * 0.2) continue;
+      uniq.push(best[i]);
+    }
+    if (uniq.length < 2) return null;
+    var rows = [], withGlyph = 0;
+    for (i = 0; i < uniq.length; i++) {
+      var sq = uniq[i], inner = [], sw = sq.x1 - sq.x0;
+      for (j = 0; j < shapes.length; j++) {
+        var g = shapes[j];
+        if (g === sq) continue;
+        if (g.x0 < sq.x0 - sw * 0.02 || g.x1 > sq.x1 + sw * 0.02 || g.y0 < sq.y0 - sw * 0.02 || g.y1 > sq.y1 + sw * 0.02) continue;
+        if (g.rect && Math.abs((g.x1 - g.x0) - sw) < sw * 0.1 && Math.abs((g.y1 - g.y0) - sw) < sw * 0.1) continue;
+        inner.push(shapePolys(g));
+      }
+      var mask = shapeMask(inner, { x0: sq.x0, y0: sq.y0, x1: sq.x1, y1: sq.y1 });
+      if (mask) withGlyph++;
+      rows.push({ hex: sq.hex, mask: mask, polys: inner, box: { x0: sq.x0, y0: sq.y0, x1: sq.x1, y1: sq.y1 } });
+    }
+    /* a column of plain squares with nothing on them is not a key */
+    if (withGlyph < rows.length * 0.5) return null;
+    return { rows: rows };
+  }
+
+  /**
+   * Page-space shapes (each a list of polygons) -> the same in a unit box
+   * (0..1, y DOWN), 3 decimals. Shapes stay separate: a pixel is inked when
+   * it is inside ANY shape (each shape even-odd on its own), so two bars that
+   * cross make a "+" and a ring drawn as one shape keeps its hole.
+   */
+  function unitPolys(shapeList, box) {
+    var bw = box.x1 - box.x0, bh = box.y1 - box.y0, out = [];
+    for (var a = 0; a < shapeList.length; a++) {
+      var shape = [];
+      for (var b = 0; b < shapeList[a].length; b++) {
+        var p = shapeList[a][b], q = [];
+        for (var v = 0; v < p.length; v += 2) {
+          q.push(Math.round((p[v] - box.x0) / bw * 1000) / 1000, Math.round((box.y1 - p[v + 1]) / bh * 1000) / 1000);
+        }
+        shape.push(q);
+      }
+      if (shape.length) out.push(shape);
+    }
+    return out;
+  }
+
+  /**
+   * glyphFromPolys(unitPolys, opts) -> palette glyph { w, h, bits, path, clean, source }
+   * (the same shape as XSKeyRead's Glyph). `bits` is 16 x 16, 1 bit a pixel,
+   * row-major from the top, base64; `path` an SVG path in a 100 x 100 box
+   * (y down), null when it would be over 1 KB.
+   */
+  function glyphFromPolys(polys, opts) {
+    opts = isObj(opts) ? opts : {};
+    if (!Array.isArray(polys) || !polys.length) return null;
+    /* accept a flat list of polygons as one shape per polygon */
+    var shapes = [], i, r, c;
+    for (i = 0; i < polys.length; i++) {
+      if (!Array.isArray(polys[i]) || !polys[i].length) continue;
+      shapes.push(typeof polys[i][0] === 'number' ? [polys[i]] : polys[i]);
+    }
+    if (!shapes.length) return null;
+    var N = 16, bits = new Uint8Array(N * N), any = false;
+    for (r = 0; r < N; r++) {
+      for (c = 0; c < N; c++) {
+        var x = (c + 0.5) / N, y = (r + 0.5) / N;
+        for (i = 0; i < shapes.length; i++) {
+          if (insideShape(shapes[i], x, y)) { bits[r * N + c] = 1; any = true; break; }
+        }
+      }
+    }
+    if (!any) return null;
+    var parts = [], flat = [];
+    for (i = 0; i < shapes.length; i++) for (var f = 0; f < shapes[i].length; f++) flat.push(shapes[i][f]);
+    for (i = 0; i < flat.length; i++) {
+      var p = flat[i], s = 'M';
+      for (var v = 0; v < p.length; v += 2) {
+        s += (v ? ' L' : '') + Math.round(p[v] * 100) + ' ' + Math.round(p[v + 1] * 100);
+      }
+      parts.push(s + 'Z');
+    }
+    var path = parts.join('');
+    return {
+      w: N, h: N, bits: packBits(bits, N * N),
+      path: path.length <= 1024 ? path : null,
+      clean: !!opts.clean,
+      source: opts.source || 'pdf-path'
+    };
+  }
+
+  /**
+   * tileGraphics(tile, out) — the tile's stroked segments and vertex dots, in
+   * whole-chart cells, appended to out.segments / out.circles (#10 input).
+   */
+  function tileGraphics(t, out) {
+    if (!t || !t.place) return;
+    var px = t.place.col, py = t.place.row, i;
+    var segs = t.segs || [];
+    /* the grid itself: whatever colour + width strokes a fifth or more of
+       the page's segments is grid, not backstitch */
+    var tally = {}, gridKey = {};
+    for (i = 0; i < segs.length; i++) {
+      var tk = segs[i].hex + '|' + Math.round(segs[i].width * 100);
+      tally[tk] = (tally[tk] || 0) + 1;
+    }
+    for (var gk2 in tally) if (tally.hasOwnProperty(gk2) && tally[gk2] >= Math.max(20, segs.length * 0.2)) gridKey[gk2] = 1;
+    for (i = 0; i < segs.length; i++) {
+      var s = segs[i];
+      if (gridKey[s.hex + '|' + Math.round(s.width * 100)]) continue;
+      var a = tileCellOf(t, s.x1, s.y1), b = tileCellOf(t, s.x2, s.y2);
+      if (a.c < -0.05 || a.r < -0.05 || b.c < -0.05 || b.r < -0.05) continue;
+      if (a.c > t.gc + 0.05 || b.c > t.gc + 0.05 || a.r > t.gr + 0.05 || b.r > t.gr + 0.05) continue;
+      out.segments.push({ x1: a.c + px, y1: a.r + py, x2: b.c + px, y2: b.r + py, hex: s.hex,
+        width: Math.round(s.width / t.cellW * 1000) / 1000 });
+    }
+    var dots = t.dots || [];
+    for (i = 0; i < dots.length; i++) {
+      out.circles.push({ x: dots[i].x + px, y: dots[i].y + py, r: dots[i].r, hex: dots[i].hex });
+    }
+    t.segs = null;
+    t.dots = null;
+  }
+
+  /**
+   * normMask(unitShapes) -> mask of the symbol in its OWN box (aspect kept,
+   * centred). KG-Chart draws a key swatch's symbol bigger and lower in its
+   * square than the same symbol in a chart cell, so the legend is matched to
+   * the cells on this, not on the cell-relative mask.
+   */
+  function normMask(shapes) {
+    if (!Array.isArray(shapes) || !shapes.length) return '';
+    var x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity, a, b, v;
+    for (a = 0; a < shapes.length; a++) {
+      for (b = 0; b < shapes[a].length; b++) {
+        var p = shapes[a][b];
+        for (v = 0; v < p.length; v += 2) {
+          if (p[v] < x0) x0 = p[v];
+          if (p[v] > x1) x1 = p[v];
+          if (p[v + 1] < y0) y0 = p[v + 1];
+          if (p[v + 1] > y1) y1 = p[v + 1];
+        }
+      }
+    }
+    var side = Math.max(x1 - x0, y1 - y0);
+    if (!(side > 0)) return '';
+    var cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+    /* shapeMask samples a y-up box from its top: hand it the y-down unit
+       shapes with the box flipped accordingly */
+    var flipped = [];
+    for (a = 0; a < shapes.length; a++) {
+      var sh = [];
+      for (b = 0; b < shapes[a].length; b++) {
+        var q = shapes[a][b], f = [];
+        for (v = 0; v < q.length; v += 2) f.push(q[v], -q[v + 1]);
+        sh.push(f);
+      }
+      flipped.push(sh);
+    }
+    return shapeMask(flipped, { x0: cx - side / 2, x1: cx + side / 2, y0: -cy - side / 2, y1: -cy + side / 2 });
+  }
+
+  function sigMask(sig) {
+    var s = sig || '', b = s.indexOf('|');
+    return b < 0 ? s : s.slice(0, b);
+  }
+  function sigText(sig) {
+    var s = sig || '', b = s.indexOf('|');
+    return b < 0 ? '' : s.slice(b);
+  }
+
+  /**
+   * sigGroups(hist) -> [{ sig, n, members:[sig] }] largest first: the cells
+   * of one ink grouped by the symbol drawn in them. A group within 4 of 64
+   * samples of a bigger one (the same symbol, rasterised a hair apart) is
+   * folded into it.
+   */
+  function sigGroups(hist) {
+    var keys = Object.keys(hist), groups = [], i, j;
+    keys.sort(function (a, b) { return hist[b] - hist[a] || (a < b ? -1 : 1); });
+    for (i = 0; i < keys.length; i++) {
+      var k = keys[i], home = null;
+      for (j = 0; j < groups.length; j++) {
+        if (sigText(groups[j].sig) === sigText(k) && maskNear(sigMask(groups[j].sig), sigMask(k)) <= SIG_NEAR) { home = groups[j]; break; }
+      }
+      if (home) { home.n += hist[k]; home.members.push(k); }
+      else groups.push({ sig: k, n: hist[k], members: [k] });
+    }
+    return groups;
+  }
+
+  /** Unmatched key rows whose counts add up to n (2 or 3 of them), or null. */
+  function sumSubset(n, cand, entries) {
+    var tol = Math.max(2, n * 0.01), i, j, k;
+    for (i = 0; i < cand.length; i++) {
+      for (j = i + 1; j < cand.length; j++) {
+        var s2 = entries[cand[i]].stitchCount + entries[cand[j]].stitchCount;
+        if (Math.abs(s2 - n) <= tol) return [cand[i], cand[j]];
+      }
+    }
+    if (cand.length > 24) return null;
+    for (i = 0; i < cand.length; i++) {
+      for (j = i + 1; j < cand.length; j++) {
+        for (k = j + 1; k < cand.length; k++) {
+          var s3 = entries[cand[i]].stitchCount + entries[cand[j]].stitchCount + entries[cand[k]].stitchCount;
+          if (Math.abs(s3 - n) <= tol) return [cand[i], cand[j], cand[k]];
+        }
+      }
+    }
+    return null;
+  }
+
+  /**
+   * nameClasses(raw, sigs, inks, counts, entries, legends, sigPolys)
+   *   raw      Int32Array, per cell an index into inks (-1 empty)
+   *   sigs     per cell the symbol signature (tileSigs)
+   *   inks     the distinct fills ('5b5b5b', or 'font\u0001glyph')
+   *   counts   cells per ink
+   *   entries  parseKey entries
+   *   legends  legendOf() results from the key pages
+   * -> { classes:[{ ink, n, entry, why }], cellClass:Int32Array, classPal:[],
+   *      inkMatched:[], placeholders:[{ ink, n, candidates, why }], split:[],
+   *      glyphs:[per entry], legendRows, legendUsed, legendPage }
+   *
+   * classPal[c] is the entry index, or -2 - k for placeholder k.
+   */
+  function nameClasses(raw, sigs, inks, counts, entries, legends, sigPolys) {
+    sigPolys = sigPolys || {};
+    var nCells = raw.length, i, j, k;
+    var crossIdx = [];
+    for (i = 0; i < entries.length; i++) if (CHECK_KINDS[(entries[i] && entries[i].kind) || 'cross']) crossIdx.push(i);
+    var hasCount = function (e) { return typeof e.stitchCount === 'number' && e.stitchCount > 0; };
+
+    /* per ink, the symbols drawn in its cells */
+    var hist = [];
+    for (i = 0; i < inks.length; i++) hist.push({});
+    for (i = 0; i < nCells; i++) {
+      var ri = raw[i];
+      if (ri < 0) continue;
+      var sg = sigs[i] || '';
+      hist[ri][sg] = (hist[ri][sg] || 0) + 1;
+    }
+    var filled = 0;
+    for (i = 0; i < counts.length; i++) filled += counts[i];
+
+    var classes = [], classByKey = {};
+    function classFor(ink, entry, why) {
+      var key = entry >= 0 ? 'e' + entry : 'u' + ink + ':' + why;
+      if (classByKey.hasOwnProperty(key)) return classByKey[key];
+      classByKey[key] = classes.length;
+      classes.push({ ink: inks[ink], inkIndex: ink, n: 0, entry: entry, why: entry >= 0 ? null : why, candidates: [] });
+      return classes.length - 1;
+    }
+    /* inkSig[ink][sig] -> class */
+    var inkSig = [];
+    for (i = 0; i < inks.length; i++) inkSig.push({});
+    var split = [], legendUsed = false, legendRows = 0, legendPage = null, inkMatched = [];
+    for (i = 0; i < inks.length; i++) inkMatched.push(false);
+    var legendMask = {};
+
+    /* ---- 1. the key page's own swatches, when they are the key's rows ---- */
+    var legend = null;
+    for (i = 0; i < (legends || []).length; i++) {
+      if (legends[i].rows.length === crossIdx.length && crossIdx.length >= 2) { legend = legends[i]; break; }
+    }
+    /* a long key carried over several pages, in page order */
+    if (!legend && legends && legends.length > 1 && crossIdx.length >= 2) {
+      var joined = [];
+      for (i = 0; i < legends.length; i++) joined = joined.concat(legends[i].rows);
+      if (joined.length === crossIdx.length) legend = { rows: joined, page: legends[0].page };
+    }
+    if (legend) {
+      legendRows = legend.rows.length;
+      var byInk = {};
+      for (i = 0; i < legend.rows.length; i++) (byInk[legend.rows[i].hex] = byInk[legend.rows[i].hex] || []).push(i);
+      var covered = 0;
+      for (i = 0; i < inks.length; i++) if (byInk[inks[i]]) covered += counts[i];
+      var normCache = {};
+      var normOf = function (mk) {
+        if (!normCache.hasOwnProperty(mk)) normCache[mk] = sigPolys[mk] ? normMask(sigPolys[mk]) : '';
+        return normCache[mk];
+      };
+      for (i = 0; i < legend.rows.length; i++) {
+        var lrow = legend.rows[i];
+        if (lrow.norm === undefined) lrow.norm = normMask(unitPolys(lrow.polys, lrow.box));
+      }
+      if (filled && covered / filled >= 0.8) {
+        var trial = [], perEntry = {};
+        for (i = 0; i < inks.length; i++) {
+          var rowsHere = byInk[inks[i]] || [], sk = Object.keys(hist[i]), m = {};
+          for (j = 0; j < sk.length; j++) {
+            var e = -1;
+            if (rowsHere.length === 1) e = crossIdx[rowsHere[0]];
+            else if (rowsHere.length > 1) {
+              var bestD = 999, second = 999, bestR = -1, mk = normOf(sigMask(sk[j]));
+              for (k = 0; k < rowsHere.length; k++) {
+                var d = maskNear(mk, legend.rows[rowsHere[k]].norm);
+                if (d < bestD) { second = bestD; bestD = d; bestR = rowsHere[k]; }
+                else if (d < second) second = d;
+              }
+              if (bestR >= 0 && bestD <= SIG_FAR && second >= bestD * 2 + 6) e = crossIdx[bestR];
+            }
+            m[sk[j]] = e;
+            if (e >= 0) perEntry[e] = (perEntry[e] || 0) + hist[i][sk[j]];
+          }
+          trial.push(m);
+        }
+        /* the swatch order is the key's order only if the counts agree */
+        var withCount = 0, agreeing = 0;
+        for (i = 0; i < crossIdx.length; i++) {
+          var ce = entries[crossIdx[i]];
+          if (!hasCount(ce)) continue;
+          withCount++;
+          if (Math.abs((perEntry[crossIdx[i]] || 0) - ce.stitchCount) <= Math.max(2, ce.stitchCount * 0.01)) agreeing++;
+        }
+        if (!withCount || agreeing / withCount >= 0.9) {
+          legendUsed = true;
+          legendPage = legend.page || null;
+          for (i = 0; i < legend.rows.length; i++) legendMask[crossIdx[i]] = legend.rows[i];
+          for (i = 0; i < inks.length; i++) {
+            var sks = Object.keys(trial[i]), into = {}, anyMatch = false, anyMiss = false;
+            for (j = 0; j < sks.length; j++) {
+              var en = trial[i][sks[j]];
+              if (en >= 0) { inkSig[i][sks[j]] = classFor(i, en, null); into[en] = 1; anyMatch = true; }
+              else { inkSig[i][sks[j]] = -1; anyMiss = true; }
+            }
+            inkMatched[i] = anyMatch && !anyMiss;
+            var intoList = Object.keys(into).map(Number);
+            if (intoList.length > 1) split.push({ ink: inks[i], by: 'legend', into: intoList.sort(function (a, b) { return a - b; }) });
+          }
+        }
+      }
+    }
+
+    var usedEntry = {};
+    var ties = [];
+    if (!legendUsed) {
+      /* ---- 2. counts (and printed text symbols, and colours) ---- */
+      var marks = [];
+      for (i = 0; i < inks.length; i++) marks.push({ id: inks[i], n: counts[i] });
+      var tieOut = {};
+      var map = matchGlyphs(marks, entries, tieOut);
+      ties = tieOut.ties || [];
+      var tied = {};
+      for (i = 0; i < ties.length; i++) for (j = 0; j < ties[i].marks.length; j++) tied[ties[i].marks[j]] = ties[i];
+      for (i = 0; i < inks.length; i++) {
+        var me = map[inks[i]];
+        if (me !== undefined) {
+          usedEntry[me] = 1;
+          inkMatched[i] = true;
+          var c0 = classFor(i, me, null), hk = Object.keys(hist[i]);
+          for (j = 0; j < hk.length; j++) inkSig[i][hk[j]] = c0;
+        }
+      }
+      for (i = 0; i < ties.length; i++) for (j = 0; j < ties[i].entries.length; j++) usedEntry[ties[i].entries[j]] = 1;
+      /* an ink no key row's count fits: split it by the symbol drawn in its
+         cells, when the parts' counts each fit a key row */
+      for (i = 0; i < inks.length; i++) {
+        if (inkMatched[i] || tied[inks[i]] || !counts[i]) continue;
+        var groups = sigGroups(hist[i]);
+        if (groups.length < 2) continue;
+        var rem = [];
+        for (j = 0; j < crossIdx.length; j++) {
+          if (!usedEntry[crossIdx[j]] && hasCount(entries[crossIdx[j]])) rem.push(crossIdx[j]);
+        }
+        if (!rem.length) continue;
+        var subMarks = groups.map(function (g, gi) { return { id: 'g' + gi, n: g.n }; });
+        var subEntries = rem.map(function (q) { return { stitchCount: entries[q].stitchCount, symbol: '', hex: null }; });
+        var subMap = matchGlyphs(subMarks, subEntries);
+        var intoS = [];
+        for (j = 0; j < groups.length; j++) {
+          var se = subMap['g' + j];
+          if (se === undefined) continue;
+          var realE = rem[se];
+          usedEntry[realE] = 1;
+          intoS.push(realE);
+          var cs = classFor(i, realE, null);
+          for (k = 0; k < groups[j].members.length; k++) inkSig[i][groups[j].members[k]] = cs;
+        }
+        if (intoS.length) split.push({ ink: inks[i], by: 'glyph', into: intoS.sort(function (a, b) { return a - b; }) });
+        if (intoS.length === groups.length) inkMatched[i] = true;
+      }
+    }
+
+    /* ---- 3. whatever is left is said out loud, never dropped ---- */
+    var unmatchedCross = [];
+    for (i = 0; i < crossIdx.length; i++) {
+      var ci2 = crossIdx[i];
+      var hasCells = classByKey.hasOwnProperty('e' + ci2);
+      if (!hasCells && !usedEntry[ci2]) unmatchedCross.push(ci2);
+    }
+    var placeholders = [];
+    for (i = 0; i < inks.length; i++) {
+      var hk2 = Object.keys(hist[i]), left = 0;
+      for (j = 0; j < hk2.length; j++) if (!(inkSig[i][hk2[j]] >= 0)) left += hist[i][hk2[j]];
+      if (!left) continue;
+      var why = 'unknown', cands = [];
+      var tie = null;
+      for (j = 0; j < ties.length; j++) if (ties[j].marks.indexOf(inks[i]) >= 0) tie = ties[j];
+      if (tie) { why = 'tie'; cands = tie.entries.slice().sort(function (a, b) { return a - b; }); }
+      else {
+        var withCounts = unmatchedCross.filter(function (q) { return hasCount(entries[q]); });
+        var sub = sumSubset(left, withCounts, entries);
+        if (sub) { why = 'shared-ink'; cands = sub.sort(function (a, b) { return a - b; }); }
+        else {
+          cands = withCounts.slice().sort(function (a, b) {
+            return Math.abs(entries[a].stitchCount - left) - Math.abs(entries[b].stitchCount - left) || a - b;
+          }).slice(0, 6);
+        }
+      }
+      var cu = classFor(i, -1, why);
+      classes[cu].candidates = cands;
+      for (j = 0; j < hk2.length; j++) if (!(inkSig[i][hk2[j]] >= 0)) inkSig[i][hk2[j]] = cu;
+      placeholders.push({ ink: inks[i], n: 0, candidates: cands, why: why, cls: cu });
+    }
+
+    /* per-cell class, counts per class */
+    var cellClass = new Int32Array(nCells);
+    for (i = 0; i < nCells; i++) {
+      var r2 = raw[i];
+      if (r2 < 0) { cellClass[i] = -1; continue; }
+      var cc = inkSig[r2][sigs[i] || ''];
+      cellClass[i] = cc;
+      classes[cc].n++;
+    }
+    var classPal = [];
+    for (i = 0; i < classes.length; i++) classPal.push(classes[i].entry);
+    for (i = 0; i < placeholders.length; i++) {
+      placeholders[i].n = classes[placeholders[i].cls].n;
+      classPal[placeholders[i].cls] = -2 - i;
+    }
+
+    /* ---- R5: the designer's own symbol per key row ---- */
+    var glyphs = [];
+    for (i = 0; i < entries.length; i++) glyphs.push(null);
+    var entryMasks = {};
+    for (i = 0; i < inks.length; i++) {
+      var hk3 = Object.keys(hist[i]);
+      for (j = 0; j < hk3.length; j++) {
+        var cl = classes[inkSig[i][hk3[j]]];
+        if (!cl || cl.entry < 0) continue;
+        var em = entryMasks[cl.entry] = entryMasks[cl.entry] || {};
+        var mk2 = sigMask(hk3[j]);
+        em[mk2] = (em[mk2] || 0) + hist[i][hk3[j]];
+      }
+    }
+    for (i = 0; i < entries.length; i++) {
+      var ems = entryMasks[i];
+      if (!ems) {
+        if (legendMask[i] && legendMask[i].mask) {
+          glyphs[i] = glyphFromPolys(unitPolys(legendMask[i].polys, legendMask[i].box), { clean: true, source: 'pdf-path' });
+        }
+        continue;
+      }
+      var tot = 0, top = '', topN = -1, mks = Object.keys(ems);
+      for (j = 0; j < mks.length; j++) { tot += ems[mks[j]]; if (ems[mks[j]] > topN) { topN = ems[mks[j]]; top = mks[j]; } }
+      var lg = legendMask[i];
+      if (!top && !(lg && lg.mask)) continue;
+      var agreeN = 0;
+      for (j = 0; j < mks.length; j++) if (maskNear(mks[j], top) <= SIG_NEAR) agreeN += ems[mks[j]];
+      /* clean: (nearly) every cell of the colour shows the same symbol, and
+         it is the symbol the key page prints for it */
+      var clean = !!top && tot > 0 && agreeN / tot >= 0.99 &&
+        (!lg || !lg.norm || maskNear(normMask(sigPolys[top]), lg.norm) <= SIG_FAR);
+      var polys = lg ? unitPolys(lg.polys, lg.box) : sigPolys[top];
+      if (polys) glyphs[i] = glyphFromPolys(polys, { clean: clean, source: 'pdf-path' });
+    }
+
+    return {
+      classes: classes, cellClass: cellClass, classPal: classPal, inkMatched: inkMatched,
+      placeholders: placeholders, split: split, glyphs: glyphs,
+      legendRows: legendRows, legendUsed: legendUsed, legendPage: legendPage
+    };
+  }
+
+  /**
+   * solveCluster(markIdx, entryIdx, marks, entries) -> [[mark, entry]] | null
+   * Marks and key entries whose counts are all within a few stitches of each
+   * other. The pairing with the smallest count error wins when it is the
+   * only one; when several pairings fit the counts equally well, the mark
+   * colours decide, but only by a clear margin. null = a real tie.
+   */
+  function solveCluster(cm, ce, marks, entries) {
+    var k = Math.min(cm.length, ce.length), best = [], bestCost = Infinity;
+    function walk(i, usedSet, acc, cost) {
+      if (cost > bestCost) return;
+      if (i === k) {
+        if (cost < bestCost) { bestCost = cost; best = [acc.slice()]; }
+        else best.push(acc.slice());
+        return;
+      }
+      /* marks (or entries, whichever is the shorter list) go in order */
+      for (var j = 0; j < (cm.length <= ce.length ? ce.length : cm.length); j++) {
+        if (usedSet[j]) continue;
+        var m = cm.length <= ce.length ? cm[i] : cm[j];
+        var e = cm.length <= ce.length ? ce[j] : ce[i];
+        usedSet[j] = 1;
+        acc.push([m, e]);
+        walk(i + 1, usedSet, acc, cost + Math.abs(marks[m].n - entries[e].stitchCount));
+        acc.pop();
+        usedSet[j] = 0;
+      }
+    }
+    walk(0, {}, [], 0);
+    if (!best.length) return null;
+    if (best.length === 1) return best[0];
+    /* equal on counts: try the colours */
+    var scored = [];
+    for (var b = 0; b < best.length; b++) {
+      var tot = 0, okc = true;
+      for (var p = 0; p < best[b].length; p++) {
+        var mh = /^[0-9a-f]{6}$/.test(marks[best[b][p][0]].id) ? marks[best[b][p][0]].id : null;
+        var eh = entries[best[b][p][1]].hex;
+        var la = mh && hexToLab(mh), lb = eh && hexToLab(eh);
+        if (!la || !lb) { okc = false; break; }
+        tot += deltaE2000(la, lb);
+      }
+      if (!okc) return null;
+      scored.push(tot);
+    }
+    var order = scored.map(function (v, i) { return i; }).sort(function (a, c) { return scored[a] - scored[c]; });
+    if (scored[order[1]] - scored[order[0]] >= 8) return best[order[0]];
+    return null;
+  }
+
   /** Greedy glyph -> key-entry assignment (symbol, then counts, then colour). */
-  function matchGlyphs(marks, entries) {
+  function matchGlyphs(marks, entries, out) {
     var i, j, map = {}, usedE = {}, usedM = {};
     var byCount = {}, colByCount = {};
     for (i = 0; i < entries.length; i++) {
@@ -5784,7 +6917,30 @@
     var mi = 0, ei = 0;
     while (mi < rm.length && ei < re.length) {
       var mn = marks[rm[mi]].n, en = entries[re[ei]].stitchCount;
-      if (Math.abs(mn - en) <= Math.max(3, en * 0.03)) {
+      var tol = Math.max(3, en * 0.03);
+      if (Math.abs(mn - en) <= tol) {
+        /* Wave K: when another mark or entry is just as close, the counts
+           cannot say which is which (pacman: DMC 3846 and DMC 728 both
+           print 126). Pairing them in sort order was a coin toss; now the
+           colours decide when they clearly can, else it is a tie. */
+        var mj = mi, ej = ei;
+        while (mj + 1 < rm.length && Math.abs(marks[rm[mj + 1]].n - en) <= tol) mj++;
+        while (ej + 1 < re.length && Math.abs(entries[re[ej + 1]].stitchCount - mn) <= tol) ej++;
+        if ((mj > mi || ej > ei) && mj - mi <= 5 && ej - ei <= 5) {
+          var cm = rm.slice(mi, mj + 1), ce = re.slice(ei, ej + 1);
+          var pairs = solveCluster(cm, ce, marks, entries);
+          if (pairs) {
+            for (var pq = 0; pq < pairs.length; pq++) {
+              map[marks[pairs[pq][0]].id] = pairs[pq][1]; usedE[pairs[pq][1]] = 1; usedM[pairs[pq][0]] = 1;
+            }
+          } else {
+            for (pq = 0; pq < cm.length; pq++) usedM[cm[pq]] = 2;
+            for (pq = 0; pq < ce.length; pq++) usedE[ce[pq]] = 2;
+            if (out) (out.ties = out.ties || []).push({ marks: cm.map(function (q) { return marks[q].id; }), entries: ce.slice() });
+          }
+          mi = mj + 1; ei = ej + 1;
+          continue;
+        }
         map[marks[rm[mi]].id] = re[ei]; usedE[re[ei]] = 1; usedM[rm[mi]] = 1;
         mi++; ei++;
       } else if (mn > en) { mi++; } else { ei++; }
@@ -5862,7 +7018,17 @@
     if (last - first + 1 > maxPages) last = first + maxPages - 1;
     var budget = clampInt(opts.budgetMs, 1000, 600000, 30000);
 
-    var tiles = [], pending = [], scanned = 0, misses = 0, stopped = false;
+    var tiles = [], pending = [], legends = [], scanned = 0, misses = 0, stopped = false;
+    /* Stroked segments are only kept when the key has backstitch, knots or
+       beads to find (or opts.graphics asks): a KG page strokes every square
+       edge, 3,700 segments a page, and Pokémon has 70 pages. */
+    var wantSegs = opts.graphics === true;
+    var kEntries = isObj(opts.key) && Array.isArray(opts.key.entries) ? opts.key.entries : [];
+    for (var ke = 0; ke < kEntries.length && !wantSegs; ke++) {
+      var kk = kEntries[ke] && kEntries[ke].kind;
+      if (kk === 'back' || kk === 'knot' || kk === 'bead') wantSegs = true;
+    }
+    if (opts.graphics === false) wantSegs = false;
 
     function step(n) {
       if (n > last || stopped) return Promise.resolve();
@@ -5872,12 +7038,13 @@
         try { opts.onProgress(n - first + 1, last - first + 1); } catch (e) { /* ignore */ }
       }
       return pdf.getPage(n).then(function (page) {
-        return extractPage(page, OPS);
+        return extractPage(page, OPS, wantSegs);
       }, function () { return null; }).then(function (res) {
         scanned++;
         if (res && res.tile) { res.tile.page = n; tiles.push(res.tile); misses = 0; }
         else if (res && res.pending) { res.page = n; pending.push(res); misses = 0; }
         else {
+          if (res && res.legend) { res.legend.page = n; legends.push(res.legend); }
           misses++;
           /* Nothing that looks like a chart in the first handful of pages:
              stop early so a PDF with no grid fails in under a second.
@@ -5922,8 +7089,12 @@
         t.page = pending[p].page;
         t.pageBox = pending[p].pageBox || null;
         t.place = placeTile(t, pending[p].nums);
+        t.sig = tileSigs(t, pending[p].shapes || [], pending[p].marks || []);
+        t.segs = (pending[p].segs || []).length <= 50000 ? (pending[p].segs || []) : [];
+        t.dots = tileDots(t, pending[p].shapes || []);
         tiles.push(t);
       }
+      for (var pf = 0; pf < pending.length; pf++) { pending[pf].shapes = null; pending[pf].segs = null; }
       tiles.sort(function (a, b) { return a.page - b.page; });
     }
 
@@ -5979,6 +7150,8 @@
       /* ---- assemble ---- */
       var ids = [], idIndex = {}, counts = [];
       var raw = new Int32Array(W * H);
+      var sigs = new Array(W * H);
+      var graphics = { segments: [], circles: [] };
       for (i = 0; i < raw.length; i++) raw[i] = -1;
       for (i = 0; i < tiles.length; i++) {
         t = tiles[i];
@@ -5992,13 +7165,17 @@
             if (id === null) continue;
             var gi = idIndex[id];
             if (gi === undefined) { gi = ids.length; idIndex[id] = gi; ids.push(id); counts.push(0); }
-            if (raw[Y * W + X] < 0) counts[gi]++;
             raw[Y * W + X] = gi;
+            sigs[Y * W + X] = t.sig ? t.sig[y * t.gc + x] : '';
           }
         }
+        tileGraphics(t, graphics);
       }
+      /* counted after placing, so an overlap between tiles is counted once
+         under the colour that ends up on the chart */
+      for (i = 0; i < counts.length; i++) counts[i] = 0;
       var filled = 0;
-      for (i = 0; i < raw.length; i++) if (raw[i] >= 0) filled++;
+      for (i = 0; i < raw.length; i++) if (raw[i] >= 0) { filled++; counts[raw[i]]++; }
 
       /* ---- name the colours from the key ---- */
       var key = isObj(opts.key) ? opts.key : null;
@@ -6023,23 +7200,27 @@
         };
       }
 
-      var map = matchGlyphs(marks, entries);
-      var glyphToPal = new Int16Array(ids.length);
-      for (i = 0; i < ids.length; i++) {
-        var e = map[ids[i]];
-        glyphToPal[i] = (e === undefined) ? -1 : e;
-        if (e !== undefined) matched++;
+      /* Wave K: every read cell is named, split by its printed symbol when
+         the key's counts prove one ink carries two colours, or put in an
+         explicit "could not tell apart" class; never silently -1. */
+      var sigPolys = {};
+      for (i = 0; i < tiles.length; i++) {
+        var sp0 = tiles[i].sigPolys || {}, spk = Object.keys(sp0);
+        for (var sj = 0; sj < spk.length; sj++) if (!sigPolys[spk[sj]]) sigPolys[spk[sj]] = sp0[spk[sj]];
+        tiles[i].sigPolys = null;
+        tiles[i].sig = null;
       }
-      for (i = 0; i < raw.length; i++) {
-        cells[i] = raw[i] < 0 ? -1 : glyphToPal[raw[i]];
-      }
+      var named = nameClasses(raw, sigs, ids, counts, entries, legends, sigPolys);
+      var cls = named.classes;
+      for (i = 0; i < raw.length; i++) cells[i] = raw[i] < 0 ? -1 : named.classPal[named.cellClass[i]];
 
       /* per-entry recovered counts, for the 2% acceptance test */
       var recovered = [];
       for (i = 0; i < entries.length; i++) recovered.push(0);
-      for (i = 0; i < ids.length; i++) {
-        if (glyphToPal[i] >= 0) recovered[glyphToPal[i]] += counts[i];
+      for (i = 0; i < cls.length; i++) {
+        if (cls[i].entry >= 0) recovered[cls[i].entry] += cls[i].n;
       }
+      for (i = 0; i < ids.length; i++) if (named.inkMatched[i]) matched++;
       for (i = 0; i < entries.length; i++) {
         var want = entries[i].stitchCount;
         if (want === null || want === undefined || want <= 0) continue;
@@ -6050,37 +7231,81 @@
       palette = [];
       for (i = 0; i < entries.length; i++) {
         var en = entries[i];
-        palette.push(normalizePaletteEntry({
+        var isCell = CHECK_KINDS[en.kind || 'cross'];
+        var pe = normalizePaletteEntry({
           i: i, symbol: en.symbol || '', brand: en.brand || 'DMC', code: en.code,
           name: en.name || '', hex: en.hex || null,
           strands: en.strands || (key && key.strandsDefault) || 2,
           kind: en.kind || 'cross',
-          stitchCount: recovered[i] || en.stitchCount || 0,
+          /* the chart's own count for a cell colour (0 when the chart has
+             none of it: the key's number lives in keyCount, so the two are
+             never mixed up again); a backstitch / knot row keeps the key's */
+          stitchCount: isCell ? recovered[i] : (en.stitchCount || 0),
           skeins: en.skeins || 0
-        }, i, (key && key.strandsDefault) || 2));
+        }, i, (key && key.strandsDefault) || 2);
+        if (typeof en.stitchCount === 'number' && en.stitchCount > 0) pe.keyCount = en.stitchCount;
+        if (named.glyphs[i]) pe.glyph = named.glyphs[i];
+        palette.push(pe);
+      }
+      var unresolved = [];
+      for (i = 0; i < named.placeholders.length; i++) {
+        var ph = named.placeholders[i], cands = ph.candidates;
+        var label = cands.length
+          ? cands.map(function (q) { return flossLabel(entries[q]); }).join(' or ')
+          : 'Unknown colour';
+        var pIdx = palette.length;
+        palette.push({
+          i: pIdx, symbol: '', brand: '', code: '',
+          name: label + (ph.why === 'unknown' ? ' (not in the key?)' : ' (not told apart)'),
+          hex: /^[0-9a-f]{6}$/.test(ph.ink) ? ph.ink : '808080',
+          strands: (key && key.strandsDefault) || 2, bsStrands: 1, kind: 'cross', blendWith: null,
+          stitchCount: ph.n, skeins: 0, have: false, unresolved: cands.slice()
+        });
+        unresolved.push({
+          palette: pIdx, ink: ph.ink, cells: ph.n, candidates: cands.slice(),
+          expected: cands.map(function (q) { return entries[q].stitchCount || null; }),
+          why: ph.why
+        });
+      }
+      for (i = 0; i < raw.length; i++) {
+        if (cells[i] < -1) cells[i] = entries.length + (-2 - cells[i]);
       }
 
       var agreePct = countable ? agree / countable : 0;
       ok = countable > 0 && agreePct >= 0.8 && W >= 10 && H >= 10;
       confidence = Math.round(Math.min(1, agreePct * (matched / Math.max(1, ids.length))) * 100) / 100;
+      if (unresolved.length) confidence = Math.min(confidence, 0.5);
 
       if (matched < ids.length) {
         pushOnce(warnings, (ids.length - matched) + ' symbol' +
           (ids.length - matched === 1 ? '' : 's') + ' could not be matched to a colour in the key');
+      }
+      for (i = 0; i < unresolved.length; i++) {
+        var ur = unresolved[i];
+        pushOnce(warnings, fmtInt(ur.cells) + ' ' + plural(ur.cells, 'stitch', 'stitches') +
+          (ur.why === 'unknown' ? ' are in a colour the key does not list'
+            : ' could not be told apart: ' + ur.candidates.map(function (q) { return flossLabel(entries[q]); }).join(' or ')));
       }
       if (!ok) {
         pushOnce(warnings, 'the stitch counts in the key only agree with the grid on ' +
           Math.round(agreePct * 100) + '% of colours');
       }
 
+      var checkData = normalize({ palette: palette, chart: { w: W, h: H, cells: cells } }, null);
+      var check = checkCounts(checkData, entries);
+
       return {
         ok: ok, w: W, h: H,
         originX: tiles[0].originX, originY: tiles[0].originY,
         cellW: tiles[0].cellW, cellH: tiles[0].cellH,
         cells: cells, glyphs: ids.slice(), counts: counts.slice(), palette: palette,
-        colors: ids.length, matched: matched, agree: agree, countable: countable,
+        colors: ids.length, classes: cls.length, matched: matched, agree: agree, countable: countable,
         confidence: confidence, ms: Math.round(now()), pages: scanned,
-        tiles: tiles.length, filled: filled, regions: regions, warnings: warnings
+        tiles: tiles.length, filled: filled, regions: regions, warnings: warnings,
+        check: check, unresolved: unresolved, split: named.split,
+        legend: { rows: named.legendRows, used: named.legendUsed, page: named.legendPage },
+        graphics: graphics,
+        mixedCells: tiles.reduce(function (s, tl) { return s + (tl.mixed || 0); }, 0)
       };
     }, function (err) {
       return fail('that PDF could not be read (' + ((err && err.message) || 'unknown error') + ')');
@@ -6357,23 +7582,41 @@
     var w = g.w, h = g.h, cells = g.cells;
     var y0 = clampInt(opts.yFrom, 0, h - 1, 0), y1 = clampInt(opts.yTo, 0, h - 1, h - 1);
     if (y0 > y1) { var tmp = y0; y0 = y1; y1 = tmp; }
+    /* Wave K (#14): a column band, a printed page or a 10 x 10 block, long
+       rows chunked at every `chunk` columns, and the done squares per run. */
+    var xa = clampInt(opts.xFrom, 0, w - 1, 0), xb = clampInt(opts.xTo, 0, w - 1, w - 1);
+    if (xa > xb) { var tx = xa; xa = xb; xb = tx; }
+    var sc = isObj(opts.scope) ? opts.scope : null;
+    if (sc) {
+      var sr = scopeRect(data, sc, w, h);
+      if (!sr || sr.x1 < sr.x0) return out;
+      xa = Math.max(xa, sr.x0); xb = Math.min(xb, sr.x1);
+      y0 = Math.max(y0, sr.y0); y1 = Math.min(y1, sr.y1);
+      if (xa > xb || y0 > y1) return out;
+      out.scope = { x0: xa, y0: y0, x1: xb, y1: y1, label: sr.words.join(' · ') };
+    }
+    var chunk = clampInt(opts.chunk, 0, 10000, 0);
+    var withDone = !!opts.done, dbytes = withDone ? doneOf(data, w * h) : null;
+    var bandW = xb - xa + 1;
     var count = y1 - y0 + 1;
     for (var k = 0; k < count; k++) {
       var y = from === 'top' ? y0 + k : y1 - k;
       var label = from === 'top' ? y + 1 : h - y;
       var rtl = dir === 'serpentine' && label % 2 === 0;
       var base = y * w, runs = [], stitches = 0;
-      var curP = -2, curN = 0, curX = 0;
-      for (var s = 0; s < w; s++) {
-        var x = rtl ? w - 1 - s : s;
+      var curP = -2, curN = 0, curX = 0, curD = 0;
+      for (var s = 0; s < bandW; s++) {
+        var x = rtl ? xb - s : xa + s;
         var v = cells[base + x];
         var p = v < 0 || (color !== null && v !== color) ? -1 : v;
         if (p >= 0) stitches++;
-        if (p === curP) { curN++; continue; }
-        if (curN) runs.push({ p: curP, n: curN, x: curX });
-        curP = p; curN = 1; curX = x;
+        var brk = chunk && s && (rtl ? (x + 1) % chunk === 0 : x % chunk === 0);
+        var on = withDone && p >= 0 ? bitOn(dbytes, base + x) : 0;
+        if (p === curP && !brk) { curN++; curD += on; continue; }
+        if (curN) runs.push(withDone ? { p: curP, n: curN, x: curX, done: curD } : { p: curP, n: curN, x: curX });
+        curP = p; curN = 1; curX = x; curD = on;
       }
-      if (curN) runs.push({ p: curP, n: curN, x: curX });
+      if (curN) runs.push(withDone ? { p: curP, n: curN, x: curX, done: curD } : { p: curP, n: curN, x: curX });
       if (!stitches) out.totals.emptyRows++;
       if (!stitches && opts.skipEmpty) continue;
       out.rows.push({ y: y, n: label, rtl: rtl, stitches: stitches, runs: runs });
@@ -6471,6 +7714,1653 @@
   }
 
   /* ================================================================== *
+   * 10d. Wave K (xs-core). Pure logic for the batch-2 app: placeholders a
+   *      grid read could not name, one total, distinct symbols, skeins to
+   *      buy, bulk marks with a confirm, parking, pages, islands, rows v2,
+   *      find my place, goals, sessions and pace, stash and brands,
+   *      calculators, joining charts, cells off localStorage, grid-craft
+   *      kinds, and the mark log. See docs/wave-k/api/xs-core.md.
+   * ================================================================== */
+
+  function nowMs(now) { return typeof now === 'number' && isFinite(now) ? now : Date.now(); }
+
+  /** A fresh, mutable copy of the chart's cells (never the shared cache). */
+  function cellsCopy(data) {
+    var g = chartCells(isObj(data) ? data.chart : null);
+    if (!g) return null;
+    var c = new Int16Array(g.w * g.h);
+    for (var i = 0; i < c.length; i++) c[i] = i < g.cells.length ? g.cells[i] : -1;
+    return { w: g.w, h: g.h, cells: c };
+  }
+
+  /** The progress bitmap of the crosses as bytes, or an empty one. */
+  function doneOf(data, n) {
+    var pr = isObj(data) && isObj(data.progress) ? data.progress : {};
+    if (pr.mode === 'counts') return new Uint8Array(Math.ceil(n / 8));
+    var b = b64ToBytes(str(pr.done, ''));
+    if (b.length < Math.ceil(n / 8)) { var g = new Uint8Array(Math.ceil(n / 8)); g.set(b); b = g; }
+    return b;
+  }
+  function bitOn(bytes, i) { return ((bytes[i >> 3] || 0) >> (i & 7)) & 1; }
+
+  /**
+   * Moves every reference to palette entry `from` onto `to` (-1: unstitched)
+   * and then removes `from`, renumbering everything above it.
+   */
+  function mergePaletteEntry(d, from, to) {
+    var g = cellsCopy(d), i;
+    var toAfter = to > from ? to - 1 : to;
+    var shift = function (v) { return v === from ? toAfter : (v > from ? v - 1 : v); };
+    if (g) {
+      for (i = 0; i < g.cells.length; i++) {
+        var v = g.cells[i];
+        if (v === from) g.cells[i] = toAfter;
+        else if (v > from) g.cells[i] = v - 1;
+      }
+      d.chart.cells = packCells(g.cells, g.w, g.h);
+      ['part', 'back', 'knots'].forEach(function (layer) {
+        var list = d.chart[layer] || [];
+        for (var k = 0; k < list.length; k++) {
+          if (layer === 'part') {
+            if (list[k].a >= 0) list[k].a = list[k].a === from ? toAfter : (list[k].a > from ? list[k].a - 1 : list[k].a);
+            if (list[k].b >= 0) list[k].b = list[k].b === from ? toAfter : (list[k].b > from ? list[k].b - 1 : list[k].b);
+          } else if (list[k].i >= 0) {
+            list[k].i = list[k].i === from ? toAfter : (list[k].i > from ? list[k].i - 1 : list[k].i);
+          }
+        }
+      });
+    }
+    d.palette.splice(from, 1);
+    for (i = 0; i < d.palette.length; i++) {
+      d.palette[i].i = i;
+      if (d.palette[i].blendWith !== null && d.palette[i].blendWith !== undefined) {
+        var bw = shift(d.palette[i].blendWith);
+        d.palette[i].blendWith = bw < 0 ? null : bw;
+      }
+    }
+    if (Array.isArray(d.parking)) {
+      for (i = 0; i < d.parking.length; i++) {
+        var pk = d.parking[i];
+        if (typeof pk.paletteIndex === 'number') pk.paletteIndex = Math.max(0, pk.paletteIndex === from ? toAfter : (pk.paletteIndex > from ? pk.paletteIndex - 1 : pk.paletteIndex));
+      }
+    }
+    if (d.current) {
+      if (d.current.paletteIndex === from) d.current.paletteIndex = Math.max(0, toAfter);
+      else if (d.current.paletteIndex > from) d.current.paletteIndex--;
+      if (d.current.rowOpts && typeof d.current.rowOpts.color === 'number') {
+        var rc = d.current.rowOpts.color;
+        d.current.rowOpts.color = rc === from ? (toAfter >= 0 ? toAfter : null) : (rc > from ? rc - 1 : rc);
+      }
+    }
+    if (d.progress && Array.isArray(d.progress.perColor)) {
+      d.progress.perColor = d.progress.perColor.filter(function (p) { return p.i !== from; })
+        .map(function (p) { return { i: p.i > from ? p.i - 1 : p.i, done: p.done }; });
+    }
+    return d;
+  }
+
+  /**
+   * resolveClass(data, placeholder, choice) -> data      (parity gap 1)
+   *
+   * The stitcher's answer for a placeholder colour a grid read could not
+   * name (`palette[placeholder].unresolved`):
+   *   choice = palette index    every square of the placeholder becomes it
+   *   choice = -1               "these squares are fabric" (unstitched)
+   *   choice = { cells:[idx], to }   only those squares (a split by hand)
+   * The placeholder is removed once no square uses it, and every index above
+   * it moves down one. Done bits stay with their squares. Pure: returns a new
+   * normalized XSData; the caller wraps it in Store.updateCraftData (undo).
+   */
+  function resolveClass(data, placeholder, choice) {
+    var d = normalize(deepCopy(normalize(data, null)), null);
+    var p = clampInt(placeholder, 0, 9999, -1);
+    if (p < 0 || p >= d.palette.length || !d.chart) return d;
+    var g = cellsCopy(d), i;
+    if (isObj(choice)) {
+      var to = clampInt(choice.to, -1, d.palette.length - 1, -2);
+      if (to === -2 || to === p) return d;
+      var list = Array.isArray(choice.cells) ? choice.cells : [];
+      for (i = 0; i < list.length; i++) {
+        var ci = clampInt(list[i], 0, g.cells.length - 1, -1);
+        if (ci >= 0 && g.cells[ci] === p) g.cells[ci] = to;
+      }
+      d.chart.cells = packCells(g.cells, g.w, g.h);
+      var left = 0;
+      for (i = 0; i < g.cells.length; i++) if (g.cells[i] === p) left++;
+      d.palette[p].stitchCount = left;
+      if (left) return normalize(d, null);
+      return normalize(mergePaletteEntry(d, p, -1), null);
+    }
+    var target = clampInt(choice, -1, d.palette.length - 1, -2);
+    if (target === -2 || target === p) return d;
+    var moved = 0;
+    for (i = 0; i < g.cells.length; i++) if (g.cells[i] === p) moved++;
+    if (target >= 0) d.palette[target].stitchCount = (d.palette[target].stitchCount || 0) + moved;
+    return normalize(mergePaletteEntry(d, p, target), null);
+  }
+
+  /* ---- #1 the honesty sweep: one total, said one way ------------------ */
+
+  /** pctText(412, 64512) -> '0.64%'; under 1% two decimals, never '100%' early. */
+  function pctText(done, total) {
+    done = num(done, 0); total = num(total, 0);
+    if (!(total > 0) || !(done > 0)) return '0%';
+    if (done >= total) return '100%';
+    var p = done / total * 100;
+    if (p < 0.01) return '<0.01%';
+    if (p < 1) return String(Math.round(p * 100) / 100) + '%';
+    var r = Math.floor(p);
+    return (r >= 100 ? 99 : r) + '%';
+  }
+
+  /**
+   * totals(data) -> { done, total, pct, pctText, crosses:{done,total}, fromKey:[i], text }
+   * THE stitch total. progressStats over the chart, plus any cross colour the
+   * chart holds no square of but the key prints a count for (keyCount):
+   * those are counted from the key ("counted from the key, not on the
+   * chart"), their done from progress.keyDone. Every screen shows this one.
+   */
+  function totals(data) {
+    var d = isObj(data) ? data : {};
+    var st = progressStats(d);
+    var palette = Array.isArray(d.palette) ? d.palette : [];
+    var fromKey = [], extraT = 0, extraD = 0;
+    var kd = isObj(d.progress) && isObj(d.progress.keyDone) ? d.progress.keyDone : {};
+    if (isObj(d.progress) && d.progress.mode === 'cells') {
+      for (var i = 0; i < palette.length; i++) {
+        var e = palette[i];
+        if (!CHECK_KINDS[e.kind || 'cross'] || !(e.keyCount > 0) || e.unresolved) continue;
+        if (st.byColor[i] && st.byColor[i].total > 0) continue;
+        fromKey.push(i);
+        extraT += e.keyCount;
+        extraD += Math.min(e.keyCount, clampInt(kd[i], 0, 1e9, 0));
+      }
+    }
+    var done = st.done + extraD, total = st.total + extraT;
+    return {
+      done: done, total: total,
+      pct: total > 0 ? Math.floor(done / total * 100) : 0,
+      pctText: pctText(done, total),
+      crosses: { done: st.breakdown.cross.done + extraD, total: st.breakdown.cross.total + extraT },
+      fromKey: fromKey,
+      text: fmtInt(done) + ' of ' + fmtInt(total) + ' ' + plural(total, 'stitch', 'stitches') + ' · ' + pctText(done, total)
+    };
+  }
+
+  /* family rotation for distinct symbols */
+  var FAMILY_ORDER = ['dot', 'square', 'tri', 'round', 'cross', 'diamond', 'line', 'star', 'angle', 'letter', 'digit', 'alpha'];
+
+  /**
+   * symbolCheck(palette) -> { ok, repeats:[[i,j]], sameFamily:[[i,j]] }
+   * repeats: two colours with the same symbol. sameFamily: two colours whose
+   * symbols are from one shape family while some family is still unused.
+   */
+  function symbolCheck(palette) {
+    var list = Array.isArray(palette) ? palette : [];
+    var repeats = [], same = [], fams = {}, i, j;
+    for (i = 0; i < list.length; i++) fams[familyOf(str(list[i] && list[i].symbol, ''))] = 1;
+    var spare = Object.keys(fams).length < FAMILY_ORDER.length && list.length <= FAMILY_ORDER.length;
+    for (i = 0; i < list.length; i++) {
+      for (j = i + 1; j < list.length; j++) {
+        var a = str(list[i] && list[i].symbol, ''), b = str(list[j] && list[j].symbol, '');
+        if (!a || !b) continue;
+        if (a === b) repeats.push([i, j]);
+        else if (spare && familyOf(a) === familyOf(b)) same.push([i, j]);
+      }
+    }
+    return { ok: !repeats.length && !same.length, repeats: repeats, sameFamily: same };
+  }
+
+  /* ---- skeins to buy ---------------------------------------------------- */
+
+  /**
+   * skeinPlan({ stitchCount, count, over, strands, waste, have }) ->
+   *   { low, mid, high, have, buy, text }
+   * mid uses the geometric middle of the published yields, so "buy" is a
+   * number a stitcher can act on, with the range still shown.
+   */
+  function skeinPlan(o) {
+    o = isObj(o) ? o : {};
+    var r = skeinRange(o), have = clampInt(o.have, 0, 9999, 0);
+    var buy = Math.max(0, r.mid - have);
+    var text;
+    if (!r.high) text = 'no stitches, no skeins';
+    else {
+      text = (r.low === r.high ? r.high + ' ' + plural(r.high, 'skein') : r.low + '–' + r.high + ' skeins');
+      if (have) text += ' (you have ' + have + (buy ? ', buy ' + buy : ', enough') + ')';
+      else if (r.low !== r.high) text += ' (buy ' + r.mid + ')';
+    }
+    return { low: r.low, mid: r.mid, high: r.high, have: have, buy: buy, text: text };
+  }
+
+  /* ---- bulk marks, described before they happen ------------------------ */
+
+  var CONFIRM_ABOVE = 1000;
+
+  function scopeRect(d, scope, w, h) {
+    var r = { x0: 0, y0: 0, x1: w - 1, y1: h - 1 }, words = [];
+    if (isObj(scope.block)) {
+      var bx = clampInt(scope.block.bx, 0, 9999, 0), by = clampInt(scope.block.by, 0, 9999, 0);
+      r = { x0: bx * 10, y0: by * 10, x1: Math.min(w - 1, bx * 10 + 9), y1: Math.min(h - 1, by * 10 + 9) };
+      words.push('block ' + (bx + 1) + ',' + (by + 1));
+    }
+    if (scope.page !== undefined && scope.page !== null) {
+      var pg = Array.isArray(d.pages) ? d.pages[clampInt(scope.page, 0, 9999, -1)] : null;
+      if (!pg || !pg.region) return null;
+      var q = pg.region;
+      r = { x0: Math.max(r.x0, q.x), y0: Math.max(r.y0, q.y), x1: Math.min(r.x1, q.x + q.w - 1), y1: Math.min(r.y1, q.y + q.h - 1) };
+      words.push(str(pg.label, 'page ' + (clampInt(scope.page, 0, 9999, 0) + 1)).replace(/^Page/, 'page'));
+    }
+    if (scope.row !== undefined && scope.row !== null) {
+      var ry = clampInt(scope.row, 0, h - 1, 0);
+      r = { x0: r.x0, y0: Math.max(r.y0, ry), x1: r.x1, y1: Math.min(r.y1, ry) };
+      words.push('row ' + (ry + 1));
+    }
+    if (r.x1 < r.x0 || r.y1 < r.y0) r = { x0: 0, y0: 0, x1: -1, y1: -1 };
+    r.words = words;
+    return r;
+  }
+
+  /**
+   * bulkPlan(data, scope, opts) -> { cells:Int32Array, count, already, total, confirm, text, label }
+   * What a "whole colour" / "page done" / "block done" / "row done" tap
+   * would change, so the app can ask first. scope: { color } | { page } |
+   * { page, color } | { block:{bx,by} } | { block, color } | { row, color }.
+   * opts.unmark: describe un-marking instead. `cells` are the squares whose
+   * bit would flip; `confirm` is true above CONFIRM_ABOVE of them.
+   */
+  function bulkPlan(data, scope, opts) {
+    opts = isObj(opts) ? opts : {};
+    scope = isObj(scope) ? scope : {};
+    var none = { cells: new Int32Array(0), count: 0, already: 0, total: 0, confirm: false, text: 'Nothing to mark.', label: '' };
+    var g = gridOf(data);
+    if (!g) return none;
+    var w = g.w, h = g.h, cells = g.cells;
+    var color = typeof scope.color === 'number' && scope.color >= 0 ? Math.floor(scope.color) : null;
+    var rect = scopeRect(data, scope, w, h);
+    if (!rect) return none;
+    var bytes = doneOf(data, w * h), unmark = !!opts.unmark;
+    var pick = [], total = 0, already = 0;
+    for (var y = rect.y0; y <= rect.y1; y++) {
+      for (var x = rect.x0; x <= rect.x1; x++) {
+        var i = y * w + x, v = cells[i];
+        if (v < 0 || (color !== null && v !== color)) continue;
+        total++;
+        var on = bitOn(bytes, i);
+        if (on) already++;
+        if (on === (unmark ? 1 : 0)) pick.push(i);
+      }
+    }
+    var e = color !== null && Array.isArray(data.palette) ? data.palette[color] : null;
+    var label = [e ? flossLabel(e) : ''].concat(rect.words).filter(Boolean).join(' · ') || 'the whole chart';
+    var n = pick.length;
+    var text = n
+      ? (unmark ? 'Unmark ' : 'Mark ') + fmtInt(n) + ' ' + plural(n, 'stitch', 'stitches') + ' of ' + label +
+        (unmark ? '?' : ' as done?') + (already && !unmark ? ' (' + fmtInt(already) + ' already done)' : '')
+      : (unmark ? 'Nothing marked in ' : 'All of ') + label + (unmark ? '.' : ' is already done.');
+    return { cells: new Int32Array(pick), count: n, already: already, total: total,
+      confirm: n > CONFIRM_ABOVE, text: text, label: label };
+  }
+
+  /* ---- #3 parking on the chart ------------------------------------------ */
+
+  var CORNERS = { tl: 1, tr: 1, bl: 1, br: 1 };
+
+  /**
+   * parkAt(data, { x, y, paletteIndex, corner, note }) -> data
+   * Parks a colour's thread at stitch (x, y); a thread already parked on
+   * that stitch in that colour is moved, not doubled.
+   */
+  function parkAt(data, o) {
+    var d = normalize(deepCopy(normalize(data, null)), null);
+    o = isObj(o) ? o : {};
+    if (!d.chart) return d;
+    var x = clampInt(o.x, 0, d.chart.w - 1, -1), y = clampInt(o.y, 0, d.chart.h - 1, -1);
+    var pi = clampInt(o.paletteIndex, 0, Math.max(0, d.palette.length - 1), -1);
+    if (x < 0 || y < 0 || pi < 0 || pi >= d.palette.length) return d;
+    var e = d.palette[pi];
+    var entry = { key: flossLabel(e), symbol: e.symbol || '', corner: CORNERS[o.corner] ? o.corner : 'tl',
+      note: str(o.note, '').slice(0, 200), x: x, y: y, paletteIndex: pi };
+    for (var i = 0; i < d.parking.length; i++) {
+      var p = d.parking[i];
+      if (p.x === x && p.y === y && p.paletteIndex === pi) { d.parking[i] = entry; return normalize(d, null); }
+    }
+    d.parking.push(entry);
+    return normalize(d, null);
+  }
+
+  /** unpark(data, i) -> data without parking[i]. */
+  function unpark(data, i) {
+    var d = normalize(deepCopy(normalize(data, null)), null);
+    i = clampInt(i, 0, 9999, -1);
+    if (i >= 0 && i < d.parking.length) d.parking.splice(i, 1);
+    return d;
+  }
+
+  /** parkedAt(data, x, y) -> [parking index] (marking a parked stitch offers to unpark). */
+  function parkedAt(data, x, y) {
+    var out = [], list = isObj(data) && Array.isArray(data.parking) ? data.parking : [];
+    for (var i = 0; i < list.length; i++) if (list[i].x === x && list[i].y === y) out.push(i);
+    return out;
+  }
+
+  /** Block order for a parking direction: rank of block (bx, by) after (fx, fy). */
+  function blockRank(bx, by, fx, fy, nbx, nby, dir) {
+    var lin, cur;
+    if (dir === 'down' || dir === 'column') { lin = bx * nby + by; cur = fx * nby + fy; }
+    else if (dir === 'left') { lin = by * nbx + (nbx - 1 - bx); cur = fy * nbx + (nbx - 1 - fx); }
+    else { lin = by * nbx + bx; cur = fy * nbx + fx; }
+    var total = nbx * nby;
+    return ((lin - cur) % total + total) % total;      // 0 = the current block
+  }
+
+  /** Per 10 x 10 block, the squares of `color` still to do (and the first one). */
+  function blockTodo(g, color, bytes) {
+    var nbx = Math.ceil(g.w / 10), nby = Math.ceil(g.h / 10);
+    var left = new Int32Array(nbx * nby), first = new Int32Array(nbx * nby);
+    for (var i = 0; i < first.length; i++) first[i] = -1;
+    for (var y = 0; y < g.h; y++) {
+      var by = (y / 10) | 0;
+      for (var x = 0; x < g.w; x++) {
+        var c = y * g.w + x;
+        if (g.cells[c] !== color || bitOn(bytes, c)) continue;
+        var b = by * nbx + ((x / 10) | 0);
+        left[b]++;
+        if (first[b] < 0) first[b] = c;
+      }
+    }
+    return { nbx: nbx, nby: nby, left: left, first: first };
+  }
+
+  /**
+   * nextBlockFor(data, color, from:{x,y}, dir) -> { x, y, bx, by, left } | null
+   * The parking assistant: the next 10 x 10 block, in the stitcher's working
+   * direction ('right' rows of blocks left to right, 'left', 'down' /
+   * 'column' columns of blocks top to bottom), that still has stitches of
+   * this colour to do, and the first of them (where to park the thread).
+   * Wraps round the chart; never returns the current block.
+   */
+  function nextBlockFor(data, color, from, dir) {
+    var g = gridOf(data);
+    if (!g) return null;
+    color = clampInt(color, 0, 9999, -1);
+    from = isObj(from) ? from : {};
+    var fx = clampInt(from.x, 0, g.w - 1, 0), fy = clampInt(from.y, 0, g.h - 1, 0);
+    var t = blockTodo(g, color, doneOf(data, g.w * g.h));
+    var fbx = (fx / 10) | 0, fby = (fy / 10) | 0, best = -1, bestRank = Infinity;
+    for (var b = 0; b < t.left.length; b++) {
+      if (!t.left[b]) continue;
+      var bx = b % t.nbx, by = (b / t.nbx) | 0;
+      var rk = blockRank(bx, by, fbx, fby, t.nbx, t.nby, dir);
+      if (rk === 0) continue;
+      if (rk < bestRank) { bestRank = rk; best = b; }
+    }
+    if (best < 0) return null;
+    var c = t.first[best];
+    return { x: c % g.w, y: (c / g.w) | 0, bx: best % t.nbx, by: (best / t.nbx) | 0, left: t.left[best] };
+  }
+
+  /**
+   * parkingOrder(data, from, dir) -> [{ i, x, y, paletteIndex, rank, distance }]
+   * The parked threads in the order the stitcher will meet them.
+   */
+  function parkingOrder(data, from, dir) {
+    var g = gridOf(data), list = isObj(data) && Array.isArray(data.parking) ? data.parking : [];
+    if (!g) return [];
+    from = isObj(from) ? from : {};
+    var fx = clampInt(from.x, 0, g.w - 1, 0), fy = clampInt(from.y, 0, g.h - 1, 0);
+    var nbx = Math.ceil(g.w / 10), nby = Math.ceil(g.h / 10), out = [];
+    for (var i = 0; i < list.length; i++) {
+      var p = list[i];
+      if (typeof p.x !== 'number' || typeof p.y !== 'number') continue;
+      out.push({ i: i, x: p.x, y: p.y, paletteIndex: p.paletteIndex === undefined ? null : p.paletteIndex,
+        rank: blockRank((p.x / 10) | 0, (p.y / 10) | 0, (fx / 10) | 0, (fy / 10) | 0, nbx, nby, dir),
+        distance: Math.round(Math.sqrt((p.x - fx) * (p.x - fx) + (p.y - fy) * (p.y - fy)) * 10) / 10 });
+    }
+    out.sort(function (a, b) { return a.rank - b.rank || a.distance - b.distance || a.i - b.i; });
+    return out;
+  }
+
+  /* ---- #4 printed pages as regions ------------------------------------- */
+
+  /**
+   * cellsOfPage(data, pageIndex, { color }) -> Int32Array of the stitched
+   * squares (ascending) that printed page prints; empty when the page has
+   * no region.
+   */
+  function cellsOfPage(data, pageIndex, opts) {
+    var g = gridOf(data), pg = isObj(data) && Array.isArray(data.pages) ? data.pages[clampInt(pageIndex, 0, 9999, -1)] : null;
+    if (!g || !pg || !pg.region) return new Int32Array(0);
+    var color = colorOpt(opts), r = pg.region, out = [];
+    for (var y = r.y; y < r.y + r.h && y < g.h; y++) {
+      for (var x = r.x; x < r.x + r.w && x < g.w; x++) {
+        var i = y * g.w + x, v = g.cells[i];
+        if (v < 0 || (color !== null && v !== color)) continue;
+        out.push(i);
+      }
+    }
+    return new Int32Array(out);
+  }
+
+  /**
+   * pageProgress(data) -> [{ page, n, label, region, done, total, pct, pctText, complete }]
+   * One row per page that prints part of the chart, its progress read off
+   * the same bitmap as everything else ("Page 9 · 1,204 of 4,081 done").
+   */
+  function pageProgress(data) {
+    var g = gridOf(data), pages = isObj(data) && Array.isArray(data.pages) ? data.pages : [];
+    if (!g) return [];
+    var bytes = doneOf(data, g.w * g.h), out = [];
+    for (var p = 0; p < pages.length; p++) {
+      var r = pages[p] && pages[p].region;
+      if (!r) continue;
+      var done = 0, total = 0;
+      for (var y = r.y; y < r.y + r.h && y < g.h; y++) {
+        for (var x = r.x; x < r.x + r.w && x < g.w; x++) {
+          var i = y * g.w + x;
+          if (g.cells[i] < 0) continue;
+          total++;
+          if (bitOn(bytes, i)) done++;
+        }
+      }
+      out.push({ page: p, n: pages[p].n, label: pages[p].label, region: r, done: done, total: total,
+        pct: total ? Math.floor(done / total * 100) : 0, pctText: pctText(done, total),
+        complete: total > 0 && done === total });
+    }
+    return out;
+  }
+
+  /* ---- #13 islands and travel ------------------------------------------ */
+
+  var ISLAND_CACHE = { key: null, color: null, res: null };
+
+  /**
+   * islands(data, color) -> { count, list:[{ id, n, done, x0, y0, x1, y1, first }], label:Int32Array }
+   * 8-connected areas of one colour (a stitcher can carry along a diagonal),
+   * numbered in reading order of their first square. label[i] is the island
+   * of square i, -1 elsewhere. The last answer is cached.
+   */
+  function islands(data, color) {
+    var g = gridOf(data);
+    color = clampInt(color, 0, 9999, -1);
+    if (!g || color < 0) return { count: 0, list: [], label: new Int32Array(0) };
+    var ck = (isObj(data.chart) && (typeof data.chart.cells === 'string' ? data.chart.cells : (data.chart.cells && data.chart.cells.data))) || null;
+    var dk = isObj(data.progress) ? str(data.progress.done, '') : '';
+    if (ck && ISLAND_CACHE.key === ck + '#' + dk.length + dk.slice(0, 64) && ISLAND_CACHE.color === color) return ISLAND_CACHE.res;
+    var w = g.w, h = g.h, cells = g.cells, label = new Int32Array(w * h), i;
+    for (i = 0; i < label.length; i++) label[i] = -1;
+    var bytes = doneOf(data, w * h), list = [], stack = new Int32Array(w * h);
+    for (i = 0; i < cells.length; i++) {
+      if (cells[i] !== color || label[i] >= 0) continue;
+      var id = list.length, sp = 0, isl = { id: id, n: 0, done: 0, x0: w, y0: h, x1: -1, y1: -1, first: i };
+      stack[sp++] = i; label[i] = id;
+      while (sp) {
+        var c = stack[--sp], cx = c % w, cy = (c / w) | 0;
+        isl.n++;
+        if (bitOn(bytes, c)) isl.done++;
+        if (cx < isl.x0) isl.x0 = cx;
+        if (cx > isl.x1) isl.x1 = cx;
+        if (cy < isl.y0) isl.y0 = cy;
+        if (cy > isl.y1) isl.y1 = cy;
+        for (var dy = -1; dy <= 1; dy++) {
+          var ny = cy + dy;
+          if (ny < 0 || ny >= h) continue;
+          for (var dx = -1; dx <= 1; dx++) {
+            var nx = cx + dx;
+            if ((!dx && !dy) || nx < 0 || nx >= w) continue;
+            var nc = ny * w + nx;
+            if (cells[nc] === color && label[nc] < 0) { label[nc] = id; stack[sp++] = nc; }
+          }
+        }
+      }
+      list.push(isl);
+    }
+    var res = { count: list.length, list: list, label: label };
+    if (ck) { ISLAND_CACHE.key = ck + '#' + dk.length + dk.slice(0, 64); ISLAND_CACHE.color = color; ISLAND_CACHE.res = res; }
+    return res;
+  }
+
+  /** Cells per centimetre on this project's fabric (stitches, not threads). */
+  function cellsPerCm(data) {
+    var f = isObj(data) && isObj(data.fabric) ? data.fabric : {};
+    return effectiveCount(f.count, f.over) / CM_PER_IN;
+  }
+
+  /**
+   * Nearest square of another island (not in `skip`), searched outwards from
+   * every square of island `id` at once. -> { island, from, to, cells } | null
+   */
+  function nearestIsland(isl, w, h, id, skip, stamp, stampVal) {
+    var label = isl.label, queue = [], src = [], i, head = 0;
+    var first = isl.list[id].first;
+    /* seed with the island's squares (flood its label from `first`) */
+    var seed = [first];
+    stamp[first] = stampVal;
+    while (seed.length) {
+      var c = seed.pop();
+      queue.push(c); src.push(c);
+      var cx = c % w, cy = (c / w) | 0;
+      for (var dy = -1; dy <= 1; dy++) for (var dx = -1; dx <= 1; dx++) {
+        var nx = cx + dx, ny = cy + dy;
+        if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+        var n2 = ny * w + nx;
+        if (label[n2] === id && stamp[n2] !== stampVal) { stamp[n2] = stampVal; seed.push(n2); }
+      }
+    }
+    var best = null, bestD = Infinity, ring = -1;
+    while (head < queue.length) {
+      var q = queue[head], s = src[head]; head++;
+      var qx = q % w, qy = (q / w) | 0, sx = s % w, sy = (s / w) | 0;
+      var cheb = Math.max(Math.abs(qx - sx), Math.abs(qy - sy));
+      /* a Chebyshev ring past the best Euclidean hit cannot do better */
+      if (best && cheb > bestD) break;
+      if (cheb !== ring) ring = cheb;
+      var lq = label[q];
+      if (lq >= 0 && lq !== id && !skip[lq]) {
+        var d = Math.sqrt((qx - sx) * (qx - sx) + (qy - sy) * (qy - sy));
+        if (d < bestD) { bestD = d; best = { island: lq, from: s, to: q, cells: Math.round(d * 100) / 100 }; }
+        continue;
+      }
+      for (var ey = -1; ey <= 1; ey++) for (var ex = -1; ex <= 1; ex++) {
+        var mx = qx + ex, my = qy + ey;
+        if (mx < 0 || my < 0 || mx >= w || my >= h) continue;
+        var m2 = my * w + mx;
+        if (stamp[m2] === stampVal) continue;
+        stamp[m2] = stampVal;
+        queue.push(m2); src.push(s);
+      }
+    }
+    return best;
+  }
+
+  /**
+   * islandRoute(data, color, from, opts) -> { order:[id], hops:[{ from, to, cells, cm, cut }], cm, cuts }
+   * A greedy cross-country route: start at the island nearest `from`, then
+   * always the nearest island not yet stitched. `cut` marks a carry longer
+   * than opts.carryCm (default 2.5 cm, about an inch): start a new thread.
+   * opts.todo (default true) leaves out islands already done; opts.max
+   * (default 400) caps the route length (the rest is left to the next call).
+   */
+  function islandRoute(data, color, from, opts) {
+    opts = isObj(opts) ? opts : {};
+    var g = gridOf(data), isl = islands(data, color);
+    var out = { order: [], hops: [], cm: 0, cuts: 0 };
+    if (!g || !isl.count) return out;
+    var carry = num(opts.carryCm, 2.5), perCm = cellsPerCm(data);
+    var todo = opts.todo !== false, max = clampInt(opts.max, 1, 100000, 400);
+    var skip = {}, left = 0, i;
+    for (i = 0; i < isl.list.length; i++) {
+      if (todo && isl.list[i].done >= isl.list[i].n) skip[i] = 1; else left++;
+    }
+    if (!left) return out;
+    from = isObj(from) ? from : {};
+    var fx = clampInt(from.x, 0, g.w - 1, 0), fy = clampInt(from.y, 0, g.h - 1, 0);
+    var start = -1, sd = Infinity;
+    for (i = 0; i < isl.list.length; i++) {
+      if (skip[i]) continue;
+      var L = isl.list[i];
+      var dx = fx < L.x0 ? L.x0 - fx : (fx > L.x1 ? fx - L.x1 : 0);
+      var dy = fy < L.y0 ? L.y0 - fy : (fy > L.y1 ? fy - L.y1 : 0);
+      var dd = dx * dx + dy * dy;
+      if (dd < sd) { sd = dd; start = i; }
+    }
+    var stamp = new Int32Array(g.w * g.h), sv = 0, cur = start;
+    out.order.push(cur);
+    skip[cur] = 1;
+    while (out.order.length < Math.min(left, max)) {
+      var hop = nearestIsland(isl, g.w, g.h, cur, skip, stamp, ++sv);
+      if (!hop) break;
+      var cm = Math.round(hop.cells / perCm * 10) / 10;
+      var cut = cm > carry;
+      out.hops.push({ from: cur, to: hop.island, cells: hop.cells, cm: cm, cut: cut,
+        at: { x: hop.to % g.w, y: (hop.to / g.w) | 0 } });
+      out.cm = Math.round((out.cm + cm) * 10) / 10;
+      if (cut) out.cuts++;
+      cur = hop.island;
+      skip[cur] = 1;
+      out.order.push(cur);
+    }
+    return out;
+  }
+
+  /**
+   * islandAt(data, x, y) -> { id, of, n, done, nextCm, nextCells, cut, text } | null
+   * The readout: "island 4 of 37 · 12 stitches here · next island 3.1 cm away".
+   */
+  function islandAt(data, x, y, opts) {
+    opts = isObj(opts) ? opts : {};
+    var g = gridOf(data);
+    if (!g) return null;
+    x = clampInt(x, 0, g.w - 1, -1); y = clampInt(y, 0, g.h - 1, -1);
+    if (x < 0 || y < 0) return null;
+    var color = g.cells[y * g.w + x];
+    if (color < 0) return null;
+    var isl = islands(data, color), id = isl.label[y * g.w + x];
+    if (id < 0) return null;
+    var skip = {};
+    skip[id] = 1;
+    var hop = isl.count > 1 ? nearestIsland(isl, g.w, g.h, id, skip, new Int32Array(g.w * g.h), 1) : null;
+    var perCm = cellsPerCm(data), carry = num(opts.carryCm, 2.5);
+    var cm = hop ? Math.round(hop.cells / perCm * 10) / 10 : null;
+    var L = isl.list[id];
+    return {
+      id: id, of: isl.count, n: L.n, done: L.done, color: color,
+      nextCm: cm, nextCells: hop ? hop.cells : null, cut: cm !== null && cm > carry,
+      text: 'island ' + (id + 1) + ' of ' + isl.count + ' · ' + fmtInt(L.n) + ' ' + plural(L.n, 'stitch', 'stitches') + ' here' +
+        (hop ? ' · next island ≈ ' + cm + ' cm away' + (cm > carry ? ' (start a new thread rather than carry)' : '') : '')
+    };
+  }
+
+  /* ---- templates (shell-data §2) --------------------------------------- */
+
+  /** A template from a project: the chart, key and fabric, no progress. */
+  function templateFromProject(project) {
+    var cd = isObj(project) && isObj(project.craftData) ? project.craftData : null;
+    if (!cd) return null;
+    var d = normalize(deepCopy(cd), null);
+    if (!d) return null;
+    d.progress = {};
+    d.parking = [];
+    d.current = {};
+    d.goals = undefined;
+    d.sizeWarnedAt = 0;
+    var out = normalize(d, null);
+    if (dataSize(out) > 250000) { out.chart = null; out = normalize(out, null); }
+    return { craftData: out };
+  }
+
+  /* ---- #10 backstitch, knots and fractionals from drawn graphics --------- */
+
+  /**
+   * ornamentsFromGraphics(g, palette, opts) -> { back, knots, part, unmatched, stats }
+   *
+   * g = { segments:[{ x1,y1,x2,y2, hex, width }], circles:[{ x, y, r, hex }],
+   *       polys:[{ pts:[x,y,...], hex }] }, in chart cells (0,0 = top-left
+   * corner of the chart; extractGrid().graphics is exactly this).
+   *  - Grid lines are dropped: any width used by axis-aligned lines that run
+   *    10+ cells is a grid width, and lines of that width on the lattice go.
+   *  - Segments snap to the half-cell lattice (more than 0.15 off: not a
+   *    backstitch), are split into unit steps along straight, axis or 45°
+   *    runs (the OXS model, one bit of progress per step) and de-duplicated.
+   *  - Colour: nearest palette entry of kind 'back' (CIEDE2000 < opts.maxDE,
+   *    default 25); with none in range the item is `unmatched`, never guessed.
+   *  - Circles on a vertex: r < 0.3 cell a French knot, else a bead (kind
+   *    'knot' / 'bead' entries).
+   *  - Polys inside one cell: a quarter square is a quarter stitch (d: 1 tl,
+   *    2 tr, 3 bl, 4 br — the direction mapping is unverified against a real
+   *    generator, as HANDOFF says), a half-cell triangle a half stitch.
+   */
+  function ornamentsFromGraphics(g, palette, opts) {
+    g = isObj(g) ? g : {};
+    opts = isObj(opts) ? opts : {};
+    palette = Array.isArray(palette) ? palette : [];
+    var maxDE = num(opts.maxDE, 25);
+    var out = { back: [], knots: [], part: [], unmatched: [], stats: { segments: 0, grid: 0, offLattice: 0, steps: 0 } };
+    function nearestOf(kinds, hex) {
+      var lab = hexToLab(hex), best = -1, bd = Infinity;
+      if (!lab) return -1;
+      for (var i = 0; i < palette.length; i++) {
+        if (!kinds[palette[i].kind]) continue;
+        var l2 = hexToLab(palette[i].hex);
+        if (!l2) continue;
+        var dd = deltaE2000(lab, l2);
+        if (dd < bd) { bd = dd; best = i; }
+      }
+      return bd <= maxDE ? best : -1;
+    }
+    var segs = Array.isArray(g.segments) ? g.segments : [], i;
+    var gridW = {};
+    for (i = 0; i < segs.length; i++) {
+      var s = segs[i], len = Math.sqrt((s.x2 - s.x1) * (s.x2 - s.x1) + (s.y2 - s.y1) * (s.y2 - s.y1));
+      if ((Math.abs(s.x1 - s.x2) < 1e-3 || Math.abs(s.y1 - s.y2) < 1e-3) && len >= 10) gridW[Math.round(num(s.width, 0) * 1000)] = 1;
+    }
+    var isGridW = function (w) {
+      var k = Math.round(num(w, 0) * 1000);
+      for (var gk in gridW) if (gridW.hasOwnProperty(gk) && Math.abs(+gk - k) <= Math.max(1, +gk * 0.05)) return true;
+      return false;
+    };
+    var seen = {};
+    var snap = function (v) { return Math.round(v * 2) / 2; };
+    for (i = 0; i < segs.length; i++) {
+      var sg = segs[i];
+      out.stats.segments++;
+      var axis = Math.abs(sg.x1 - sg.x2) < 1e-3 || Math.abs(sg.y1 - sg.y2) < 1e-3;
+      var onLat = Math.abs(sg.x1 - Math.round(sg.x1)) < 0.02 || Math.abs(sg.y1 - Math.round(sg.y1)) < 0.02;
+      if (axis && onLat && isGridW(sg.width)) { out.stats.grid++; continue; }
+      var ax = snap(sg.x1), ay = snap(sg.y1), bx = snap(sg.x2), by = snap(sg.y2);
+      if (Math.abs(ax - sg.x1) > 0.15 || Math.abs(ay - sg.y1) > 0.15 || Math.abs(bx - sg.x2) > 0.15 || Math.abs(by - sg.y2) > 0.15 ||
+          (ax === bx && ay === by)) { out.stats.offLattice++; continue; }
+      var pi = nearestOf({ back: 1 }, sg.hex);
+      if (pi < 0) { out.unmatched.push({ type: 'back', x1: ax, y1: ay, x2: bx, y2: by, hex: sg.hex }); continue; }
+      var dx = bx - ax, dy = by - ay, steps = 1;
+      var adx = Math.abs(dx), ady = Math.abs(dy);
+      if (!adx || !ady || adx === ady) {
+        var unit = (adx % 1 || ady % 1) ? 0.5 : 1;
+        steps = Math.max(1, Math.round(Math.max(adx, ady) / unit));
+      }
+      for (var k = 0; k < steps; k++) {
+        var x1 = ax + dx * k / steps, y1 = ay + dy * k / steps, x2 = ax + dx * (k + 1) / steps, y2 = ay + dy * (k + 1) / steps;
+        var key = pi + ':' + Math.min(x1, x2) + ',' + (x1 <= x2 ? y1 : y2) + '-' + Math.max(x1, x2) + ',' + (x1 <= x2 ? y2 : y1);
+        if (x1 === x2) key = pi + ':' + x1 + ',' + Math.min(y1, y2) + '|' + Math.max(y1, y2);
+        if (seen[key]) continue;
+        seen[key] = 1;
+        out.back.push({ x1: x1, y1: y1, x2: x2, y2: y2, i: pi });
+        out.stats.steps++;
+      }
+    }
+    var circ = Array.isArray(g.circles) ? g.circles : [];
+    for (i = 0; i < circ.length; i++) {
+      var c = circ[i], bead = num(c.r, 0) >= 0.3;
+      var ki = nearestOf(bead ? { bead: 1, knot: 1 } : { knot: 1, bead: 1 }, c.hex);
+      var cx = snap(num(c.x, 0)), cy = snap(num(c.y, 0));
+      if (ki < 0) { out.unmatched.push({ type: bead ? 'bead' : 'knot', x: cx, y: cy, hex: c.hex }); continue; }
+      out.knots.push({ x: cx, y: cy, i: ki, t: palette[ki].kind === 'bead' || bead ? 'bead' : 'knot' });
+    }
+    var polys = Array.isArray(g.polys) ? g.polys : [];
+    for (i = 0; i < polys.length; i++) {
+      var pts = polys[i].pts || [], x0 = Infinity, y0 = Infinity, x1b = -Infinity, y1b = -Infinity, v;
+      for (v = 0; v < pts.length; v += 2) {
+        x0 = Math.min(x0, pts[v]); x1b = Math.max(x1b, pts[v]); y0 = Math.min(y0, pts[v + 1]); y1b = Math.max(y1b, pts[v + 1]);
+      }
+      var cellX = Math.floor((x0 + x1b) / 2), cellY = Math.floor((y0 + y1b) / 2);
+      var pw = x1b - x0, ph = y1b - y0, pa = nearestOf({ cross: 1, half: 1, blend: 1 }, polys[i].hex);
+      if (pa < 0 || !(pw > 0.2) || x1b - cellX > 1.05 || y1b - cellY > 1.05) { out.unmatched.push({ type: 'part', x: cellX, y: cellY, hex: polys[i].hex }); continue; }
+      var d;
+      if (pw < 0.6 && ph < 0.6) {
+        var qx = (x0 + x1b) / 2 - cellX < 0.5 ? 0 : 1, qy = (y0 + y1b) / 2 - cellY < 0.5 ? 0 : 1;
+        d = 1 + qx + qy * 2;
+      } else if (pts.length === 6) {
+        /* which corner the right angle sits in tells / from \ */
+        var area = Math.abs((pts[2] - pts[0]) * (pts[5] - pts[1]) - (pts[4] - pts[0]) * (pts[3] - pts[1])) / 2;
+        if (area < 0.35 || area > 0.65) { out.unmatched.push({ type: 'part', x: cellX, y: cellY, hex: polys[i].hex }); continue; }
+        var sx = 0, sy = 0;
+        for (v = 0; v < 6; v += 2) { sx += pts[v] - cellX; sy += pts[v + 1] - cellY; }
+        sx /= 3; sy /= 3;
+        d = (sx < 0.5) === (sy < 0.5) ? 2 : 1;      // centroid tl/br: "\" half (2); tr/bl: "/" half (1)
+      } else { out.unmatched.push({ type: 'part', x: cellX, y: cellY, hex: polys[i].hex }); continue; }
+      out.part.push({ x: cellX, y: cellY, a: pa, b: -1, d: d });
+    }
+    return out;
+  }
+
+  /* ---- #5 sessions, shown per stitch (shell-data owns the log) ----------- */
+
+  var DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  var MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  function dayLabel(ms) {
+    var dt = new Date(ms);
+    return DAY_NAMES[dt.getDay()] + ' ' + dt.getDate() + ' ' + MONTH_NAMES[dt.getMonth()];
+  }
+  function dayKey(ms) {
+    var dt = new Date(ms), m = dt.getMonth() + 1, dd = dt.getDate();
+    return dt.getFullYear() + '-' + (m < 10 ? '0' : '') + m + '-' + (dd < 10 ? '0' : '') + dd;
+  }
+
+  /**
+   * sessionLines(activity, opts) -> [{ s, e, ms, n, colours, text }] newest first
+   * activity = Store.activity(id) ({ sessions:[{ s, e, c:{stitch}, by:{ 'DMC 310':{stitch} } }] }).
+   * "Tue 11 Nov · 52 min · 318 stitches · DMC 310, 3843".
+   */
+  function sessionLines(activity, opts) {
+    opts = isObj(opts) ? opts : {};
+    var unit = str(opts.unit, 'stitch'), list = isObj(activity) && Array.isArray(activity.sessions) ? activity.sessions : [];
+    var out = [];
+    for (var i = list.length - 1; i >= 0; i--) {
+      var s = list[i];
+      if (!isObj(s)) continue;
+      var n = isObj(s.c) ? clampInt(s.c[unit], -1e9, 1e9, 0) : 0;
+      if (n <= 0 && !opts.all) continue;
+      var ms = Math.max(0, num(s.e, 0) - num(s.s, 0)), mins = Math.max(1, Math.round(ms / 60000));
+      var by = isObj(s.by) ? s.by : {}, cols = Object.keys(by).filter(function (k) { return isObj(by[k]) && by[k][unit] > 0; })
+        .sort(function (a, b) { return by[b][unit] - by[a][unit]; });
+      var shown = cols.slice(0, 3).map(function (k, j) { return j ? k.replace(/^DMC\s+/, '') : k; });
+      out.push({ s: s.s, e: s.e, ms: ms, n: n, colours: cols,
+        text: dayLabel(s.s) + ' · ' + (mins >= 60 ? Math.floor(mins / 60) + ' h ' + (mins % 60) + ' min' : mins + ' min') + ' · ' +
+          fmtInt(n) + ' ' + plural(n, 'stitch', 'stitches') + (shown.length ? ' · ' + shown.join(', ') + (cols.length > 3 ? ' +' + (cols.length - 3) : '') : '') });
+    }
+    return out;
+  }
+
+  /** dayStrip(activity, days, now) -> [{ day:'YYYY-MM-DD', label, n }] oldest first. */
+  function dayStrip(activity, days, now, opts) {
+    opts = isObj(opts) ? opts : {};
+    var unit = str(opts.unit, 'stitch'), map = isObj(activity) && isObj(activity.days) ? activity.days : {};
+    days = clampInt(days, 1, 366, 7);
+    var t = nowMs(now), out = [];
+    for (var i = days - 1; i >= 0; i--) {
+      var ms = t - i * 86400000, k = dayKey(ms), rec = map[k];
+      out.push({ day: k, label: DAY_NAMES[new Date(ms).getDay()], n: isObj(rec) ? clampInt(rec[unit], 0, 1e9, 0) : 0 });
+    }
+    return out;
+  }
+
+  /* ---- #21 find my place, and goals ------------------------------------ */
+
+  /**
+   * findPlace(data, text) -> { x, y, page?, block?, text } | { error }
+   * "col 134 row 57", "row 57 col 134", "134, 57", "134 x 57", "page 9",
+   * "p9", "block 13,6". Rows and columns are counted from 1, as printed.
+   */
+  function findPlace(data, text) {
+    var g = isObj(data) && isObj(data.chart) ? data.chart : null;
+    if (!g) return { error: 'There is no chart to move around.' };
+    var w = g.w, h = g.h, s = String(text == null ? '' : text).toLowerCase().trim(), m;
+    var off = function () { return { error: 'That is off the chart (' + w + ' × ' + h + ' stitches).' }; };
+    if ((m = /^(?:page|p)\s*(\d{1,4})$/.exec(s))) {
+      var want = +m[1], pages = Array.isArray(data.pages) ? data.pages : [];
+      for (var i = 0; i < pages.length; i++) {
+        var lab = /(\d+)\s*$/.exec(str(pages[i].label, ''));
+        if (pages[i].region && ((lab && +lab[1] === want) || (!lab && pages[i].n + 1 === want))) {
+          var r = pages[i].region;
+          return { x: r.x + (r.w >> 1), y: r.y + (r.h >> 1), page: i, text: str(pages[i].label, 'Page ' + want) };
+        }
+      }
+      return { error: 'Page ' + want + ' does not print part of this chart.' };
+    }
+    if ((m = /^block\s*(\d{1,4})\s*[,;\s]\s*(\d{1,4})$/.exec(s))) {
+      var bx = +m[1] - 1, by = +m[2] - 1;
+      if (bx < 0 || by < 0 || bx * 10 >= w || by * 10 >= h) return off();
+      var x = Math.min(w - 1, bx * 10 + 4), y = Math.min(h - 1, by * 10 + 4);
+      return { x: x, y: y, block: { bx: bx, by: by }, text: 'block ' + m[1] + ',' + m[2] };
+    }
+    var col = null, row = null;
+    if ((m = /col(?:umn)?\s*(\d{1,5})/.exec(s))) col = +m[1];
+    if ((m = /row\s*(\d{1,5})/.exec(s))) row = +m[1];
+    if (col === null && row === null && (m = /^(\d{1,5})\s*(?:[,;x×*]|\s)\s*(\d{1,5})$/.exec(s))) { col = +m[1]; row = +m[2]; }
+    if (col === null && row === null) return { error: 'Type a column and row ("col 134 row 57"), a page ("page 9") or a block ("block 13,6").' };
+    if (col === null) col = 1;
+    if (row === null) row = 1;
+    if (col < 1 || row < 1 || col > w || row > h) return off();
+    return { x: col - 1, y: row - 1, text: positionLabel(col - 1, row - 1, w, h).grid };
+  }
+
+  /**
+   * goalProgress(goal, data, activity, now) -> { done, target, left, pct, met, perDayNeeded, text, approx }
+   * goal = { kind: 'perDay', n } | { kind: 'page', page, by } | { kind: 'colour', color, by } |
+   *        { kind: 'total', by }. perDayNeeded is ≈ (marked approx) and only with a `by` date.
+   */
+  function goalProgress(goal, data, activity, now) {
+    goal = isObj(goal) ? goal : {};
+    var t = nowMs(now), done = 0, target = 0, what = '';
+    if (goal.kind === 'perDay') {
+      var days = isObj(activity) && isObj(activity.days) ? activity.days : {};
+      var rec = days[dayKey(t)];
+      done = isObj(rec) ? clampInt(rec.stitch, 0, 1e9, 0) : 0;
+      target = clampInt(goal.n, 1, 1e7, 100);
+      return { done: done, target: target, left: Math.max(0, target - done), pct: Math.min(100, Math.floor(done / target * 100)),
+        met: done >= target, perDayNeeded: null, approx: false,
+        text: fmtInt(done) + ' of ' + fmtInt(target) + ' today' + (done >= target ? ' ✓' : '') };
+    }
+    if (goal.kind === 'page') {
+      var pp = pageProgress(data), row = null;
+      for (var i = 0; i < pp.length; i++) if (pp[i].page === clampInt(goal.page, 0, 9999, -1)) row = pp[i];
+      if (!row) return { done: 0, target: 0, left: 0, pct: 0, met: false, perDayNeeded: null, approx: false, text: 'That page has no part of the chart.' };
+      done = row.done; target = row.total; what = str(row.label, 'Page');
+    } else if (goal.kind === 'colour') {
+      var st = progressStats(data), c = st.byColor[clampInt(goal.color, 0, 9999, -1)];
+      if (!c) return { done: 0, target: 0, left: 0, pct: 0, met: false, perDayNeeded: null, approx: false, text: 'No such colour.' };
+      done = c.done; target = c.total; what = flossLabel(data.palette[goal.color]);
+    } else {
+      var tt = totals(data);
+      done = tt.done; target = tt.total; what = 'the piece';
+    }
+    var left = Math.max(0, target - done), need = null;
+    if (goal.by && left > 0) {
+      var daysLeft = Math.max(1, Math.ceil((num(goal.by, t) - t) / 86400000));
+      need = Math.ceil(left / daysLeft);
+    }
+    return { done: done, target: target, left: left, pct: target ? Math.floor(done / target * 100) : 0, met: target > 0 && !left,
+      perDayNeeded: need, approx: need !== null,
+      text: (target && !left ? what + ' done ✓' : fmtInt(left) + ' left on ' + what) +
+        (need !== null ? ' · ≈ ' + fmtInt(need) + ' a day to finish by ' + dayLabel(num(goal.by, t)) : '') };
+  }
+
+  /* ---- X3 the mark log (shell-data stores it; this replays it) ----------- */
+
+  /**
+   * markDiff(prevB64, nextB64, n) -> [[cellIndex, 1|0]] — what changed between
+   * two progress bitmaps, for Store.logMarks after a bulk mark or an undo.
+   */
+  function markDiff(prev, next, n) {
+    var a = b64ToBytes(str(prev, '')), b = b64ToBytes(str(next, ''));
+    n = clampInt(n, 0, 1e9, Math.max(a.length, b.length) * 8);
+    var out = [], bytes = Math.ceil(n / 8);
+    for (var k = 0; k < bytes; k++) {
+      var x = (a[k] || 0) ^ (b[k] || 0);
+      if (!x) continue;
+      for (var bit = 0; bit < 8; bit++) {
+        if (!((x >> bit) & 1)) continue;
+        var i = k * 8 + bit;
+        if (i < n) out.push([i, ((b[k] || 0) >> bit) & 1]);
+      }
+    }
+    return out;
+  }
+
+  /**
+   * replayMarks(chunks, n, opts) -> { frames, next() -> { at, bits, changed } | null, reset() }
+   * chunks = Store.readMarks(id) ([{ at, marks:[[i, 1|0]] }], in order). Each
+   * frame applies one chunk (or opts.perFrame marks at most) to ONE bitmap
+   * (Uint8Array, one byte per cell, shared between frames: copy it to keep
+   * it) and lists the changed cells, so a renderer can redraw only those.
+   * Replaying all of it reproduces the progress bitmap bit for bit.
+   */
+  function replayMarks(chunks, n, opts) {
+    opts = isObj(opts) ? opts : {};
+    chunks = Array.isArray(chunks) ? chunks : [];
+    n = clampInt(n, 0, 1e8, 0);
+    var per = clampInt(opts.perFrame, 0, 1e7, 0);
+    var bits = new Uint8Array(n), ci = 0, mi = 0;
+    var frames = 0;
+    for (var k = 0; k < chunks.length; k++) {
+      var len = isObj(chunks[k]) && Array.isArray(chunks[k].marks) ? chunks[k].marks.length : 0;
+      frames += per ? Math.max(1, Math.ceil(len / per)) : 1;
+    }
+    return {
+      frames: frames,
+      bits: bits,
+      next: function () {
+        if (ci >= chunks.length) return null;
+        var ch = isObj(chunks[ci]) ? chunks[ci] : {}, marks = Array.isArray(ch.marks) ? ch.marks : [];
+        var end = per ? Math.min(marks.length, mi + per) : marks.length, changed = [];
+        for (var q = mi; q < end; q++) {
+          var m = marks[q], i = clampInt(m && m[0], -1, n - 1, -1);
+          if (i < 0) continue;
+          var v = m[1] ? 1 : 0;
+          if (bits[i] !== v) { bits[i] = v; changed.push(i); }
+        }
+        var at = num(ch.at, 0);
+        if (end >= marks.length) { ci++; mi = 0; } else mi = end;
+        return { at: at, bits: bits, changed: changed };
+      },
+      reset: function () { for (var z = 0; z < n; z++) bits[z] = 0; ci = 0; mi = 0; }
+    };
+  }
+
+  /* ---- #15 floss identity, needs and a kitting list ---------------------- */
+
+  /** flossId('DMC', '04') -> 'dmc:4' (the profile's floss rows are keyed brand -> code). */
+  function flossId(brand, code) {
+    var k = codeKey(brand, code);
+    return k ? k.replace('|', ':') : '';
+  }
+
+  /**
+   * flossNeeds(data, opts) -> { [brand]: { [code]: { skeins, stitches, name } } }
+   * Skeins each colour of a project needs (skeinPlan's "buy" with no stash);
+   * the stitches come from the chart, else the key's printed count.
+   * Backstitch / knot rows count one skein unless the key printed skeins.
+   */
+  function flossNeeds(data, opts) {
+    opts = isObj(opts) ? opts : {};
+    var d = isObj(data) ? data : {}, out = {}, st = progressStats(d);
+    var f = isObj(d.fabric) ? d.fabric : {};
+    var pal = Array.isArray(d.palette) ? d.palette : [];
+    for (var i = 0; i < pal.length; i++) {
+      var e = pal[i], k = codeKey(e.brand || 'DMC', e.code);
+      if (!k || e.unresolved) continue;
+      var parts = k.split('|'), brand = parts[0], code = parts[1];
+      var cell = CHECK_KINDS[e.kind || 'cross'];
+      var stitches = cell ? ((st.byColor[i] && st.byColor[i].total) || e.keyCount || e.stitchCount || 0) : 0;
+      if (opts.remaining && cell && st.byColor[i]) stitches = Math.max(0, stitches - st.byColor[i].done);
+      var sk = cell ? skeinRange({ stitchCount: stitches, count: f.count, over: f.over, strands: e.strands }).mid
+        : Math.max(1, clampInt(e.skeins, 0, 999, 0));
+      if (e.skeins > sk) sk = e.skeins;
+      if (!sk) continue;
+      var b = out[brand] = out[brand] || {};
+      var cur = b[code] || { skeins: 0, stitches: 0, name: e.name || '', printed: str(e.code, '') };
+      cur.skeins += sk; cur.stitches += stitches;
+      b[code] = cur;
+    }
+    return out;
+  }
+
+  /** The profile's floss shape, or Store.flossStash()'s array, as { brand: { code: owned } }. */
+  function stashMap(stash) {
+    var m = {}, i;
+    if (Array.isArray(stash)) {
+      for (i = 0; i < stash.length; i++) {
+        var r = stash[i];
+        if (!isObj(r)) continue;
+        var id = flossId(r.brand, r.code);
+        if (id) m[id] = (m[id] || 0) + clampInt(r.owned, 0, 1e6, 0);
+      }
+    } else if (isObj(stash)) {
+      var bs = Object.keys(stash);
+      for (i = 0; i < bs.length; i++) {
+        var codes = isObj(stash[bs[i]]) ? stash[bs[i]] : {}, cs = Object.keys(codes);
+        for (var j = 0; j < cs.length; j++) {
+          var v = codes[cs[j]], owned = isObj(v) ? v.owned : v;
+          var id2 = flossId(bs[i], cs[j]);
+          if (id2) m[id2] = (m[id2] || 0) + clampInt(owned, 0, 1e6, 0);
+        }
+      }
+    }
+    return m;
+  }
+
+  /**
+   * kitList(projects, stash, opts) -> { projects:[{ id, title, rows:[{ id, brand, code, name, need,
+   *   allocated, buy, setAside:[{ id, n }] }], buy }], buyTotal }
+   * projects = [{ id, title, data }] in priority order (active WIPs first);
+   * each takes what it needs from the stash before the next one does.
+   * Computed, never stored (the same rule as Store.flossAllocation).
+   */
+  function kitList(projects, stash, opts) {
+    opts = isObj(opts) ? opts : {};
+    var left = stashMap(stash), out = { projects: [], buyTotal: 0 }, given = {};
+    projects = Array.isArray(projects) ? projects : [];
+    for (var p = 0; p < projects.length; p++) {
+      var pr = projects[p] || {}, needs = flossNeeds(pr.data, { remaining: opts.remaining !== false });
+      var rows = [], buy = 0;
+      Object.keys(needs).sort().forEach(function (brand) {
+        Object.keys(needs[brand]).sort(function (a, b) { return (parseInt(a, 10) || 0) - (parseInt(b, 10) || 0) || (a < b ? -1 : 1); })
+          .forEach(function (code) {
+            var id = brand + ':' + code, need = needs[brand][code].skeins, have = left[id] || 0;
+            var alloc = Math.min(need, have);
+            left[id] = have - alloc;
+            var row = { id: id, brand: brand === 'dmc' ? 'DMC' : brand.charAt(0).toUpperCase() + brand.slice(1), code: code,
+              printed: needs[brand][code].printed || code,
+              name: needs[brand][code].name, need: need, allocated: alloc, buy: need - alloc,
+              setAside: (given[id] || []).slice() };
+            (given[id] = given[id] || []).push({ id: pr.id, n: alloc });
+            buy += row.buy;
+            rows.push(row);
+          });
+      });
+      out.projects.push({ id: pr.id, title: str(pr.title, ''), rows: rows, buy: buy });
+      out.buyTotal += buy;
+    }
+    return out;
+  }
+
+  /* ---- #16 brand tables, pluggable, with provenance ----------------------- */
+
+  var BRAND_TABLES = {};
+
+  /**
+   * registerBrandTable({ brand, rows:['code|name|hex'], provenance:{ source, licence, url, approx } })
+   * -> { ok, brand, n } | { ok:false, reason }. No table is shipped for any
+   * brand but DMC until a licensed source is approved (BUILD decision).
+   */
+  function registerBrandTable(t) {
+    t = isObj(t) ? t : {};
+    var brand = canonBrand(t.brand) || str(t.brand, '').trim();
+    if (!brand || brand === 'DMC') return { ok: false, reason: 'DMC is built in; give another brand.' };
+    var pv = isObj(t.provenance) ? t.provenance : {};
+    if (!str(pv.source, '') || !str(pv.licence, '')) return { ok: false, reason: 'A colour table needs its source and licence.' };
+    var rows = [], raw = Array.isArray(t.rows) ? t.rows : [];
+    for (var i = 0; i < raw.length; i++) {
+      var p = String(raw[i]).split('|'), hex = normHex(p[2], null), code = str(p[0], '').trim();
+      if (!code || !hex) continue;
+      var rgb = hexToRgb(hex);
+      rows.push({ code: code, name: str(p[1], '').trim(), hex: hex, lab: rgbToLab(rgb[0], rgb[1], rgb[2]) });
+    }
+    if (!rows.length) return { ok: false, reason: 'No usable rows (code|name|hex).' };
+    BRAND_TABLES[brand.toLowerCase()] = { brand: brand, rows: rows,
+      provenance: { source: str(pv.source, ''), licence: str(pv.licence, ''), url: str(pv.url, ''), approx: pv.approx !== false } };
+    return { ok: true, brand: brand, n: rows.length };
+  }
+
+  function tableFor(brand) {
+    var b = String(brand == null ? '' : brand).trim().toLowerCase() || 'dmc';
+    if (b === 'dmc') {
+      return { brand: 'DMC', rows: FLOSS.dmc, provenance: { source: 'sharlagelfand/dmc (floss_adrianj.csv)', licence: 'MIT', url: 'https://github.com/sharlagelfand/dmc', approx: true } };
+    }
+    return BRAND_TABLES[b] || null;
+  }
+
+  /** brandTables() -> [{ brand, n, provenance }] (DMC always first). */
+  function brandTables() {
+    var out = [{ brand: 'DMC', n: FLOSS.dmc.length, provenance: tableFor('DMC').provenance }];
+    Object.keys(BRAND_TABLES).sort().forEach(function (k) {
+      out.push({ brand: BRAND_TABLES[k].brand, n: BRAND_TABLES[k].rows.length, provenance: BRAND_TABLES[k].provenance });
+    });
+    return out;
+  }
+
+  function matchWord(de) { return de < 2 ? 'very close' : de < 5 ? 'close' : de < 10 ? 'noticeable' : 'different'; }
+
+  function rowFor(table, code) {
+    if (!table) return null;
+    var want = codeKey(table.brand, code);
+    for (var i = 0; i < table.rows.length; i++) if (codeKey(table.brand, table.rows[i].code) === want) return table.rows[i];
+    return null;
+  }
+
+  function labOfRow(r) {
+    if (r.lab) return r.lab;
+    var rgb = hexToRgb(r.hex);
+    return rgb ? rgbToLab(rgb[0], rgb[1], rgb[2]) : null;
+  }
+
+  /**
+   * convert(brand, code, toBrand) -> { brand, code, name, hex, deltaE, word, provenance } | { none:true, reason }
+   * Matching is by colour difference against each brand's own RGB list,
+   * never a typed lookup table. With no table for a brand it says so.
+   */
+  function convert(brand, code, toBrand) {
+    var from = tableFor(brand), to = tableFor(toBrand);
+    if (!from) return { none: true, reason: 'There is no ' + str(brand, 'colour') + ' colour table on this device, so its colours cannot be matched.' };
+    if (!to) return { none: true, reason: 'There is no ' + str(toBrand, 'colour') + ' colour table on this device, so there is no honest match.' };
+    var src = rowFor(from, code);
+    if (!src) return { none: true, reason: str(brand, '') + ' ' + str(code, '') + ' is not in the ' + from.brand + ' table.' };
+    var lab = labOfRow(src), best = null, bd = Infinity;
+    for (var i = 0; i < to.rows.length; i++) {
+      var l2 = labOfRow(to.rows[i]);
+      if (!l2) continue;
+      var dd = deltaE2000(lab, l2);
+      if (dd < bd) { bd = dd; best = to.rows[i]; }
+    }
+    if (!best) return { none: true, reason: 'No colour to match.' };
+    return { brand: to.brand, code: best.code, name: best.name, hex: best.hex, deltaE: round1(bd), word: matchWord(bd),
+      provenance: to.provenance };
+  }
+
+  /**
+   * substitutes(brand, code, stash, n) -> [{ brand, code, name, hex, deltaE, word, have }]
+   * "I'm out of 3846": the n nearest colours in the stash (any brand with a
+   * table), nearest first.
+   */
+  function substitutes(brand, code, stash, n) {
+    var src = rowFor(tableFor(brand), code);
+    if (!src) return [];
+    var lab = labOfRow(src), m = stashMap(stash), out = [], self = flossId(brand, code);
+    Object.keys(m).forEach(function (id) {
+      if (id === self || !(m[id] > 0)) return;
+      var bc = id.split(':'), t = tableFor(bc[0]), r = rowFor(t, bc[1]);
+      if (!r) return;
+      var dd = deltaE2000(lab, labOfRow(r));
+      out.push({ brand: t.brand, code: r.code, name: r.name, hex: r.hex, deltaE: round1(dd), word: matchWord(dd), have: m[id] });
+    });
+    out.sort(function (a, b) { return a.deltaE - b.deltaE || (a.code < b.code ? -1 : 1); });
+    return out.slice(0, clampInt(n, 1, 50, 3));
+  }
+
+  /* ---- #17 fabric, hoop and frame ------------------------------------------ */
+
+  var HOOPS_IN = [4, 5, 6, 7, 8, 9, 10, 12, 14];
+  var QSNAPS_IN = [[6, 6], [8, 8], [11, 11], [8, 11], [11, 14], [14, 14], [11, 17], [17, 17]];
+  var FRAMES_IN = [[5, 7], [8, 10], [11, 14], [12, 16], [16, 20], [18, 24], [24, 36]];
+  var CUTS_IN = [{ name: 'fat eighth', w: 11, h: 18 }, { name: 'fat quarter', w: 18, h: 22 }, { name: 'half yard', w: 18, h: 36 }];
+
+  function fitsIn(w, h, W, H) {
+    var a = Math.min(W - w, H - h), b = Math.min(W - h, H - w);
+    return Math.max(a, b);
+  }
+
+  /**
+   * fabricPlan({ w, h, count, over, margin }) -> { design, margin, cut, cuts, hoop, qsnap, frame, text }
+   * margin: 'frame' (3 in a side, the default), 'hoop' (2 in) or inches.
+   * All sizes in inches and cm; `cuts` says which standard piece the cut fits
+   * and how much is spare. The hoop is the smallest one whose inside clears
+   * the design's diagonal; frames leave a 2 in mat round a 1/4 in opening.
+   */
+  function fabricPlan(o) {
+    o = isObj(o) ? o : {};
+    var m = o.margin === 'hoop' ? 2 : (typeof o.margin === 'number' && o.margin >= 0 ? o.margin : 3);
+    var s = finishedSize({ w: o.w, h: o.h, count: o.count, over: o.over });
+    var cw = round2(s.wIn + 2 * m), ch = round2(s.hIn + 2 * m);
+    var cuts = CUTS_IN.map(function (c) {
+      var spare = fitsIn(cw, ch, c.w, c.h);
+      return { name: c.name, w: c.w, h: c.h, fits: spare >= 0, spareIn: round1(spare) };
+    });
+    var diag = Math.sqrt(s.wIn * s.wIn + s.hIn * s.hIn) + 1, hoop = null;
+    for (var i = 0; i < HOOPS_IN.length; i++) if (HOOPS_IN[i] >= diag) { hoop = HOOPS_IN[i]; break; }
+    var qs = null;
+    for (i = 0; i < QSNAPS_IN.length; i++) {
+      if (fitsIn(s.wIn + 1, s.hIn + 1, QSNAPS_IN[i][0], QSNAPS_IN[i][1]) >= 0) { qs = QSNAPS_IN[i]; break; }
+    }
+    var open = { w: round2(s.wIn + 0.5), h: round2(s.hIn + 0.5) }, frame = null;
+    for (i = 0; i < FRAMES_IN.length; i++) {
+      if (fitsIn(open.w + 4, open.h + 4, FRAMES_IN[i][0], FRAMES_IN[i][1]) >= 0) { frame = FRAMES_IN[i]; break; }
+    }
+    var fq = cuts[1];
+    return {
+      design: { wIn: s.wIn, hIn: s.hIn, wCm: s.wCm, hCm: s.hCm },
+      margin: { in: m, cm: round1(m * CM_PER_IN) },
+      cut: { wIn: cw, hIn: ch, wCm: round1(cw * CM_PER_IN), hCm: round1(ch * CM_PER_IN) },
+      cuts: cuts,
+      hoop: hoop ? { in: hoop, cm: round1(hoop * CM_PER_IN) } : null,
+      qsnap: qs ? { wIn: qs[0], hIn: qs[1] } : null,
+      frame: frame ? { wIn: frame[0], hIn: frame[1], opening: open } : null,
+      text: 'cut ' + cw + ' × ' + ch + ' in · fits a fat quarter (18 × 22 in)? ' +
+        (fq.fits ? 'yes, ' + fq.spareIn + ' in spare' : 'no') +
+        (hoop ? ' · ' + hoop + ' in hoop' : ' · bigger than a 14 in hoop: use a frame')
+    };
+  }
+
+  /**
+   * frameFit({ w, h, over }, { wIn, hIn }, counts) -> [{ count, wIn, hIn, fits, spareIn }]
+   * The reverse question: "8 × 10 frame: on 16 ct it fits / needs 18 ct".
+   */
+  function frameFit(design, frame, counts) {
+    design = isObj(design) ? design : {};
+    frame = isObj(frame) ? frame : {};
+    if (!Array.isArray(counts) || !counts.length) counts = [11, 14, 16, 18, 20, 22, 25, 28, 32];
+    var out = [];
+    for (var i = 0; i < counts.length; i++) {
+      var s = finishedSize({ w: design.w, h: design.h, count: counts[i], over: design.over });
+      var spare = fitsIn(s.wIn, s.hIn, num(frame.wIn, 0), num(frame.hIn, 0));
+      out.push({ count: counts[i], wIn: s.wIn, hIn: s.hIn, fits: spare >= 0, spareIn: round1(spare) });
+    }
+    return out;
+  }
+
+  /* ---- #20 adjacent grid crafts: a kind, not a new craft -------------------- */
+
+  var KINDS = {
+    cross: { label: 'Cross-stitch', unit: 'stitch', units: 'stitches', material: 'floss', fabric: true, strands: true, pageWord: 'page' },
+    diamond: { label: 'Diamond painting', unit: 'drill', units: 'drills', material: 'drills', fabric: false, strands: false, pageWord: 'section', pack: 200 },
+    needlepoint: { label: 'Needlepoint', unit: 'stitch', units: 'stitches', material: 'yarn', fabric: true, strands: false, pageWord: 'page', meshWord: 'mesh' },
+    filet: { label: 'Filet crochet', unit: 'mesh', units: 'meshes', material: 'thread', fabric: false, strands: false, pageWord: 'page' },
+    fusebead: { label: 'Fuse beads', unit: 'bead', units: 'beads', material: 'beads', fabric: false, strands: false, pageWord: 'pegboard', pack: 1000 }
+  };
+
+  /** kindOf(data) -> 'cross' | 'diamond' | 'needlepoint' | 'filet' | 'fusebead'. */
+  function kindOf(data) { return isObj(data) && KINDS[data.kind] ? data.kind : 'cross'; }
+
+  /**
+   * materials(data, i) -> { amount, unit, packs?, text, approx }
+   * What one colour takes, in the kind's own terms: skeins of floss, drills
+   * in packs of 200 (10% spare), wool for tent stitch (≈, by mesh count),
+   * filet thread per mesh (≈), fuse beads.
+   */
+  function materials(data, i) {
+    var d = isObj(data) ? data : {}, k = kindOf(d), K = KINDS[k];
+    var e = Array.isArray(d.palette) ? d.palette[i] : null;
+    if (!e) return { amount: 0, unit: K.units, text: '', approx: false };
+    var st = progressStats(d), n = (st.byColor[i] && st.byColor[i].total) || e.keyCount || e.stitchCount || 0;
+    var f = isObj(d.fabric) ? d.fabric : {};
+    if (k === 'diamond' || k === 'fusebead') {
+      var want = Math.ceil(n * (k === 'diamond' ? 1.1 : 1.05)), packs = Math.ceil(want / K.pack);
+      return { amount: want, unit: K.units, packs: packs, approx: true,
+        text: fmtInt(n) + ' ' + plural(n, K.unit, K.units) + ' · ' + packs + ' ' + plural(packs, 'pack') + ' of ' + K.pack };
+    }
+    if (k === 'needlepoint') {
+      var mesh = effectiveCount(f.count, 1), m = Math.ceil(n * (CM_PER_IN / mesh) * 3.2 / 100 * 10) / 10;
+      return { amount: m, unit: 'm', approx: true, text: '≈ ' + m + ' m of wool (tent stitch on ' + mesh + ' mesh)' };
+    }
+    if (k === 'filet') {
+      var mm = Math.ceil(n * 0.06 * 10) / 10;
+      return { amount: mm, unit: 'm', approx: true, text: fmtInt(n) + ' filled ' + plural(n, 'mesh', 'meshes') + ' · ≈ ' + mm + ' m of thread' };
+    }
+    var sp = skeinPlan({ stitchCount: n, count: f.count, over: f.over, strands: e.strands, have: e.have ? 1 : 0 });
+    return { amount: sp.mid, unit: 'skeins', approx: true, text: sp.text };
+  }
+
+  /**
+   * filetRowText(row, data) -> 'Row 5 (left to right): 3 open, 7 filled, 2 open'
+   * A filet chart is two-state: any stitched square is a filled mesh, an
+   * empty one is open. `row` is one of writtenRows().rows.
+   */
+  function filetRowText(row, data) {
+    row = isObj(row) ? row : {};
+    var runs = Array.isArray(row.runs) ? row.runs : [], parts = [], merged = [];
+    for (var i = 0; i < runs.length; i++) {
+      var filled = runs[i].p >= 0;
+      if (merged.length && merged[merged.length - 1].f === filled) merged[merged.length - 1].n += runs[i].n;
+      else merged.push({ f: filled, n: runs[i].n });
+    }
+    for (i = 0; i < merged.length; i++) parts.push(merged[i].n + ' ' + (merged[i].f ? 'filled' : 'open'));
+    return 'Row ' + (row.n === undefined ? num(row.y, 0) + 1 : row.n) + ' (' + (row.rtl ? 'right to left' : 'left to right') + '): ' +
+      (parts.length ? parts.join(', ') : 'nothing');
+  }
+
+  /* ---- #18 joining quadrant files ---------------------------------------- */
+
+  /**
+   * quadrantLayout(datas, names) -> [{ x, y }]
+   * Where each part goes: names saying tl / tr / bl / br (or "top left" …)
+   * are placed as quadrants by the parts' own sizes; otherwise row by row,
+   * two to a row.
+   */
+  function quadrantLayout(datas, names) {
+    datas = Array.isArray(datas) ? datas : [];
+    names = Array.isArray(names) ? names : [];
+    var tag = names.map(function (n) {
+      var s = String(n || '').toLowerCase().replace(/[^a-z]+/g, ' ');
+      if (/\btl\b|top left|upper left/.test(s)) return 'tl';
+      if (/\btr\b|top right|upper right/.test(s)) return 'tr';
+      if (/\bbl\b|bottom left|lower left/.test(s)) return 'bl';
+      if (/\bbr\b|bottom right|lower right/.test(s)) return 'br';
+      return null;
+    });
+    var size = function (d) { return isObj(d) && isObj(d.chart) ? { w: d.chart.w, h: d.chart.h } : { w: 0, h: 0 }; };
+    var idx = {};
+    tag.forEach(function (t, i) { if (t && idx[t] === undefined) idx[t] = i; });
+    var out = [];
+    if (Object.keys(idx).length === datas.length && datas.length) {
+      var wtl = idx.tl !== undefined ? size(datas[idx.tl]).w : (idx.bl !== undefined ? size(datas[idx.bl]).w : 0);
+      var htl = idx.tl !== undefined ? size(datas[idx.tl]).h : (idx.tr !== undefined ? size(datas[idx.tr]).h : 0);
+      for (var i = 0; i < datas.length; i++) {
+        var t = tag[i];
+        out.push({ x: t === 'tr' || t === 'br' ? wtl : 0, y: t === 'bl' || t === 'br' ? htl : 0 });
+      }
+      return out;
+    }
+    var x = 0, y = 0, rowH = 0;
+    for (var j = 0; j < datas.length; j++) {
+      if (j && j % 2 === 0) { x = 0; y += rowH; rowH = 0; }
+      out.push({ x: x, y: y });
+      x += size(datas[j]).w;
+      rowH = Math.max(rowH, size(datas[j]).h);
+    }
+    return out;
+  }
+
+  /**
+   * joinCharts(parts:[{ data, x, y }], opts) -> { data, w, h, maps:[[old -> new]], conflicts }
+   * One chart from several files (the four Pokémon quadrants). Colours are
+   * merged by brand + code (else hex + name), squares, backstitch, knots,
+   * fractionals, done bits and page regions are moved by each part's offset.
+   * `conflicts` counts squares two parts give different colours (the later
+   * part wins).
+   */
+  function joinCharts(parts, opts) {
+    opts = isObj(opts) ? opts : {};
+    parts = Array.isArray(parts) ? parts.filter(function (p) { return isObj(p) && isObj(p.data); }) : [];
+    var W = 0, H = 0, i, k;
+    var norm = parts.map(function (p) { return { d: normalize(p.data, null), x: clampInt(p.x, 0, 20000, 0), y: clampInt(p.y, 0, 20000, 0) }; });
+    for (i = 0; i < norm.length; i++) {
+      if (!norm[i].d.chart) continue;
+      W = Math.max(W, norm[i].x + norm[i].d.chart.w);
+      H = Math.max(H, norm[i].y + norm[i].d.chart.h);
+    }
+    if (!W || !H || W * H > 4000000) return { data: null, w: W, h: H, maps: [], conflicts: 0, error: W * H > 4000000 ? 'too big' : 'no charts' };
+    var palette = [], byKey = {}, maps = [];
+    var first = norm[0].d;
+    for (i = 0; i < norm.length; i++) {
+      var map = [];
+      norm[i].d.palette.forEach(function (e) {
+        var key = codeKey(e.brand || 'DMC', e.code) || ('hex|' + e.hex + '|' + e.name + '|' + e.kind);
+        key += '|' + e.kind;
+        if (!byKey.hasOwnProperty(key)) {
+          byKey[key] = palette.length;
+          var c = deepCopy(e);
+          c.i = palette.length;
+          c.stitchCount = 0;
+          if (c.keyCount) c.keyCount = 0;
+          palette.push(c);
+        }
+        var ni = byKey[key];
+        if (e.keyCount) palette[ni].keyCount = (palette[ni].keyCount || 0) + e.keyCount;
+        map.push(ni);
+      });
+      maps.push(map);
+    }
+    var cells = new Int16Array(W * H), done = new Uint8Array(Math.ceil(W * H / 8)), conflicts = 0;
+    for (i = 0; i < cells.length; i++) cells[i] = -1;
+    var back = [], knots = [], part = [], pages = [];
+    for (i = 0; i < norm.length; i++) {
+      var n = norm[i], d = n.d;
+      if (!d.chart) continue;
+      var g = chartCells(d.chart), bytes = doneOf(d, g.w * g.h), mp = maps[i];
+      for (var y = 0; y < g.h; y++) {
+        for (var x = 0; x < g.w; x++) {
+          var v = g.cells[y * g.w + x];
+          if (v < 0) continue;
+          var j = (y + n.y) * W + (x + n.x), nv = mp[v] === undefined ? -1 : mp[v];
+          if (cells[j] >= 0 && cells[j] !== nv) conflicts++;
+          cells[j] = nv;
+          if (bitOn(bytes, y * g.w + x)) done[j >> 3] |= 1 << (j & 7);
+          else done[j >> 3] &= ~(1 << (j & 7));
+        }
+      }
+      d.chart.back.forEach(function (b) { back.push({ x1: b.x1 + n.x, y1: b.y1 + n.y, x2: b.x2 + n.x, y2: b.y2 + n.y, i: b.i >= 0 ? mp[b.i] : -1 }); });
+      d.chart.knots.forEach(function (q) { knots.push({ x: q.x + n.x, y: q.y + n.y, i: q.i >= 0 ? mp[q.i] : -1, t: q.t }); });
+      d.chart.part.forEach(function (q) { part.push({ x: q.x + n.x, y: q.y + n.y, a: q.a >= 0 ? mp[q.a] : -1, b: q.b >= 0 ? mp[q.b] : -1, d: q.d }); });
+      d.pages.forEach(function (pg) {
+        var c2 = deepCopy(pg);
+        if (c2.region) { c2.region.x += n.x; c2.region.y += n.y; c2.region.fx = c2.region.fx; }
+        c2.label = (parts.length > 1 && opts.labels && opts.labels[i] ? opts.labels[i] + ' · ' : '') + c2.label;
+        pages.push(c2);
+      });
+    }
+    for (k = 0; k < cells.length; k++) if (cells[k] >= 0) palette[cells[k]].stitchCount++;
+    var out = normalize({
+      fabric: first.fabric, design: { w: W, h: H, title: first.design.title, designer: first.design.designer, copyright: first.design.copyright },
+      strandsDefault: first.strandsDefault, palette: palette,
+      chart: { w: W, h: H, cells: cells, back: back, knots: knots, part: part },
+      pages: pages, progress: { mode: 'cells', done: bytesToB64(done) },
+      source: first.source
+    }, null);
+    return { data: out, w: W, h: H, maps: maps, conflicts: conflicts };
+  }
+
+  /* ---- #6 charts set in a symbol font, from the text layer ---------------- */
+
+  /**
+   * glyphCells(items, opts) -> [{ x, y, font, code }]
+   * One entry per printed symbol, from pdf.js getTextContent().items (or
+   * PdfText glyphs(): { font, code|unicode, box }). A multi-glyph item such as
+   * "O O O O O" is split by the pitch: every non-space character is the next
+   * square, spaces only separate them (an empty square is a wide " " item,
+   * which is skipped). opts.fonts limits the fonts; opts.minSize / maxSize
+   * keep only chart-sized text (the key's own symbols are bigger).
+   * x, y: the symbol's left / baseline in page units (y up, pdf.js space).
+   */
+  function glyphCells(items, opts) {
+    opts = isObj(opts) ? opts : {};
+    items = Array.isArray(items) ? items : [];
+    var out = [], fonts = isObj(opts.fonts) ? opts.fonts : null, i;
+    var minS = num(opts.minSize, 0), maxS = num(opts.maxSize, 1e9);
+    /* the pitch: the most common gap between rows of chart text */
+    var pitch = num(opts.pitch, 0);
+    var norm = [];
+    for (i = 0; i < items.length; i++) {
+      var it = items[i];
+      if (!isObj(it)) continue;
+      var font = str(it.font || it.fontName, ''), s, x, y, size;
+      if (it.transform) {
+        s = str(it.str, ''); x = num(it.transform[4], 0); y = num(it.transform[5], 0);
+        size = Math.abs(num(it.transform[0], 0)) || Math.abs(num(it.transform[3], 0));
+      } else if (it.box) {
+        s = str(it.unicode, '') || (it.code !== undefined ? String.fromCharCode(clampInt(it.code, 0, 65535, 32)) : '');
+        x = num(it.box.x0, 0); y = -num(it.box.y1, 0); size = num(it.size, 0);
+      } else continue;
+      if (!s.replace(/\s+/g, '') || (fonts && !fonts[font]) || size < minS || size > maxS) continue;
+      /* chart text is single symbols separated by spaces; "10" or "Page"
+         (two characters side by side) is a ruler number or a word */
+      if (/\S\S/.test(s)) continue;
+      norm.push({ s: s, x: x, y: y, font: font, w: num(it.width, 0), size: size });
+    }
+    if (!pitch) {
+      /* rows of symbols in different fonts sit a fraction of a point apart
+         on their baselines: cluster them first, then take the commonest gap */
+      var yl = [];
+      for (i = 0; i < norm.length; i++) yl.push(norm[i].y);
+      yl.sort(function (a, b) { return a - b; });
+      var rowsY = [], acc = 0, cnt = 0;
+      for (i = 0; i < yl.length; i++) {
+        if (cnt && yl[i] - acc / cnt > 1.2) { rowsY.push(acc / cnt); acc = 0; cnt = 0; }
+        acc += yl[i]; cnt++;
+      }
+      if (cnt) rowsY.push(acc / cnt);
+      var gaps = {};
+      for (i = 1; i < rowsY.length; i++) { var gk = Math.round((rowsY[i] - rowsY[i - 1]) * 10) / 10; if (gk > 1.2) gaps[gk] = (gaps[gk] || 0) + 1; }
+      pitch = modeKey(gaps).value || 0;
+      if (pitch > 0) {
+        var fit = combFit(rowsY, pitch);
+        if (fit && Math.abs(fit.pitch - pitch) < pitch * 0.1) pitch = fit.pitch;
+      }
+    }
+    if (!(pitch > 0)) return out;
+    for (i = 0; i < norm.length; i++) {
+      var n = norm[i], k = 0;
+      for (var c = 0; c < n.s.length; c++) {
+        var ch = n.s.charAt(c);
+        if (/\s/.test(ch)) continue;
+        out.push({ x: n.x + k * pitch, y: n.y, font: n.font, code: ch, size: n.size });
+        k++;
+      }
+    }
+    out.pitch = pitch;
+    return out;
+  }
+
+  /**
+   * gridFromGlyphs(cells, key, opts) -> GridResult (the extractGrid shape:
+   *   ok, w, h, cells:Int16Array, palette, check, unresolved, classes, glyphs,
+   *   counts, filled, warnings, source:'text')
+   * The squares of a chart printed in a symbol font, matched to the key by
+   * the symbol itself: the same font and character (entry.symbolCode
+   * { font, code }), else the same character the key printed (entry.symbol),
+   * else the key's printed counts; anything else is an explicit
+   * placeholder. opts.design { w, h } is the printed size (the lattice is
+   * anchored at the bottom-right of the glyphs when it is larger).
+   */
+  function gridFromGlyphs(glyphs, key, opts) {
+    opts = isObj(opts) ? opts : {};
+    glyphs = Array.isArray(glyphs) ? glyphs : [];
+    var warnings = [], i;
+    var pitch = num(glyphs.pitch, num(opts.pitch, 0));
+    var empty = { ok: false, w: 0, h: 0, cells: new Int16Array(0), palette: null, check: null, unresolved: [], classes: 0,
+      glyphs: [], counts: [], filled: 0, colors: 0, matched: 0, warnings: warnings, source: 'text' };
+    if (glyphs.length < 20 || !(pitch > 0)) { warnings.push('there is no chart set in a symbol font here'); return empty; }
+    var x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+    for (i = 0; i < glyphs.length; i++) {
+      x0 = Math.min(x0, glyphs[i].x); x1 = Math.max(x1, glyphs[i].x);
+      y0 = Math.min(y0, glyphs[i].y); y1 = Math.max(y1, glyphs[i].y);
+    }
+    var W = Math.round((x1 - x0) / pitch) + 1, H = Math.round((y1 - y0) / pitch) + 1;
+    var de = isObj(opts.design) ? opts.design : (isObj(key) && isObj(key.design) ? key.design : {});
+    var dw = clampInt(de.w, 0, 20000, 0), dh = clampInt(de.h, 0, 20000, 0);
+    var offX = 0, offY = 0;
+    if (dw >= W && dh >= H && dw && dh) {
+      /* the glyphs cover part of the printed size (unsymbolled colours, a
+         margin of plain fabric): keep the printed size, centred on the glyphs */
+      offX = Math.floor((dw - W) / 2); offY = Math.floor((dh - H) / 2);
+      if (dw !== W || dh !== H) warnings.push('the symbols cover ' + W + ' × ' + H + ' of the printed ' + dw + ' × ' + dh + ' stitches');
+      W = dw; H = dh;
+    }
+    if (W < 4 || H < 4 || W * H > 4000000) { warnings.push('the symbols do not form a chart grid'); return empty; }
+    var ids = [], idIndex = {}, counts = [];
+    var raw = new Int32Array(W * H), off = 0;
+    for (i = 0; i < raw.length; i++) raw[i] = -1;
+    for (i = 0; i < glyphs.length; i++) {
+      var g = glyphs[i];
+      var fx = (g.x - x0) / pitch, fy = (y1 - g.y) / pitch;
+      var cx = Math.round(fx), cy = Math.round(fy);
+      if (Math.abs(fx - cx) > 0.3 || Math.abs(fy - cy) > 0.3) { off++; continue; }
+      var X2 = cx + offX, Y2 = cy + offY;
+      if (X2 < 0 || Y2 < 0 || X2 >= W || Y2 >= H) continue;
+      var id = g.font + '\u0001' + g.code;
+      if (!idIndex.hasOwnProperty(id)) { idIndex[id] = ids.length; ids.push(id); counts.push(0); }
+      if (raw[Y2 * W + X2] < 0) counts[idIndex[id]]++;
+      raw[Y2 * W + X2] = idIndex[id];
+    }
+    if (off > glyphs.length * 0.05) warnings.push(off + ' symbols sat off the grid and were left out');
+    var entries = isObj(key) && Array.isArray(key.entries) ? key.entries : [];
+    /* match: font + code, then the printed character, then counts (nameClasses) */
+    var pre = {}, used = {};
+    for (i = 0; i < ids.length; i++) {
+      var parts = ids[i].split('\u0001');
+      for (var e = 0; e < entries.length; e++) {
+        if (used[e] || !CHECK_KINDS[entries[e].kind || 'cross']) continue;
+        var sc = entries[e].symbolCode;
+        if (isObj(sc) && sc.font === parts[0] && sc.code === parts[1]) { pre[i] = e; used[e] = 1; break; }
+      }
+    }
+    for (i = 0; i < ids.length; i++) {
+      if (pre.hasOwnProperty(i)) continue;
+      var ch2 = ids[i].split('\u0001')[1], hit = -1, nh = 0;
+      for (var e2 = 0; e2 < entries.length; e2++) {
+        if (used[e2] || !CHECK_KINDS[entries[e2].kind || 'cross']) continue;
+        if (str(entries[e2].symbol, '') === ch2) { hit = e2; nh++; }
+      }
+      if (nh === 1) { pre[i] = hit; used[hit] = 1; }
+    }
+    /* the rest by counts, as a grid read does */
+    var restIdx = [], restMarks = [];
+    for (i = 0; i < ids.length; i++) if (!pre.hasOwnProperty(i)) { restIdx.push(i); restMarks.push({ id: ids[i], n: counts[i] }); }
+    var restEntries = entries.map(function (en, k) { return used[k] ? { stitchCount: null, kind: 'used' } : en; });
+    var map = restMarks.length ? matchGlyphs(restMarks, restEntries) : {};
+    var palette = [], placeholders = [], classPal = [];
+    for (i = 0; i < entries.length; i++) {
+      var en2 = entries[i];
+      var pe = normalizePaletteEntry({ i: i, symbol: en2.symbol || '', brand: en2.brand || 'DMC', code: en2.code, name: en2.name || '',
+        hex: en2.hex || null, strands: en2.strands || (key && key.strandsDefault) || 2, kind: en2.kind || 'cross',
+        stitchCount: 0, skeins: en2.skeins || 0 }, i, (key && key.strandsDefault) || 2);
+      if (typeof en2.stitchCount === 'number' && en2.stitchCount > 0) pe.keyCount = en2.stitchCount;
+      palette.push(pe);
+    }
+    var matched = 0, how = [];
+    for (i = 0; i < ids.length; i++) {
+      var t = pre.hasOwnProperty(i) ? pre[i] : (map[ids[i]] !== undefined && restEntries[map[ids[i]]].kind !== 'used' ? map[ids[i]] : -1);
+      if (t >= 0) { classPal[i] = t; matched++; how.push(pre.hasOwnProperty(i) ? 'symbol' : 'count'); continue; }
+      var unusedCross = [];
+      for (var q = 0; q < entries.length; q++) {
+        if (CHECK_KINDS[entries[q].kind || 'cross'] && !used[q] && classPal.indexOf(q) < 0) unusedCross.push(q);
+      }
+      var pIdx = palette.length;
+      palette.push({ i: pIdx, symbol: ids[i].split('\u0001')[1], brand: '', code: '', name: 'Symbol "' + ids[i].split('\u0001')[1] + '" (not in the key?)',
+        hex: '808080', strands: (key && key.strandsDefault) || 2, bsStrands: 1, kind: 'cross', blendWith: null,
+        stitchCount: 0, skeins: 0, have: false, unresolved: unusedCross.slice(0, 8) });
+      placeholders.push({ palette: pIdx, ink: ids[i], cells: counts[i], candidates: unusedCross.slice(0, 8), expected: [], why: 'unknown' });
+      classPal[i] = pIdx;
+      how.push(null);
+    }
+    var cells = new Int16Array(W * H), filled = 0;
+    for (i = 0; i < raw.length; i++) {
+      cells[i] = raw[i] < 0 ? -1 : classPal[raw[i]];
+      if (raw[i] >= 0) { filled++; palette[cells[i]].stitchCount++; }
+    }
+    var noSymbol = [];
+    for (i = 0; i < entries.length; i++) {
+      if (CHECK_KINDS[entries[i].kind || 'cross'] && !palette[i].stitchCount) noSymbol.push(i);
+    }
+    if (noSymbol.length) warnings.push(noSymbol.length + ' ' + plural(noSymbol.length, 'key colour') + ' ' +
+      plural(noSymbol.length, 'has', 'have') + ' no symbol in the chart text (' +
+      noSymbol.map(function (q) { return flossLabel(entries[q]); }).join(', ') + '): those squares are not read');
+    var check = checkCounts(normalize({ palette: palette, chart: { w: W, h: H, cells: cells } }, null), entries);
+    return {
+      ok: filled > 0 && matched > 0, w: W, h: H, cells: cells, palette: palette, check: check,
+      unresolved: placeholders, classes: ids.length, glyphs: ids.slice(), counts: counts.slice(),
+      how: how, filled: filled, colors: ids.length, matched: matched, missing: noSymbol, pitch: pitch,
+      warnings: warnings, source: 'text'
+    };
+  }
+
+  /**
+   * keySymbolCodes(items, entries, opts) -> entries (each copy gains
+   * symbolCode { font, code } when a key-sized symbol sits on its row).
+   * Rows are matched by the baseline of the entry's code in the text layer.
+   */
+  function keySymbolCodes(items, entries, opts) {
+    opts = isObj(opts) ? opts : {};
+    items = Array.isArray(items) ? items : [];
+    var out = (Array.isArray(entries) ? entries : []).map(function (e) { return deepCopy(e); });
+    var codes = [], syms = [], i;
+    var minS = num(opts.minSize, 8);
+    for (i = 0; i < items.length; i++) {
+      var it = items[i];
+      if (!isObj(it) || !it.transform) continue;
+      var s = str(it.str, '').trim(), size = Math.abs(num(it.transform[0], 0));
+      if (!s) continue;
+      var rec = { s: s, x: num(it.transform[4], 0), y: num(it.transform[5], 0), font: str(it.fontName, ''), size: size };
+      if (s.length === 1 && size >= minS) syms.push(rec);
+      codes.push(rec);
+    }
+    for (var e = 0; e < out.length; e++) {
+      var code = str(out[e].code, '');
+      if (!code) continue;
+      var row = null;
+      for (i = 0; i < codes.length; i++) if (codes[i].s === code) { row = codes[i]; break; }
+      if (!row) continue;
+      var best = null, bd = Infinity;
+      for (i = 0; i < syms.length; i++) {
+        var dy = Math.abs(syms[i].y - row.y);
+        if (dy < row.size * 0.8 && syms[i].x < row.x && dy < bd) { bd = dy; best = syms[i]; }
+      }
+      if (best) out[e].symbolCode = { font: best.font, code: best.s };
+    }
+    return out;
+  }
+
+  /* ---- end of wave K section ---- */
+
+  /* ================================================================== *
    * 11. Exports and registration
    * ================================================================== */
 
@@ -6558,6 +9448,53 @@
     cellsOfRow: cellsOfRow,
     fmtInt: fmtInt,
 
+    /* wave K (xs-core): docs/wave-k/api/xs-core.md */
+    WAVE_K: 1,
+    resolveClass: resolveClass,
+    glyphFromPolys: glyphFromPolys,
+    totals: totals,
+    pctText: pctText,
+    symbolCheck: symbolCheck,
+    skeinPlan: skeinPlan,
+    bulkPlan: bulkPlan,
+    CONFIRM_ABOVE: CONFIRM_ABOVE,
+    parkAt: parkAt,
+    unpark: unpark,
+    parkedAt: parkedAt,
+    nextBlockFor: nextBlockFor,
+    parkingOrder: parkingOrder,
+    cellsOfPage: cellsOfPage,
+    pageProgress: pageProgress,
+    islands: islands,
+    islandRoute: islandRoute,
+    islandAt: islandAt,
+    templateFromProject: templateFromProject,
+    ornamentsFromGraphics: ornamentsFromGraphics,
+    sessionLines: sessionLines,
+    dayStrip: dayStrip,
+    findPlace: findPlace,
+    goalProgress: goalProgress,
+    markDiff: markDiff,
+    replayMarks: replayMarks,
+    flossId: flossId,
+    flossNeeds: flossNeeds,
+    kitList: kitList,
+    registerBrandTable: registerBrandTable,
+    brandTables: brandTables,
+    convert: convert,
+    substitutes: substitutes,
+    fabricPlan: fabricPlan,
+    frameFit: frameFit,
+    KINDS: KINDS,
+    kindOf: kindOf,
+    materials: materials,
+    filetRowText: filetRowText,
+    quadrantLayout: quadrantLayout,
+    joinCharts: joinCharts,
+    glyphCells: glyphCells,
+    gridFromGlyphs: gridFromGlyphs,
+    keySymbolCodes: keySymbolCodes,
+
     /* internals, exposed for test/xstitch.test.html only */
     _key: {
       brandColumnHeader: brandColumnHeader,
@@ -6585,7 +9522,23 @@
       latticeOf: latticeOf,
       placeTile: placeTile,
       matchGlyphs: matchGlyphs,
-      collectGlyphs: collectGlyphs
+      collectGlyphs: collectGlyphs,
+      /* wave K */
+      collectRects: collectRects,
+      pdfOps: pdfOps,
+      mergeTile: mergeTile,
+      pickK: pickK,
+      tileSigs: tileSigs,
+      tileDots: tileDots,
+      legendOf: legendOf,
+      shapeMask: shapeMask,
+      maskDist: maskDist,
+      sigGroups: sigGroups,
+      nameClasses: nameClasses,
+      solveCluster: solveCluster,
+      glyphFromPolys: glyphFromPolys,
+      unitPolys: unitPolys,
+      SIG_N: SIG_N
     }
   };
 
@@ -6597,7 +9550,12 @@
         id: 'crossstitch',
         normalize: normalize,
         summary: summary,
-        templates: TEMPLATES
+        templates: TEMPLATES,
+        /* Wave K (#18, shell-data §4): the two big strings live in
+           IndexedDB once they pass 32 KB; normalize keeps the same `data`
+           string, so opening a project rewrites nothing. */
+        heavy: { fields: ['chart.cells.data', 'progress.done'], minBytes: 32768 },
+        template: { fromProject: templateFromProject }
       });
     } catch (e) { /* never break the shell */ }
   }

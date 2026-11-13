@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>PdfText corpus fingerprint (dev tool)</title>
+<style>
+  body { font: 13px/1.4 Menlo, Consolas, monospace; background:#111; color:#eee; padding:16px; }
+  td, th { padding: 1px 8px; text-align: left; }
+  .skip { color:#888; } .bad { color:#ff6b6b; } .ok { color:#7bd389; }
+</style>
+</head>
+<body>
+<h1>PdfText corpus fingerprint <span class="skip">(dev tool, wave K)</span></h1>
+<p class="skip">Extracts every PDF named in ../tmp-pdf/SOURCES.md (plus <code>?files=a.pdf,b.pdf</code>)
+through <code>PdfText.extract</code> and shows a SHA-256 of each result, so an extractor change can be
+proved to leave the text output byte for byte unchanged: run it before the change, copy
+<code>window.CORPUS</code>, run it after and compare (<code>window.compareCorpus(before)</code>).
+Nothing from tmp-pdf leaves the page. <code>?heavy=1</code> includes files over 17 MB.</p>
+<div id="status">running…</div>
+<div id="summary"></div>
+<pre id="list" class="skip" style="white-space:pre-wrap;word-break:break-all"></pre>
+<table id="t"><thead><tr><th>file</th><th>pages</th><th>chars</th><th>sha256</th><th>ms</th></tr></thead><tbody></tbody></table>
+<script src="../js/vendor/pdf.min.js"></script>
+<script src="../js/pdftext.js"></script>
+<script>
+'use strict';
+(function () {
+  if (!window.pdfjsLib || !window.pdfjsLib.GlobalWorkerOptions) return;
+  var src = '../js/vendor/pdf.worker.min.js';
+  try {
+    Object.defineProperty(window.pdfjsLib.GlobalWorkerOptions, 'workerSrc', {
+      get: function () { return src; }, set: function () {}
+    });
+  } catch (e) { window.pdfjsLib.GlobalWorkerOptions.workerSrc = src; }
+})();
+var HEAVY = /(?:^|[?&])heavy=1(?:&|$)/.test(location.search);
+var extra = (location.search.match(/[?&]files=([^&]+)/) || [])[1];
+/* File names only (the tmp-pdf folder as of 2026-11-12); a missing file is skipped. */
+var KNOWN = ('bear,bee,cardigan,cato,crochet-allfree-stitches-ebook,crochet-apl-haekelarbeit-de,crochet-apl-klickmann,' +
+  'crochet-apl-orr-filet4,crochet-apl-priscilla-filet2,crochet-apl-weldons-K-WK013,crochet-archive-weldons-v24,crochet-baphomet,' +
+  'crochet-bee-sizes,crochet-bernat-basketweave,crochet-bernat-lace-cardigan,crochet-caron-cuff-cardigan,crochet-fish,' +
+  'crochet-furls-frontier-shawl,crochet-gosyo-lace-doily,crochet-gosyo-motif-doily,crochet-hobbii-amarah-en,' +
+  'crochet-kingcole-festival-uk,crochet-kingcole-festival-us,crochet-kingcole-pumpkins,crochet-lionbrand-logcabin-pullover,' +
+  'crochet-magicyarn-c2c-mountain,crochet-panda,crochet-patons-mesh-cardigan,crochet-premier-simple-throw,' +
+  'crochet-premier-sparkling-wrap,crochet-redheart-persian-tiles,crochet-snowman,crochet-stylecraft-cabaret,' +
+  'crochet-stylecraft-cowl-mitts,crochet-stylecraft-guide,crochet-stylecraft-hex-socks,crochet-stylecraft-hood,crochet-turtle,' +
+  'knit-apl-nicoll,knit-bernat-topdown-pullover,knit-fromtheheart-magicloop-socks,knit-interweave-8-socks,knit-interweave-lace,' +
+  'knit-patons-boxy-cable,knit-patons-boyfriend-cable,knit-patons-cabled-yoke,knit-patons-mockneck-cable,' +
+  'knit-rico-triangular-shawl,knit-sandnes-0216,knit-sandnes-raglan-child,other-apl-macrame-herwig3,other-apl-tatting-riego,' +
+  'other-embroidery-stitchedstories-guide,other-embroidery-stitchedstories-onepage,other-punchneedle-koekoek,' +
+  'other-weaving-handwoven,sew-agf-catwalk-quilt,sew-agf-joyous-picnic-quilt,sew-freespirit-harmony-quilt,' +
+  'sew-pencilskirt-pattern,sew-pencilskirt,sew-peppermint-apron-A0,sew-peppermint-apron,sew-peppermint-bronte-bathers,' +
+  'sew-peppermint-samford-pants,sew-peppermint-westend-jacket,sew-rileyblake-triple-t-tote,sew-sundress-pattern,sew-sundress,' +
+  'sew-swoon-mabel-bag,sew-tianas-jogger-12m-6y,sew-tianas-jogger-7-12,xs-apl-dg003,xs-apl-dmc-motifs,xs-apl-dmc-pointdemarque,' +
+  'xs-apl-dmc-puntomarca,xs-apl-hkb383,xs-apl-nichols,xs-apl-orr-book14,xs-apl-priscilla-cross1,xs-apl-priscilla-cross2,' +
+  'xs-apl-tapestry-painted,xs-dmc-2168,xs-dmc-2173,xs-dmc-2234,xs-metalgreymon,xs-pacman,xs-pokemon-bl,xs-pokemon-br,' +
+  'xs-pokemon-tl,xs-pokemon-tr,xs-portal,xs-satsuma-stayhome-bw,xs-satsuma-stayhome-color,xs-satsuma-summersflight-bw,' +
+  'xs-satsuma-summersflight-color,xs-satsuma-sunshine,xs-tinymodernist-autumn,xs-tinymodernist-foxy,' +
+  'xs-tinymodernist-halloween,xs-tinymodernist-homestitchhome,xs-tinymodernist-matryoshka,xs-tinymodernist-welcome,' +
+  'xs-typechar,xs-wocs-caterpillars,xs-yarntree-alphabets').split(',').map(function (n) { return n + '.pdf'; });
+window.CORPUS = {};
+window.CORPUS_DONE = false;
+
+function hex(buf) {
+  return Array.prototype.map.call(new Uint8Array(buf), function (b) { return ('0' + b.toString(16)).slice(-2); }).join('');
+}
+function sha(s) {
+  return crypto.subtle.digest('SHA-256', new TextEncoder().encode(s)).then(function (b) { return hex(b).slice(0, 16); });
+}
+function row(cells, cls) {
+  var tr = document.createElement('tr');
+  if (cls) tr.className = cls;
+  cells.forEach(function (c) { var td = document.createElement('td'); td.textContent = c; tr.appendChild(td); });
+  document.querySelector('#t tbody').appendChild(tr);
+}
+window.compareCorpus = function (before) {
+  var diff = [], same = 0;
+  Object.keys(before).forEach(function (k) {
+    var a = before[k], b = window.CORPUS[k];
+    if (!b) { diff.push(k + ': missing now'); return; }
+    if (a.sha !== b.sha) diff.push(k + ': ' + a.sha + ' -> ' + b.sha);
+    else same++;
+  });
+  Object.keys(window.CORPUS).forEach(function (k) { if (!before[k]) diff.push(k + ': new'); });
+  return { same: same, diff: diff };
+};
+
+fetch('../tmp-pdf/SOURCES.md', { cache: 'no-store' }).then(function (r) { return r.ok ? r.text() : ''; }, function () { return ''; })
+  .then(function (md) {
+    var seen = {}, names = [];
+    (md.match(/[A-Za-z0-9][\w.\-]*\.pdf\b/g) || []).concat(KNOWN, extra ? decodeURIComponent(extra).split(',') : [])
+      .forEach(function (n) { if (!seen[n]) { seen[n] = true; names.push(n); } });
+    names.sort();
+    var chain = Promise.resolve();
+    names.forEach(function (name) {
+      chain = chain.then(function () {
+        document.getElementById('status').textContent = 'reading ' + name;
+        return fetch('../tmp-pdf/' + name, { cache: 'no-store' }).then(function (r) { return r.ok ? r.blob() : null; }, function () { return null; })
+          .then(function (blob) {
+            if (!blob) return;
+            if (blob.size > 17 * 1048576 && !HEAVY) { row([name, 'heavy, skipped'], 'skip'); return; }
+            var t0 = performance.now();
+            return window.PdfText.extract(blob).then(function (res) {
+              var ms = Math.round(performance.now() - t0);
+              var fp = JSON.stringify([res.text, res.pages, res.pagesTotal, res.columnsDetected, res.emptyPages, res.garbled, res.ocrNoise]);
+              return sha(fp).then(function (h) {
+                window.CORPUS[name] = { sha: h, chars: res.chars, pages: res.pages };
+                row([name, res.pages, res.chars, h, ms]);
+              });
+            }, function (err) {
+              var msg = String((err && err.message) || err);
+              return sha('ERR:' + msg).then(function (h) {
+                window.CORPUS[name] = { sha: h, error: msg };
+                row([name, 'error', msg, h], 'bad');
+              });
+            });
+          });
+      });
+    });
+    return chain;
+  })
+  .then(function () {
+    window.CORPUS_DONE = true;
+    var keys = Object.keys(window.CORPUS).sort();
+    var all = keys.map(function (k) { return k + '=' + window.CORPUS[k].sha; }).join(';');
+    document.getElementById('status').textContent = 'done: ' + keys.length + ' files';
+    document.getElementById('list').textContent = all;
+    return sha(all).then(function (h) {
+      // headless runs read this line (tools/headless-suite.sh); no "failed"
+      // count: it is a fingerprint, compared by hand against a run before
+      document.getElementById('summary').textContent = keys.length + ' files, corpus ' + h + ', 0 failed';
+    });
+  });
+</script>
+</body>
+</html>

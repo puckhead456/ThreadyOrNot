@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Ocr tests</title>
+<style>
+  body { font: 14px/1.4 Menlo, Consolas, monospace; background:#111; color:#eee; padding:16px; }
+  .pass { color:#7bd389; }
+  .fail { color:#ff6b6b; background:#2a1414; }
+  .info { color:#bbb; }
+  .group { margin-top:18px; font-weight:bold; color:#9cf; border-bottom:1px solid #333; padding-bottom:4px; }
+  #summary { margin-top:20px; font-size:18px; font-weight:bold; }
+  #summary.ok { color:#7bd389; }
+  #summary.bad { color:#ff6b6b; }
+</style>
+</head>
+<body>
+<h1>Ocr test suite</h1>
+<p class="group">js/ocr.js: opt-in text reader (tesseract.js v5, LSTM). Synthetic pictures drawn in code; nothing from tmp-pdf.</p>
+<div id="out"></div>
+<div id="summary">running…</div>
+
+<script src="../js/ocr.js"></script>
+<script>
+'use strict';
+
+var out = document.getElementById('out');
+var passed = 0, failed = 0;
+function log(ok, label, detail) {
+  if (ok) passed++; else failed++;
+  var line = (ok ? 'PASS' : 'FAIL') + ' - ' + label + (detail ? '  (' + detail + ')' : '');
+  var div = document.createElement('div');
+  div.className = ok ? 'pass' : 'fail';
+  div.textContent = line;
+  out.appendChild(div);
+  (ok ? console.log : console.error)(line);
+}
+function info(text) {
+  var div = document.createElement('div'); div.className = 'info'; div.textContent = '  ' + text; out.appendChild(div);
+  console.log(text);
+}
+function group(t) { var d = document.createElement('div'); d.className = 'group'; d.textContent = t; out.appendChild(d); }
+function eq(a, e, label) { var ok = a === e; log(ok, label, ok ? '' : 'expected ' + JSON.stringify(e) + ' got ' + JSON.stringify(a)); }
+function ok(c, label, detail) { log(!!c, label, detail); }
+function finish() {
+  var s = document.getElementById('summary');
+  s.textContent = passed + ' passed, ' + failed + ' failed';
+  s.className = failed ? 'bad' : 'ok';
+  keepAlive = false;
+}
+
+/* Character error rate: Levenshtein distance / reference length. */
+function cer(ref, hyp) {
+  ref = String(ref); hyp = String(hyp);
+  var m = ref.length, n = hyp.length, prev = [], cur = [], i, j;
+  for (j = 0; j <= n; j++) prev[j] = j;
+  for (i = 1; i <= m; i++) {
+    cur = [i];
+    for (j = 1; j <= n; j++) {
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ref[i - 1] === hyp[j - 1] ? 0 : 1));
+    }
+    prev = cur;
+  }
+  return m ? prev[n] / m : (n ? 1 : 0);
+}
+function norm(s) { return String(s).replace(/\s+/g, ' ').trim(); }
+
+/* Draw lines of text like a printed booklet page. */
+function page(lines, o) {
+  o = o || {};
+  var px = o.px || 28, w = o.w || 1200, lh = Math.round(px * 1.5);
+  var c = document.createElement('canvas');
+  c.width = w; c.height = o.h || (lh * lines.length + px * 3);
+  var g = c.getContext('2d');
+  g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height);
+  g.fillStyle = o.ink || '#111';
+  g.font = px + 'px ' + (o.font || 'Arial, Helvetica, sans-serif');
+  g.textBaseline = 'top';
+  lines.forEach(function (t, i) { g.fillText(t, o.x || px, px + i * lh); });
+  if (o.noise) {
+    var d = g.getImageData(0, 0, c.width, c.height), a = d.data, seed = 7;
+    for (var k = 0; k < a.length; k += 4) {
+      seed = (seed * 16807) % 2147483647;
+      var v = (seed / 2147483647 - 0.5) * o.noise;
+      a[k] = a[k + 1] = a[k + 2] = Math.max(0, Math.min(255, a[k] + v));
+    }
+    g.putImageData(d, 0, 0);
+  }
+  return c;
+}
+
+function vendorFetches() {
+  return performance.getEntriesByType('resource').filter(function (e) { return /vendor\/tesseract\//.test(e.name); }).length;
+}
+
+/* Headless Chrome's --virtual-time-budget (tools/headless-suite.sh) lets
+   virtual time race ahead while the page only waits on a Web Worker or
+   Cache Storage, so the dump fires before the engine answers. Virtual time
+   stands still while a network fetch is pending, so a chain of tiny
+   same-origin fetches keeps it parked until the suite is done. Harmless in a
+   real tab. */
+try { performance.setResourceTimingBufferSize(1000000); } catch (e) {}
+var keepAlive = true;
+(function park() {
+  if (!keepAlive) return;
+  fetch('../js/ocr.js', { cache: 'no-store' }).then(function (r) { return r.arrayBuffer(); })
+    .then(park, function () { setTimeout(park, 50); });
+})();
+
+var O = window.Ocr;
+var T0 = Date.now();
+
+(async function run() {
+  try {
+    group('1. Contract without the engine (pure, no download)');
+    ok(O && typeof O.recognize === 'function', 'window.Ocr is defined');
+    ok(O.available(), 'available() in this browser');
+    var ds = O.downloadSize();
+    ok(ds.bytes > 4e6 && ds.bytes < 6e6, 'downloadSize() is 4-6 MB', ds.label + ', ' + ds.bytes + ' bytes');
+    ok(/^about \d+ MB$/.test(ds.label), 'downloadSize().label reads "about N MB"', ds.label);
+    eq(O.CACHE, 'thready-ocr-v1', 'cache bucket name');
+    ok(/\/js\/vendor\/tesseract\/$/.test(O.BASE), 'files resolve beside js/ocr.js', O.BASE);
+    eq(vendorFetches(), 0, 'loading js/ocr.js fetched nothing from js/vendor/tesseract/');
+
+    eq(O._foldCode('310'), '310', 'fold: plain code');
+    eq(O._foldCode('3l0'), '310', 'fold: l inside digits becomes 1');
+    eq(O._foldCode('9O5'), '905', 'fold: O inside digits becomes 0');
+    eq(O._foldCode('B5200'), 'B5200', 'fold: B5200');
+    eq(O._foldCode('E3821'), 'E3821', 'fold: Light Effects E code');
+    eq(O._foldCode('Blanc'), 'BLANC', 'fold: Blanc');
+    eq(O._foldCode('DMC310'), '310', 'fold: a run-together "DMC310" gives 310');
+    eq(O._foldCode('Stitch'), null, 'fold: a word is not a code');
+    eq(O._foldCode('OIO'), null, 'fold: letters with no real digit are not a code');
+    eq(O._foldCode('31000'), null, 'fold: five digits is not a DMC code');
+
+    var fake = O._shape({ blocks: [{ paragraphs: [{ lines: [
+      { bbox: { x0: 10, y0: 20, x1: 210, y1: 50 }, words: [
+        { text: 'Row', confidence: 95, bbox: { x0: 10, y0: 20, x1: 70, y1: 50 } },
+        { text: '12', confidence: 85, bbox: { x0: 90, y0: 20, x1: 130, y1: 50 } }] }] }] }] });
+    eq(fake.text, 'Row 12', 'shape: line text');
+    eq(fake.conf, 90, 'shape: mean confidence');
+    eq(fake.words[1].line, 0, 'shape: word knows its line');
+    fake.size = { w: 1000, h: 2000 };
+    var items = O.toTextItems(fake, { scale: 2, pageWidth: 500, pageHeight: 1000 });
+    eq(items.length, 1, 'toTextItems: one line');
+    eq(items[0].box.x0, 5, 'toTextItems: px to page units (x0 = 10 / 2)');
+    eq(items[0].nbox.y1, 0.025, 'toTextItems: normalised box');
+    eq(items[0].font, 'ocr', 'toTextItems: font "ocr"');
+    ok(items[0].ocr === true && items[0].words.length === 2, 'toTextItems: marked ocr, keeps words');
+    eq(items[0].margin, true, 'toTextItems: top 8% is margin');
+    eq(O.toTextItems(fake, { scale: 2, minConf: 90 })[0].text, 'Row', 'toTextItems: minConf drops a weak word');
+    eq(O.toPlainText(fake, { minConf: 99 }), '', 'toPlainText: nothing above minConf gives empty text');
+    eq(O.toPlainText(fake), 'Row 12', 'toPlainText: the line by default');
+    eq(O.toPlainText(fake, { dropMargin: true }), '', 'toPlainText dropMargin: a line in the top 8% (a running head or folio) is left out');
+    var folio = O._shape({ blocks: [{ paragraphs: [{ lines: [
+      { bbox: { x0: 10, y0: 400, x1: 300, y1: 430 }, words: [{ text: 'Knit 90 plain rounds', confidence: 95, bbox: { x0: 10, y0: 400, x1: 300, y1: 430 } }] },
+      { bbox: { x0: 10, y0: 1500, x1: 60, y1: 1530 }, words: [{ text: '[126]', confidence: 95, bbox: { x0: 10, y0: 1500, x1: 60, y1: 1530 } }] }] }] }] });
+    folio.size = { w: 1100, h: 2100 };
+    eq(O.toPlainText(folio, { dropMargin: true }), 'Knit 90 plain rounds', 'toPlainText dropMargin: a lone page number closing the text block is left out');
+    var codes = O.codesFrom({ words: [{ text: '3l0', conf: 95, bbox: {} }, { text: '310', conf: 95, bbox: {} }, { text: '310', conf: 60, bbox: {} }, { text: '999', conf: 95, bbox: {} }] }, { lexicon: ['310'] });
+    eq(codes.map(function (c) { return c.code + ':' + c.sure; }).join(' '), '310:false 310:true 310:false 999:false',
+      'codesFrom: folded, weak and off-lexicon codes are never "sure"');
+
+    group('2. Not installed');
+    await O.remove();
+    eq(await O.installed(), false, 'installed() is false after remove()');
+    var err = null;
+    try { await O.recognize(page(['hello'])); } catch (e) { err = e; }
+    eq(err && err.name, 'NotInstalledError', 'recognize() before install rejects NotInstalledError');
+    eq(vendorFetches(), 0, 'still nothing fetched');
+
+    group('3. Install (one-time, same-origin, own cache bucket)');
+    var ctl = new AbortController(), seen = 0;
+    var p = O.install({ signal: ctl.signal, onProgress: function (e) { seen++; if (e.loaded > 200000) ctl.abort(); } });
+    err = null;
+    try { await p; } catch (e) { err = e; }
+    eq(err && err.name, 'AbortError', 'install() can be cancelled');
+    eq(await O.installed(), false, 'a cancelled install is not "installed"');
+
+    var prog = [], t = Date.now();
+    var res = await O.install({ onProgress: function (e) { prog.push(e.fraction); } });
+    info('install: ' + res.bytes + ' bytes in ' + res.ms + ' ms (local server)');
+    ok(prog.length > 5, 'install() reports progress', prog.length + ' events');
+    eq(prog[prog.length - 1], 1, 'progress ends at 1');
+    var mono = prog.every(function (f, i) { return i === 0 || f >= prog[i - 1]; });
+    ok(mono, 'progress never goes backwards');
+    eq(await O.installed(), true, 'installed() after install');
+    ok((await caches.keys()).indexOf('thready-ocr-v1') !== -1, 'files live in cache "thready-ocr-v1"');
+    var stored = await O.storedBytes();
+    ok(Math.abs(stored - ds.bytes) < 1024, 'stored bytes match downloadSize()', stored + ' vs ' + ds.bytes);
+    var before = vendorFetches();
+    var again = await O.install();
+    eq(again.bytes, 0, 'install() again downloads nothing');
+    eq(vendorFetches(), before, 'and fetches nothing');
+
+    group('4. Recognition of a synthetic page (engine from the cache, no network)');
+    var REF = ['Round 3: ch 3, 2 dc in each st around.', 'Cast on 64 stitches and join in the round.',
+      'Cut 2 pieces 45 cm x 30 cm from Fabric A.', 'DMC 310 Black, DMC 3865 Winter White.'];
+    var before2 = vendorFetches();
+    var stages = {};
+    var r = await O.recognize(page(REF, { px: 32 }), { dpi: 200, onProgress: function (e) { stages[e.stage] = true; } });
+    eq(vendorFetches(), before2, 'engine started without any network request');
+    info('first result: load ' + r.loadMs + ' ms + recognise ' + r.ms + ' ms; conf ' + r.conf);
+    var c1 = cer(REF.join('\n'), r.text);
+    info('text:\n' + r.text);
+    ok(c1 < 0.03, 'clean 32 px sans text: CER under 3%', 'CER ' + (c1 * 100).toFixed(2) + '%');
+    eq(r.lines.length, 4, 'four lines found');
+    ok(r.words.length >= 30, 'word boxes returned', r.words.length + ' words');
+    var w0 = r.words[0];
+    ok(w0 && w0.bbox.x0 >= 20 && w0.bbox.x0 < 50 && w0.bbox.y0 >= 20 && w0.bbox.y0 < 50, 'first word box is where it was drawn', JSON.stringify(w0 && w0.bbox));
+    ok(r.conf > 80, 'mean confidence high on clean text', r.conf);
+    ok(stages.recognizing, 'onProgress reports the recognising stage');
+    ok(typeof r.ms === 'number' && r.size.w === 1200, 'result has ms and size');
+
+    var r2 = await O.recognize(page(REF, { px: 32 }));
+    eq(r2.loadMs, 0, 'second call reuses the warm engine (loadMs 0)');
+    info('warm recognise: ' + r2.ms + ' ms');
+
+    group('5. Sizes, serif, noise (where it degrades)');
+    var sizes = [12, 16, 20];
+    for (var si = 0; si < sizes.length; si++) {
+      var rs = await O.recognize(page(REF, { px: sizes[si], w: 900 }));
+      var cs = cer(REF.join('\n'), rs.text);
+      info(sizes[si] + ' px: CER ' + (cs * 100).toFixed(2) + '%, conf ' + rs.conf + ', ' + rs.ms + ' ms');
+      if (sizes[si] >= 16) ok(cs < 0.05, sizes[si] + ' px text: CER under 5%', (cs * 100).toFixed(2) + '%');
+    }
+    var rserif = await O.recognize(page(REF, { px: 28, font: 'Georgia, "Times New Roman", serif' }));
+    var cserif = cer(REF.join('\n'), rserif.text);
+    ok(cserif < 0.05, 'serif 28 px: CER under 5%', (cserif * 100).toFixed(2) + '%');
+    var rnoise = await O.recognize(page(REF, { px: 28, noise: 120, ink: '#444' }));
+    var cnoise = cer(REF.join('\n'), rnoise.text);
+    info('grey ink + heavy noise: CER ' + (cnoise * 100).toFixed(2) + '%, conf ' + rnoise.conf);
+    ok(cnoise < 0.15, 'grey ink with heavy noise: CER under 15%', (cnoise * 100).toFixed(2) + '%');
+
+    group('5b. Sideways pages (size tables and layouts turned 90 degrees)');
+    var ub = O._unturn({ words: [{ bbox: { x0: 10, y0: 20, x1: 50, y1: 30 } }], lines: [] }, 90, { w: 200, h: 100 }).words[0].bbox;
+    eq(JSON.stringify(ub), JSON.stringify({ x0: 20, y0: 50, x1: 30, y1: 90 }), 'unturn 90: a box read on the turned picture maps back');
+    var ub2 = O._unturn({ words: [{ bbox: { x0: 10, y0: 20, x1: 50, y1: 30 } }], lines: [] }, 270, { w: 200, h: 100 }).words[0].bbox;
+    eq(JSON.stringify(ub2), JSON.stringify({ x0: 170, y0: 10, x1: 180, y1: 50 }), 'unturn 270: a box read on the turned picture maps back');
+    var upright = page(REF, { px: 30, w: 1000 });
+    var side = O._turned(upright, 270);   // text now runs bottom to top
+    var rside = await O.recognize(side);
+    eq(rside.rotation, 90, 'a page printed sideways is read turned 90 degrees');
+    var cside = cer(REF.join('\n'), rside.text);
+    ok(cside < 0.05, 'and reads as well as upright', 'CER ' + (cside * 100).toFixed(2) + '%');
+    var sb = rside.words[0] && rside.words[0].bbox;
+    ok(sb && sb.x1 <= side.width && sb.y1 <= side.height && (sb.y1 - sb.y0) > (sb.x1 - sb.x0),
+      'its word boxes are in the sideways picture\'s own pixels (tall, narrow)', JSON.stringify(sb));
+    var rnot = await O.recognize(side, { rotate: false });
+    ok(rnot.rotation === 0 && rnot.conf < 75, 'rotate:false keeps the poor upright reading (and its low confidence shows it)', 'conf ' + rnot.conf);
+
+    group('6. Floss-code mode (digits and codes)');
+    var KEY = ['310', '3865', 'B5200', '321', '995', 'E3821', '742', 'Ecru', '3799', '208', '156', '3013'];
+    var kc = document.createElement('canvas'); kc.width = 900; kc.height = 620;
+    var kg = kc.getContext('2d'); kg.fillStyle = '#fff'; kg.fillRect(0, 0, kc.width, kc.height);
+    var palette = ['#000', '#f4f1ea', '#fff', '#c8102e', '#00a3e0', '#d4af37', '#f7a800', '#efe6d0', '#3b3b3b', '#7b4fa0', '#8f9fd6', '#a7a382'];
+    kg.font = '26px Arial, sans-serif'; kg.textBaseline = 'middle';
+    KEY.forEach(function (code, i) {
+      var col = i % 2, row = Math.floor(i / 2), x = 40 + col * 430, y = 50 + row * 95;
+      kg.fillStyle = palette[i]; kg.fillRect(x, y - 20, 40, 40); kg.strokeStyle = '#333'; kg.strokeRect(x, y - 20, 40, 40);
+      kg.fillStyle = '#111'; kg.fillText('DMC ' + code, x + 60, y);
+      kg.fillText(String(12 + i * 7), x + 260, y);
+    });
+    var rk = await O.recognize(kc, { mode: 'codes' });
+    var found = O.codesFrom(rk).map(function (c) { return c.code; });
+    var hit = KEY.filter(function (k) { return found.indexOf(k.toUpperCase()) !== -1; });
+    info('codes mode read: ' + rk.text.replace(/\n/g, ' | '));
+    ok(hit.length >= 11, 'key: at least 11 of 12 floss codes read', hit.length + '/12 (' + KEY.filter(function (k) { return hit.indexOf(k) === -1; }).join(',') + ' missed)');
+    var rkText = await O.recognize(kc, { mode: 'text' });
+    var foundT = O.codesFrom(rkText).map(function (c) { return c.code; });
+    info('text mode on the same key: ' + KEY.filter(function (k) { return foundT.indexOf(k.toUpperCase()) !== -1; }).length + '/12 codes');
+    var dg = await O.recognize(page(['12 14 16 18 20', '84 92 100 108 116'], { px: 30, w: 700 }), { mode: 'digits' });
+    eq(norm(dg.text), '12 14 16 18 20 84 92 100 108 116', 'digits mode reads a size table row exactly');
+    var sw = await O.recognize(page(['12 14 16 18 20'], { px: 30, w: 700 }), { mode: 'text' });
+    ok(sw.text.length > 0, 'switching back to text mode still works', sw.text);
+
+    group('7. Cancel, terminate, remove');
+    var big = page(REF.concat(REF, REF, REF, REF), { px: 24, w: 1600 });
+    var pr = O.recognize(big);
+    setTimeout(function () { O.cancel(); }, 30);
+    err = null;
+    try { await pr; } catch (e) { err = e; }
+    eq(err && err.name, 'AbortError', 'cancel() rejects the job in flight with AbortError');
+    var ac = new AbortController();
+    var pr2 = O.recognize(big, { signal: ac.signal });
+    setTimeout(function () { ac.abort(); }, 30);
+    err = null;
+    try { await pr2; } catch (e) { err = e; }
+    eq(err && err.name, 'AbortError', 'opts.signal cancels one call');
+    var r3 = await O.recognize(page(['Back to work after a cancel.'], { px: 32, w: 700 }));
+    ok(cer('Back to work after a cancel.', r3.text) < 0.05, 'the engine restarts after a cancel', r3.text);
+    O.terminate();
+    eq(await O.remove(), true, 'remove() deletes the bucket');
+    eq(await O.installed(), false, 'installed() false after remove()');
+    ok((await caches.keys()).filter(function (n) { return /^thready-ocr-/.test(n); }).length === 0, 'no thready-ocr-* cache left');
+    info('suite wall time ' + (Date.now() - T0) + ' ms');
+  } catch (e) {
+    log(false, 'suite crashed: ' + (e && (e.stack || e.message) || e));
+  }
+  finish();
+})();
+</script>
+</body>
+</html>

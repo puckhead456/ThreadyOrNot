@@ -1,0 +1,573 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Knitting journey audit (wave K, knit-store)</title>
+<style>
+  body { font: 13px/1.4 Menlo, Consolas, monospace; background:#111; color:#eee; padding:16px; }
+  .pass { color:#7bd389; }
+  .fail { color:#ff6b6b; background:#2a1414; }
+  .skip { color:#c9a96b; }
+  .group { margin-top:18px; font-weight:bold; color:#9cf; border-bottom:1px solid #333; padding-bottom:4px; }
+  #summary { margin-top:20px; font-size:18px; font-weight:bold; }
+  #summary.ok { color:#7bd389; }
+  #summary.bad { color:#ff6b6b; }
+  .note { color:#aaa; }
+  table { border-collapse: collapse; margin: 6px 0 14px; }
+  td, th { border: 1px solid #333; padding: 1px 5px; vertical-align: top; font-size: 12px; }
+  th { color: #9cf; }
+</style>
+</head>
+<body>
+<h1>Knitting journey audit (wave K, knit-store, P21)</h1>
+<p class="note">
+  Drives the store the way the app does for one size per fixture: the PDF's text through
+  <code>PdfText</code>, <code>Store.splitSections(text, 'knitting')</code>, the pattern picked in a book,
+  <code>Store.importPatternSections</code> with the size, then the counter row by row
+  (<code>jumpToRow</code> / <code>tapRow</code> / "I'm at the length") and asserts the line, count, chart chip
+  and side against <code>docs/research/knitting.md</code>. Fixtures are read from <code>../tmp-pdf</code> at
+  run time (copyrighted, never committed); a missing file skips its group. Assertions carry the
+  brainstorm's evidence ids (E1..E13, docs/wave-k/brainstorm/01-knitting.md).
+  <code>?dump=&lt;file&gt;&amp;size=N&amp;group=&lt;name&gt;&amp;rows=N</code> prints what the counter shows per row.
+</p>
+<div id="out">Loading fixtures...</div>
+<div id="summary"></div>
+
+<script src="../js/patterns.js"></script>
+<script src="../js/knits.js"></script>
+<script src="../js/vendor/pdf.min.js"></script>
+<!-- the worker's code on the main thread (pdf.js's "fake worker"), so the
+     headless runner's virtual clock waits for the extraction -->
+<script src="../js/vendor/pdf.worker.min.js"></script>
+<script src="../js/pdftext.js"></script>
+<script src="../js/knit-chart.js"></script>
+<script src="../js/store.js"></script>
+<script>
+'use strict';
+
+(function () {
+  if (!window.pdfjsLib || !window.pdfjsLib.GlobalWorkerOptions) return;
+  var src = '../js/vendor/pdf.worker.min.js';
+  try {
+    Object.defineProperty(window.pdfjsLib.GlobalWorkerOptions, 'workerSrc', {
+      get: function () { return src; }, set: function () {}, configurable: true
+    });
+  } catch (e) { window.pdfjsLib.GlobalWorkerOptions.workerSrc = src; }
+})();
+
+var out = document.getElementById('out');
+out.textContent = '';
+var passed = 0, failed = 0, skipped = 0;
+function el(tag, cls, text) { var e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; }
+function log(ok, label, detail) {
+  if (ok) passed++; else failed++;
+  out.appendChild(el('div', ok ? 'pass' : 'fail', (ok ? 'PASS' : 'FAIL') + ' - ' + label + (detail ? '  (' + detail + ')' : '')));
+  if (!ok) console.error(label, detail || '');
+}
+function skip(label) { skipped++; out.appendChild(el('div', 'skip', 'SKIP - ' + label)); }
+/** A screen fact owned by another worker (the reader): shown, listed, not a failure until it holds. */
+var knownList = [];
+function known(a, b, label, owner) { var A = js(a), B = js(b); if (A === B) { log(true, label); return; } knownList.push(label); out.appendChild(el('div', 'skip', 'KNOWN (' + owner + ') - ' + label + '  (expected ' + B + ' got ' + A + ')')); }
+function group(t) { out.appendChild(el('div', 'group', t)); }
+function js(x) { return JSON.stringify(x); }
+function eq(a, b, label) { var A = js(a), B = js(b); log(A === B, label, A === B ? '' : 'expected ' + B + ' got ' + A); }
+function ok(c, label, detail) { log(!!c, label, c ? '' : detail); }
+
+var TEST_KEY = 'stitchkeeper-wavek-knit-journey';
+var REAL_KEY = Store.KEY;
+try { localStorage.removeItem(TEST_KEY); } catch (e) { /* ignore */ }
+Store.__setKeyForTests(TEST_KEY);
+Store.registerCraftParser('knitting', 'Knits');
+
+function cacheGet(key) { try { return sessionStorage.getItem(key); } catch (e) { return null; } }
+function cacheSet(key, v) { try { sessionStorage.setItem(key, v); } catch (e) { /* quota */ } }
+
+/** The fixture's text (the same sessionStorage cache as knits.fixtures). */
+function extract(name) {
+  if (/\.txt$/i.test(name)) {
+    return fetch('../tmp-pdf/' + name, { cache: 'no-store' }).then(function (r) {
+      if (r.status === 404) return { missing: true };
+      return r.text().then(function (t) { return { text: t }; });
+    }, function () { return { missing: true }; });
+  }
+  var key = 'pfx.v1:' + name;
+  var hit = cacheGet(key);
+  if (hit) { try { var o0 = JSON.parse(hit); if (o0 && o0.text) return Promise.resolve(o0); } catch (e) { /* re-read */ } }
+  var path = '../tmp-pdf/' + name;
+  return fetch(path, { method: 'HEAD', cache: 'no-store' }).then(function (res) {
+    if (res.status === 404) return { missing: true };
+    return fetch(path, { cache: 'no-store' }).then(function (r) { return r.blob(); })
+      .then(function (b) { return window.PdfText.extract(b); })
+      .then(function (r) {
+        var o = { text: r.text, pages: r.pages, pagesTotal: r.pagesTotal, chars: r.chars, emptyPages: r.emptyPages, garbled: !!r.garbled };
+        cacheSet(key, JSON.stringify(o));
+        return o;
+      }, function (err) { return { error: (err && err.message) || String(err) }; });
+  }, function () { return { missing: true }; });
+}
+
+/**
+ * Import a fixture as the New project sheet does: the sections of the picked
+ * pattern (`opts.group`, a substring of its group name; default all), the
+ * picked size, the whole text for sizes / gauge / abbreviations.
+ */
+function importFixture(name, opts) {
+  opts = opts || {};
+  return extract(name).then(function (x) {
+    if (!x || x.missing || x.error || !x.text) return null;
+    var secs = Store.splitSections(x.text, 'knitting');
+    if (opts.group) {
+      var g = String(opts.group).toLowerCase();
+      secs = secs.filter(function (s) { return s.group && String(s.group).toLowerCase().indexOf(g) >= 0; });
+    }
+    var p = Store.createProject({ name: name, craft: 'knitting' });
+    Store.importPatternSections(p.id, secs, { mode: 'parts', text: x.text, size: typeof opts.size === 'number' ? opts.size : null });
+    var res = { project: Store.project(p.id), sections: secs, text: x.text };
+    if (!opts.charts || !window.KnitChart || !window.PdfText || typeof PdfText.open !== 'function') return res;
+    // the background chart scan the app runs after a knitting import (pages opts.charts)
+    return fetch('../tmp-pdf/' + name, { cache: 'no-store' }).then(function (rr) { return rr.blob(); })
+      .then(function (b) { return PdfText.open(b); })
+      .then(function (h) { return KnitChart.scan(h, { pages: opts.charts }); })
+      .then(function (pages) {
+        var list = [];
+        (pages || []).forEach(function (pg) { (pg.charts || []).forEach(function (c) { list.push({ page: pg.page, name: String(c.name || ''), noImage: true, chart: JSON.parse(JSON.stringify(c)) }); }); });
+        Store.setChartPages(p.id, list, { undo: false });
+        res.project = Store.project(p.id);
+        res.charts = list;
+        return res;
+      }, function () { return res; });
+  });
+}
+
+function partNamed(proj, re) {
+  var ps = Store.project(proj.id).parts;
+  for (var i = 0; i < ps.length; i++) if (re.test(ps[i].name)) return ps[i];
+  return null;
+}
+function fresh(proj, prt) { return Store.part(Store.project(proj.id), prt.id); }
+/** Put the counter on row `row` (the row being worked) and return the fresh part. */
+function at(proj, prt, row) { Store.jumpToRow(proj.id, prt.id, row); return fresh(proj, prt); }
+
+function shown(prt, row) {
+  var l = Store.lineForRow(prt, row);
+  if (!l) return null;
+  return String(l.text || '');
+}
+
+/* ---- ?dump= : what the counter shows, row by row ----------------------- */
+var Q = {};
+location.search.replace(/^\?/, '').split('&').forEach(function (kv) { if (!kv) return; var p = kv.split('='); Q[decodeURIComponent(p[0])] = decodeURIComponent(p[1] || ''); });
+
+function dumpFixture() {
+  group('dump ' + Q.dump);
+  return importFixture(Q.dump, { size: Q.size ? +Q.size : null, group: Q.group || null, charts: Q.charts ? Q.charts.split(',').map(Number) : null }).then(function (r) {
+    if (!r) { skip(Q.dump + ' not found'); return; }
+    var proj = r.project;
+    out.appendChild(el('div', 'note', 'sizes ' + js(proj.sizes) + ' size ' + js(proj.size) + ' gauge ' + js(proj.gauge)));
+    if (Q.ri && r.charts) r.charts.forEach(function (c) { var pre = el('pre'); var t = []; for (var q = 1; q <= +Q.ri; q++) { var ri = null; try { ri = KnitChart.rowInfo(c.chart, q); } catch (e) { ri = String(e); } t.push('RI ' + c.name + ' ' + q + ' ' + js(ri && { consumes: ri.consumes, produces: ri.produces, unknown: ri.unknown })); } pre.textContent = 'chart ' + c.name + ' rows ' + c.chart.rows + ' cols ' + c.chart.cols + ' cells ' + !!c.chart.cells + ' | ' + t.join(' | '); out.appendChild(pre); });
+    var rows = Q.rows ? +Q.rows : 40;
+    proj.parts.forEach(function (prt) {
+      if (Q.part && !new RegExp(Q.part, 'i').test(prt.name)) return;
+      if (Q.end) Q.end.split(',').forEach(function (n) { at(proj, prt, +n + 1); Store.endStretch(proj.id, prt.id); });
+      out.appendChild(el('h3', null, prt.name + ' ×' + prt.makeCount + ' target ' + prt.targetRows + ' group ' + prt.group));
+      if (Q.lines) {
+        var pre = el('pre');
+        pre.textContent = Store.partLines ? '' : '';
+        var ls = Store.linesFor ? Store.linesFor(prt) : [];
+        pre.textContent = ls.map(function (l) {
+          return [l.row, l.rowEnd, l.kind, l.count, l.until ? js(l.until) : '', l.chart ? js(l.chart) : '', l.repeatOf ? js([l.repeatOf, l.repeatFrom, l.repeatTo, l.repeatTimes]) : '', (l.markers ? 'MK' + js(l.markers) : '') + (l.stretch ? ' ST' + js({id: l.stretch.id, key: l.stretch.key, count: l.stretch.count, within: l.stretch.within}) : ''), String(l.text).slice(0, 140)].join(' | ');
+        }).join('\n');
+        out.appendChild(pre);
+        if (Q.json) {
+          var pj = el('pre');
+          pj.textContent = ls.filter(function (l) { return l && (l.until || l.kind === 'repeat' || l.stretch || l.approxRow); }).map(function (l) {
+            var c = {}; for (var k in l) if (l[k] !== null && k !== 'stitches' && k !== 'notes' && !(Array.isArray(l[k]) && !l[k].length)) c[k] = l[k];
+            return js(c);
+          }).join('\n');
+          out.appendChild(pj);
+        }
+      }
+      if (Q.expand) {
+        var pe = el('pre'), lsx = Store.linesFor(prt), prevC = null;
+        pe.textContent = Q.expand.split(',').map(function (rr) {
+          var ex = null;
+          try { ex = Knits.expand(lsx, +rr, prevC, null); } catch (e) { return rr + ' threw ' + e; }
+          return 'EXPAND ' + rr + ': ' + (ex && ex.stitches ? ex.stitches.map(function (s) { return s.t + (s.marker ? '[' + s.marker + ']' : '') + (s.m ? '{' + js(s.m) + '}' : ''); }).join(' ') : js(ex)) +
+            ' keys=' + (ex && ex.stitches && ex.stitches[0] ? Object.keys(ex.stitches[0]).join(',') : '') + ' extra=' + (ex ? Object.keys(ex).join(',') : '');
+        }).join('\n');
+        out.appendChild(pe);
+      }
+      var t = el('table'), head = el('tr');
+      ['row', 'line', 'target', 'chart', 'until', 'side', 'cable', 'stretch', 'markers'].forEach(function (x) { head.appendChild(el('th', null, x)); });
+      t.appendChild(head);
+      for (var r0 = 1; r0 <= rows; r0++) {
+        var p = at(proj, prt, r0);
+        var tr = el('tr');
+        var ci = Store.chartInfo(p), ui = Store.untilInfo(p), si = Store.sideInfo(p), cb = Store.cableInfo(p);
+        var st = Store.stretchInfo ? Store.stretchInfo(p) : null;
+        var lf = Store.lineInfo ? Store.lineInfo(p, r0) : null;
+        [r0, (shown(p, r0) || '—').slice(0, 110) + (lf && lf.via ? '  ⟵ ' + js([lf.k, lf.n, lf.cycle, lf.of]) : ''), Store.targetFor(p, r0),
+          ci ? (ci.panels ? ci.panels.map(function (x) { return x.name + ' ' + x.row + '/' + x.of; }).join(' · ') : ci.name + ' ' + ci.row + '/' + ci.of) : '',
+          ui ? ui.value + (ui.unit || '') + ' ≈' + ui.targetRow : '', si ? (si.side || si.source || '') : '',
+          cb ? 'in ' + cb.inRows : '', st ? js([st.state, st.row, st.of]) : '', (function () { var mi = Store.markerInfo(p); return (mi.markers.length ? (mi.segments ? mi.segments.join('|') : 'shifted ' + mi.basis + '→' + mi.total) + (mi.moved ? ' moved' : '') + (mi.source === 'carried' ? ' carried' : '') : ''); })()].forEach(function (v) { tr.appendChild(el('td', null, v === null || v === undefined ? '' : String(v))); });
+        t.appendChild(tr);
+      }
+      out.appendChild(t);
+    });
+  });
+}
+
+/* ---- the audit ---------------------------------------------------------- */
+
+var JOURNEYS = [];
+function journey(title, fn) { JOURNEYS.push({ title: title, fn: fn }); }
+
+// journeys are added below as the store learns each behaviour
+
+function resolved(proj, prt, row) {
+  var x = Store.lineInfo(at(proj, prt, row), row);
+  return x ? String(x.shown.text || '') : null;
+}
+
+journey('Bernat raglan, size M (research §1): repeats show the row they repeat (E4)', function () {
+  return importFixture('knit-bernat-topdown-pullover.pdf', { size: 1 }).then(function (r) {
+    if (!r) { skip('knit-bernat-topdown-pullover.pdf is not in tmp-pdf'); return; }
+    var sl = partNamed(r.project, /^Sleeves?$/);
+    var yoke = partNamed(r.project, /^Part 2$|^Yoke$/);
+    ok(sl && yoke, 'the Sleeves and the yoke rounds were imported');
+    if (!sl || !yoke) return;
+    // P1: the sleeve's "Knit even until 3"" stretch is ended where the pattern's gauge puts it (13 rnds)
+    if (Store.stretchInfo) {
+      var st0 = Store.stretchInfo(at(r.project, sl, 1));
+      if (st0 && st0.state === 'open') { at(r.project, sl, 14); Store.endStretch(r.project.id, sl.id); }
+    }
+    ok(/^Next rnd: K2tog/.test(resolved(r.project, sl, 20)), 'sleeve rnd 20 (under "Rep last 6 rnds 8 times more") is the decrease round', resolved(r.project, sl, 20));
+    var knit = [21, 22, 23, 24, 25].map(function (n) { return /^Knit 5/.test(resolved(r.project, sl, n)); });
+    eq(knit, [true, true, true, true, true], 'rnds 21-25 knit even');
+    ok(/^Next rnd: K2tog/.test(resolved(r.project, sl, 26)), 'rnd 26 decreases again');
+    var x16 = Store.lineInfo(at(r.project, sl, 16), 16);
+    ok(x16 && /^Knit 5/.test(x16.shown.text) && x16.via === null, 'rnd 16 is "Knit 5 rnds even" as written, never the decrease round (plainRows)');
+    var x20 = Store.lineInfo(at(r.project, sl, 20), 20);
+    eq(x20 && [x20.k, x20.n, x20.cycle, x20.of], [1, 6, 2, 9], '"rnd 1 of 6 · repeat 2 of 9"');
+    eq(Store.targetFor(at(r.project, sl, 68), 67), 30, 'rnd 67 ends the decreases on 30 sts (research: 30 for M)');
+    ok(/^2nd rnd: Knit to next marker/.test(resolved(r.project, yoke, 20)), 'yoke rnd 20 is an increase round', resolved(r.project, yoke, 20));
+    ok(/^1st rnd: Knit/.test(resolved(r.project, yoke, 21)), 'yoke rnd 21 is a plain round');
+    eq(Store.targetFor(at(r.project, yoke, 20), 20), 160, '... with 160 sts on it');
+  });
+});
+
+journey('Patons boyfriend, size L (research §10): a "work until" is a stretch, not a row (E1, E8)', function () {
+  return importFixture('knit-patons-boyfriend-cable.pdf', { size: 2 }).then(function (r) {
+    if (!r) { skip('knit-patons-boyfriend-cable.pdf is not in tmp-pdf'); return; }
+    var P = r.project;
+    ok(P.rowPhases === true, 'a knitting project made now is numbered in stretch phases');
+    var front = partNamed(P, /^Front$/);
+    if (!front) { log(false, 'a Front part'); return; }
+    var rib = Store.stretchInfo(at(P, front, 1));
+    ok(rib && rib.state === 'open' && /Twisted Ribbing/.test(rib.line.text), 'Front row 1 is the 4" rib stretch (open)', rib && rib.line.text);
+    eq(Store.part(Store.project(P.id), front.id).targetRows, null, 'no row target while a stretch is open');
+    at(P, front, 21);
+    var e0 = Store.endStretch(P.id, front.id);
+    eq(e0 && [e0.event, e0.start, e0.end], ['stretchEnd', 1, 20], '"I\'m at the length" after 20 rows ends the rib at row 20');
+    ok(/^1st row: \(RS\)/.test(shown(fresh(P, front), 21)), 'row 21 is the panel set-up row');
+    var s5 = Store.stretchInfo(at(P, front, 25));
+    ok(s5 && /Cont even in pat until/.test(s5.line.text), 'the 5th row after the rib is the "Cont even … same length as Back" stretch, NOT the raglan cast-offs (E1)', shown(fresh(P, front), 25));
+    eq(Store.targetFor(fresh(P, front), 25), 93, '... with the stitch total kept: 93 (E8)');
+    ok(/Cont even/.test(shown(fresh(P, front), 90)), 'row 90 is still the stretch (nothing after it is numbered yet)');
+    at(P, front, 101);
+    var hBefore = Store.project(P.id).history.length;
+    var e1 = Store.endStretch(P.id, front.id);
+    eq(e1 && [e1.start, e1.end], [25, 100], '"I\'m at the length" at row 101: the stretch was rows 25-100');
+    ok(e1 && e1.next && /Shape raglans/.test(e1.next.text), '... and the next row is "Shape raglans"');
+    ok(/Shape raglans/.test(shown(fresh(P, front), 101)) && /Shape raglans/.test(shown(fresh(P, front), 102)), 'rows 101-102 are the raglan cast-offs');
+    eq(Store.targetFor(fresh(P, front), 102), 89, '... ending on 89 sts (research §10, size L)');
+    var hist = Store.project(P.id).history;
+    eq([hist.length - hBefore, hist[hist.length - 1].kind], [1, 'stretchEnd'], 'one history entry of its own kind');
+    Store.undo();
+    var s2 = Store.stretchInfo(at(P, front, 101));
+    ok(s2 && s2.state === 'open', 'one Undo: the stretch is open again');
+  });
+});
+
+journey('Lace Fountain Hat (research §4h): 61 rounds counted from the read chart (E7, P5)', function () {
+  return importFixture('knit-interweave-lace.pdf', { group: 'hat', charts: [26, 27] }).then(function (r) {
+    if (!r) { skip('knit-interweave-lace.pdf is not in tmp-pdf'); return; }
+    var hat = partNamed(r.project, /^Hat$/);
+    if (!hat) { log(false, 'a Hat part'); return; }
+    ok((r.charts || []).some(function (c) { return /lace/i.test(c.name) && c.chart && c.chart.cells; }), 'the Lace chart was read (background scan of pp. 26-27)');
+    var rib = Store.stretchInfo(at(r.project, hat, 1));
+    ok(rib && rib.state === 'open', 'the 3/4" rib is a stretch');
+    var ribU = Store.untilInfo(at(r.project, hat, 1));
+    eq(ribU && ribU.value, 0.75, '... of 3/4 in (it read 4 in)');
+    at(r.project, hat, 7);
+    Store.endStretch(r.project.id, hat.id);
+    var p = fresh(r.project, hat);
+    ok(/Inc\.? Rnd|inc 20 sts/i.test(shown(p, 7)) && Store.targetFor(p, 7) === 144, 'round 7 (after 6 rib rounds) is the "Inc. Rnd" to 144 sts (it was a second cast-on)', shown(p, 7));
+    ok(/Work 5 rnds even/.test(shown(p, 8)) && /Work 5 rnds even/.test(shown(p, 12)) && !/Work 5 rnds/.test(shown(p, 13) || ''), 'rounds 8-12 are the 5 even rounds');
+    var first = null, last = null;
+    for (var n = 7; n <= 90; n++) {
+      var ci = Store.chartInfo(at(r.project, hat, n));
+      if (ci && /Lace/.test(ci.name)) { if (first === null) first = n; last = n; }
+    }
+    eq(last - first + 1, 61, 'the chart sentence is 61 numbered rounds (it was one line with no rounds)');
+    eq(Store.chartInfo(at(r.project, hat, first)).row, 1, '... the first is chart row 1');
+    eq(Store.targetFor(fresh(r.project, hat), first), 144, 'chart round 1 is worked on 144 sts');
+    eq(Store.targetFor(fresh(r.project, hat), last), 84, 'the last chart round ends on 84 sts (counted from the chart: research 144 → 84)');
+    ok(Store.targetFor(p, first + 55) > 84 && Store.targetFor(p, first + 55) < 144, 'a round near the top has its own count from the chart (the decreases are in the chart)', String(Store.targetFor(p, first + 55)));
+  });
+});
+
+journey('8 socks book, Time Traveler (research §2a): only its own charts attach (E12, P7)', function () {
+  return importFixture('knit-interweave-8-socks.pdf', { group: 'time traveler', charts: [5, 6, 7, 34] }).then(function (r) {
+    if (!r) { skip('knit-interweave-8-socks.pdf is not in tmp-pdf'); return; }
+    var pp = r.project.craftData && r.project.craftData.patternPages;
+    ok(pp && pp.length === 1 && /time traveler/i.test(pp[0].name), 'the import remembers Time Traveler\'s own pages', JSON.stringify(pp));
+    var kept = Store.chartPages(r.project.id).map(function (c) { return c.page; });
+    var scanned = (r.charts || []).map(function (c) { return c.page; });
+    ok(scanned.indexOf(34) >= 0, 'the scan did read a chart on p34 (Stranded Boot Stockings\' Leg chart)', JSON.stringify(scanned));
+    ok(kept.indexOf(34) < 0, '... and it is not kept with Time Traveler (it was: E12)', JSON.stringify(kept));
+    ok(kept.some(function (pg) { return pg >= 3 && pg <= 9; }), 'Time Traveler\'s own chart pages are kept', JSON.stringify(kept));
+  });
+});
+
+journey('Reader-side screen facts (E9, E10, E11, E13): what the import gives the counter', function () {
+  return importFixture('knit-bernat-topdown-pullover.pdf', { size: 1 }).then(function (r) {
+    if (!r) { skip('knit-bernat-topdown-pullover.pdf is not in tmp-pdf'); return; }
+    var sl = partNamed(r.project, /^Sleeves?$/);
+    eq(sl && sl.makeCount, 2, 'E9: Bernat Sleeves are made twice (no make-count printed; a pullover has two sleeves)', 'knit-parse');
+    return importFixture('knit-interweave-8-socks.pdf', { group: 'time traveler', size: 1 });
+  }).then(function (r) {
+    if (!r) { skip('knit-interweave-8-socks.pdf is not in tmp-pdf'); return; }
+    var g = r.project.gauge || {};
+    eq([g.sts, g.rows, g.over, g.unit], [32, 46, 4, 'in'], 'E11: Time Traveler\'s own gauge (32 sts and 46 rnds = 4")', 'knit-parse');
+    var names = r.project.parts.map(function (p) { return p.name; });
+    eq(names.some(function (n) { return /^knits$/i.test(n); }), false, 'E10: no part named after the "Interweave Knits" advert', 'knit-parse / pdftext');
+    var foot = partNamed(r.project, /^Foot$/);
+    eq(foot ? Store.sideInfo(at(r.project, foot, 2)).inRound : null, true, 'E13: the Foot (worked in rounds) has no RS? chip', 'knit-parse');
+  });
+});
+
+journey('Stranded Boot Stockings (research §2h): the Leg chart is 84 counted rounds, 84 → 60 sts (P5)', function () {
+  return importFixture('knit-interweave-8-socks.pdf', { group: 'stranded', charts: [32, 33, 34] }).then(function (r) {
+    if (!r) { skip('knit-interweave-8-socks.pdf is not in tmp-pdf'); return; }
+    var names = r.project.parts.map(function (p) { return p.name; });
+    eq(['Cuff', 'Leg', 'Heel'].map(function (n) { return names.indexOf(n) >= 0; }), [true, true, true], 'the stocking is split into its pieces (Cuff, Leg, Heel …), not one "Cuff" part', JSON.stringify(names));
+    var leg = partNamed(r.project, /^Leg$/);
+    if (!leg) return;
+    var rounds = 0, lastChart = null;
+    for (var n = 1; n <= 90; n++) {
+      var ci = Store.chartInfo(at(r.project, leg, n));
+      if (ci && /leg/i.test(ci.name)) { rounds++; lastChart = ci.row; }
+    }
+    eq([rounds, lastChart], [84, 84], 'Leg: 84 numbered rounds, chart row = round');
+    eq(Store.targetFor(fresh(r.project, leg), 1), 84, 'round 1 is worked on the cuff\'s 84 sts');
+    eq(Store.targetFor(fresh(r.project, leg), 84), 60, 'round 84 ends on 60 sts');
+    // the p34 Leg chart has unread cells (research / HANDOFF): those rounds get no count, never a guess
+    var unk = 0;
+    for (n = 2; n <= 83; n++) if (Store.targetFor(fresh(r.project, leg), n) === null) unk++;
+    ok(unk > 0, 'rounds from the first unread chart cell on have no count (' + unk + ' of 82), not an invented one');
+  });
+});
+
+/* ---- the knit-audit walks (docs/wave-k/knit-audit.md): "not sure", never a confident wrong answer ---- */
+
+journey('Audit: boyfriend L Front / Front (continued) / Shape Neck / Sleeves', function () {
+  return importFixture('knit-patons-boyfriend-cable.pdf', { size: 2 }).then(function (r) {
+    if (!r) { skip('knit-patons-boyfriend-cable.pdf is not in tmp-pdf'); return; }
+    var P = r.project, front = partNamed(P, /^Front$/);
+    if (!front) { log(false, 'a Front part'); return; }
+    at(P, front, 21); Store.endStretch(P.id, front.id);   // 20 rows of rib
+    var bad = [], sides = [], rings = [];
+    for (var n = 25; n <= 40; n++) {
+      var li = Store.lineInfo(at(P, front, n), n);
+      if (li && /^4th row/.test(li.shown.text)) bad.push(n);
+      sides.push(Store.sideInfo(fresh(P, front)).side);
+      var cb = Store.cableInfo(fresh(P, front));
+      rings.push(cb ? cb.inRows : null);
+    }
+    eq(bad, [], 'rows 25-40 (the "Cont even in pat … same length as Back" stretch) never show "4th row …" (audit row 24→)');
+    var li25 = Store.lineInfo(at(P, front, 25), 25);
+    ok(li25 && /Cont even/.test(li25.shown.text), '... they show the stretch\'s own sentence');
+    eq(sides.slice(0, 4), ['rs', 'ws', 'rs', 'ws'], 'RS / WS alternate inside the stretch (it said "RS?" on every row)');
+    ok(rings.indexOf(0) >= 0 && rings.some(function (x) { return x !== 1; }), 'the cable ring follows the panels inside the stretch (it said "cable in 1" on every row)', JSON.stringify(rings));
+    at(P, front, 101); Store.endStretch(P.id, front.id);
+    eq(Store.part(Store.project(P.id), front.id).targetRows, 102, 'once its last stretch has ended the Front has a target (row 102, the raglan cast-offs), so it finishes');
+    var fc = partNamed(P, /^Front \(continued\)$/);
+    if (fc) eq([1, 2, 3].map(function (k) { return Store.sideInfo(at(P, fc, k)).side; }), ['rs', 'ws', 'rs'], 'Front (continued) rows 1-3: RS, WS, RS (carried from the Front; it said "RS?")');
+    var neck = partNamed(P, /^Shape Neck$/);
+    if (neck) {
+      // (the AT SAME TIME stretch "until 4 sts remain" ended after 26 rows, as in the audit's walk)
+      var ns = Store.stretchInfo(at(P, neck, 2));
+      if (ns && ns.state === 'open') { at(P, neck, ns.start + 26); Store.endStretch(P.id, neck.id); }
+      neck = fresh(P, neck);
+      var jl = Store.linesFor(neck).filter(function (l) { return l && l.row >= 1 && /with\s+RS\s+facing|^\s*join\s+yarn/i.test(l.text); })[0];
+      if (jl) eq(Store.patternSideAt(fresh(P, neck), jl.row).side, 'rs', 'Shape Neck: the "Join yarn to rem sts" row (second side, after "With RS facing …") is RS (it said WS)');
+      else skip('Shape Neck has no numbered "With RS facing" row in this parse');
+    }
+    var sl = partNamed(P, /^Sleeves$/);
+    if (sl) {
+      var s1 = Store.stretchInfo(at(P, sl, 1));
+      ok(s1 && /Twisted Ribbing/.test(s1.line.text), 'Sleeves row 1 is the 2½" rib stretch (it was missing)', s1 && s1.line.text);
+    }
+  });
+});
+
+journey('Audit: Time Traveler toe, Foot and Leg', function () {
+  return importFixture('knit-interweave-8-socks.pdf', { group: 'time traveler', size: 1, charts: [5, 6, 7] }).then(function (r) {
+    if (!r) { skip('knit-interweave-8-socks.pdf is not in tmp-pdf'); return; }
+    var P = r.project, toe = partNamed(P, /^Toe$/), foot = partNamed(P, /^Foot$/), leg = partNamed(P, /^Leg$/);
+    if (toe) {
+      var wrong = [];
+      for (var n = 3; n <= 20; n++) { var li = Store.lineInfo(at(P, toe, n), n); if (li && /\bpm\b/.test(li.shown.text) && li.via) wrong.push(n); }
+      eq(wrong, [], 'toe rnds 3-20 ("rep Inc rnd every other rnd") never show the marker set-up round as the repeated row');
+      var li3 = Store.lineInfo(at(P, toe, 3), 3);
+      eq(li3 && li3.unsure, true, '... the store says it is not sure (the printed sentence shows)');
+    }
+    if (foot) eq([1, 2].map(function (k) { return Store.sideInfo(at(P, foot, k)).inRound; }), [true, true], 'E13: Foot rnds 1-2 are in the round (no "RS?")');
+    if (leg) {
+      var lc = Store.chartInfo(at(P, leg, 2));
+      ok(!lc || lc.row === null, 'Leg rnd 2 "Work even through Row 11 of Foot chart": the chart row is unknown, not row 1', JSON.stringify(lc && [lc.name, lc.row]));
+    }
+  });
+});
+
+journey('Audit: Stranded Boot Foot and Sandnes yoke', function () {
+  return importFixture('knit-interweave-8-socks.pdf', { group: 'stranded', charts: [32, 33, 34] }).then(function (r) {
+    if (!r) { skip('knit-interweave-8-socks.pdf is not in tmp-pdf'); return; }
+    var foot = partNamed(r.project, /^Foot$/);
+    if (foot) {
+      var c = Store.chartInfo(at(r.project, foot, 3));
+      ok(!(c && c.row === 10 && c.of === 10), 'Stranded Foot: no "Chart · row 10 of 10" ("ending with chart Rnd 10" is the end, not the row)', JSON.stringify(c && [c.name, c.row, c.of]));
+    }
+    return importFixture('knit-sandnes-raglan-child.pdf', { size: 1, group: 'child' });
+  }).then(function (r) {
+    if (!r) { skip('knit-sandnes-raglan-child.pdf is not in tmp-pdf'); return; }
+    var yoke = partNamed(r.project, /^Yoke$/);
+    if (!yoke) return;
+    at(r.project, yoke, 15); Store.endStretch(r.project.id, yoke.id);
+    var bad = [];
+    for (var n = 23; n <= 43; n++) { var li = Store.lineInfo(at(r.project, yoke, n), n); if (li && li.via && /turn/i.test(li.shown.text)) bad.push(n); }
+    eq(bad, [], 'Sandnes yoke rnds 23-43 never show a short-row line as the repeated round');
+  });
+});
+
+journey('Audit: Icelandic shawl chart rows', function () {
+  return importFixture('knit-interweave-lace.pdf', { group: 'icelandic', charts: [12, 13, 14, 15] }).then(function (r) {
+    if (!r) { skip('knit-interweave-lace.pdf is not in tmp-pdf'); return; }
+    var past = [], stuck = [];
+    r.project.parts.forEach(function (prt) {
+      for (var n = 1; n <= 130; n++) {
+        var c = Store.chartInfo(at(r.project, prt, n));
+        if (c && c.row && c.of && c.row > c.of) past.push(prt.name + ' ' + n + ': ' + c.name + ' ' + c.row + '/' + c.of);
+        if (c && c.row === 15 && n >= 17 && n <= 35 && /B/.test(c.name)) stuck.push(n);
+      }
+    });
+    eq(past, [], 'no chart row past the chart\'s length on any row (it said "Chart D · row 65 of 64")');
+    eq(stuck, [], '"Row 15 and all following odd rows" is not chart row 15 on rows 17-35');
+  });
+});
+
+function segs(proj, prt, row) {
+  var mi = Store.markerInfo(at(proj, prt, row));
+  return mi.segments ? mi.segments.join('|') : (mi.unplaced ? 'unplaced' : null);
+}
+
+journey('Bernat raglan, size XS/S (research §1 Markers): the raglan markers move (E5)', function () {
+  return importFixture('knit-bernat-topdown-pullover.pdf', { size: 0 }).then(function (r) {
+    if (!r) { skip('knit-bernat-topdown-pullover.pdf is not in tmp-pdf'); return; }
+    var neck = partNamed(r.project, /^Part 1$|^Neck$/);
+    if (!neck) { log(false, 'the neck rows were imported'); return; }
+    eq(segs(r.project, neck, 1), '1|2|4|2|18|2|4|2|1', 'row 1 places 8 markers: 1|2|4|2|18|2|4|2|1');
+    eq(segs(r.project, neck, 3), '2|2|6|2|20|2|6|2|2', 'row 3: +1 outside each raglan seam = 2|2|6|2|20|2|6|2|2 (44)');
+    eq(segs(r.project, neck, 5), '3|2|8|2|22|2|8|2|3', 'row 5 (52)');
+    eq(segs(r.project, neck, 7), '4|2|10|2|24|2|10|2|4', 'row 7 (60)');
+    eq(segs(r.project, neck, 8), 'unplaced', 'row 8 casts on 16 at the front and joins: where the round starts is not said, so no numbers (honest)');
+  });
+});
+
+journey('Sandnes raglan, 4 yrs (research §13): rib stretch, short rows, marked raglan stitches (E5, E7)', function () {
+  return importFixture('knit-sandnes-raglan-child.pdf', { size: 1, group: 'child' }).then(function (r) {
+    if (!r) { skip('knit-sandnes-raglan-child.pdf is not in tmp-pdf'); return; }
+    var yoke = partNamed(r.project, /^Yoke$/);
+    if (!yoke) { log(false, 'a Yoke part'); return; }
+    var rib = Store.stretchInfo(at(r.project, yoke, 3));
+    ok(rib && rib.state === 'open' && /7 cm ribbing/.test(rib.line.text), 'the 7 cm neck rib is its own stretch (it was one row, E7)', rib && rib.line.text);
+    at(r.project, yoke, 15);
+    Store.endStretch(r.project.id, yoke.id);
+    ok(/k 1 rnd, while inc 8/.test(shown(fresh(r.project, yoke), 15)), 'after 14 rounds of rib, round 15 is the increase round');
+    var sr = Store.shortRowInfo(at(r.project, yoke, 16));
+    ok(sr && sr.n === 1, 'and the German short rows follow it (short row 1)', JSON.stringify(sr && [sr.n, sr.of]));
+    var mi = Store.markerInfo(at(r.project, yoke, 22));
+    eq([mi.segments && mi.segments.join('|'), mi.marked, mi.plain && mi.plain.join('|')], ['12|9|25|9|13', true, '12|8|24|8|12'],
+      'the first raglan round: each marked stitch gains one each side: 12 | ● | 8 | ● | 24 | ● | 8 | ● | 12 (it said 11|7|23|7|20, E5)');
+    eq(Store.markerInfo(at(r.project, yoke, 22)).markers.filter(function (m) { return m.kind === 'stitch'; }).length, 4, 'four marked raglan stitches');
+  });
+});
+
+function panelChip(proj, prt, row) {
+  var p = at(proj, prt, row);
+  var ci = Store.chartInfo(p);
+  if (!ci) return null;
+  var list = ci.panels || [ci];
+  return list.map(function (x) { return x.name + ' ' + x.row + '/' + x.of; }).join(' · ');
+}
+
+journey('Patons mock neck, size M (research §9): panels run through "Cont in pat" (E2, E3)', function () {
+  return importFixture('knit-patons-mockneck-cable.pdf', { size: 1 }).then(function (r) {
+    if (!r) { skip('knit-patons-mockneck-cable.pdf is not in tmp-pdf'); return; }
+    var back = partNamed(r.project, /^Back \(continued\)$/);
+    ok(!!back, 'a "Back (continued)" part (the panels are set there)');
+    if (!back) return;
+    eq(panelChip(r.project, back, 1), 'Panel Pat C 1/12 · Panel Pat B 1/28 · Panel Pat A 1/24', 'row 1 sets three panels, each with its own length');
+    // research §9: on garment row n, A = ((n-1) mod 24)+1, B = ((n-1) mod 28)+1, C = ((n-1) mod 12)+1
+    eq(panelChip(r.project, back, 31), 'Panel Pat C 7/12 · Panel Pat B 3/28 · Panel Pat A 7/24', 'row 31 (inside "Cont in pat … until 15½""): C 7, B 3, A 7 (it said "C row 1 of 28")');
+    eq(panelChip(r.project, back, 3), 'Panel Pat C 3/12 · Panel Pat B 3/28 · Panel Pat A 3/24', 'row 3 is panel row 3, not row 1 again');
+    var cb = Store.cableInfo(at(r.project, back, 2));
+    eq(cb && cb.inRows, 1, 'cable ring on row 2: a crossing next row (Panel A crosses on every RS row)');
+  });
+});
+
+journey('Patons boyfriend, size L (research §10): three panels of 22, 4 and 6 rows', function () {
+  return importFixture('knit-patons-boyfriend-cable.pdf', { size: 2 }).then(function (r) {
+    if (!r) { skip('knit-patons-boyfriend-cable.pdf is not in tmp-pdf'); return; }
+    var front = partNamed(r.project, /^Front$/);
+    ok(!!front, 'a Front part');
+    if (!front) return;
+    // (P1: the Front's 4" of rib is a stretch of its own; the knitter ends it after 20 rows)
+    var rib = Store.stretchInfo(at(r.project, front, 1));
+    if (rib && rib.state === 'open') { at(r.project, front, 21); Store.endStretch(r.project.id, front.id); }
+    eq(panelChip(r.project, front, 21), 'Cable Panel C 1/6 · Cable Panel B 1/4 · Cable Panel A 1/22', 'the set-up row (row 21 after 20 rows of rib) places C (6 rows), B (4), A (22)');
+    eq(panelChip(r.project, front, 152), 'Cable Panel C 6/6 · Cable Panel B 4/4 · Cable Panel A 22/22', '132 rows on (LCM(22, 4, 6)) every panel is on its last row');
+    eq(panelChip(r.project, front, 153), 'Cable Panel C 1/6 · Cable Panel B 1/4 · Cable Panel A 1/22', '... and the next row brings all three back to row 1 together');
+  });
+});
+
+function runAll() {
+  var chain = Promise.resolve();
+  JOURNEYS.forEach(function (j) {
+    chain = chain.then(function () {
+      group(j.title);
+      try { return Promise.resolve(j.fn()).catch(function (e) { log(false, j.title + ' threw', String(e && e.stack || e)); }); }
+      catch (e) { log(false, j.title + ' threw', String(e && e.stack || e)); }
+    });
+  });
+  return chain;
+}
+
+function finish() {
+  try {
+    Store.getState().projects.slice().forEach(function (p) { Store.deleteProject(p.id); });
+    Store.flush();
+    localStorage.removeItem(TEST_KEY);
+    localStorage.removeItem(TEST_KEY + '.preimport');
+  } catch (e) { /* ignore */ }
+  Store.__setKeyForTests(REAL_KEY);
+  var sum = document.getElementById('summary');
+  sum.textContent = passed + ' passed, ' + failed + ' failed' + (skipped ? ', ' + skipped + ' skipped' : '') + (knownList.length ? ', ' + knownList.length + ' known' : '');
+  sum.className = failed ? 'bad' : 'ok';
+}
+
+(Q.dump ? dumpFixture() : runAll()).then(finish, function (e) { log(false, 'journey page threw', String(e && e.stack || e)); finish(); });
+</script>
+</body>
+</html>

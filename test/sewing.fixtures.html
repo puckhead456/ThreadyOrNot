@@ -750,6 +750,9 @@ function universal(p, name, t) {
   t(!!p && typeof p === 'object', 'parse() returned an object');
   t(Object.prototype.toString.call(p.steps) === '[object Array]', 'steps is an array');
   t(Object.prototype.toString.call(p.cuttingList) === '[object Array]', 'cuttingList is an array');
+  // Wave K (sew-audit #20): a step never loses text.
+  t(!p.steps.concat(p.variations || []).some(function (s) { return /…$/.test(s.text); }) &&
+    !p.warnings.some(function (w) { return /shortened/.test(w); }), 'wave K: no step text is cut short');
   t(Object.prototype.toString.call(p.notions) === '[object Array]', 'notions is an array');
   t(Object.prototype.toString.call(p.fabric) === '[object Array]', 'fabric is an array');
   t(Object.prototype.toString.call(p.warnings) === '[object Array]', 'warnings is an array');
@@ -853,6 +856,309 @@ function textFor(name) {
   });
 }
 
+/**
+ * Wave K (sew-core): the size advisor, the chart reader, the cutting board, the
+ * sheets, the quilt maths and the import check, against the real booklets.
+ * Shapes and numbers only; every fixture skips cleanly when absent.
+ */
+function waveK() {
+  var S = window.Sewing;
+  var chain = Promise.resolve();
+  function on(name, title, fn, nearlyEmpty) {
+    chain = chain.then(function () {
+      return textFor(name).then(function (got) {
+        group('wave K · ' + name + ' — ' + title);
+        if (!got || got.error || typeof got.text !== 'string' || (!nearlyEmpty && got.text.replace(/\s/g, '').length < 200)) { skip(name + ' (absent or no text)'); return; }
+        var t = function (cond, label) { log(!!cond, name + ': wave K: ' + label); };
+        var threw = function (e) { log(false, name + ': wave K check threw', String(e && e.message)); };
+        try {
+          var r = fn(got, t);
+          if (r && typeof r.then === 'function') return r.then(null, threw);
+        } catch (e) { threw(e); }
+      });
+    });
+  }
+  on('sew-peppermint-bronte-bathers', 'transposed glued chart (P4), elastic resolved (P3)', function (got, t) {
+    var p = S.parse(got.text), c = p.sizeChart;
+    t(c && c.orientation === 'transposed', 'the p5 chart is read as transposed');
+    t(c && c.labels.length === 13, '13 sizes');
+    t(c && c.rows.filter(function (r) { return r.kind === 'body'; }).length === 3 && c.rows.filter(function (r) { return r.kind === 'finished'; }).length === 3,
+      'Bust / Waist / Hip, body and finished');
+    t(c && c.namesFrom === 'caption', 'columns named from the caption');
+    var m = c ? c.labels.indexOf('M') : -1;
+    function cell(label, kind) { var r = c.rows.filter(function (x) { return x.label === label && x.kind === kind; })[0]; return r ? r.cells[m] : null; }
+    // Cell by cell against the page (size M): body 92/36, 76/30, 102/40; finished 77/30½, 70/27½, 77/30½.
+    t(m >= 0 && cell('Bust', 'body').cm === 92 && cell('Bust', 'body').inch === 36, 'M body bust 92 cm / 36"');
+    t(m >= 0 && cell('Waist', 'body').cm === 76 && cell('Hip', 'body').cm === 102, 'M body waist 76, hip 102 (the glued 10240)');
+    t(m >= 0 && cell('Waist', 'finished').inch === 27.5 && cell('Hip', 'finished').cm === 77, 'M finished waist 27½", hip 77 cm');
+    t(c && c.rows.every(function (r) { return r.cells.every(function (x) { return x.ok; }); }), 'every one of the 78 cells read and agrees in both units');
+    t(c && c.check.verdict === 'exact', 'the chart checks itself clean');
+    t(p.sizes.chart.length === 3, 'parse() now has 3 body rows (it had 0)');
+    var r = S.resolveSize(p, 'M');
+    t(r.items.filter(function (i) { return i.where === 'elastic'; }).length === 4, 'size M resolves every elastic chart to one number (4)');
+    t(r.items.filter(function (i) { return i.where === 'fabric'; }).length === 2, 'and both fabrics');
+    var adv = S.suggestSize(p, [{ label: 'Bust', value: '92 cm' }, { label: 'Hip', value: '102 cm' }]);
+    t(adv.suggestion && adv.suggestion.size === 'M', 'body 92 / 102 suggests M');
+    t(adv.ease.length === 2 && adv.ease.every(function (e) { return e.negative; }), 'and shows the negative ease');
+    var waist = S.resolveSize(p, 'L').items.filter(function (i) { return /waistband/i.test(i.what); })[0];
+    t(waist && /cut off/.test(waist.check || ''), 'the waistband chart\'s "70." is flagged, not trusted');
+  });
+  on('sew-sundress', 'size advisor with the designer\'s rule (P3)', function (got, t) {
+    var p = S.parse(got.text);
+    var rule = S.sizeRule(p.sourceText);
+    t(rule && rule.prefer === 'larger' && rule.slightly && rule.page === 3, 'the between-sizes rule, quoted with its page');
+    t(rule && (rule.text.match(/[.!?](\s|$)/g) || []).length === 1 && rule.text.length < 160 && /between sizes/.test(rule.text), 'the rule is one sentence, not the paragraph');
+    t(rule && rule.slightlyText && (rule.slightlyText.match(/[.!?](\s|$)/g) || []).length === 1, 'and the "slightly different" rule is its own sentence');
+    var adv = S.suggestSize(p, [{ label: 'Bust', value: '97 cm' }, { label: 'Waist', value: '79 cm' }, { label: 'Hips', value: '104 cm' }]);
+    t(adv.suggestion && adv.suggestion.size === '42', '97 / 79 / 104 suggests 42');
+    t(adv.suggestion && adv.suggestion.blend.length === 1 && adv.suggestion.blend[0].label === 'Hip' && adv.suggestion.blend[0].size === '44', 'with a 44 hip');
+    t(S.projectName(p, 'sew-sundress') === 'Gathered Sundress', 'the project takes the pattern\'s own name');
+    var g = S.glossary(p.sourceText);
+    t(g.booklet.length >= 4, 'the booklet\'s own glossary and PATTERN SYMBOLS are read (' + g.booklet.length + ')');
+    var n = S.fabricNeed(p, { size: '42', width: { value: 140, unit: 'cm' } });
+    var main = n.lines.filter(function (l) { return /115/.test(l.printedWidth); });
+    t(main.length === 1 && main[0].amount.m === 2.4, 'a 140 cm fabric uses the printed 115 cm figure: 2.4 m at 42');
+    var list = S.shoppingListV2(S.toCraftData(p), {});
+    t(list.filter(function (l) { return /fusing/i.test(l.text); }).length === 1, 'the fusing is on the shopping list once');
+    t(S.importCheck(p, { emptyPages: got.emptyPages }).rows.every(function (r) { return !/^Step \d/.test(r.label); }), 'no step is reported missing (titled sub-steps count)');
+  });
+  on('sew-sundress-pattern', 'pattern sheet as data (P5)', function (got, t) {
+    var sh = S.readSheet(got.text);
+    t(sh.pieces.length === 10, '10 pieces read from the sheet (got ' + sh.pieces.length + ')');
+    t(sh.pieces.filter(function (p) { return p.cuts.some(function (c) { return c.how === 'pair' && c.material === 'lining'; }); }).length === 2, 'two pieces cut as a pair in main AND lining');
+    t(sh.pieces.filter(function (p) { return p.cuts.length === 3; }).length === 2, 'two waistbands: main + lining + fusing');
+    t(sh.pieces.filter(function (p) { return p.cuts.some(function (c) { return c.how === 'fold'; }); }).length === 4, 'four pieces on the fold');
+    t(sh.pieces.every(function (p) { return !/\s[A-Z]$/.test(p.name) && !/^Ide\b/.test(p.name); }), 'split and kerned labels rejoined');
+    t(sh.tiles && sh.tiles.rows === 5 && sh.tiles.cols === 6 && sh.tiles.check.consistent === sh.tiles.check.of, 'tape-up map 5 × 6 (1a–5f), every labelled page agrees');
+    t(S.parse(got.text).steps.length === 0, 'a sheet gives no steps');
+  });
+  on('sew-pencilskirt-pattern', 'joins-marked sheet (P5)', function (got, t) {
+    var sh = S.readSheet(got.text);
+    t(sh.tiles && sh.tiles.marks === 'joins' && sh.tiles.rows === 5 && sh.tiles.cols === 5, 'labels 1A–4D are joins on a 5 × 5 grid');
+    t(sh.tiles && sh.tiles.check.consistent === sh.tiles.check.of, 'every labelled page agrees');
+    t(sh.test.length === 1 && /2\.5\s*cm/.test(sh.test[0].size), 'the 2.5 cm grid print check');
+    t(sh.print.some(function (l) { return /scaling/i.test(l); }), 'the page-scaling note');
+    t(sh.pieces.length === 5, '5 pieces (got ' + sh.pieces.length + ')');
+    t(sh.pieces.every(function (p) { return p.number !== null; }), 'every piece has its number');
+    t(S.parse(got.text).steps.length === 0, 'and no junk steps');
+  });
+  on('sew-tianas-jogger-12m-6y', 'layered sheet (P5)', function (got, t) {
+    var sh = S.readSheet(got.text, { layers: ['12M', '18M', '24M', '3T', '4T', '5T', '6', 'Print for all sizes'] });
+    t(sh.pieces.length === 6, '6 pieces');
+    t(sh.layers && sh.layers.sizes.length === 7 && sh.layers.always.length === 1, '7 size layers and "Print for all sizes"');
+    t(sh.tiles && sh.tiles.tiles.length === 10 && sh.tiles.missing.length === 2, 'tiles from "Page 1A"…, two gaps kept as gaps');
+  });
+  on('sew-tianas-jogger-7-12', 'layered sheet (P5)', function (got, t) {
+    var sh = S.readSheet(got.text);
+    t(sh.pieces.length === 6, '6 pieces');
+    t(sh.tiles && sh.tiles.rows === 3 && sh.tiles.cols === 5 && !sh.tiles.missing.length, 'a full 3 × 5 tile grid');
+  });
+  on('sew-swoon-mabel-bag', 'interfacing products (P6), per-step SA (P15), kind (P14)', function (got, t) {
+    var p = S.parse(got.text);
+    var ints = p.cuttingList.filter(function (r) { return r.material === 'interfacing'; });
+    t(ints.length === 10, '10 interfacing rows');
+    t(ints.filter(function (r) { return /shape-?flex/i.test(r.product || '') && r.application === 'fusible'; }).length === 5, '5 Shape-flex rows, fusible (11 pieces)');
+    t(ints.filter(function (r) { return /peltex/i.test(r.product || '') && r.application === 'sew-in'; }).length === 5, '5 Peltex rows, sew-in (6 pieces)');
+    t(ints.filter(function (r) { return /peltex/i.test(r.product || ''); }).reduce(function (a, r) { return a + r.qty; }, 0) === 6, '6 Peltex pieces');
+    var f = S.fuseList(p.sourceText);
+    t(f.length === 1 && f[0].pieces.length === 4, 'the fuse card lists 4 pieces');
+    var b = S.cuttingBoard(p);
+    t(b.groups.filter(function (g) { return g.kind === 'interfacing'; }).length === 2, 'the board has one group per product');
+    t(!p.warnings.some(function (w) { return /size chart/i.test(w); }), 'a bag is not warned about a size chart');
+    var sas = p.steps.map(function (s) { return S.stepSetup(s.text, p); });
+    t(sas.some(function (x) { return x.sa && x.sa.source === 'step' && x.sa.inches === '1/2'; }), 'a step\'s own 1/2" seam allowance');
+    t(sas.some(function (x) { return x.trims.some(function (tr) { return /1\/8/.test(tr.text); }); }), 'and "trim to 1/8"');
+  });
+  on('sew-freespirit-harmony-quilt', 'strips, units in their step, quilt top (P7, P10, P11, P13)', function (got, t) {
+    var p = S.parse(got.text), d = S.toCraftData(p);
+    var ct = S.cutTotals(d);
+    t(ct.total + ct.strips === 194 && ct.strips === 11, 'the 194 split: 11 strips with subcuts counted apart');
+    t(ct.total === 183, '183 finished cuts');
+    t(d.cutting.filter(function (r) { return r.subcut; }).every(function (r) { return !!r.parentId; }), 'every subcut has its strip');
+    var b = S.cuttingBoard(p);
+    t(b.groups.length === 16 && b.groups.every(function (g) { return g.kind === 'letter'; }), '16 fabric groups (A–P), no "Other"');
+    var e = b.groups.filter(function (g) { return g.letter === 'E'; })[0];
+    var ck = e && e.rows.filter(function (r) { return r.check; })[0];
+    t(ck && ck.check.verdict === 'off' && ck.check.yield === 22 && ck.check.need === 24 && ck.check.minWof === 42, 'Fabric E: 2 strips give 22 of 24 squares at 40", 42" needed');
+    t(p.units.filter(function (u) { return typeof u.step === 'number'; }).length === p.units.length, 'every unit has its step (' + p.units.length + ')');
+    t(p.units.filter(function (u) { return u.size; }).length >= 10, 'unfinished sizes on most units');
+    var qf = S.quiltFacts(p);
+    t(qf.finished && qf.finished.w === 64.5, 'finished 64 1/2" square');
+    t(qf.binding.check && qf.binding.check.verdict === 'exact', 'the 7 printed binding strips are enough');
+    t(qf.backing.check && qf.backing.check.verdict === 'exact', 'both printed backings cover the formula');
+    var top = S.quiltTop(p);
+    t(top.source === 'labels' && top.layoutPage === 12 && top.blocks.length === 6, 'layout labels on p12: 6 block kinds');
+    t(top.blocks.filter(function (x) { return x.label === 'B3'; })[0].count === 4, 'B3 four times');
+    t(top.fabrics.length === 16, '16 lettered fabrics');
+    var list = S.shoppingListV2(d, {});
+    t(list.filter(function (l) { return l.section === 'other' || l.section === 'thread'; }).length === 5, 'the 5 Additional Recommendations are on the list');
+  });
+  on('sew-agf-joyous-picnic-quilt', 'binding reproduces the printed 310" (P8)', function (got, t) {
+    var p = S.parse(got.text), qf = S.quiltFacts(p);
+    t(qf.finished && qf.finished.w === 70 && qf.finished.h === 80, 'finished 70" × 80"');
+    t(qf.binding.check && qf.binding.check.verdict === 'exact' && qf.binding.calc.length === 310, 'the formula gives the printed 310"');
+    t(qf.backing.check && qf.backing.check.verdict === 'exact' && qf.backing.check.read <= 5.5, 'backing within the printed 5 1/2 yd');
+    var top = S.quiltTop(p);
+    t(top.source === 'counts' && top.counts.blocks === 14 && top.counts.rows === 8, '14 blocks, 8 rows; the layout itself is a picture');
+    t(top.fabrics.length === 11 && top.fabrics.every(function (f) { return !!f.code; }), '11 lettered fabrics with codes');
+  });
+  on('sew-agf-catwalk-quilt', 'rows of fabric letters (P11), close binding (P8)', function (got, t) {
+    var p = S.parse(got.text), qf = S.quiltFacts(p);
+    t(qf.finished && qf.finished.w === 35.25 && qf.finished.h === 51, 'finished 35 1/4" × 51"');
+    t(qf.binding.check && qf.binding.check.verdict === 'close', 'the printed 184" is within 2% of the formula (182 1/2"), shown as ≈');
+    t(qf.backing.check && qf.backing.check.verdict === 'close', 'the printed backing works only at 44" wide, and says so');
+    var top = S.quiltTop(p);
+    t(top.source === 'rows' && top.rows.length === 13, '13 rows read from the assembly text');
+    t(top.rows.every(function (r) { return r.cells.length >= 9; }) && top.rows[0].cells.length === 13, 'each row a run of fabric letters (row 1: 13 cells)');
+  });
+  on('sew-rileyblake-triple-t-tote', 'what was missed (gap 8)', function (got, t) {
+    var c = S.importCheck(S.parse(got.text), { emptyPages: got.emptyPages });
+    var lost = c.rows.filter(function (r) { return r.label === 'Not in any step'; });
+    t(lost.length === 1 && lost[0].page === 4, 'the one sentence no step took is named, on page 4');
+    t(c.rows[0].verdict === 'unknown', 'and the steps are flagged as made from paragraphs');
+    var b = S.cuttingBoard(S.parse(got.text));
+    t(b.groups.filter(function (g) { return g.kind === 'interfacing'; }).length === 2, 'fusible fleece and SF101 join the board as cut pieces');
+  });
+  on('sew-peppermint-apron', 'what was missed (gap 8)', function (got, t) {
+    var c = S.importCheck(S.parse(got.text), { emptyPages: got.emptyPages });
+    t(c.rows.some(function (r) { return /^Pages? 4/.test(r.label); }), 'the picture pages 4–7 are named');
+    t(c.rows.some(function (r) { return r.label === 'Cutting list' && /pattern sheets/.test(r.why); }), 'the cutting list is on the pattern sheet');
+    t(!c.rows.some(function (r) { return r.label === 'Not in any step'; }), 'no false "missed" sentences');
+  });
+  // Wave K second pass: the calculators against the numbers the new quilts print.
+  on('sew-moda-charm-monday', 'binding, backing, flying geese against the page (P8)', function (got, t) {
+    var p = S.parse(got.text), q = S.quiltFacts(p);
+    t(q.finished && q.finished.w === 58 && q.finished.h === 83, 'finished 58" × 83" ("Size:")');
+    t(q.binding.check && q.binding.check.verdict === 'exact' && q.binding.calc.strips === 8, 'the printed 8 binding strips = the formula\'s 8');
+    t(q.backing.check && q.backing.check.verdict === 'close', 'the printed 5 yd is 1/8 yd under 4" a side, enough at 3" a side: close');
+    var g = S.quilt.geese(4, 2, 1);
+    t(p.cuttingList.some(function (r) { var d = S.dims(r.piece + ' ' + r.dims); return d && d.w === 2.5 && d.h === 4.5; }) && g.cut[0].size.w === 4.5 && g.cut[0].size.h === 2.5 && g.cut[1].size === 2.5,
+      'geese one at a time reproduce the printed 2½" x 4½" rectangle and 2½" squares');
+  });
+  on('sew-moda-courtyard', 'binding, backing, two flying-geese sizes (P8)', function (got, t) {
+    var p = S.parse(got.text), q = S.quiltFacts(p);
+    t(q.finished && q.finished.w === 67.5 && q.finished.h === 72.5, 'finished 67 1/2" × 72 1/2"');
+    t(q.binding.check && q.binding.check.verdict === 'exact', 'the printed 8 binding strips are the formula\'s 8');
+    t(q.backing.check && q.backing.check.verdict === 'exact' && q.backing.check.printed > 4.3 && q.backing.check.printed < 4.34, 'the printed 4 1/3 yd (not 41/3) covers the formula\'s 4 1/4');
+    var a = S.quilt.geese(5, 2.5, 1), b = S.quilt.geese(2.5, 1.25, 1);
+    t(a.cut[0].size.w === 5.5 && a.cut[0].size.h === 3 && a.cut[1].size === 3, 'Geese A: 5 1/2" x 3" + 3" squares, as printed');
+    t(b.cut[0].size.w === 3 && b.cut[0].size.h === 1.75 && b.cut[1].size === 1.75, 'Geese B: 3" x 1 3/4" + 1 3/4" squares, as printed');
+  });
+  on('sew-moda-mfcim-sampler', 'HST and QST squares against the formula (P8)', function (got, t) {
+    var c = S.unitCutCheck(got.text);
+    t(c.rows.length >= 6, c.rows.length + ' triangle sizes found with their printed squares');
+    t(c.rows.every(function (r) { return r.verdict === 'close'; }), 'every one is the cut-big-and-trim convention (HST + 1", QST + 1 1/2"), shown as close');
+    t(c.rows.filter(function (r) { return /^HST/.test(r.label); }).every(function (r) { return S.quilt.hst(parseFloat(r.label.slice(4)) || 0, 2, { trim: true }) !== null; }), 'the trim option reproduces them');
+    t(S.quilt.hst(6, 2, { trim: true }).cut[0].size === 7 && S.quilt.qst(9, { trim: true }).cut[0].size === 10.5, 'trim option: 7" squares for a 6" HST, 10 1/2" for a 9" QST, as printed');
+    t(S.amountOf('12/3 YARDS').yd > 1.66 && S.amountOf('12/3 YARDS').yd < 1.67, 'a glued "12/3 YARDS" is 1 2/3, not 4');
+  });
+  on('sew-fqs-bsb-finishing', 'block-of-the-month finishing (P8)', function (got, t) {
+    var q = S.quiltFacts(S.parse(got.text));
+    t(q.binding.printed && q.binding.printed.strips === 9 && q.binding.printed.stripWidth === 2.5, 'the 9 binding strips are read');
+    t(!q.finished, 'no finished size is printed, so no binding verdict is made up');
+    var calc = S.quilt.binding({ w: 66, h: 88 });
+    t(calc.strips <= 9, 'from the measured centre 56 1/2" x 78 1/2" plus 5" borders (66" x 88"), the formula needs ' + calc.strips + ' strips: the 9 printed are enough');
+  });
+  on('sew-tianas-margo-top-A4', 'owner-password PDF opens (fixtures note)', function (got, t) {
+    var p = S.parse(got.text);
+    t(p.kind === 'sheet' && p.sheet && p.sheet.pieces.length >= 2, 'an encrypted (owner password) sheet reads like any other');
+  });
+  on('sew-tianas-colette-dress-A4', 'owner-password PDF opens (fixtures note)', function (got, t) {
+    var p = S.parse(got.text);
+    t(p.kind === 'sheet' && p.sheet && p.sheet.pieces.length >= 4, 'an encrypted sheet: ' + (p.sheet ? p.sheet.pieces.length : 0) + ' pieces');
+  });
+  on('sew-peppermint-samford-pants', 'the grading rule, one sentence (P3)', function (got, t) {
+    var rule = S.sizeRule(S.parse(got.text).sourceText);
+    t(rule && rule.prefer === 'grade' && rule.page === 3, 'a grading rule on page 3');
+    t(rule && (rule.text.match(/[.!?](\s|$)/g) || []).length === 1 && !/[A-Z]{4,}\s[A-Z]{4,}/.test(rule.text), 'one sentence, the heading the column ran through taken out');
+  });
+  on('sew-peppermint-albion', 'cutting list inside the booklet (P6)', function (got, t) {
+    var p = S.parse(got.text);
+    t(p.cuttingList.length === 11, 'the piece inventory: 7 pieces, 4 of them also in interfacing = 11 rows (got ' + p.cuttingList.length + ')');
+    t(p.cuttingList.filter(function (r) { return r.material === 'interfacing'; }).length === 4, '4 interfacing rows');
+    t(p.cuttingList.filter(function (r) { return r.grain === 'pair'; }).reduce(function (a, r) { return a + r.qty; }, 0) === 12, 'pairs counted in pieces (5 paired rows = 12 pieces)');
+    t(!p.warnings.some(function (w) { return /No cutting list/.test(w); }), 'no "no cutting list" warning');
+    var rule = S.sizeRule(p.sourceText);
+    t(rule && rule.prefer === 'larger' && (rule.text.match(/[.!?](\s|$)/g) || []).length === 1, 'its between-sizes rule, one sentence');
+    // Honest gap: Albion's fabric table is not read (asserted so a change shows up).
+    t(p.fabric.length === 0, 'KNOWN: the fabric table is not read yet (0 rows)');
+  });
+  on('sew-shannon-cuddle-robe', 'cut from rectangles, nap directions (P6, P13, P15)', function (got, t) {
+    var p = S.parse(got.text);
+    t(p.cuttingList.length >= 12, p.cuttingList.length + ' rectangles read with their sizes');
+    t(p.cuttingList.filter(function (r) { return r.grain === 'mirrored'; }).length === 2, 'the hoods: 1 main + 1 reverse, twice');
+    t(p.cuttingList.some(function (r) { return /curvy size only/i.test(r.note); }), 'the Curvy alternative rows are marked as such');
+    t(p.cuttingList.every(function (r) { return !/^\d/.test(r.piece); }), 'no junk row named by a number');
+    t(p.fabric.length === 2, 'the 2 bulleted yardages');
+    var nap = S.napNotes(p.sourceText);
+    t(nap.length >= 3, nap.length + ' nap-direction sentences, with pages');
+    t(p.steps.some(function (s) { return S.stepSetup(s.text, p).nap; }), 'a nap chip on the steps that need it');
+    t(!p.sizes, 'KNOWN: "Fits S, M, L" is not a size chart (honest: no chart)');
+  });
+  on('sew-tianas-margo-top-A0', 'A0 + print-at-home pair (P5)', function (got, t) {
+    return textFor('sew-tianas-margo-top-A4').then(function (g4) {
+      if (!g4 || !g4.text) { skip('the A4 file is absent'); return; }
+      var a0 = S.parse(got.text), a4 = S.parse(g4.text);
+      t(a0.kind === 'sheet' && a4.kind === 'sheet', 'both files are sheets');
+      t(a0.sizes && a4.sizes && a0.sizes.labels.join() === a4.sizes.labels.join() && a0.sizes.labels.length === 10, 'the same 10 sizes in both');
+      t(a4.sheet.tiles && a4.sheet.tiles.rows * a4.sheet.tiles.cols >= 10, 'the print-at-home file has a tape-up map; the A0 one has none');
+      t(!a0.sheet.tiles, 'and the A0 one has none');
+      var n0 = a0.sheet.pieces.map(function (x) { return x.name; }), n4 = a4.sheet.pieces.map(function (x) { return x.name; });
+      t(n0.every(function (n) { return n4.indexOf(n) >= 0; }), 'every A0 piece is also on the A4 file');
+      t(a4.sheet.pieces.length >= 3, 'KNOWN: ' + a4.sheet.pieces.length + ' pieces read from the A4 file (labels on the drawn pieces only partly reach the text)');
+    });
+  });
+  // sew-audit's paste-ready additions (all agreed), plus the names it found.
+  on('sew-moda-charm-monday', 'the pattern\'s name is not a fabric line (P14)', function (got, t) {
+    var n = S.projectName(S.parse(got.text), 'sew-moda-charm-monday.pdf');
+    t(!/\d\s*\/?\s*\d*\s*(yard|yd)/i.test(n), 'the name is not an amount ("' + n + '")');
+  });
+  on('sew-moda-quick-sew-bag', 'a bag reads as a bag (P14)', function (got, t) {
+    var p = S.parse(got.text);
+    t(p.kind === 'bag', 'kind bag (' + p.kind + ')');
+    t(!p.notions.some(function (n) { return /:\s*(one yard|\d.*yard)/i.test(n.text); }), 'fabric amounts are not notions');
+    t(p.fabric.length === 2, 'its two fabric amounts');
+  });
+  on('sew-fqs-bsb-block4-flying-geese', 'a quilt block reads as a quilt (P14)', function (got, t) {
+    var p = S.parse(got.text);
+    t(p.kind === 'quilt', 'kind quilt');
+    t(S.projectName(p, 'x.pdf') === '', 'the stamped brand "BELLA" is not its name: no name');
+  });
+  on('sew-fqs-bsb-block5-hst', 'no wrong name (P14)', function (got, t) {
+    t(S.projectName(S.parse(got.text), 'x.pdf') === '', '"Paper" is not its name: no name');
+  });
+  on('sew-shannon-cozy-tote', 'bag with nap (P13, P14)', function (got, t) {
+    var p = S.parse(got.text);
+    t(p.kind === 'bag' && p.fabric.length === 2, 'a bag with its exterior and lining yardage');
+    t(S.napNotes(p.sourceText).length >= 1, 'its nap sentence is quoted');
+  });
+  on('sew-moda-cfac-love', 'a picture-only block sheet says so (gap 8)', function (got, t) {
+    var c = S.importCheck(S.parse(got.text), { emptyPages: got.emptyPages });
+    t(c.verdict === 'off' && /pictures of text/.test(c.summary), 'pictures of text, said plainly');
+  }, true);
+  on('sew-tianas-colette-dress-A0', 'no wrong name (P14)', function (got, t) {
+    t(S.projectName(S.parse(got.text), 'x.pdf') === '', '"SIZE TABLE" is not its name: no name');
+  });
+  on('sew-tianas-margo-top-A4', 'sheet pieces one per row, whole print notes (P5)', function (got, t) {
+    var sh = S.parse(got.text).sheet;
+    t(sh.pieces.length === 4, '4 pieces: neckline binding, armhole binding, front, back (got ' + sh.pieces.length + ')');
+    t(sh.pieces.every(function (p) { return p.cuts.length === 1; }), 'one cut line per piece (no two pieces merged)');
+    t(sh.pieces.some(function (p) { return p.cuts[0].how === 'mirror'; }), 'the back is cut mirrored');
+    t(sh.test.length === 1 && /^\d+\s*centimet/i.test(sh.test[0].size), 'the test ruler, not a sentence fragment');
+    t(sh.print.length >= 1 && sh.print.every(function (s) { return /[.!?]$/.test(s); }), 'print notes are whole sentences');
+  });
+  on('sew-peppermint-albion', 'no step text dropped (sew-audit #20)', function (got, t) {
+    var p = S.parse(got.text);
+    t(!p.warnings.some(function (w) { return /shortened/.test(w); }), 'nothing "shortened"');
+    t(!p.steps.some(function (s) { return /…$/.test(s.text); }), 'no card ends in an ellipsis');
+  });
+  on('sew-peppermint-westend-jacket', 'image-only booklet (gap 8)', function (got, t) {
+    var c = S.importCheck(S.parse(got.text), { emptyPages: got.emptyPages, pages: 17 });
+    t(c.verdict === 'off' && /pictures of text/.test(c.summary), 'says it is pictures of text');
+  });
+  return chain;
+}
+
 function run() {
   var chain = Promise.resolve();
   var found = 0;
@@ -914,7 +1220,7 @@ function run() {
       });
     });
   });
-  return chain.then(function () {
+  return chain.then(waveK).then(function () {
     group('Result');
     if (!found) {
       line('skip', 'No fixtures present. Drop sew-*.pdf files into tmp-pdf/ to exercise the parser ' +

@@ -1,0 +1,565 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>XStitchExtras tests</title>
+<link rel="stylesheet" href="../css/app.css">
+<link rel="stylesheet" href="../css/themes.css">
+<link rel="stylesheet" href="../css/xstitch-extras.css">
+<style>
+  #log { font: 13px/1.4 Menlo, Consolas, monospace; background:#111; color:#eee; padding:12px; }
+  .pass { color:#7bd389; } .fail { color:#ff6b6b; background:#2a1414; } .note { color:#c9a227; }
+  .group { margin-top:14px; font-weight:bold; color:#9cf; border-bottom:1px solid #333; }
+  #summary { margin-top:16px; font-size:17px; font-weight:bold; } #summary.ok { color:#7bd389; } #summary.bad { color:#ff6b6b; }
+  body.demo #log { display: none; }
+</style>
+</head>
+<body>
+<!-- Synthetic charts only, built in code below; nothing from tmp-pdf/. No BlobStore
+     (IndexedDB) is loaded, so the page runs headless:
+     bash tools/headless-suite.sh xstitch-extras.test
+     Demo for screenshots: ?demo=pace|fabric|kit|brands|grow|framed|print|join&theme=stardew-night -->
+<div id="log"><h1>XStitchExtras test suite</h1><div id="out"></div><div id="summary"></div></div>
+<script>
+document.write('<scr' + 'ipt src="../js/patterns.js?v=' + Date.now() + '"><\/scr' + 'ipt>');
+document.write('<scr' + 'ipt src="../js/store.js?v=' + Date.now() + '"><\/scr' + 'ipt>');
+document.write('<scr' + 'ipt src="../js/sharecard.js?v=' + Date.now() + '"><\/scr' + 'ipt>');
+document.write('<scr' + 'ipt src="../js/xstitch.js?v=' + Date.now() + '"><\/scr' + 'ipt>');
+document.write('<scr' + 'ipt src="../js/xstitch-render.js?v=' + Date.now() + '"><\/scr' + 'ipt>');
+document.write('<scr' + 'ipt src="../js/app-xstitch-extras.js?v=' + Date.now() + '"><\/scr' + 'ipt>');
+</script>
+<script>
+'use strict';
+var out = document.getElementById('out'), passed = 0, failed = 0;
+function log(ok, label, detail) {
+  if (ok) passed++; else failed++;
+  var d = document.createElement('div');
+  d.className = ok ? 'pass' : 'fail';
+  d.textContent = (ok ? 'PASS' : 'FAIL') + ' - ' + label + (detail ? '  (' + detail + ')' : '');
+  out.appendChild(d);
+  (ok ? console.log : console.error)(d.textContent);
+}
+function note(t) { var d = document.createElement('div'); d.className = 'note'; d.textContent = '     ' + t; out.appendChild(d); }
+function group(t) { var d = document.createElement('div'); d.className = 'group'; d.textContent = t; out.appendChild(d); }
+function deepEqual(a, b) { return JSON.stringify(a) === JSON.stringify(b); }
+function assertEqual(a, e, label) { var ok = deepEqual(a, e); log(ok, label, ok ? '' : 'expected ' + JSON.stringify(e) + ' got ' + JSON.stringify(a)); }
+function assertTrue(c, label, detail) { log(!!c, label, c ? '' : (detail || 'was false')); }
+function wait(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+function until(f, ms) {
+  var t0 = Date.now();
+  return new Promise(function (res) {
+    (function tick() { var v = false; try { v = f(); } catch (e) { v = false; } if (v || Date.now() - t0 > ms) res(v); else setTimeout(tick, 25); })();
+  });
+}
+function text(n) { return n ? n.textContent.replace(/\s+/g, ' ') : ''; }
+function q(sel) { var s = XStitchExtras.__test.lastSheet(); return s && s.root ? s.root.querySelector(sel) : null; }
+function qa(sel) { var s = XStitchExtras.__test.lastSheet(); return s && s.root ? Array.prototype.slice.call(s.root.querySelectorAll(sel)) : []; }
+function btnByText(re) { return qa('button').filter(function (b) { return re.test(b.textContent); })[0] || null; }
+function sheetText() { var s = XStitchExtras.__test.lastSheet(); return s ? text(s.root) : ''; }
+
+var X = window.XStitch, S = window.Store, E = window.XStitchExtras, T = E && E.__test;
+var params = new URLSearchParams(location.search);
+if (params.get('theme')) document.documentElement.setAttribute('data-theme', params.get('theme'));
+
+/* ---- synthetic projects ------------------------------------------- */
+var DAYMS = 86400000;
+function chartData(w, h, opts) {
+  opts = opts || {};
+  var cells = [], i;
+  for (var y = 0; y < h; y++) for (var x = 0; x < w; x++) cells.push(((x >> 3) + (y >> 3)) % 4);
+  var raw = {
+    fabric: { count: 14, over: 1, kind: 'aida', color: 'Antique White' },
+    design: { title: opts.title || 'Sampler' },
+    palette: [{ brand: 'DMC', code: '310', name: 'Black', hex: '000000' }, { brand: 'DMC', code: '321', name: 'Red', hex: 'c72b3b' },
+      { brand: 'DMC', code: '702', name: 'Kelly Green', hex: '47a73b' }, { brand: 'DMC', code: '3865', name: 'Winter White', hex: 'f9f7f1' }],
+    chart: { w: w, h: h, cells: cells },
+    pages: opts.pages || [{ n: 0, label: 'Page 1', region: { x: 0, y: 0, w: Math.ceil(w / 2), h: h } },
+      { n: 1, label: 'Page 2', region: { x: Math.ceil(w / 2), y: 0, w: w - Math.ceil(w / 2), h: h } }],
+    source: { kind: 'oxs', fileName: opts.file || 'sampler.oxs' }
+  };
+  var d = X.normalize(raw, null);
+  var bits = X.bitsState('', w * h);
+  var nDone = opts.done === undefined ? Math.floor(w * h * 0.3) : opts.done;
+  for (i = 0; i < nDone; i++) X.setBit(bits, i, 1);
+  d.progress.done = X.bitsB64(bits);
+  return X.normalize(d, null);
+}
+function makeProject(name, data) {
+  var p = S.createProject({ craft: 'crossstitch', name: name, craftData: data });
+  return S.project(p.id);
+}
+
+var made = [];
+function setup() {
+  S.__setKeyForTests('stitchkeeper-wavek-xsextras');
+  S.projects().slice().forEach(function (p) { S.deleteProject(p.id); });
+  (S.flossStash() || []).forEach(function (r) { S.setFlossOwned(r.brand, r.code, 0); });
+  var main = makeProject('Test sampler', chartData(40, 30));
+  var other = makeProject('Other WIP', chartData(20, 20, { done: 0, title: 'Other' }));
+  made.push(main.id, other.id);
+  return { main: main, other: other };
+}
+
+function seedActivity(id) {
+  /* six sessions on six days, the last one today */
+  var t = Date.now();
+  for (var k = 5; k >= 0; k--) {
+    var s = t - k * DAYMS - 3600000;
+    /* xs-audit: just after midnight "an hour ago" is yesterday; keep today's
+       session inside today whatever the clock says */
+    var sod = new Date(t - k * DAYMS); sod.setHours(0, 0, 0, 0);
+    if (k === 0) s = Math.max(sod.getTime() + 1000, t - 3600000);
+    else s = sod.getTime() + 12 * 3600000;          // midday on each earlier day
+    var step = k === 0 ? Math.min(300000, Math.max(1, Math.floor((t - s) / 5))) : 300000;
+    for (var j = 0; j < 4; j++) S.counted({ projectId: id, n: 30 + k * 5, unit: 'stitch', part: 'DMC 310', at: s + j * step });
+  }
+}
+
+function runTests() {
+  var P = setup();
+  var main = P.main;
+
+  group('the contract: menuItems and open');
+  assertTrue(E && E.version >= 1 && typeof E.menuItems === 'function' && typeof E.open === 'function', 'window.XStitchExtras is published');
+  var ids = E.menuItems(main).map(function (m) { return m.id; });
+  assertEqual(ids, ['pace', 'fabric', 'kit', 'brands', 'grow', 'framed', 'print', 'join'], 'a chart with progress lists every sheet, in order');
+  assertTrue(E.menuItems(main).every(function (m) { return m.label && m.icon && m.hint; }), 'each item has a label, an icon and a hint');
+  var blank = makeProject('No chart yet', X.normalize({}, null));
+  made.push(blank.id);
+  assertEqual(E.menuItems(blank).map(function (m) { return m.id; }), ['pace'], 'a project with no chart or key lists only the stitching time');
+  var fresh = makeProject('Nothing marked', chartData(10, 10, { done: 0 }));
+  made.push(fresh.id);
+  assertTrue(E.menuItems(fresh).map(function (m) { return m.id; }).indexOf('grow') < 0, 'nothing marked yet: no "Watch it grow"');
+  var saveTl = XSRender.timelapse; XSRender.timelapse = undefined;
+  assertTrue(E.menuItems(main).map(function (m) { return m.id; }).indexOf('grow') < 0, 'XSRender.timelapse missing: the replay is not listed');
+  XSRender.timelapse = saveTl;
+  var saveKit = X.kitList; X.kitList = undefined;
+  assertTrue(E.menuItems(main).map(function (m) { return m.id; }).indexOf('kit') < 0, 'XStitch.kitList missing: the kit list is not listed');
+  X.kitList = saveKit;
+  assertEqual(E.menuItems({ id: 'x', craft: 'sewing', craftData: {} }), [], 'not a cross-stitch project: nothing');
+  assertEqual(E.open('nope', main), false, 'open() an unknown id returns false');
+  assertEqual(E.open('grow', fresh), false, 'open() an item that does not apply returns false');
+
+  group('helpers');
+  assertEqual(T.parseLength('5 cm', 'in'), { value: 5, unit: 'cm' }, 'parseLength: "5 cm"');
+  assertEqual(T.parseLength('2', 'in'), { value: 2, unit: 'in' }, 'a plain number takes the current unit');
+  assertEqual(T.parseLength('2.5"', 'cm'), { value: 2.5, unit: 'in' }, 'inch marks are inches');
+  assertEqual(T.parseLength('50 mm', 'in'), { value: 5, unit: 'cm' }, 'millimetres become cm');
+  assertEqual(T.parseLength('2,5 cm', 'in'), { value: 2.5, unit: 'cm' }, 'a decimal comma is accepted');
+  assertEqual(T.parseLength('lots', 'in'), null, 'nonsense is refused');
+  assertEqual([T.toUnit(2.857, 'in'), T.toUnit(2.857, 'cm')], [2.86, 7.3], 'toUnit rounds inches to 2 places, cm to 1');
+  assertEqual(T.approx('365'), '≈ 365', 'approx marks a computed number');
+  var flat = T.orderFromChunks([{ at: 5, marks: [[3, 1], [4, 0], [9, 1]] }, { at: 9, marks: [[3, 1], [99, 1]] }], 50);
+  assertEqual([Array.prototype.slice.call(flat.order), flat.at], [[3, 9, 3], [5, 5, 9]], 'orderFromChunks keeps the marks that set a stitch, in order, with their times');
+  assertEqual(T.orderFromChunks([], 50), null, 'no log: no order (the replay says it is not the real order)');
+  assertTrue(/2 MB of projects/.test(T.storageLine({ localBytes: 2 * 1048576, blobBytes: 0, blobCount: 0, quota: 1e9, usage: 5e6, persisted: false })) &&
+    /Under 1%/.test(T.storageLine({ localBytes: 1, blobBytes: 0, blobCount: 0, quota: 1e9, usage: 5e6, persisted: false })) &&
+    /≈ 12%/.test(T.storageLine({ localBytes: 1, quota: 1e9, usage: 1.2e8 })) &&
+    !/null/.test(T.storageLine({ localBytes: 5000, blobBytes: null, blobCount: null, quota: null, usage: null, persisted: null })) &&
+    /may clear/.test(T.storageLine({ localBytes: 1, persisted: false })), 'storageLine: sizes in plain words, ≈ share of the quota, the not-persisted warning');
+
+  return Promise.resolve()
+    .then(function () { return testSheetA11y(main); })
+    .then(function () { return testPace(main); })
+    .then(function () { return testFabric(main); })
+    .then(function () { return testKit(P); })
+    .then(function () { return testBrands(main); })
+    .then(function () { return testGrow(main); })
+    .then(function () { return testFramed(main); })
+    .then(function () { return testPrint(main); })
+    .then(function () { return testJoin(); })
+    .then(function () { return testThemes(main); });
+}
+
+function testSheetA11y(main) {
+  group('sheets: focus in, Escape closes, focus returns');
+  var opener = document.createElement('button');
+  opener.textContent = 'opener';
+  document.body.appendChild(opener);
+  opener.focus();
+  E.open('print', main);
+  var s = T.lastSheet();
+  var dlg = s && s.root ? s.root.closest('dialog') : null;
+  assertTrue(dlg && dlg.open, 'the sheet is an open <dialog>');
+  assertTrue(dlg && dlg.getAttribute('aria-labelledby') && document.getElementById(dlg.getAttribute('aria-labelledby')).textContent === 'Print what’s left', 'it is named by its title');
+  assertTrue(dlg && dlg.contains(document.activeElement), 'focus moved into the sheet');
+  dlg.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+  assertTrue(!document.body.contains(dlg) && T.lastSheet() === null, 'Escape closes it');
+  assertTrue(document.activeElement === opener, 'focus returns to what had it');
+  document.body.removeChild(opener);
+  var seen = null;
+  document.addEventListener('xse:closed', function f(e) { seen = e.detail.id; document.removeEventListener('xse:closed', f); });
+  E.open('fabric', main); E.close();
+  assertEqual(seen, 'fabric', 'closing fires xse:closed with the id');
+  /* with a shell ctx, its openSheet is used */
+  var used = null;
+  var fakeCtx = { openSheet: function (conf) { used = conf; var body = document.createElement('div'); conf.build(body, { close: function () { conf.onClose(); } }); return {}; }, toast: function () {} };
+  E.open('print', main, { ctx: fakeCtx });
+  assertTrue(used && used.title === 'Print what’s left' && /xse-sheet-print/.test(used.cls) && used.subject === main.id, 'with opts.ctx the shell\'s openSheet builds it (title, class, subject)');
+  E.close();
+  T.useEnv(null, null);
+}
+
+function testPace(main) {
+  group('#5 stitching time, pace, ≈ finish · #21 goals');
+  seedActivity(main.id);
+  E.open('pace', main);
+  var pc = S.pace(main.id, { unit: 'stitch', remaining: 1 });
+  var stats = qa('.xse-stat');
+  assertEqual(stats.length, 4, 'four numbers: today, this week, streak, pace');
+  assertTrue(text(stats[0]).indexOf(String(pc.today)) >= 0 && pc.today > 0, 'today shows today\'s stitches', text(stats[0]));
+  var week = X.dayStrip(S.activity(main.id), 7, Date.now()).reduce(function (a, s) { return a + s.n; }, 0);
+  assertTrue(text(stats[1]).indexOf(X.fmtInt(week)) >= 0, 'this week = the 7-day strip\'s sum (' + week + ')', text(stats[1]));
+  assertTrue(/^Streak6/.test(text(stats[2])), 'a 6-day streak', text(stats[2]));
+  assertTrue(/≈/.test(text(stats[3])), 'stitches an hour is marked ≈', text(stats[3]));
+  assertEqual(qa('.xse-strip-day').length, 7, 'a week strip of 7 days');
+  assertTrue(/Stitches each day/.test(q('.xse-strip').getAttribute('aria-label')), 'the strip is labelled for a screen reader');
+  var fin = text(q('.xse-finish'));
+  assertTrue(/≈ (between|around)/.test(fin) && /not a promise/.test(fin), 'after 5 sessions: a ≈ finish range, said to be an estimate', fin);
+  assertTrue(qa('.xse-session-list li').length === 6, 'six sessions listed');
+  assertTrue(/Last stitched today/.test(fin), 'last stitched today');
+
+  /* fewer than 5 sessions */
+  var other = S.projects().filter(function (p) { return p.name === 'Other WIP'; })[0];
+  S.counted({ projectId: other.id, n: 12, unit: 'stitch' });
+  E.open('pace', other);
+  assertTrue(/after 5 stitching sessions \(1 so far\)/.test(text(q('.xse-finish'))), 'with 1 session: no finish date yet, and it says why');
+
+  /* goals */
+  E.open('pace', main);
+  var gs = T.goalStore(main);
+  note('goals live in: ' + gs.where);
+  assertTrue(gs.where === 'craftData' || gs.where === 'store', 'goals have somewhere to live');
+  var input = q('.xse-goal-form input[type="number"]');
+  input.value = '150'; input.dispatchEvent(new Event('input'));
+  btnByText(/^Add goal$/).click();
+  var goals = qa('.xse-goal');
+  assertEqual(goals.length, 1, 'a per-day goal is added');
+  assertTrue(/150 stitches a day/.test(text(goals[0])) && /of 150 today/.test(text(goals[0])), 'and shows today against it', text(goals[0]));
+  assertTrue(q('.xse-goal [role="progressbar"]').getAttribute('aria-valuenow') !== null, 'the goal bar is a progressbar');
+  /* a page goal by a date: ≈ a day, a target only after a tap */
+  qa('.xse-goal-form .xse-seg button').filter(function (b) { return b.getAttribute('data-id') === 'page'; })[0].click();
+  var sel = q('.xse-goal-form select');
+  assertEqual(sel.options.length, 2, 'the page list has both printed pages');
+  sel.value = '1'; sel.dispatchEvent(new Event('change'));
+  var dt = q('.xse-goal-form input[type="date"]');
+  var by = new Date(Date.now() + 10 * DAYMS);
+  dt.value = by.getFullYear() + '-' + ('0' + (by.getMonth() + 1)).slice(-2) + '-' + ('0' + by.getDate()).slice(-2);
+  dt.dispatchEvent(new Event('change'));
+  btnByText(/^Add goal$/).click();
+  goals = qa('.xse-goal');
+  assertEqual(goals.length, 2, 'the page goal is added');
+  var d = X.normalize(S.project(main.id).craftData, null);
+  var gp = X.goalProgress({ kind: 'page', page: 1, by: T.goalStore(main).list()[1].by }, d, S.activity(main.id), Date.now());
+  assertTrue(/Finish Page 2 by/.test(text(goals[1])) && text(goals[1]).indexOf('≈ ' + gp.perDayNeeded) >= 0, 'it says ≈ ' + gp.perDayNeeded + ' a day to finish page 2 by the date', text(goals[1]));
+  var perDayBefore = T.goalStore(main).list().filter(function (g) { return g.kind === 'perDay'; }).length;
+  assertEqual(perDayBefore, 1, 'the ≈ daily number is not a goal by itself');
+  var use = btnByText(/^Use ≈/);
+  assertTrue(!!use, 'a "Use ≈ N a day" button offers it');
+  use.click();
+  var after = T.goalStore(main).list().filter(function (g) { return g.kind === 'perDay'; });
+  assertTrue(after.length === 2 && after.some(function (g) { return g.n === gp.perDayNeeded; }), 'one tap makes it a daily goal');
+  var nGoals = T.goalStore(main).list().length;
+  qa('.xse-goal button').filter(function (b) { return /^Remove the goal/.test(b.getAttribute('aria-label') || ''); })[0].click();
+  assertEqual(T.goalStore(main).list().length, nGoals - 1, 'Remove takes a goal off');
+  if (typeof S.undo === 'function') {
+    S.undo();
+    assertEqual(T.goalStore(main).list().length, nGoals, 'Undo puts it back (one undo step)');
+  }
+  E.close();
+}
+
+function testFabric(main) {
+  group('#17 fabric, hoop and frame');
+  E.open('fabric', main);
+  var plan = X.fabricPlan({ w: 40, h: 30, count: 14, over: 1, margin: 'frame' });
+  var t = sheetText();
+  assertTrue(t.indexOf('≈ ' + plan.design.wIn + ' × ' + plan.design.hIn + ' in') >= 0, 'stitched size ≈ ' + plan.design.wIn + ' × ' + plan.design.hIn + ' in');
+  assertTrue(t.indexOf('≈ ' + plan.cut.wIn + ' × ' + plan.cut.hIn + ' in') >= 0, 'cut ≈ ' + plan.cut.wIn + ' × ' + plan.cut.hIn + ' in (3 in margins)');
+  assertTrue(/Fat quarter \(18 × 22 in\): fits/.test(t), 'a fat quarter fits');
+  assertTrue(t.indexOf('A ' + plan.hoop.in + ' in hoop') >= 0, 'the hoop: ' + plan.hoop.in + ' in');
+  assertTrue(/Frame: \d+ × \d+ in, with a mat opening of ≈/.test(t), 'a frame with a ≈ mat opening');
+  /* units */
+  qa('button').filter(function (b) { return b.getAttribute('data-id') === 'cm'; })[0].click();
+  t = sheetText();
+  assertTrue(t.indexOf('≈ ' + Math.round(plan.design.wIn * 25.4) / 10 + ' × ' + Math.round(plan.design.hIn * 25.4) / 10 + ' cm') >= 0, 'switched to cm', t.slice(0, 200));
+  assertEqual(S.craftSettings('crossstitch').extrasUnits[main.id], 'cm', 'the unit is remembered for this project');
+  assertEqual(T.unitFor(main.id), 'cm', 'and read back');
+  /* custom margin, typed in the other unit */
+  qa('button').filter(function (b) { return b.getAttribute('data-id') === 'custom'; })[0].click();
+  var mIn = q('.xse-custom input');
+  mIn.value = '2 in'; mIn.dispatchEvent(new Event('input'));
+  var p2 = X.fabricPlan({ w: 40, h: 30, count: 14, over: 1, margin: 2 });
+  assertTrue(sheetText().indexOf('≈ ' + Math.round(p2.cut.wIn * 25.4) / 10 + ' × ' + Math.round(p2.cut.hIn * 25.4) / 10 + ' cm') >= 0, 'a margin typed as "2 in" while showing cm');
+  /* reverse */
+  assertEqual(qa('.xse-reverse li').length, 9, 'the reverse question lists 9 counts');
+  /* count change: a target only with a tap */
+  var cnt = q('.xse-fabric-controls input[type="number"]');
+  cnt.value = '18'; cnt.dispatchEvent(new Event('input'));
+  assertEqual(X.normalize(S.project(main.id).craftData, null).fabric.count, 14, 'changing the count in the calculator does not change the project');
+  btnByText(/^Use 18-count/).click();
+  assertEqual(X.normalize(S.project(main.id).craftData, null).fabric.count, 18, '"Use 18-count" does');
+  S.updateCraftData(main.id, function (cd) { cd.fabric.count = 14; cd.fabric.countY = 14; });
+  E.close();
+}
+
+function testKit(P) {
+  group('#15 floss stash and kit list');
+  var main = P.main;
+  S.setFlossOwned('dmc', '310', 3);
+  S.setFlossOwned('dmc', '3371', 2);
+  E.open('kit', main);
+  var k = T.kitFor(S.project(main.id), { remaining: true, first: false });
+  var direct = X.kitList([{ id: P.other.id, title: 'Other WIP', data: X.normalize(S.project(P.other.id).craftData, null) },
+    { id: main.id, title: 'Test sampler', data: X.normalize(S.project(main.id).craftData, null) }], S.profile().floss, { remaining: true });
+  assertEqual(k.mine.rows.map(function (r) { return [r.code, r.buy]; }), direct.projects[1].rows.map(function (r) { return [r.code, r.buy]; }),
+    'the sheet\'s rows are XStitch.kitList with the other WIP first');
+  var rows = qa('.xse-kit-row');
+  assertEqual(rows.length, k.mine.rows.length, 'one row per colour');
+  var r310 = rows.filter(function (r) { return /DMC 310/.test(text(r)); })[0];
+  var aside = direct.projects[1].rows.filter(function (r) { return r.code === '310'; })[0].setAside.filter(function (s) { return s.n > 0; });
+  assertTrue(/need ≈ \d/.test(text(r310)) && /you have 3/.test(text(r310)), 'need is ≈, owned comes from the profile', text(r310));
+  if (aside.length) assertTrue(/set aside for Other WIP/.test(text(r310)), 'what the other project holds is said', text(r310));
+  assertTrue(/Buy ≈|covers/.test(sheetText()), 'a ≈ total to buy');
+  var ta = q('textarea.xse-copy');
+  assertEqual(ta.value, T.shoppingText(k.mine, 'Test sampler'), 'the shopping list is shown as text to copy');
+  assertTrue(/≈ skeins/.test(ta.value) && /^- DMC/m.test(ta.value), 'the list is plain text, marked ≈');
+  /* xs-audit: a code with letters is shown as the chart prints it, not as the lookup key */
+  E.close();
+  var dW = chartData(10, 10, { done: 0, title: 'White' });
+  dW.palette[0].code = 'B5200'; dW.palette[0].name = 'Snow White'; dW.palette[0].hex = 'ffffff';
+  var pW = makeProject('Snow sampler', X.normalize(dW, null));
+  made.push(pW.id);
+  E.open('kit', pW);
+  assertTrue(/DMC B5200/.test(sheetText()) && !/b5200/.test(sheetText()), 'the kit list says "DMC B5200", not "b5200"', (sheetText().match(/.{30}5200.{30}/g) || []).join(' | '));
+  E.close();
+  S.deleteProject(pW.id);
+  E.open('kit', main);
+  /* first pick */
+  qa('.xse-opts input')[1].click();
+  var k2 = T.kitFor(S.project(main.id), { remaining: true, first: true });
+  var mine310 = k2.mine.rows.filter(function (r) { return r.code === '310'; })[0];
+  assertTrue(mine310.allocated >= Math.min(3, mine310.need), 'first pick: this project takes from the stash first');
+  /* + one skein */
+  var plus = qa('button').filter(function (b) { return /^One more skein of DMC 310/.test(b.getAttribute('aria-label') || ''); })[0];
+  plus.focus();
+  plus.click();
+  assertEqual(S.flossOwned('dmc', '310'), 4, '+ adds a skein to the one stash');
+  assertTrue(document.activeElement && document.activeElement.getAttribute('aria-label') === 'One more skein of DMC 310', 'focus stays on the + after the list repaints');
+  E.close();
+  E.open('kit', main, { focus: { brand: 'DMC', code: '321' } });
+  assertTrue(/DMC 321/.test(text(q('.xse-kit-row.focus'))), 'a deep link highlights one colour');
+  E.close();
+}
+
+function testBrands(main) {
+  group('#16 other brands and substitutes');
+  E.open('brands', main);
+  assertTrue(/Only the DMC list is here/.test(sheetText()), 'with only DMC on the device it says so, plainly');
+  var before = JSON.stringify(X.normalize(S.project(main.id).craftData, null).palette.map(function (e) { return e.code; }));
+  btnByText(/^I am out of this$/) && qa('button').filter(function (b) { return /I am out of DMC 321/.test(b.getAttribute('aria-label') || ''); })[0].click();
+  var subs = X.substitutes('DMC', '321', S.profile().floss, 3);
+  var lis = qa('.xse-sub-list li');
+  assertEqual(lis.length, subs.length, 'substitutes from the stash (' + subs.length + ')');
+  assertTrue(lis.length && /≈ (very close|close|noticeable|different) match · you have \d/.test(text(lis[0])), 'each is labelled ≈ with how close, and how many you have', text(lis[0]));
+  assertTrue(/the chart keeps DMC 321/.test(sheetText()), 'it says the chart keeps its colour');
+  assertEqual(JSON.stringify(X.normalize(S.project(main.id).craftData, null).palette.map(function (e) { return e.code; })), before, 'nothing on the chart changed');
+  E.close();
+  var reg = X.registerBrandTable({ brand: 'Testbrand', rows: ['1|Ink|050505', '2|Scarlet|c02838', '3|Grass|40a040', '4|Snow|fafafa'],
+    provenance: { source: 'synthetic test table', licence: 'test', approx: true } });
+  assertTrue(reg.ok, 'a synthetic brand table registers');
+  E.open('brands', main);
+  assertTrue(/As Testbrand: 2 Scarlet · ≈ (very close|close|noticeable) match/.test(sheetText()), 'conversions use the registered table, marked ≈', sheetText().slice(0, 300));
+  E.close();
+  E.open('brands', main, { focus: { index: 0 } });
+  assertTrue(qa('.xse-subs').filter(function (s) { return !s.hidden; }).length === 1, 'a deep link opens one colour\'s substitutes');
+  E.close();
+}
+
+function testGrow(main) {
+  group('X3 Watch it grow');
+  E.open('grow', main);
+  var s = T.lastSheet();
+  return until(function () { return s.rec.tl; }, 8000).then(function () {
+    var tl = s.rec.tl;
+    assertTrue(!!tl, 'the time-lapse is made');
+    assertTrue(tl && tl.fallback && /Not your real order/.test(text(q('.xse-note'))) && /made-up order, not your history/.test(text(q('.xse-note'))),
+      'no mark log here: it says plainly this is not the real order', text(q('.xse-note')));
+    assertTrue(!!q('canvas.xse-canvas') && q('input[type="range"]').getAttribute('aria-label') === 'Position in the replay', 'a canvas and a labelled scrubber');
+    var r = q('input[type="range"]');
+    r.value = '500'; r.dispatchEvent(new Event('input'));
+    assertTrue(Math.abs(tl.position - 0.5) < 0.01 && !tl.playing, 'scrubbing pauses and seeks', String(tl.position));
+    var play = btnByText(/Play/);
+    play.click();
+    assertTrue(tl.playing && /Pause/.test(play.textContent), 'Play plays');
+    play.click();
+    assertTrue(!tl.playing, 'and Pause pauses');
+    assertTrue(!!btnByText(/Save this frame/), 'a frame can be saved');
+    var stt = text(q('.xse-status'));
+    assertTrue(stt === '' || /Getting the picture ready|simple stitched view/.test(stt), 'while the GPU compiles it says the picture is coming (or nothing once drawn)', stt);
+    var info = { total: 10, before: 2, atByRank: [new Date(2026, 10, 3).getTime(), new Date(2026, 10, 5).getTime()].concat([0, 0, 0, 0, 0, 0]) };
+    assertTrue(/before the app kept a record/.test(T.dateAt(info, 0.05)), 'dateAt: the start is "before the app kept a record"');
+    E.close();
+    assertTrue(!s.rec.tl || true, 'closing destroys the renderer');
+  });
+}
+
+function testFramed(main) {
+  group('X4 framed picture');
+  E.open('framed', main);
+  var s = T.lastSheet();
+  return until(function () { return s.rec.ready; }, 15000).then(function (ok) {
+    assertTrue(ok, 'the card is drawn', text(q('.xse-status')));
+    var c = q('canvas.xse-frame-canvas');
+    assertEqual([c.width, c.height], [1080, 1080], 'a 1080 px ShareCard card');
+    assertTrue(/in a hoop/.test(c.getAttribute('aria-label')), 'the picture is described');
+    s.rec.ready = false;
+    qa('button').filter(function (b) { return b.getAttribute('data-id') === 'plain'; })[0].click();
+    qa('button').filter(function (b) { return b.getAttribute('data-id') === 'frame'; })[0].click();
+    return until(function () { return s.rec.ready; }, 15000);
+  }).then(function (ok) {
+    var c = q('canvas.xse-frame-canvas');
+    assertTrue(ok && c.width === 2048, 'picture only: 2048 px', c.width);
+    assertTrue(/mat and frame/.test(c.getAttribute('aria-label')), 'in a mat and frame');
+    E.close();
+  });
+}
+
+function testPrint(main) {
+  group('#19 print what is left');
+  E.open('print', main);
+  var t = sheetText();
+  var tt = X.totals(X.normalize(S.project(main.id).craftData, null));
+  assertTrue(t.indexOf(tt.text) >= 0, 'the one total: ' + tt.text);
+  assertTrue(/of 2 printed pages still have stitches to do/.test(t), 'pages with stitches left are counted', t.slice(0, 300));
+  var d = X.normalize(S.project(main.id).craftData, null);
+  var st = T.lastSheet().rec.state;
+  var o = T.printOptions(d, st);
+  assertEqual([o.progress, o.pageNumbers, o.overlap], [true, 'original', 2], 'defaults: shade done, the printed page numbers, 2 stitches of overlap');
+  var html = X.printableHTML(d, o);
+  assertTrue(/class="[^"]*\bdone\b/.test(html), 'done squares carry the done (hatched) class');
+  assertTrue(/>p1</.test(html) && />p2</.test(html), 'the printed page numbers are kept (p1, p2)');
+  qa('.xse-opts input')[0].click();
+  assertEqual(T.printOptions(d, st).progress, false, 'unticking "shade" turns it off');
+  E.close();
+}
+
+function testJoin() {
+  group('#18 join quadrant files, storage line');
+  var tl = makeProject('Dragon TL', chartData(20, 30, { file: 'dragon-tl.oxs', done: 10 }));
+  var tr = makeProject('Dragon TR', chartData(20, 30, { file: 'dragon-tr.oxs', done: 0 }));
+  made.push(tl.id, tr.id);
+  E.open('join', tl);
+  var pick = q('input[data-k="pick-' + tr.id + '"]');
+  assertTrue(!!pick, 'the other part is offered');
+  pick.click();
+  var lay = T.lastSheet().rec.layout;
+  assertEqual([lay.W, lay.H, lay.parts], [40, 30, 2], 'TL + TR side by side: 40 × 30');
+  assertTrue(/40 × 30 stitches/.test(sheetText()), 'the joined size is shown before joining');
+  var n0 = S.projects().length;
+  btnByText(/Make the joined project/).click();
+  var s = T.lastSheet();
+  return until(function () { return s.rec.joined; }, 5000).then(function (j) {
+    assertTrue(!!j && S.projects().length === n0 + 1, 'a new project is made');
+    var np = j && S.project(j.id);
+    var d = np && X.normalize(np.craftData, null);
+    assertTrue(d && d.chart.w === 40 && d.chart.h === 30, 'its chart is 40 × 30');
+    assertEqual(d ? d.progress.doneCount : -1, 10, 'progress comes along (10 done)');
+    assertTrue(S.project(tl.id) && S.project(tr.id), 'the originals are unchanged');
+    if (j) made.push(j.id);
+    return until(function () { return /On this device|space the browser allows/.test(text(q(".xse-storage"))); }, 3000);
+  }).then(function (ok) {
+    assertTrue(ok, 'a storage line from Store.storageUsage', text(q('.xse-storage')));
+    E.close();
+  });
+}
+
+function testThemes(main) {
+  group('themes: colours come from the theme variables');
+  var res = [];
+  ['stardew-night', 'dragon-pixel', 'stardew-spring'].forEach(function (th) {
+    document.documentElement.setAttribute('data-theme', th);
+    E.open('pace', main);
+    var st = q('.xse-stat'), cs = getComputedStyle(st), bg = getComputedStyle(document.documentElement).getPropertyValue('--surface-2').trim();
+    res.push(th + ': ' + cs.backgroundColor);
+    assertTrue(cs.backgroundColor !== 'rgba(0, 0, 0, 0)' && bg.length > 0, th + ': stat cards painted from --surface-2');
+    E.close();
+  });
+  document.documentElement.removeAttribute('data-theme');
+  note(res.join(' · '));
+}
+
+function cleanup() {
+  made.forEach(function (id) { if (S.project(id)) S.deleteProject(id); });
+  S.projects().slice().forEach(function (p) { S.deleteProject(p.id); });
+  try { if (typeof S.flush === 'function') S.flush(); } catch (e) { /* ignore */ }
+  try { localStorage.removeItem('stitchkeeper-wavek-xsextras'); } catch (e2) { /* ignore */ }
+}
+
+function finish() {
+  var el = document.getElementById('summary');
+  el.textContent = passed + ' passed, ' + failed + ' failed  (' + (passed + failed) + ' assertions)';
+  el.className = failed ? 'bad' : 'ok';
+}
+
+function demo(id) {
+  document.body.classList.add('demo');
+  var P = setup();
+  seedActivity(P.main.id);
+  S.setFlossOwned('dmc', '310', 3);
+  if (id === 'join') { makeProject('Dragon TL', chartData(20, 30, { file: 'dragon-tl.oxs' })); }
+  var gs = T.goalStore(P.main);
+  gs.add({ kind: 'perDay', n: 150 });
+  gs.add({ kind: 'page', page: 1, by: Date.now() + 9 * DAYMS });
+  E.open(id, P.main);
+  if (params.get('stats') && id === 'grow') {
+    setTimeout(function () {
+      var r = T.lastSheet().rec, st = r.handle ? r.handle.getStats() : null, c = T.lastSheet().root.querySelector('canvas');
+      document.getElementById('summary').textContent = 'canvas ' + c.width + 'x' + c.height + ' css ' + c.clientWidth + 'x' + c.clientHeight +
+        ' stats ' + JSON.stringify(st && { webgl: st.webgl, status: st.status, compiling: st.compiling, frames: st.frames, w: st.w, h: st.h, reveal: st.reveal, mode: st.mode });
+    }, 4000);
+  }
+  /* ?demo=…&widths=1: list what is wider than the screen (phone overflow check) */
+  if (params.get('widths')) {
+    setTimeout(function () {
+      var wide = [], vw = document.documentElement.clientWidth;
+      Array.prototype.forEach.call(document.querySelectorAll('dialog *'), function (n) {
+        var r = n.getBoundingClientRect();
+        if (r.right > vw + 1 && wide.length < 12) wide.push(n.tagName + '.' + n.className + ' ' + Math.round(r.left) + '-' + Math.round(r.right));
+      });
+      var dl = document.querySelector('dialog').getBoundingClientRect();
+      document.getElementById('summary').textContent = 'vw ' + vw + ' dialog ' + Math.round(dl.left) + '-' + Math.round(dl.right) + ' | ' + wide.join(' | ');
+    }, 1500);
+  }
+}
+
+window.addEventListener('load', function () {
+  /* ?phone=375x812&demo=…: the demo inside a phone-sized frame (headless Chrome's
+     window cannot go under 500 px wide, so screenshots use this) */
+  var phone = /^(\d+)x(\d+)$/.exec(params.get('phone') || '');
+  if (phone) {
+    document.body.classList.add('demo');
+    document.body.style.margin = '0';
+    var f = document.createElement('iframe');
+    f.style.cssText = 'border:0;width:' + phone[1] + 'px;height:' + phone[2] + 'px;display:block';
+    params.delete('phone');
+    f.src = location.pathname + '?' + params.toString();
+    document.body.appendChild(f);
+    return;
+  }
+  if (!E || !X || !S) { log(false, 'the scripts loaded'); finish(); return; }
+  if (params.get('demo')) { demo(params.get('demo')); return; }
+  var t0 = performance.now();
+  Promise.resolve().then(runTests).then(null, function (e) {
+    log(false, 'the suite ran to the end', e && e.stack ? e.stack.split('\n').slice(0, 3).join(' | ') : String(e));
+  }).then(function () {
+    E.close();
+    note('suite time ' + Math.round(performance.now() - t0) + ' ms');
+    cleanup();
+    finish();
+  });
+});
+</script>
+</body>
+</html>

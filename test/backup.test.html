@@ -238,11 +238,11 @@ group('2. Keys this reader does not understand are kept (12 #2)');
     palette: ['#ff0000', '#00ff00'],
     unknownFutureKey: { deep: { kept: true } }
   }, 'and its craftData byte for byte, unknown keys included');
-  // Known gap, 12 #5: importJSON has never applied the file's `settings`
-  // block (theme, haptics, toursSeen, per-craft bags). Pinned here so the day
-  // it changes is a deliberate one.
-  assertEqual(Store.craftSettings('beadwork'), {},
-    'import still ignores the file\'s settings, per-craft bags included (12 #5, not wave 1)');
+  // Wave K (shell-data): the gap pinned here since wave 1 (12 #5) is closed on
+  // purpose: importJSON now merges the file's `settings` block, unknown keys
+  // in a craft's bag included (docs/wave-k/api/shell-data.md §3).
+  assertEqual(Store.craftSettings('beadwork'), { loomWidth: 24, futureSetting: 'kept' },
+    'wave K: import restores the file\'s per-craft settings bag, unknown keys included');
 
   var round = JSON.parse(Store.exportJSON());
   assertEqual(round.futureTopLevelKey, { written: 'by a later version', n: 7 },
@@ -871,6 +871,114 @@ step(function () {
     assertEqual(res.written, 2, 'with its pages');
     return Store.exportThready({ projectId: 'nope' }).then(function () { log(false, 'an unknown project is refused'); },
       function (err) { assertEqual(err.code, 'noProject', 'exporting a project that is not here is refused'); });
+  });
+});
+
+/* ---- wave K: settings come back from a backup, with preview and undo ---- */
+
+step(function () {
+  group('wave K 1. Settings restored from a backup: preview, merge, replace, skip, undo');
+  fresh();
+  Store.setSetting('theme', 'pixel-wyrm');
+  Store.setCraftSetting('knitting', 'unit', 'cm');
+  Store.setMeasurement('bust', 90, 'cm');
+  Store.setFlossOwned('dmc', '310', 1);
+  Store.getState().settings.toursSeen = ['home'];
+  var file = JSON.parse(Store.exportJSON());
+  file.settings.theme = 'stardew-night';
+  file.settings.haptics = false;
+  file.settings.focusProjects = ['whatever'];
+  file.settings.persistGranted = true;
+  file.settings.toursSeen = ['counter'];
+  file.settings.crafts = { knitting: { unit: 'in', needleSystem: 'us' }, sewing: { shopping: { thread: false } } };
+  file.settings.profile = {
+    units: { length: 'in' },
+    measurements: { bust: { value: 38, unit: 'in', at: Date.now() + 1000 }, waist: { value: 30, unit: 'in', at: 1 } },
+    floss: { dmc: { '310': { owned: 4, at: Date.now() + 1000 }, '666': { owned: 2, at: 1 } } },
+    fabric: [{ id: 'fab1', kind: 'aida', count: 14, unit: 'in', qty: 1, at: 1 }]
+  };
+  var text = JSON.stringify(file);
+  var before = JSON.stringify(Store.getState().settings);
+  var pv = Store.previewImport(text);
+  assertEqual(pv.settings.present, true, 'previewImport reports the file\'s settings block');
+  var keys = pv.settings.changes.map(function (c) { return c.key; }).sort();
+  assertEqual(keys, ['crafts.knitting', 'crafts.sewing', 'haptics', 'profile', 'theme', 'toursSeen'],
+    'and lists what restoring it would change (focusProjects and persistGranted are this device\'s)');
+  assertEqual(JSON.stringify(Store.getState().settings), before, 'the preview writes nothing');
+  Store.importJSON(text);
+  var s = Store.settings();
+  assertEqual([s.theme, s.haptics], ['stardew-night', false], 'merge (the default) restores the theme and switches');
+  assertEqual(Store.craftSettings('knitting'), { unit: 'in', needleSystem: 'us' }, 'and each craft\'s bag');
+  assertEqual(Store.craftSettings('sewing'), { shopping: { thread: false } }, 'including a craft this phone had no bag for');
+  assertEqual([Store.measurement('bust'), Store.measurement('waist'), Store.flossOwned('dmc', '310'), Store.flossOwned('dmc', '666'), Store.fabricStash().length],
+    [38, 30, 4, 2, 1], 'the profile merges by key (the newer measurement and floss row win; new rows and fabric added)');
+  assertEqual(s.toursSeen.slice().sort(), ['counter', 'home'], 'tours seen on either side stay seen');
+  assertEqual(s.focusProjects, [], 'focusProjects is never taken from a file');
+  assertEqual(Store.canUndoImport(), true, 'Undo import is offered');
+  Store.undoImport();
+  assertEqual([Store.settings().theme, Store.measurement('bust'), Store.craftSettings('knitting').unit], ['pixel-wyrm', 90, 'cm'],
+    'and Undo import puts the settings back as they were');
+  Store.importJSON(text, { settings: 'skip' });
+  assertEqual(Store.settings().theme, 'pixel-wyrm', '\'skip\' leaves the settings alone (the old behaviour)');
+  Store.undoImport();
+  Store.setMeasurement('hip', 100, 'cm');
+  Store.importJSON(text, { settings: 'replace' });
+  assertEqual([Store.measurement('hip'), Store.measurement('bust')], [null, 38], '\'replace\' takes the profile whole from the file');
+  assertEqual(Store.previewImport(JSON.stringify({ version: 1, projects: [], templates: [] })).settings.present, false,
+    'a one-project file has no settings to restore');
+  return null;
+});
+
+/* ---- wave K: heavy craft data in .thready files ---------------------- */
+
+step(function () {
+  group('wave K 2. Heavy craft data travels inline in .thready and one-project files');
+  if (!B.available()) { log(true, 'IndexedDB unavailable here: skipped'); return null; }
+  fresh();
+  Store.registerCraft({
+    id: 'zwkheavy',
+    normalize: function (raw) { var d = raw || {}; return { cells: typeof d.cells === 'string' ? d.cells : 'EMPTY', n: d.n || 0 }; },
+    heavy: { fields: ['cells'], minBytes: 1000 }
+  });
+  var cells = new Array(40001).join('q');
+  var p = Store.createProject({ name: 'ZWK heavy', craft: 'zwkheavy', craftData: { cells: cells, n: 3 } });
+  var pid = p.id;
+  var read;
+  Store.flush();
+  return Store.heavyIdle().then(function () {
+    Store.flush();
+    assertEqual(Store.heavyInfo(pid).fields[0].where, 'idb', 'the cells are in IndexedDB before the backup');
+    Store.__setKeyForTests(K);   // reload: the project is not loaded yet
+    assertEqual(Store.heavyState(pid), 'unloaded', 'and not loaded after a reload');
+    return Store.exportThready({ appVersion: 'test' });
+  }).then(function (res) {
+    return Store.readBackupFile(res.blob);
+  }).then(function (r) {
+    read = r;
+    var bp = JSON.parse(r.text).projects.filter(function (x) { return x.id === pid; })[0];
+    assertEqual(bp.craftData.cells.length, 40000, 'exportThready loads it first and writes the cells inline in backup.json');
+    assertTrue(!bp.heavy, 'with no side table, so the file is whole on its own (and readable by older builds)');
+    assertEqual(r.pages.filter(function (pg) { return pg.key.indexOf(':heavy:') >= 0; }).length, 0, 'the heavy blobs are not duplicated in pages/');
+    fresh();
+    return B.deletePrefix('p:' + pid + ':');
+  }).then(function () {
+    assertEqual(Store.importJSON(read.text), 1, 'onto an empty phone it imports');
+    assertEqual(Store.project(pid).craftData.cells.length, 40000, 'whole, at once (no blob needed)');
+    Store.flush();
+    return Store.heavyIdle();
+  }).then(function () {
+    Store.flush();
+    assertEqual(Store.heavyInfo(pid).fields[0].where, 'idb', 'and the next save moves the cells off localStorage again');
+    var keep = Store.importJSON(read.text, { projects: (function () { var o = {}; o[pid] = 'keepBoth'; return o; })() });
+    var clone = Store.projects().filter(function (x) { return x.id !== pid; })[0];
+    assertEqual(clone.craftData.cells.length, 40000, 'a Keep-both copy gets its own whole cells');
+    return Store.exportThready({ projectId: pid });
+  }).then(function (res) {
+    return Store.readBackupFile(res.blob);
+  }).then(function (r) {
+    assertEqual(JSON.parse(r.text).projects[0].craftData.cells.length, 40000, 'a one-project file is whole too');
+    var ids = Store.projects().map(function (x) { return x.id; });
+    return Promise.all(ids.map(function (id) { return B.deletePrefix('p:' + id + ':'); }));
   });
 });
 

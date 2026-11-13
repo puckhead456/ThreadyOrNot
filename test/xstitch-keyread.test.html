@@ -1,0 +1,703 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>XSKeyRead tests</title>
+<style>
+  body { font: 14px/1.4 Menlo, Consolas, monospace; background:#111; color:#eee; padding:16px; }
+  .pass { color:#7bd389; }
+  .fail { color:#ff6b6b; background:#2a1414; }
+  .note { color:#c9a227; }
+  .skip { color:#888; }
+  .group { margin-top:18px; font-weight:bold; color:#9cf; border-bottom:1px solid #333; padding-bottom:4px; }
+  #summary { margin-top:20px; font-size:18px; font-weight:bold; }
+  #summary.ok { color:#7bd389; }
+  #summary.bad { color:#ff6b6b; }
+  #summary.run { color:#9cf; }
+  table.t { border-collapse:collapse; margin:6px 0 10px; font-size:12px; }
+  table.t th, table.t td { border:1px solid #333; padding:2px 6px; text-align:right; vertical-align:middle; }
+  table.t th { color:#9cf; background:#1a1a1a; }
+  table.t td.l, table.t th.l { text-align:left; }
+  td.ex { color:#7bd389; } td.pa { color:#c9a227; } td.bl { color:#888; } td.wr { color:#ff6b6b; font-weight:bold; }
+  canvas.sym { width:24px; height:24px; image-rendering:pixelated; background:#fff; vertical-align:middle; }
+  i.sw { display:inline-block; width:14px; height:14px; border:1px solid #0008; vertical-align:middle; }
+  #ex canvas { background:#fff; display:block; max-width:100%; }
+  .panel { border:1px solid #333; border-radius:8px; padding:12px; margin:12px 0 22px; background:#161616; }
+  .panel h2 { margin:0 0 8px; font-size:15px; color:#9cf; }
+  .panel button { font:inherit; background:#2a2a2a; color:#eee; border:1px solid #444; border-radius:6px; padding:5px 9px; cursor:pointer; }
+</style>
+</head>
+<body>
+<h1>XSKeyRead test suite</h1>
+<p class="note">Synthetic keys are drawn in code (several faces, sizes, JPEG artefacts) and are the committed tests. The
+accuracy ledger reads the image-only key fixtures in <code>../tmp-pdf</code> at runtime (gitignored, copyrighted, never
+committed) against <code>tmp-pdf/&lt;fixture&gt;.key.truth.json</code> and skips what is absent. <code>?quick=1</code>
+skips the fixtures; <code>?only=synthetic|fixtures</code>.</p>
+
+<div class="panel">
+  <h2>Visual QA: read a key picture</h2>
+  <div>Drop a key picture: <input type="file" id="q-file" accept="image/*"> <button id="q-pot">Owner's potatoes key</button></div>
+  <div id="vstats" style="margin-top:8px;white-space:pre-wrap"></div>
+  <div id="vtable"></div>
+  <div id="ex"></div>
+</div>
+
+<div id="out"></div>
+<div id="summary" class="run">running…</div>
+
+<script>
+document.write('<scr' + 'ipt src="../js/xstitch.js?v=' + Date.now() + '"><\/scr' + 'ipt>');
+document.write('<scr' + 'ipt src="../js/xstitch-keyread.js?v=' + Date.now() + '"><\/scr' + 'ipt>');
+</script>
+<script src="../js/vendor/pdf.min.js"></script>
+<script src="../js/pdftext.js"></script>
+<script>
+'use strict';
+(function () {
+  if (!window.pdfjsLib || !window.pdfjsLib.GlobalWorkerOptions) return;
+  var src = '../js/vendor/pdf.worker.min.js';
+  try {
+    Object.defineProperty(window.pdfjsLib.GlobalWorkerOptions, 'workerSrc', {
+      get: function () { return src; }, set: function () { /* ignore */ }, configurable: true
+    });
+  } catch (e) { window.pdfjsLib.GlobalWorkerOptions.workerSrc = src; }
+})();
+
+/* ---------------------------------------------------------------- *
+ * harness
+ * ---------------------------------------------------------------- */
+var out = document.getElementById('out');
+var passed = 0, failed = 0, skipped = 0;
+var QS = location.search;
+var QUICK = /[?&]quick=1/.test(QS);
+var ONLY = (/[?&]only=(\w+)/.exec(QS) || [])[1] || '';
+
+function el(tag, cls, text) { var e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
+function log(ok, label, detail) {
+  if (ok) passed++; else failed++;
+  var line = (ok ? 'PASS' : 'FAIL') + ' - ' + label + (detail ? '  (' + detail + ')' : '');
+  out.appendChild(el('div', ok ? 'pass' : 'fail', line));
+  if (ok) console.log(line); else console.error(line);
+}
+function eq(a, b, label) {
+  var ok = JSON.stringify(a) === JSON.stringify(b);
+  log(ok, label, ok ? '' : 'got ' + JSON.stringify(a) + ', want ' + JSON.stringify(b));
+}
+function note(text) { out.appendChild(el('div', 'note', '·   ' + text)); console.log('·   ' + text); }
+function skip(text) { skipped++; out.appendChild(el('div', 'skip', 'SKIP - ' + text)); }
+function group(title) { out.appendChild(el('div', 'group', title)); console.log('== ' + title + ' =='); }
+function table(rows, head, target) {
+  var t = el('table', 't'), tr = el('tr');
+  head.forEach(function (h, i) { tr.appendChild(el('th', i === 0 ? 'l' : '', h)); });
+  t.appendChild(tr);
+  rows.forEach(function (r) {
+    var row = el('tr');
+    r.forEach(function (c, i) {
+      var td = el('td', i === 0 ? 'l' : '');
+      if (c && c.node) { td.appendChild(c.node); if (c.cls) td.className += ' ' + c.cls; }
+      else if (c && typeof c === 'object' && 'text' in c) { td.textContent = c.text; if (c.cls) td.className += ' ' + c.cls; }
+      else td.textContent = c == null ? '' : String(c);
+      row.appendChild(td);
+    });
+    t.appendChild(row);
+  });
+  (target || out).appendChild(t);
+}
+function fetchBlob(path) { return fetch(path, { cache: 'no-store' }).then(function (r) { return r.ok ? r.blob() : null; }).catch(function () { return null; }); }
+function fetchJson(path) { return fetch(path, { cache: 'no-store' }).then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }); }
+function shimRaf() {
+  /* pdf.js page drawing waits on requestAnimationFrame, which never fires while the pane is hidden: this tab only */
+  if (window.__rafShim) return;
+  window.__rafShim = true;
+  window.requestAnimationFrame = function (f) { return setTimeout(function () { f(performance.now()); }, 16); };
+}
+function canon(c) { return String(c == null ? '' : c).trim().toLowerCase().replace(/^dmc\s*/, '').replace(/^0+(?=\d)/, ''); }
+function symCanvas(g) {
+  var cv = el('canvas', 'sym');
+  cv.width = 16; cv.height = 16;
+  if (!g || !g.bits) return cv;
+  var ctx = cv.getContext('2d'), id = ctx.createImageData(16, 16), bin = atob(g.bits);
+  for (var i = 0; i < 256; i++) {
+    var on = (bin.charCodeAt(i >> 3) >> (7 - (i & 7))) & 1;
+    var v = on ? 0 : 255;
+    id.data[i * 4] = on ? 0 : 255; id.data[i * 4 + 1] = on ? 0 : 255; id.data[i * 4 + 2] = on ? 0 : (g.clean ? 255 : 200); id.data[i * 4 + 3] = 255;
+    void v;
+  }
+  ctx.putImageData(id, 0, 0);
+  return cv;
+}
+function swatchNode(hex) { var i = el('i', 'sw'); if (hex) i.style.background = '#' + hex; return i; }
+
+/** score a read against truth codes: { exact, partial, blank, wrong, rows } and per-row lines */
+function scoreRead(r, truth) {
+  var s = { exact: 0, partial: 0, blank: 0, wrong: 0, rows: truth.length, lines: [], extra: 0 };
+  /* align read rows to truth rows in order (a missed or an extra row must not shift the rest):
+     a pair costs 1 when an exact read disagrees, 0 otherwise; a gap costs 0.6 */
+  var E = r.entries, T = truth, nE = E.length, nT = T.length, D = [], i, j;
+  for (i = 0; i <= nE; i++) { D.push([]); for (j = 0; j <= nT; j++) D[i].push(0); }
+  for (i = 0; i <= nE; i++) for (j = 0; j <= nT; j++) {
+    if (!i && !j) continue;
+    var best = 1e9;
+    if (i && j) best = D[i - 1][j - 1] + (E[i - 1].read.status === 'exact' && canon(E[i - 1].code) !== canon(T[j - 1].code) ? 1 : 0);
+    if (i) best = Math.min(best, D[i - 1][j] + 0.6);
+    if (j) best = Math.min(best, D[i][j - 1] + 0.6);
+    D[i][j] = best;
+  }
+  var pairs = [];
+  i = nE; j = nT;
+  while (i || j) {
+    if (i && j && D[i][j] === D[i - 1][j - 1] + (E[i - 1].read.status === 'exact' && canon(E[i - 1].code) !== canon(T[j - 1].code) ? 1 : 0)) { pairs.unshift([E[i - 1], T[j - 1]]); i--; j--; }
+    else if (i && D[i][j] === D[i - 1][j] + 0.6) { pairs.unshift([E[i - 1], null]); i--; }
+    else { pairs.unshift([null, T[j - 1]]); j--; }
+  }
+  for (var pi = 0; pi < pairs.length; pi++) {
+    var e = pairs[pi][0], t = pairs[pi][1]; i = pi;
+    if (!e) { s.blank++; s.lines.push([i + 1, t ? t.code : '', '', { text: 'missing', cls: 'bl' }, '', '', '']); continue; }
+    if (!t) { s.extra++; if (e.code) s.wrong++; s.lines.push([i + 1, '-', e.code || e.read.text, { text: e.code ? 'WRONG (extra row)' : 'extra row', cls: e.code ? 'wr' : 'bl' }, '', '', '']); continue; }
+    var st = e.read.status, cls, label;
+    if (st === 'exact') {
+      if (canon(e.code) === canon(t.code) && (!t.brand || t.brand === 'DMC')) { s.exact++; cls = 'ex'; label = 'exact'; }
+      else { s.wrong++; cls = 'wr'; label = 'WRONG'; }
+    } else if (st === 'partial') {
+      var bad = e.read.candidates.length && e.read.candidates.map(canon).indexOf(canon(t.code)) < 0;
+      s.partial++; cls = 'pa'; label = 'partial' + (bad ? ' (truth not among candidates)' : '');
+    } else { s.blank++; cls = 'bl'; label = 'blank'; }
+    var cnt = e.read.countRead;
+    var cntOk = t.stitches == null || cnt == null ? '' : (cnt === t.stitches ? 'ok' : 'count ' + cnt + ' vs ' + t.stitches);
+    s.lines.push([i + 1, t.code, (e.code || e.read.text || '') + (e.read.candidates.length > 1 ? ' {' + e.read.candidates.join(',') + '}' : ''), { text: label, cls: cls },
+      { node: swatchNode(e.read.swatchHex) }, { node: symCanvas(e.glyph), cls: '' }, e.read.evidence.join(', ') + (e.read.why ? ' / ' + e.read.why : '') + (cntOk ? ' / ' + cntOk : '') + (e.read.nameMatched ? ' / name' : '')]);
+  }
+  return s;
+}
+
+/* ---------------------------------------------------------------- *
+ * 1. synthetic keys
+ * ---------------------------------------------------------------- */
+function rng(seed) { var s = seed >>> 0; return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; }; }
+
+function pickCodes(n, seed, opts) {
+  opts = opts || {};
+  var r = rng(seed), all = XStitch.FLOSS.dmc.filter(function (e) { return /^\d+$/.test(e.code) && !e.since; });
+  var got = {}, list = [];
+  while (list.length < n) {
+    var e = all[Math.floor(r() * all.length)];
+    if (got[e.code]) continue;
+    got[e.code] = 1; list.push(e);
+  }
+  if (opts.sorted !== false) list.sort(function (a, b) { return +a.code - +b.code; });
+  return list.map(function (e) { return { code: e.code, name: e.name, hex: e.hex, stitches: 30 + Math.floor(r() * 2900) }; });
+}
+
+var SYMS = ['tri', 'dot', 'sq', 'vtri', 'heart', 'plus', 'x', 'star', 'diamond', 'ring'];
+function drawSym(ctx, kind, cx, cy, s, colour) {
+  ctx.save();
+  ctx.strokeStyle = colour; ctx.fillStyle = colour; ctx.lineWidth = Math.max(1, s * 0.09);
+  var h = s / 2;
+  ctx.beginPath();
+  switch (kind) {
+    case 'tri': ctx.moveTo(cx - h, cy + h); ctx.lineTo(cx - h, cy - h); ctx.lineTo(cx + h, cy + h); ctx.closePath(); ctx.stroke(); break;
+    case 'dot': ctx.arc(cx, cy, s * 0.14, 0, 7); ctx.stroke(); break;
+    case 'sq': ctx.fillRect(cx - s * 0.22, cy - s * 0.22, s * 0.44, s * 0.44); break;
+    case 'vtri': ctx.moveTo(cx - h, cy - h); ctx.lineTo(cx + h, cy - h); ctx.lineTo(cx, cy + h); ctx.closePath(); ctx.stroke(); break;
+    case 'heart': ctx.arc(cx - s * 0.2, cy - s * 0.1, s * 0.2, Math.PI, 0); ctx.arc(cx + s * 0.2, cy - s * 0.1, s * 0.2, Math.PI, 0); ctx.lineTo(cx, cy + h * 0.8); ctx.closePath(); ctx.stroke(); break;
+    case 'plus': ctx.fillRect(cx - s * 0.1, cy - h * 0.8, s * 0.2, s * 0.8); ctx.fillRect(cx - h * 0.8, cy - s * 0.1, s * 0.8, s * 0.2); break;
+    case 'x': ctx.moveTo(cx - h * 0.7, cy - h * 0.7); ctx.lineTo(cx + h * 0.7, cy + h * 0.7); ctx.moveTo(cx + h * 0.7, cy - h * 0.7); ctx.lineTo(cx - h * 0.7, cy + h * 0.7); ctx.stroke(); break;
+    case 'star': for (var i = 0; i < 10; i++) { var a = -Math.PI / 2 + i * Math.PI / 5, rr = i % 2 ? h * 0.4 : h * 0.9; if (i) ctx.lineTo(cx + rr * Math.cos(a), cy + rr * Math.sin(a)); else ctx.moveTo(cx + rr * Math.cos(a), cy + rr * Math.sin(a)); } ctx.closePath(); ctx.fill(); break;
+    case 'diamond': ctx.moveTo(cx, cy - h * 0.8); ctx.lineTo(cx + h * 0.6, cy); ctx.lineTo(cx, cy + h * 0.8); ctx.lineTo(cx - h * 0.6, cy); ctx.closePath(); ctx.fill(); break;
+    default: ctx.arc(cx, cy, h * 0.6, 0, 7); ctx.stroke();
+  }
+  ctx.restore();
+}
+
+/**
+ * A key drawn on a canvas. o: { rows, font, dh (digit height px), layout: 'floss'|'compact'|'bw', index, symbols,
+ * swatchSymbols, brandWord, counts, names }
+ */
+function synthKey(o) {
+  var dh = o.dh, px = Math.round(dh / 0.72), rowH = Math.round(dh * (o.rowGap || 2.3)), sw = Math.round(dh * 1.7);
+  var cv = document.createElement('canvas');
+  var W = Math.round(px * (32 + Math.max(0, (o.countAt || 15) - 15))), H = Math.round(rowH * (o.rows.length + 3));
+  cv.width = W; cv.height = H;
+  var ctx = cv.getContext('2d');
+  ctx.fillStyle = o.paper || '#fff'; ctx.fillRect(0, 0, W, H);
+  var fam = /^(serif|sans-serif|monospace)$/.test(o.font) ? o.font : '"' + o.font + '"';
+  ctx.font = px + 'px ' + fam;
+  ctx.fillStyle = '#222'; ctx.textBaseline = 'middle';
+  /* a header line */
+  ctx.fillText('Floss list', px, rowH * 0.8);
+  var x = px;
+  var X = { n: x, sym: x + px * 2, sw: x + px * 4, brand: x + px * 4 + sw + px * 0.8 };
+  X.code = X.brand + (o.brandWord !== false ? px * (typeof o.brandWord === 'string' ? 0.6 * o.brandWord.length + 1 : 2.8) : 0);
+  X.name = X.code + px * 3.6;
+  X.count = X.name + px * (o.countAt || 15);
+  if (o.header) { ctx.fillStyle = '#222'; ctx.fillText(o.header, X.code, rowH * 0.8); }
+  o.rows.forEach(function (r, i) {
+    var y = rowH * (i + 2);
+    ctx.fillStyle = '#222';
+    if (o.index) ctx.fillText(String(i + 1), X.n, y);
+    if (o.symbols) drawSym(ctx, SYMS[i % SYMS.length], X.sym + dh * 0.6, y, dh * 1.1, '#111');
+    if (o.layout !== 'bw') {
+      ctx.fillStyle = '#' + r.hex;
+      ctx.fillRect(X.sw, Math.round(y - sw / 2), sw, sw);
+      if (o.swatchOutline || /^f[c-f]f/.test(r.hex)) { ctx.strokeStyle = '#555'; ctx.lineWidth = 1; ctx.strokeRect(X.sw + 0.5, Math.round(y - sw / 2) + 0.5, sw - 1, sw - 1); }
+      if (o.swatchSymbols) {
+        var lum = parseInt(r.hex.slice(0, 2), 16) * 0.3 + parseInt(r.hex.slice(2, 4), 16) * 0.59 + parseInt(r.hex.slice(4, 6), 16) * 0.11;
+        drawSym(ctx, SYMS[i % SYMS.length], X.sw + sw / 2, y, sw * 0.6, lum < 110 ? '#fff' : '#111');
+      }
+    }
+    ctx.fillStyle = '#222';
+    if (o.brandWord !== false) ctx.fillText(typeof o.brandWord === 'string' ? o.brandWord : 'DMC', X.brand, y);
+    ctx.fillText(r.code, X.code, y);
+    if (o.names !== false) ctx.fillText(r.name, X.name, y);
+    if (o.counts) ctx.fillText(String(r.stitches), X.count, y);
+  });
+  return cv;
+}
+
+function jpeg(cv, q) {
+  /* a JPEG round trip through a data URL and an <img> (toBlob is unreliable headless) */
+  return new Promise(function (res) {
+    var img = new Image();
+    img.onload = function () {
+      var c2 = document.createElement('canvas');
+      c2.width = img.naturalWidth; c2.height = img.naturalHeight;
+      c2.getContext('2d').drawImage(img, 0, 0);
+      res(c2);
+    };
+    img.onerror = function () { note('JPEG round trip failed; reading the clean picture'); res(cv); };
+    img.src = cv.toDataURL('image/jpeg', q);
+  });
+}
+function scaled(cv, f) {
+  var c2 = document.createElement('canvas');
+  c2.width = Math.round(cv.width * f); c2.height = Math.round(cv.height * f);
+  var ctx = c2.getContext('2d'); ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(cv, 0, 0, c2.width, c2.height);
+  return c2;
+}
+
+var synthRows = [], synthTot = { exact: 0, partial: 0, blank: 0, wrong: 0, rows: 0 };
+
+function synthCase(label, o, expectExactShare, extra) {
+  extra = extra || {};
+  var cv = synthKey(o);
+  var p = Promise.resolve(cv);
+  if (extra.scale) p = p.then(function (c) { return scaled(c, extra.scale); });
+  if (extra.jpeg) p = p.then(function (c) { return jpeg(c, extra.jpeg); });
+  return p.then(function (c) {
+    var t0 = performance.now();
+    var ro = { noWorker: !!extra.noWorker };
+    if (extra.chart) ro.chart = { classes: o.rows.map(function (r) { return { hex: r.hex, count: r.stitches }; }) };
+    return XSKeyRead.read(c, ro).then(function (r) {
+      var ms = Math.round(performance.now() - t0);
+      var s = scoreRead(r, o.rows);
+      ['exact', 'partial', 'blank', 'wrong', 'rows'].forEach(function (k) { synthTot[k] += s[k]; });
+      var share = s.rows ? s.exact / s.rows : 0;
+      synthRows.push([label, s.rows, s.exact, s.partial, s.blank, { text: String(s.wrong), cls: s.wrong ? 'wr' : '' }, Math.round(share * 100) + ' %', r.verdict, ms]);
+      log(s.wrong === 0, label + ': no wrong code', s.wrong ? s.lines.filter(function (l) { return l[3].cls === 'wr'; }).map(function (l) { return l[1] + '->' + l[2]; }).join(' ') : '');
+      if (expectExactShare > 0) log(share >= expectExactShare, label + ': at least ' + Math.round(expectExactShare * 100) + ' % of rows exact', s.exact + ' / ' + s.rows);
+      if (s.wrong || (expectExactShare > 0 && share < expectExactShare) || /[?&]verbose=1/.test(QS)) {
+        note('truth: ' + o.rows.map(function (x) { return x.code; }).join(' '));
+        note('read:  ' + r.entries.map(function (e) { return (e.code || e.read.text || '_') + '[' + e.read.status.charAt(0) + (e.read.why ? ':' + e.read.why : '') + ']'; }).join(' '));
+        if (r.stats && r.stats.solve) note('solve: ' + JSON.stringify({ nodes: r.stats.solve.nodes, over: r.stats.solve.over, leaves: r.stats.solve.leaves, best: r.stats.solve.best }) + ' dbg ' + r.stats.solve.dbg + ' H ' + r.stats.H + ' cols ' + r.columns.map(function (c) { return c.kind; }).join(','));
+      }
+      if (extra.after) extra.after(r, o, s);
+      return r;
+    });
+  });
+}
+
+function syntheticTests() {
+  group('Synthetic keys: faces, sizes, JPEG');
+  if (!window.XSKeyRead) { log(false, 'XSKeyRead loaded'); return Promise.resolve(); }
+  log(XSKeyRead.isAvailable(), 'XSKeyRead.isAvailable()');
+  var tp = XSKeyRead._templates();
+  note('template faces this browser has: ' + tp.fontNames.join(', '));
+  var cases = [
+    ['Arial 18 px, floss list, counts', { rows: pickCodes(8, 1), font: 'Arial', dh: 18, index: true, symbols: true, counts: true }, 0.85],
+    ['Arial 12 px, swatch symbols', { rows: pickCodes(10, 2), font: 'Arial', dh: 12, index: true, swatchSymbols: true, counts: true }, 0.7],
+    ['Times New Roman 16 px', { rows: pickCodes(9, 3), font: 'Times New Roman', dh: 16, index: true, symbols: true, counts: true }, 0.7],
+    ['Verdana 14 px, no brand word', { rows: pickCodes(12, 4), font: 'Verdana', dh: 14, brandWord: false, symbols: true }, 0.7],
+    ['Georgia 20 px (old-style figures)', { rows: pickCodes(8, 5), font: 'Georgia', dh: 20, index: true, symbols: true, counts: true }, 0],
+    ['Courier New 15 px', { rows: pickCodes(8, 6), font: 'Courier New', dh: 15, index: true, counts: true }, 0.6],
+    ['Trebuchet MS 24 px, 14 rows', { rows: pickCodes(14, 7), font: 'Trebuchet MS', dh: 24, symbols: true, counts: true }, 0.8],
+    ['sans-serif 10 px, tiny', { rows: pickCodes(8, 8), font: 'sans-serif', dh: 10, index: true, counts: true }, 0],
+    ['Arial 3 rows only', { rows: pickCodes(3, 9), font: 'Arial', dh: 16, symbols: true }, 0],
+    ['Segoe UI 16 px, unsorted', { rows: pickCodes(10, 10, { sorted: false }), font: 'Segoe UI', dh: 16, index: true, counts: true }, 0.6]
+  ];
+  var chain = Promise.resolve();
+  cases.forEach(function (c) { chain = chain.then(function () { return synthCase(c[0], c[1], c[2]); }); });
+  chain = chain.then(function () {
+    return synthCase('Arial 16 px, JPEG q 0.55', { rows: pickCodes(10, 11), font: 'Arial', dh: 16, index: true, symbols: true, counts: true }, 0.6, { jpeg: 0.55 });
+  }).then(function () {
+    return synthCase('Arial 22 px drawn down to 0.6x, JPEG q 0.7', { rows: pickCodes(10, 12), font: 'Arial', dh: 22, index: true, symbols: true, counts: true }, 0.5, { scale: 0.6, jpeg: 0.7 });
+  }).then(function () {
+    return synthCase('Verdana 14 px with the chart\'s counts', { rows: pickCodes(10, 13), font: 'Verdana', dh: 14, index: true, symbols: true, counts: true }, 0.9, { chart: true });
+  }).then(function () {
+    return synthCase('Arial 16 px, black and white list (no swatches)', { rows: pickCodes(10, 14), font: 'Arial', dh: 16, layout: 'bw', index: true, symbols: true, counts: true }, 0, {});
+  }).then(function () {
+    return synthCase('Arial 18 px, main thread (no worker)', { rows: pickCodes(8, 15), font: 'Arial', dh: 18, index: true, symbols: true, counts: true }, 0.85, {
+      noWorker: true,
+      after: function (r) { log(r.stats.worker === false, 'noWorker runs on the main thread'); }
+    });
+  }).then(function () {
+    return synthCase('Arial 18 px: entry shape, names and symbols', { rows: pickCodes(8, 16), font: 'Arial', dh: 18, index: true, symbols: true, counts: true }, 0.85, {
+      after: function (r, o) {
+        var e = r.entries.filter(function (x) { return x.code; })[0];
+        log(!!e && e.brand === 'DMC' && e.kind === 'cross' && /^[0-9a-f]{6}$/.test(e.hex) && typeof e.read.confidence === 'number' && Array.isArray(e.read.evidence),
+          'an exact entry has the parseKey shape plus read evidence');
+        var named = r.entries.filter(function (x) { return x.code && x.name; });
+        log(named.length >= Math.floor(o.rows.length / 2), 'names matched to the table on at least half the rows', named.length + ' / ' + o.rows.length);
+        log(named.every(function (x) { var t = o.rows.filter(function (y) { return y.code === x.code; })[0]; return t && t.name === x.name; }), 'every matched name is the table name for that code');
+        var syms = r.entries.filter(function (x) { return x.glyph && x.glyph.clean; });
+        log(syms.length >= o.rows.length - 1, 'the printed symbols are captured cleanly', syms.length + ' / ' + o.rows.length);
+        var counts = r.entries.filter(function (x, i) { return x.read.countRead === o.rows[i].stitches; });
+        log(counts.length >= o.rows.length - 1, 'the count column is read', counts.length + ' / ' + o.rows.length);
+        log(r.rows.length === r.entries.length && r.rows.every(function (x) { return x.box && x.cells.length >= 3; }), 'every row has a box and cells');
+      }
+    });
+  });
+  /* stitch counts: far from the names, read; none printed, said so */
+  chain = chain.then(function () {
+    return synthCase('Arial 16 px, count column far right', { rows: pickCodes(8, 41), font: 'Arial', dh: 16, index: true, symbols: true, counts: true, countAt: 26 }, 0.85, {
+      after: function (r, o) {
+        var ok = r.entries.filter(function (e, i) { return e.read.countStatus === 'read' && e.read.countRead === o.rows[i].stitches; }).length;
+        log(ok === o.rows.length, 'a count column far past the names is read on every row', ok + ' / ' + o.rows.length);
+        log(r.entries.every(function (e) { return e.stitchCount === e.read.countRead; }), 'entry.stitchCount is the count read');
+      }
+    });
+  }).then(function () {
+    return synthCase('Arial 16 px, no count column', { rows: pickCodes(8, 42), font: 'Arial', dh: 16, index: true, symbols: true }, 0.7, {
+      after: function (r) {
+        log(r.entries.every(function (e) { return e.read.countStatus === 'none' && e.read.countRead === null && e.stitchCount === null && /no stitch counts/.test(e.read.countWhy); }),
+          'no count column: every row says countStatus "none" with the reason');
+      }
+    });
+  });
+  /* not DMC: Anchor and AuriFloss keys are not read, and every row says why */
+  [['Anchor brand word', { brandWord: 'Anchor' }, /Anchor/], ['AuriFloss brand word', { brandWord: 'AuriFloss' }, /AuriFloss/],
+    ['ANCHOR column header, no brand word', { brandWord: false, header: 'ANCHOR' }, /Anchor/]].forEach(function (c, ci) {
+    chain = chain.then(function () {
+      var o = { rows: pickCodes(8, 50 + ci), font: 'Arial', dh: 18, index: true, symbols: true, counts: true };
+      for (var k in c[1]) o[k] = c[1][k];
+      return XSKeyRead.read(synthKey(o), {}).then(function (r) {
+        log(r.entries.length >= 6 && r.entries.every(function (e) { return !e.code && e.read.status === 'blank'; }), c[0] + ': no code is claimed', r.entries.map(function (e) { return e.code || e.read.status; }).join(' '));
+        log(r.entries.every(function (e) { return c[2].test(e.read.why || '') && /only DMC/.test(e.read.why); }), c[0] + ': every row says why (' + (r.entries[0] && r.entries[0].read.why) + ')');
+        log(c[2].test(r.brandSeen || ''), c[0] + ': brandSeen', r.brandSeen + ' cols ' + r.columns.map(function (x) { return x.kind + '@' + x.x0 + '..' + x.x1; }).join(','));
+      });
+    });
+  });
+  chain = chain.then(function () {
+    var o = { rows: pickCodes(8, 55), font: 'Arial', dh: 18, index: true, symbols: true, counts: true, header: 'DMC' };
+    return XSKeyRead.read(synthKey(o), {}).then(function (r) {
+      log(r.brandSeen === 'DMC' && r.entries.filter(function (e) { return e.code; }).length >= 6, 'a DMC header and brand word: read as DMC', r.brandSeen);
+    });
+  });
+  /* determinism */
+  chain = chain.then(function () {
+    var o = { rows: pickCodes(8, 21), font: 'Arial', dh: 14, index: true, symbols: true, counts: true };
+    var cv = synthKey(o);
+    return XSKeyRead.read(cv, {}).then(function (a) {
+      return XSKeyRead.read(cv, { noWorker: true }).then(function (b) {
+        var strip = function (r) { return JSON.stringify(r.entries) + JSON.stringify(r.rows); };
+        log(strip(a) === strip(b), 'deterministic: the worker and the main thread give the same read');
+      });
+    });
+  });
+  /* cancel */
+  chain = chain.then(function () {
+    var cv = synthKey({ rows: pickCodes(30, 22), font: 'Arial', dh: 16, index: true, counts: true });
+    var p = XSKeyRead.read(cv, {});
+    XSKeyRead.cancel(p.token);
+    return p.then(function (r) { eq(r.reason, 'cancelled', 'cancel(token) resolves "cancelled"'); });
+  });
+  /* timing: a 60-row key page */
+  chain = chain.then(function () {
+    var o = { rows: pickCodes(60, 23), font: 'Arial', dh: 16, index: true, symbols: true, counts: true, rowGap: 2.0 };
+    var cv = synthKey(o);
+    var t0 = performance.now();
+    return XSKeyRead.read(cv, {}).then(function (r) {
+      var ms = Math.round(performance.now() - t0);
+      var s = scoreRead(r, o.rows);
+      log(s.wrong === 0, '60-row key: no wrong code', s.exact + ' exact');
+      log(ms < 2000, '60-row key page read in under 2 s', ms + ' ms (' + cv.width + ' x ' + cv.height + ')');
+      synthRows.push(['60 rows, Arial 16 px', s.rows, s.exact, s.partial, s.blank, s.wrong, Math.round(s.exact / s.rows * 100) + ' %', r.verdict, ms]);
+    });
+  });
+  /* nothing to read */
+  chain = chain.then(function () {
+    var cv = document.createElement('canvas'); cv.width = 300; cv.height = 200;
+    var ctx = cv.getContext('2d'); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, 300, 200);
+    return XSKeyRead.read(cv, {}).then(function (r) {
+      log(r.ok === false && r.verdict === 'none' && typeof r.message === 'string', 'a blank picture: ok false, verdict none, a message', r.message);
+    });
+  }).then(function () {
+    return XSKeyRead.read(null, {}).then(function (r) { log(r.ok === false && r.reason === 'no-image', 'no picture: reason no-image'); });
+  });
+  return chain.then(function () {
+    table(synthRows, ['case', 'rows', 'exact', 'partial', 'blank', 'wrong', 'exact share', 'verdict', 'ms']);
+    note('synthetic total: ' + synthTot.exact + ' exact, ' + synthTot.partial + ' partial, ' + synthTot.blank + ' blank, ' + synthTot.wrong + ' wrong of ' + synthTot.rows);
+  });
+}
+
+/* ---------------------------------------------------------------- *
+ * 2. readNumbers
+ * ---------------------------------------------------------------- */
+function numberTests() {
+  group('readNumbers: ruler numbers and lone numbers');
+  var chain = Promise.resolve();
+  [['Arial', 12], ['Verdana', 10], ['Times New Roman', 14]].forEach(function (fs) {
+    chain = chain.then(function () {
+      var cv = document.createElement('canvas'), px = Math.round(fs[1] / 0.72);
+      cv.width = px * 40; cv.height = px * 3;
+      var ctx = cv.getContext('2d');
+      ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, cv.width, cv.height);
+      ctx.fillStyle = '#000'; ctx.font = px + 'px "' + fs[0] + '"'; ctx.textBaseline = 'middle';
+      var boxes = [], vals = [];
+      for (var i = 1; i <= 12; i++) {
+        var v = i * 10, x = i * px * 3, w = ctx.measureText(String(v)).width;
+        ctx.fillText(String(v), x, px * 1.5);
+        boxes.push({ x: x - 3, y: px * 0.6, w: w + 6, h: px * 1.8 });
+        vals.push(v);
+      }
+      return XSKeyRead.readNumbers(cv, boxes, { expect: 'step', step: 10 }).then(function (nums) {
+        var got = nums.map(function (n) { return n.value; });
+        eq(got, vals, fs[0] + ' ' + fs[1] + ' px ruler 10..120 read exactly');
+        if (JSON.stringify(got) !== JSON.stringify(vals)) note('ruler texts: ' + nums.map(function (n) { return n.text + ':' + n.status + (n.candidates ? '{' + n.candidates.join(',') + '}' : ''); }).join(' '));
+        log(nums.every(function (n) { return n.status === 'exact'; }), fs[0] + ': every ruler number exact');
+      });
+    });
+  });
+  chain = chain.then(function () {
+    return XSKeyRead.readNumbers(document.createElement('canvas'), [], {}).then(function (n) { eq(n, [], 'no boxes: an empty list'); });
+  });
+  return chain;
+}
+
+/* ---------------------------------------------------------------- *
+ * 3. the accuracy ledger (fixtures, runtime only)
+ * ---------------------------------------------------------------- */
+var LEDGER = [];
+var ledgerRows = [];
+
+function ledgerCase(label, getSource, truth, opts) {
+  return getSource().then(function (src) {
+    if (!src) { skip(label + ': fixture absent'); return; }
+    opts = opts || {};
+    if (/[?&]dbg=1/.test(QS)) opts.debug = true;
+    var t0 = performance.now();
+    return XSKeyRead.read(src, opts || {}).then(function (r) {
+      var ms = Math.round(performance.now() - t0);
+      if (r._raw && r._raw.dbg) note(label + ' layout: ' + JSON.stringify(r._raw.dbg) + ' solve ' + JSON.stringify(r.stats.solve));
+      if (!truth) {
+        note(label + ': no truth file; read ' + r.entries.length + ' rows: ' + r.entries.map(function (e) { return e.code || e.read.text || '_'; }).join(' '));
+        ledgerRows.push([label, '?', r.entries.filter(function (e) { return e.read.status === 'exact'; }).length, '', '', '', '', ms]);
+        return;
+      }
+      var s = scoreRead(r, truth);
+      group('Ledger: ' + label);
+      table(s.lines, ['row', 'truth', 'read', 'status', 'swatch', 'symbol', 'evidence']);
+      log(s.wrong === 0, label + ': zero wrong codes', s.wrong + ' wrong');
+      if (truth.some(function (t) { return t.stitches != null; })) note(label + ' counts: ' + JSON.stringify(r.entries.map(function (e) { return e.read.countRead; })) + (r._raw && r._raw.dbg ? ' rows ' + JSON.stringify(r._raw.dbg.rows) + ' solve ' + JSON.stringify(r.stats.solve) : ''));
+      ledgerRows.push([label, s.rows, s.exact, s.partial, s.blank, { text: String(s.wrong), cls: s.wrong ? 'wr' : '' }, Math.round(s.exact / Math.max(1, s.rows) * 100) + ' %', ms]);
+      return r;
+    });
+  });
+}
+
+function pdfPage(name, page, crop, maxWidth) {
+  return function () {
+    return fetchBlob('../tmp-pdf/' + name + '.pdf').then(function (blob) {
+      if (!blob || !window.PdfText) return null;
+      shimRaf();
+      return PdfText.open(new File([blob], name + '.pdf', { type: 'application/pdf' })).then(function (hd) {
+        return hd.renderPage(page, { maxWidth: maxWidth || 2400 }).then(function (cv) {
+          try { hd.destroy(); } catch (e) { /* ignore */ }
+          if (!crop) return cv;
+          var c2 = document.createElement('canvas');
+          var x = Math.round(crop.x0 * cv.width), y = Math.round(crop.y0 * cv.height);
+          c2.width = Math.round((crop.x1 - crop.x0) * cv.width); c2.height = Math.round((crop.y1 - crop.y0) * cv.height);
+          c2.getContext('2d').drawImage(cv, -x, -y);
+          return c2;
+        });
+      });
+    });
+  };
+}
+
+function fixtureTests() {
+  group('Accuracy ledger: image-only keys (truth read by hand into tmp-pdf/*.key.truth.json, gitignored)');
+  var chain = Promise.resolve();
+  /* the owner's screenshot */
+  chain = chain.then(function () {
+    return fetchJson('../tmp-pdf/xs-potatoes.key.json').then(function (kj) {
+      if (!kj) { skip('xs-potatoes.key.json absent'); return; }
+      var truth = kj.entries.map(function (e) { return { code: e.code, stitches: e.stitches }; });
+      return ledgerCase('xs-potatoes-key.png', function () { return fetchBlob('../tmp-pdf/xs-potatoes-key.png'); }, truth, {}).then(function (r) {
+        if (!r) return;
+        log(r.entries.length === 6, 'potatoes: six rows found', r.entries.length);
+        var exact = r.entries.filter(function (e) { return e.read.status === 'exact'; }).length;
+        log(exact === 6, 'potatoes: every row exact (02 #7 proof)', exact + ' / 6');
+        var cnt = r.entries.filter(function (e, i) { return e.read.countRead === kj.entries[i].stitches; }).length;
+        var wrongCnt = r.entries.filter(function (e, i) { return e.read.countRead != null && e.read.countRead !== kj.entries[i].stitches; }).length;
+        log(wrongCnt === 0, 'potatoes: no stitch count read wrong', cnt + ' of 6 read, ' + wrongCnt + ' wrong');
+        log(r.entries.every(function (e) { return e.read.countStatus === 'read' ? e.read.countRead != null : (e.read.countStatus === 'not-read' && e.read.countRead === null && !!e.read.countWhy); }), 'potatoes: every row says whether its count was read (and why not)');
+        log(cnt === 6, 'potatoes: all six stitch counts read (the app passes no crop; this is the same call)', JSON.stringify(r.entries.map(function (e) { return e.read.countRead; })));
+        log(r.brandSeen === 'DMC', 'potatoes: the brand column reads DMC', r.brandSeen);
+        var clean = r.entries.filter(function (e) { return e.glyph && e.glyph.clean; }).length;
+        note('potatoes: ' + clean + ' of 6 symbols captured cleanly');
+        var cnts = r.entries.map(function (e) { return e.read.countRead; });
+        note('potatoes counts read: ' + JSON.stringify(cnts));
+        return ledgerCase('xs-potatoes-key.png with the stitched total', function () { return fetchBlob('../tmp-pdf/xs-potatoes-key.png'); }, truth, { total: kj.totalStitches }).then(function () {
+          var chart = { classes: kj.entries.map(function (e) { return { hex: XStitch.hexFor('DMC', e.code), count: e.stitches }; }) };
+          return ledgerCase('xs-potatoes-key.png with a chart read', function () { return fetchBlob('../tmp-pdf/xs-potatoes-key.png'); }, truth, { chart: chart }).then(function (r2) {
+            if (r2) log(r2.entries.filter(function (e) { return e.read.status === 'exact'; }).length === 6, 'potatoes with the chart: every row exact');
+          });
+        });
+      });
+    });
+  });
+  /* the PDF fixtures: truth files list { fixture, page, crop?, entries } */
+  var FIX = ['xs-tinymodernist-matryoshka', 'xs-tinymodernist-autumn', 'xs-satsuma-stayhome-color', 'xs-satsuma-stayhome-bw',
+    'xs-satsuma-summersflight-color', 'xs-satsuma-summersflight-bw', 'xs-satsuma-sunshine', 'xs-apl-tapestry-painted', 'xs-apl-orr-book14'];
+  FIX.forEach(function (name) {
+    chain = chain.then(function () {
+      return fetchJson('../tmp-pdf/' + name + '.key.truth.json').then(function (tj) {
+        if (!tj) {
+          return fetchBlob('../tmp-pdf/' + name + '.pdf').then(function (b) {
+            if (!b) skip(name + '.pdf absent'); else skip(name + ': no truth file yet (tmp-pdf/' + name + '.key.truth.json)');
+          });
+        }
+        var keys = Array.isArray(tj.keys) ? tj.keys : [tj];
+        var c2 = Promise.resolve();
+        keys.forEach(function (k, ki) {
+          c2 = c2.then(function () {
+            return ledgerCase(name + ' p' + k.page + (keys.length > 1 ? ' key ' + (ki + 1) : ''), pdfPage(name, k.page, k.crop, k.maxWidth), k.entries, { total: k.total || undefined });
+          });
+        });
+        return c2;
+      });
+    });
+  });
+  return chain.then(function () {
+    group('Ledger summary (rows exact / partial / blank / wrong)');
+    if (ledgerRows.length) table(ledgerRows, ['fixture', 'rows', 'exact', 'partial', 'blank', 'wrong', 'exact share', 'ms']);
+  });
+}
+
+/* ---------------------------------------------------------------- *
+ * visual QA
+ * ---------------------------------------------------------------- */
+function showRead(src) {
+  var vs = document.getElementById('vstats'), vt = document.getElementById('vtable');
+  vs.textContent = 'reading…'; vt.innerHTML = '';
+  XSKeyRead.read(src, { debug: true }).then(function (r) {
+    vs.textContent = (r.message || 'read') + '\nverdict ' + r.verdict + ', ' + (r.stats ? r.stats.exact + ' exact, ' + r.stats.partial + ' partial, ' + r.stats.blank + ' blank' : '') + ', ' + r.ms + ' ms';
+    var rows = (r.entries || []).map(function (e, i) {
+      return [i + 1, e.code || e.read.text || '', e.read.status, { node: swatchNode(e.read.swatchHex) }, { node: symCanvas(e.glyph) }, e.name, e.read.countRead, e.read.evidence.join(', ') + (e.read.why ? ' / ' + e.read.why : '')];
+    });
+    table(rows, ['row', 'code', 'status', 'swatch', 'symbol', 'name', 'count', 'evidence'], vt);
+    window.lastRead = r;
+  });
+}
+document.getElementById('q-file').addEventListener('change', function (ev) { if (ev.target.files[0]) showRead(ev.target.files[0]); });
+document.getElementById('q-pot').addEventListener('click', function () {
+  fetchBlob('../tmp-pdf/xs-potatoes-key.png').then(function (b) { if (b) showRead(b); else document.getElementById('vstats').textContent = 'tmp-pdf/xs-potatoes-key.png is not on this machine.'; });
+});
+
+/* explore(name, page): draw a fixture page into the panel (for reading truth by eye) */
+window.explore = function (name, page, opts) {
+  opts = opts || {};
+  return pdfPage(name, page, opts.crop, opts.maxWidth)().then(function (cv) {
+    var ex = document.getElementById('ex'); ex.innerHTML = '';
+    if (!cv) return null;
+    if (opts.cssW) cv.style.width = opts.cssW + 'px';
+    ex.appendChild(cv); window.cv = cv;
+    return { w: cv.width, h: cv.height };
+  });
+};
+
+/* ---------------------------------------------------------------- *
+ * 0. the worker
+ * ---------------------------------------------------------------- */
+function workerTests() {
+  group('The worker');
+  var src = XSKeyRead._workerSrc(), okc = true, msg = '';
+  try { new Function(src); } catch (e) { okc = false; msg = e.message; }
+  log(okc, 'the worker source compiles', msg);
+  /* does this browser run Blob workers at all (headless with virtual time may not)? */
+  var probe = new Promise(function (res) {
+    try {
+      var u = URL.createObjectURL(new Blob(['self.onmessage=function(e){self.postMessage(e.data+1)}'], { type: 'text/javascript' }));
+      var w = new Worker(u);
+      var t = setTimeout(function () { res(false); }, 5000);
+      w.onmessage = function (e) { clearTimeout(t); w.terminate(); res(e.data === 2); };
+      w.postMessage(1);
+    } catch (e) { res(false); }
+  });
+  return probe.then(function (works) {
+    if (!works) { skip('this browser does not answer from a Blob worker (headless virtual time): the worker read is checked in a real tab'); return; }
+    return workerRead();
+  });
+}
+function workerRead() {
+  var cv = synthKey({ rows: pickCodes(6, 31), font: 'Arial', dh: 16, index: true, counts: true });
+  var timer;
+  var to = new Promise(function (res) { timer = setTimeout(function () { res({ timeout: true }); }, 20000); });
+  return Promise.race([XSKeyRead.read(cv, {}), to]).then(function (r) {
+    clearTimeout(timer);
+    log(!r.timeout && r.stats && r.stats.worker === true, 'a read runs in the worker and settles', r.timeout ? 'timed out' : 'worker ' + (r.stats && r.stats.worker) + ' ' + ((r.stats && r.stats.warnings) || []).join('; '));
+  });
+}
+
+/* ---------------------------------------------------------------- */
+function run() {
+  var chain = Promise.resolve();
+  var EXPLORE = /[?&]explore=1/.test(QS);
+  if (EXPLORE) ONLY = 'none';
+  if (!ONLY || ONLY === 'synthetic' || ONLY === 'worker') chain = chain.then(workerTests);
+  if (ONLY === 'worker') chain = chain.then(function () {});
+  if (!ONLY || ONLY === 'synthetic') chain = chain.then(syntheticTests).then(numberTests);
+  if (!QUICK && (!ONLY || ONLY === 'fixtures')) chain = chain.then(fixtureTests);
+  if (/[?&]explore=1/.test(QS)) {
+    var f = (/[?&]f=([\w-]+)/.exec(QS) || [])[1], pg = +((/[?&]p=(\d+)/.exec(QS) || [])[1] || 1);
+    var cr = (/[?&]crop=([\d.,]+)/.exec(QS) || [])[1];
+    var crop = cr ? (function (a) { return { x0: +a[0], y0: +a[1], x1: +a[2], y1: +a[3] }; })(cr.split(',')) : null;
+    document.querySelector('h1').style.display = 'none';
+    Array.prototype.forEach.call(document.querySelectorAll('p.note, .panel > h2, .panel > div:not(#ex)'), function (e) { e.style.display = 'none'; });
+    chain = f ? window.explore(f, pg, { crop: crop, maxWidth: 2400 }).then(function (r) { note(JSON.stringify(r)); }) : Promise.resolve();
+  }
+  chain.then(function () {
+    var s = document.getElementById('summary');
+    s.textContent = passed + ' passed, ' + failed + ' failed, ' + skipped + ' skipped';
+    s.className = failed ? 'bad' : 'ok';
+    window.__done = { passed: passed, failed: failed, skipped: skipped };
+  }, function (e) {
+    log(false, 'suite threw', e && (e.stack || e.message));
+    var s = document.getElementById('summary');
+    s.textContent = passed + ' passed, ' + failed + ' failed (threw)';
+    s.className = 'bad';
+    window.__done = { passed: passed, failed: failed, skipped: skipped, threw: String(e) };
+  });
+}
+if (/[?&]noworker=1/.test(QS)) {
+  window.addEventListener('load', function () {
+    var r0 = XSKeyRead.read;
+    XSKeyRead.read = function (s, o, p) { o = o || {}; o.noWorker = true; return r0(s, o, p); };
+  });
+}
+window.addEventListener('error', function (e) { log(false, 'page error', e.message + ' at ' + e.lineno); });
+/* Headless runs use virtual time, which races ahead while a Worker computes (the main thread is
+   idle). A network fetch pauses virtual time, so while the suite runs there a chain of small
+   fetches lets real time pass for the worker. */
+if (/HeadlessChrome/.test(navigator.userAgent)) {
+  (function spin(n) {
+    if (window.__done) return;
+    fetch('../sw.js?spin=' + n, { cache: 'no-store' }).then(function () { spin(n + 1); }, function () { spin(n + 1); });
+  })(0);
+}
+window.addEventListener('load', run);
+</script>
+</body>
+</html>

@@ -420,9 +420,9 @@ assertEqual(X.lengthPerStitchCm(28, 2), 2.50, 'length per stitch at 28 ct over 2
   assertEqual(X.skeinsFor({ stitchCount: 1601, count: 14, strands: 1, waste: 0.2 }), 2,
     'one strand: 1,601 stitches needs 2 skeins');
   var r = X.skeinRange({ stitchCount: 1234, count: 14, over: 1, strands: 2, waste: 0.2 });
-  assertEqual(r, { low: 1, high: 2 }, 'skeinRange for 1,234 stitches is 1-2 skeins');
+  assertEqual(r, { low: 1, high: 2, mid: 2 }, 'skeinRange for 1,234 stitches is 1-2 skeins (wave K: buy 2)');
   assertTrue(r.low <= r.high, 'skeinRange low never exceeds high');
-  assertEqual(X.skeinRange({ stitchCount: 0 }), { low: 0, high: 0 }, 'skeinRange of nothing is 0-0');
+  assertEqual(X.skeinRange({ stitchCount: 0 }), { low: 0, high: 0, mid: 0 }, 'skeinRange of nothing is 0-0');
 })();
 
 /* =====================================================================
@@ -3194,6 +3194,519 @@ WR.palette[1].symbol = '';
   note('rowDone for all 300 rows: ' + allDone.toFixed(1) + ' ms');
   assertTrue(allDone < 50, 'asking rowDone of every row of a 300 x 300 chart is cheap (the chart is unpacked once)',
     allDone.toFixed(1) + ' ms');
+})();
+
+/* =====================================================================
+ * Wave K (xs-core): grid reads tell the truth, and the logic for the app
+ * ===================================================================== */
+group('wave K: the symbol in a square, as a mask');
+(function () {
+  var G = X._grid;
+  /* a "-" bar and an "E" in a 10-unit cell at (0,0)-(10,10), y up */
+  var box = { x0: 0, y0: 0, x1: 10, y1: 10 };
+  function rect(x, y, w, h) { return [[x, y, x + w, y, x + w, y + h, x, y + h]]; }
+  var bar = [rect(1.6, 4.6, 6.8, 0.8)];
+  var E = [rect(1.6, 1.6, 6.8, 0.8), rect(1.6, 1.6, 0.8, 6.8), rect(1.6, 7.6, 6.8, 0.8), rect(1.6, 4.6, 6.8, 0.8)];
+  var mb = G.shapeMask(bar, box), me = G.shapeMask(E, box);
+  assertTrue(mb && me && mb !== me, 'a thin bar (0.08 of the square) is never lost between samples, and differs from an "E"');
+  assertEqual(G.shapeMask([], box), '', 'nothing drawn: the empty mask');
+  var shifted = G.shapeMask([rect(1.6, 4.6 + 0.5, 6.8, 0.8)], box);
+  assertTrue(X._grid.maskDist(mb, shifted) > 0, 'a half-sample shift moves some samples (plain Hamming sees it)');
+  assertTrue(G.sigGroups({ a: 1 }).length === 1, 'sigGroups of one symbol is one group');
+  var g2 = G.sigGroups((function () { var h = {}; h[mb] = 100; h[shifted] = 3; h[me] = 50; return h; })());
+  assertEqual(g2.map(function (g) { return g.n; }), [103, 50], 'the same bar a hair apart folds into one group; the "E" stays its own');
+  var glyph = G.glyphFromPolys(G.unitPolys(E, box), { clean: true });
+  assertEqual([glyph.w, glyph.h, glyph.clean, glyph.source], [16, 16, true, 'pdf-path'], 'glyphFromPolys gives a 16 x 16 symbol (R5 shape)');
+  assertTrue(/^M\d/.test(glyph.path) && glyph.path.length < 1024, 'with an SVG path in a 100 x 100 box', glyph.path);
+  var bits = X.unpackBits(glyph.bits, 256), plus = G.glyphFromPolys(G.unitPolys([rect(1, 4.5, 8, 1), rect(4.5, 1, 1, 8)], box));
+  var pb = X.unpackBits(plus.bits, 256);
+  assertEqual(pb[8 * 16 + 8], 1, 'two crossing bars make a "+" with its centre inked (shapes are unioned, not XORed)');
+  assertTrue(bits.reduce(function (s, v) { return s + v; }, 0) > 20, 'the "E" sets its pixels');
+})();
+
+group('wave K: naming the classes of a grid read (the pacman bug)');
+(function () {
+  var G = X._grid;
+  var box = { x0: 0, y0: 0, x1: 10, y1: 10 };
+  function rect(x, y, w, h) { return [[x, y, x + w, y, x + w, y + h, x, y + h]]; }
+  var mBar = G.shapeMask([rect(1.6, 4.6, 6.8, 0.8)], box);
+  var mE = G.shapeMask([rect(1.6, 1.6, 6.8, 0.8), rect(1.6, 1.6, 0.8, 6.8), rect(1.6, 7.6, 6.8, 0.8)], box);
+  /* 3 inks; ink 1 carries two colours told apart by their symbol */
+  var inks = ['000000', '5b5b5b', 'e1e1e1'];
+  var raw = [], sigs = [];
+  function add(ink, sig, n) { for (var i = 0; i < n; i++) { raw.push(ink); sigs.push(sig); } }
+  add(0, '', 50); add(1, mBar, 30); add(1, mE, 7); add(2, '', 13);
+  var counts = [50, 37, 13];
+  var entries = [
+    { code: '310', stitchCount: 50, kind: 'cross', hex: '000000' },
+    { code: '349', stitchCount: 7, kind: 'cross', hex: 'd21035' },
+    { code: '3843', stitchCount: 30, kind: 'cross', hex: '14aad0' },
+    { code: '3072', stitchCount: 13, kind: 'cross', hex: 'e6e8e8' }
+  ];
+  var r = G.nameClasses(new Int32Array(raw), sigs, inks, counts, entries, []);
+  assertEqual(r.split, [{ ink: '5b5b5b', by: 'glyph', into: [1, 2] }], 'one ink, two key counts: split by the symbol in each square');
+  var per = {};
+  for (var i = 0; i < raw.length; i++) { var p = r.classPal[r.cellClass[i]]; per[p] = (per[p] || 0) + 1; }
+  assertEqual(per, { 0: 50, 1: 7, 2: 30, 3: 13 }, 'and the squares end up as the right colours');
+  assertEqual(r.placeholders, [], 'nothing left over');
+
+  /* the same, but the two colours share a symbol too: say so, do not drop it */
+  var raw2 = [], sigs2 = [];
+  for (i = 0; i < 50; i++) { raw2.push(0); sigs2.push(''); }
+  for (i = 0; i < 37; i++) { raw2.push(1); sigs2.push(mBar); }
+  for (i = 0; i < 13; i++) { raw2.push(2); sigs2.push(''); }
+  var r2 = G.nameClasses(new Int32Array(raw2), sigs2, inks, counts, entries, []);
+  assertEqual(r2.placeholders.map(function (q) { return [q.ink, q.n, q.why, q.candidates]; }), [['5b5b5b', 37, 'shared-ink', [1, 2]]],
+    'one ink, one symbol, two key counts that add up: an explicit shared-ink placeholder naming both');
+  var blank = 0;
+  for (i = 0; i < raw2.length; i++) if (r2.cellClass[i] < 0) blank++;
+  assertEqual(blank, 0, 'and no square is left without a class');
+
+  /* a tie: two inks with the same count, colours that cannot decide */
+  var tieEntries = [{ code: 'A', stitchCount: 20, kind: 'cross', hex: '808080' }, { code: 'B', stitchCount: 20, kind: 'cross', hex: '828282' }];
+  var r3 = G.nameClasses(new Int32Array([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]), new Array(40), ['a0a0a0', 'b0b0b0'], [20, 20], tieEntries, []);
+  assertEqual(r3.placeholders.map(function (q) { return q.why; }), ['tie', 'tie'], 'equal counts and no clear colour: a tie, not a coin toss');
+  var r4 = G.nameClasses(new Int32Array([0, 0, 0, 0, 0, 1, 1, 1, 1, 1]), new Array(10), ['ff0000', '0000ff'], [5, 5],
+    [{ code: 'R', stitchCount: 5, kind: 'cross', hex: '0000ff' }, { code: 'B', stitchCount: 5, kind: 'cross', hex: 'ff0000' }], []);
+  assertEqual(r4.classPal.slice(0, 2), [1, 0], 'equal counts but clearly different colours: the colours decide');
+
+  /* a KG-style key page: swatch + symbol per row, in key order */
+  var legend = { rows: [{ hex: '000000', mask: '', polys: [], box: box }, { hex: '5b5b5b', mask: mE, polys: [rect(1.6, 1.6, 6.8, 0.8), rect(1.6, 1.6, 0.8, 6.8), rect(1.6, 7.6, 6.8, 0.8)], box: box },
+    { hex: '5b5b5b', mask: mBar, polys: [rect(1.6, 4.6, 6.8, 0.8)], box: box }, { hex: 'e1e1e1', mask: '', polys: [], box: box }], page: 9 };
+  var sp = {}; sp[mBar] = G.unitPolys([rect(1.6, 4.6, 6.8, 0.8)], box); sp[mE] = G.unitPolys([rect(1.6, 1.6, 6.8, 0.8), rect(1.6, 1.6, 0.8, 6.8), rect(1.6, 7.6, 6.8, 0.8)], box);
+  var r5 = G.nameClasses(new Int32Array(raw), sigs, inks, counts, entries, [legend], sp);
+  assertEqual([r5.legendUsed, r5.legendPage, r5.split], [true, 9, [{ ink: '5b5b5b', by: 'legend', into: [1, 2] }]],
+    'the key page\'s swatches and their symbols name the classes when their order agrees with the counts');
+  var bad = JSON.parse(JSON.stringify(entries)); bad[1].stitchCount = 30; bad[2].stitchCount = 7;
+  var r6 = G.nameClasses(new Int32Array(raw), sigs, inks, counts, bad, [legend], sp);
+  assertEqual(r6.legendUsed, false, 'and are ignored when the counts say the order is different');
+  assertEqual(r6.split, [{ ink: '5b5b5b', by: 'glyph', into: [1, 2] }], 'falling back to the symbols plus the counts');
+})();
+
+group('wave K: resolveClass, the stitcher\'s answer for a placeholder');
+(function () {
+  var pal = [{ code: '310' }, { code: '349', keyCount: 3 }, { code: '', name: 'DMC 349 or DMC 3843 (not told apart)', unresolved: [1, 2] }, { code: '3843' }];
+  var d = X.normalize({ palette: pal, chart: { w: 4, h: 2, cells: [0, 2, 2, 3, 2, -1, 0, 3] } }, null);
+  assertEqual(d.palette[2].unresolved, [1, 2], 'normalize keeps unresolved');
+  assertEqual(d.palette[1].keyCount, 3, 'and keyCount');
+  var bits = X.setBit(X.bitsState('', 8), 2, 1);
+  d.progress.done = X.bitsB64(bits);
+  d = X.normalize(d, null);
+  var a = X.resolveClass(d, 2, 1);
+  assertEqual(Array.prototype.slice.call(X.unpackCells(a.chart.cells.data)), [0, 1, 1, 2, 1, -1, 0, 2], 'every placeholder square becomes DMC 349, indices above move down');
+  assertEqual(a.palette.map(function (p) { return p.code; }), ['310', '349', '3843'], 'and the placeholder is gone');
+  assertEqual(X.getBit(a.progress.done, 2), true, 'a done square stays done');
+  var b = X.resolveClass(d, 2, { cells: [1, 4], to: 3 });
+  assertEqual(b.palette.length, 4, 'a hand split of some squares keeps the placeholder while it still has squares');
+  b = X.resolveClass(b, 2, { cells: [2], to: 1 });
+  assertEqual([b.palette.length, Array.prototype.slice.call(X.unpackCells(b.chart.cells.data))], [3, [0, 2, 1, 2, 2, -1, 0, 2]], 'and removes it when the last one is assigned');
+  var c = X.resolveClass(d, 2, -1);
+  assertEqual(Array.prototype.slice.call(X.unpackCells(c.chart.cells.data)), [0, -1, -1, 2, -1, -1, 0, 2], '-1: "these are fabric" (an explicit choice only)');
+  assertEqual(X.resolveClass(d, 9, 1).palette.length, 4, 'a bad index changes nothing');
+  var old = X.normalize({ palette: [{ code: '310' }], chart: { w: 1, h: 1, cells: [0] } }, null);
+  assertTrue(!('keyCount' in old.palette[0]) && !('unresolved' in old.palette[0]) && !('glyph' in old.palette[0]),
+    'an older palette entry gains no new keys (byte for byte)');
+  var gl = X.normalize({ palette: [{ code: '310', glyph: { w: 16, h: 16, bits: 'AAAA', path: 'M1 1 L2 2Z', clean: true, source: 'pdf-path' } }] }, null).palette[0].glyph;
+  assertEqual(gl, { w: 16, h: 16, bits: 'AAAA', path: 'M1 1 L2 2Z', clean: true, source: 'pdf-path' }, 'normalize keeps a glyph');
+  assertEqual(X.normalize({ palette: [{ code: '310', glyph: { path: '<script>' } }] }, null).palette[0].glyph, undefined, 'and drops a bad one');
+})();
+
+group('wave K #1: one total, plain percentages, distinct symbols, skeins to buy');
+(function () {
+  assertEqual([X.pctText(0, 100), X.pctText(20, 64512), X.pctText(1, 1e6), X.pctText(641, 1000), X.pctText(999, 1000), X.pctText(5, 5)],
+    ['0%', '0.03%', '<0.01%', '64%', '99%', '100%'], 'pctText: two decimals under 1%, never 100% before the end');
+  var d = X.normalize({ palette: [{ code: '310', keyCount: 4 }, { code: '349', keyCount: 176 }],
+    chart: { w: 2, h: 2, cells: [0, 0, 0, 0] }, progress: { keyDone: { 1: 20 } } }, null);
+  var t = X.totals(d);
+  assertEqual([t.total, t.done, t.fromKey], [180, 20, [1]], 'totals: a colour with no square but a printed count is counted from the key');
+  assertEqual(t.text, '20 of 180 stitches · 11%', 'in one sentence');
+  assertEqual(X.normalize({ progress: { keyDone: { 5: 3 } } }, null).progress.keyDone, undefined, 'keyDone for a colour that is not there is dropped');
+  var pal = [];
+  for (var i = 0; i < 10; i++) pal.push({ hex: ['000000', '111111', '333333', '555555', '777777', '999999', 'aaaaaa', 'cccccc', 'dddddd', 'ffffff'][i], stitchCount: 100 - i });
+  X.assignSymbols(pal, { distinct: true });
+  assertEqual(X.symbolCheck(pal).ok, true, 'assignSymbols { distinct }: ten colours, ten different shape families');
+  var plain = JSON.parse(JSON.stringify(pal));
+  plain[1].symbol = plain[0].symbol;
+  assertEqual(X.symbolCheck(plain).repeats, [[0, 1]], 'symbolCheck names a repeated symbol');
+  var sp = X.skeinPlan({ stitchCount: 56985, count: 16, over: 2, strands: 2 });
+  assertTrue(sp.low < sp.mid && sp.mid < sp.high && /\(buy \d+\)$/.test(sp.text), 'skeinPlan: a range with a buy number', sp.text);
+  var sp2 = X.skeinPlan({ stitchCount: 1234, count: 14, strands: 2, have: 1 });
+  assertEqual([sp2.buy, sp2.text], [1, '1–2 skeins (you have 1, buy 1)'], 'skeinPlan with some in the stash');
+})();
+
+group('wave K #1: bulk marks are described before they happen');
+(function () {
+  var cells = [];
+  for (var i = 0; i < 40 * 30; i++) cells.push(i % 3 === 0 ? 0 : 1);
+  var d = X.normalize({ palette: [{ code: '310' }, { code: '349' }], chart: { w: 40, h: 30, cells: cells },
+    pages: [{ n: 1, label: 'Page 2', region: { x: 20, y: 0, w: 20, h: 30 } }] }, null);
+  var st = X.bitsState('', 1200); X.setBit(st, 0, 1); d.progress.done = X.bitsB64(st); d = X.normalize(d, null);
+  var p = X.bulkPlan(d, { color: 0 });
+  assertEqual([p.count, p.already, p.total, p.confirm], [399, 1, 400, false], 'whole colour: 399 to mark, 1 already done, no confirm under 1,000');
+  assertEqual(p.text, 'Mark 399 stitches of 310 as done? (1 already done)', 'in words');
+  var pg = X.bulkPlan(d, { page: 0 });
+  assertEqual(pg.total, 600, 'page done: exactly the page\'s squares');
+  assertEqual(X.bulkPlan(d, { page: 0, color: 1 }).total, 400, 'this colour on this page');
+  assertEqual(X.bulkPlan(d, { block: { bx: 1, by: 2 } }).total, 100, 'a 10 x 10 block');
+  assertEqual(X.bulkPlan(d, { row: 0, color: 0 }).count, 13, 'a row of one colour');
+  assertEqual(X.bulkPlan(d, { color: 0 }, { unmark: true }).count, 1, 'unmark describes what would be taken back');
+  var big = []; for (i = 0; i < 1500; i++) big.push(0);
+  assertEqual(X.bulkPlan(X.normalize({ palette: [{ code: '310' }], chart: { w: 50, h: 30, cells: big } }, null), { color: 0 }).confirm, true,
+    'more than CONFIRM_ABOVE (1,000) stitches: confirm');
+  assertEqual(X.bulkPlan(d, { page: 5 }).count, 0, 'a page with no region marks nothing');
+})();
+
+group('wave K #3 parking, #4 pages');
+(function () {
+  var cells = new Int16Array(40 * 20);
+  for (var i = 0; i < cells.length; i++) cells[i] = 1;
+  cells[3 * 40 + 2] = 0; cells[5 * 40 + 25] = 0; cells[15 * 40 + 5] = 0; cells[2 * 40 + 35] = 0;
+  var d = X.normalize({ palette: [{ code: '310', symbol: '+' }, { code: '349' }], chart: { w: 40, h: 20, cells: cells },
+    pages: [{ n: 1, region: { x: 0, y: 0, w: 20, h: 20 } }, { n: 2, region: { x: 20, y: 0, w: 20, h: 20 } }, { n: 3 }] }, null);
+  assertEqual(X.nextBlockFor(d, 0, { x: 2, y: 3 }, 'right'), { x: 25, y: 5, bx: 2, by: 0, left: 1 }, 'next block to the right with DMC 310');
+  assertEqual(X.nextBlockFor(d, 0, { x: 2, y: 3 }, 'down'), { x: 5, y: 15, bx: 0, by: 1, left: 1 }, 'column parking: the block below');
+  assertEqual(X.nextBlockFor(d, 0, { x: 35, y: 2 }, 'right'), { x: 5, y: 15, bx: 0, by: 1, left: 1 }, 'at the end of a row of blocks it moves to the next row');
+  assertEqual(X.nextBlockFor(d, 0, { x: 35, y: 2 }, 'left'), { x: 25, y: 5, bx: 2, by: 0, left: 1 }, 'working right to left');
+  var p = X.parkAt(d, { x: 25, y: 5, paletteIndex: 0, corner: 'br', note: 'top of the ear' });
+  assertEqual(p.parking, [{ key: '310', symbol: '+', corner: 'br', note: 'top of the ear', x: 25, y: 5, paletteIndex: 0 }], 'parkAt stores where, which corner and which colour');
+  p = X.parkAt(p, { x: 25, y: 5, paletteIndex: 0, corner: 'tl' });
+  assertEqual(p.parking.length, 1, 'parking the same thread on the same stitch moves it, not doubles it');
+  p = X.parkAt(p, { x: 5, y: 15, paletteIndex: 0 });
+  assertEqual(X.parkedAt(p, 5, 15), [1], 'parkedAt finds it (so marking it can offer to unpark)');
+  assertEqual(X.parkingOrder(p, { x: 0, y: 0 }, 'right').map(function (q) { return q.i; }), [0, 1], 'parkingOrder: in the order the stitcher meets them');
+  assertEqual(X.parkingOrder(p, { x: 0, y: 0 }, 'down').map(function (q) { return q.i; }), [1, 0], 'which depends on the direction');
+  assertEqual(X.unpark(p, 0).parking.length, 1, 'unpark');
+  assertEqual(X.normalize({ parking: [{ key: 'x', corner: 'zz' }] }, null).parking, [{ key: 'x', symbol: '', corner: 'tl', note: '' }], 'an old parking entry normalises as before');
+  assertEqual(X.cellsOfPage(d, 1, { color: 0 }).length, 2, 'cellsOfPage: the stitches a printed page holds (one colour)');
+  assertEqual(X.cellsOfPage(d, 2).length, 0, 'a page with no region holds none');
+  var st = X.bitsState('', 800); X.setBit(st, 3 * 40 + 2, 1); d.progress.done = X.bitsB64(st); d = X.normalize(d, null);
+  var pp = X.pageProgress(d);
+  assertEqual(pp.map(function (q) { return [q.page, q.done, q.total, q.complete]; }), [[0, 1, 400, false], [1, 0, 400, false]], 'pageProgress per page, from the same bitmap');
+})();
+
+group('wave K #13: islands and travel');
+(function () {
+  var w = 30, h = 10, cells = new Int16Array(w * h), i;
+  for (i = 0; i < cells.length; i++) cells[i] = 1;
+  function put(x, y) { cells[y * w + x] = 0; }
+  put(0, 0); put(1, 1);                 // island 0: diagonal pair
+  put(5, 0);                            // island 1
+  put(29, 9);                           // island 2: far corner
+  var d = X.normalize({ palette: [{ code: '3820' }, { code: '310' }], chart: { w: w, h: h, cells: cells }, fabric: { count: 14 } }, null);
+  var isl = X.islands(d, 0);
+  assertEqual([isl.count, isl.list.map(function (q) { return q.n; })], [3, [2, 1, 1]], 'islands are 8-connected (a diagonal carries)');
+  var r = X.islandRoute(d, 0, { x: 0, y: 0 });
+  assertEqual(r.order, [0, 1, 2], 'islandRoute: nearest first');
+  assertEqual(r.hops.map(function (q) { return [q.cells, q.cut]; }), [[4.12, false], [Math.round(Math.sqrt(24 * 24 + 9 * 9) * 100) / 100, true]],
+    'the far hop (25.6 stitches = 4.6 cm on 14 ct) says "cut"');
+  var at = X.islandAt(d, 5, 0);
+  assertEqual([at.id, at.of, at.n, at.nextCells], [1, 3, 1, 4.12],'islandAt: which island, of how many, and how far the next one is');
+  assertTrue(/^island 2 of 3 · 1 stitch here · next island ≈ 0\.7 cm away$/.test(at.text), 'in words', at.text);
+  assertEqual(X.islandAt(d, 3, 3).of, 1, 'the background colour is one big island');
+})();
+
+group('wave K #14: Row by row v2');
+(function () {
+  var cells = [];
+  for (var i = 0; i < 25 * 3; i++) cells.push(i % 25 < 23 ? 0 : -1);
+  var d = X.normalize({ palette: [{ code: '310' }], chart: { w: 25, h: 3, cells: cells },
+    pages: [{ n: 1, label: 'Page 2', region: { x: 10, y: 1, w: 10, h: 2 } }] }, null);
+  var st = X.bitsState('', 75); X.setBit(st, 2, 1); X.setBit(st, 3, 1); d.progress.done = X.bitsB64(st); d = X.normalize(d, null);
+  var r = X.writtenRows(d, { chunk: 10, done: true, yTo: 0 });
+  assertEqual(r.rows[0].runs, [{ p: 0, n: 10, x: 0, done: 2 }, { p: 0, n: 10, x: 10, done: 0 }, { p: 0, n: 3, x: 20, done: 0 }, { p: -1, n: 2, x: 23, done: 0 }],
+    'chunk: 10 splits a long row at every ten columns, and done counts the squares already marked');
+  var s = X.writtenRows(d, { dir: 'serpentine', chunk: 10, yFrom: 1, yTo: 1 });
+  assertEqual(s.rows[0].runs.map(function (q) { return [q.n, q.x]; }), [[2, 24], [3, 22], [10, 19], [10, 9]], 'and right to left on a serpentine row');
+  var band = X.writtenRows(d, { xFrom: 5, xTo: 14 });
+  assertEqual([band.rows.length, band.rows[0].runs], [3, [{ p: 0, n: 10, x: 5 }]], 'xFrom / xTo: a band of columns');
+  var pg = X.writtenRows(d, { scope: { page: 0 } });
+  assertEqual([pg.rows.map(function (q) { return q.n; }), pg.rows[0].runs, pg.scope.label], [[2, 3], [{ p: 0, n: 10, x: 10 }], 'page 2'],
+    'scope: a printed page (labels stay the chart\'s own row numbers)');
+  assertEqual(X.writtenRows(d, { scope: { block: { bx: 2, by: 0 } } }).rows[0].runs, [{ p: 0, n: 3, x: 20 }, { p: -1, n: 2, x: 23 }], 'scope: a 10 x 10 block');
+  assertEqual(X.writtenRows(d, {}).rows[0].runs, [{ p: 0, n: 23, x: 0 }, { p: -1, n: 2, x: 23 }], 'with no new options the rows are as before');
+})();
+
+group('wave K #10: backstitch, knots and fractionals from drawn graphics');
+(function () {
+  var pal = X.normalize({ palette: [{ code: '310', kind: 'cross', hex: '000000' }, { code: '321', kind: 'back', hex: 'c72b3b' },
+    { code: '3865', kind: 'knot', hex: 'f9f7f1' }, { code: '666', kind: 'cross', hex: 'e31d42' }] }, null).palette;
+  var g = {
+    segments: [
+      { x1: 0, y1: 0, x2: 40, y2: 0, hex: '000000', width: 0.03 },          // grid line
+      { x1: 0, y1: 10, x2: 40, y2: 10, hex: '000000', width: 0.08 },        // bold 10 line
+      { x1: 2, y1: 3, x2: 2, y2: 3.3, hex: '000000', width: 0.03 },         // a grid tick, same width
+      { x1: 1.01, y1: 1, x2: 4, y2: 1, hex: 'c42a3a', width: 0.12 },        // backstitch, 3 steps
+      { x1: 4, y1: 1, x2: 5, y2: 2, hex: 'c72b3b', width: 0.12 },           // diagonal step
+      { x1: 2, y1: 1, x2: 3, y2: 1, hex: 'c72b3b', width: 0.12 },           // a duplicate step
+      { x1: 6, y1: 6, x2: 6.5, y2: 6.5, hex: 'c72b3b', width: 0.12 },       // half-cell diagonal
+      { x1: 7.3, y1: 2, x2: 9, y2: 2, hex: 'c72b3b', width: 0.12 },         // off the lattice
+      { x1: 1, y1: 8, x2: 3, y2: 8, hex: '22aa22', width: 0.12 }            // a colour the key lacks
+    ],
+    circles: [{ x: 3.02, y: 4, r: 0.15, hex: 'fafafa' }, { x: 8, y: 8, r: 0.15, hex: '0000ff' }],
+    polys: [{ pts: [5.5, 5.5, 6, 5.5, 6, 6, 5.5, 6], hex: 'e31d42' }, { pts: [7, 7, 8, 7, 7, 8], hex: 'e31d42' }]
+  };
+  var r = X.ornamentsFromGraphics(g, pal);
+  assertEqual(r.back, [{ x1: 1, y1: 1, x2: 2, y2: 1, i: 1 }, { x1: 2, y1: 1, x2: 3, y2: 1, i: 1 }, { x1: 3, y1: 1, x2: 4, y2: 1, i: 1 },
+    { x1: 4, y1: 1, x2: 5, y2: 2, i: 1 }, { x1: 6, y1: 6, x2: 6.5, y2: 6.5, i: 1 }],
+    'grid lines dropped; runs snapped and split into unit steps, duplicates once, half-cell diagonals kept');
+  assertEqual([r.stats.grid, r.stats.offLattice], [3, 1], 'three grid lines (by width), one off-lattice stroke refused');
+  assertEqual(r.knots, [{ x: 3, y: 4, i: 2, t: 'knot' }], 'a small dot on a vertex is a French knot in the knot colour');
+  assertEqual(r.part, [{ x: 5, y: 5, a: 3, b: -1, d: 4 }, { x: 7, y: 7, a: 3, b: -1, d: 2 }], 'a quarter square and a half-cell triangle');
+  assertEqual(r.unmatched.map(function (u) { return u.type; }), ['back', 'knot'], 'colours the key does not have are left unmatched, never guessed');
+  var d = X.normalize({ palette: pal, chart: { w: 10, h: 10, cells: [], back: r.back, knots: r.knots, part: r.part } }, null);
+  assertEqual(X.progressStats(d).breakdown.back.total, 5, 'and they count like an OXS import\'s layers');
+  var oxs = X.parseOXS(X.toOXS(d));
+  assertEqual([oxs.data.chart.back.length, oxs.data.chart.knots.length], [5, 1], 'and survive an OXS round trip');
+})();
+
+group('wave K #5, #21: sessions in words, the day strip, find my place, goals');
+(function () {
+  var t0 = new Date(2026, 10, 11, 19, 0).getTime();
+  var act = { sessions: [{ s: t0, e: t0 + 52 * 60000, c: { stitch: 318 }, by: { 'DMC 310': { stitch: 300 }, 'DMC 3843': { stitch: 18 } } },
+    { s: t0 + 86400000, e: t0 + 86400000 + 90 * 60000, c: { stitch: 5 }, by: {} }],
+    days: {} };
+  act.days[(function (d) { return d.getFullYear() + '-' + (d.getMonth() + 1) + '-' + d.getDate(); })(new Date(t0))] = { stitch: 1 };
+  var lines = X.sessionLines(act);
+  assertEqual(lines[1].text, 'Wed 11 Nov · 52 min · 318 stitches · DMC 310, 3843', 'a session in one line (newest first)');
+  assertEqual(lines[0].text, 'Thu 12 Nov · 1 h 30 min · 5 stitches', 'a long session in hours');
+  var a2 = { days: { '2026-11-11': { stitch: 318 }, '2026-11-12': { stitch: 5 } } };
+  assertEqual(X.dayStrip(a2, 3, new Date(2026, 10, 12, 12).getTime()).map(function (q) { return [q.day, q.n]; }),
+    [['2026-11-10', 0], ['2026-11-11', 318], ['2026-11-12', 5]], 'dayStrip: stitches per day, oldest first');
+  var d = X.normalize({ palette: [{ code: '310' }], chart: { w: 224, h: 288, cells: [] },
+    pages: [{ n: 8, label: 'Page 9', region: { x: 107, y: 78, w: 53, h: 77 } }] }, null);
+  assertEqual(X.findPlace(d, 'col 134 row 57'), { x: 133, y: 56, text: 'col 134 · row 57' }, 'findPlace: col / row');
+  assertEqual([X.findPlace(d, 'row 57, col 134').x, X.findPlace(d, '134, 57').y, X.findPlace(d, '134 x 57').x], [133, 56, 133], 'in any order, or as a pair');
+  assertEqual(X.findPlace(d, 'page 9'), { x: 133, y: 116, page: 0, text: 'Page 9' }, 'a printed page lands in its middle');
+  assertEqual(X.findPlace(d, 'block 13,6'), { x: 124, y: 54, block: { bx: 12, by: 5 }, text: 'block 13,6' }, 'a 10 x 10 block');
+  assertTrue(/off the chart/.test(X.findPlace(d, 'col 300 row 2').error), 'off the chart says so');
+  assertTrue(/does not print/.test(X.findPlace(d, 'p3').error), 'a page with no part of the chart says so');
+  var cells = []; for (var i = 0; i < 100; i++) cells.push(0);
+  var d2 = X.normalize({ palette: [{ code: '310' }], chart: { w: 10, h: 10, cells: cells }, pages: [{ n: 0, label: 'Page 1', region: { x: 0, y: 0, w: 10, h: 5 } }] }, null);
+  var now = new Date(2026, 10, 12, 9).getTime();
+  var gp = X.goalProgress({ kind: 'page', page: 0, by: now + 5 * 86400000 }, d2, null, now);
+  assertEqual([gp.left, gp.perDayNeeded, gp.approx], [50, 10, true], 'a page goal: 50 left, ≈ 10 a day for 5 days');
+  var pd = X.goalProgress({ kind: 'perDay', n: 500 }, d2, { days: (function () { var o = {}; o[(function (t) { var dt = new Date(t), m = dt.getMonth() + 1, dd = dt.getDate(); return dt.getFullYear() + '-' + (m < 10 ? '0' : '') + m + '-' + (dd < 10 ? '0' : '') + dd; })(now)] = { stitch: 520 }; return o; })() }, now);
+  assertEqual([pd.met, pd.text], [true, '520 of 500 today ✓'], 'a per-day goal met');
+})();
+
+group('wave K X3: the mark log replays the progress bitmap');
+(function () {
+  var a = X.bitsState('', 64), b;
+  X.setBit(a, 3, 1); X.setBit(a, 9, 1);
+  var prev = X.bitsB64(a);
+  b = X.bitsState(prev, 64); X.setBit(b, 9, 0); X.setBit(b, 40, 1);
+  var next = X.bitsB64(b);
+  assertEqual(X.markDiff(prev, next, 64), [[9, 0], [40, 1]], 'markDiff lists what changed between two bitmaps');
+  var chunks = [{ at: 1, marks: [[3, 1], [9, 1]] }, { at: 2, marks: X.markDiff(prev, next, 64) }];
+  var rp = X.replayMarks(chunks, 64), f, frames = 0;
+  while ((f = rp.next())) frames++;
+  assertEqual(frames, rp.frames, 'one frame per chunk');
+  assertEqual(X.packBits(rp.bits, 64), next, 'replaying the log reproduces the bitmap bit for bit');
+  /* 10k random taps */
+  var st = X.bitsState('', 5000), log = [], seed = 3;
+  for (var i = 0; i < 10000; i++) {
+    seed = (seed * 69069 + 1) >>> 0;
+    var c = seed % 5000, on = (seed >> 13) & 1;
+    X.setBit(st, c, on);
+    log.push([c, on]);
+  }
+  var big = [];
+  for (i = 0; i < log.length; i += 300) big.push({ at: i, marks: log.slice(i, i + 300) });
+  var rp2 = X.replayMarks(big, 5000, { perFrame: 100 });
+  while (rp2.next()) { /* replay */ }
+  assertEqual(X.packBits(rp2.bits, 5000), X.bitsB64(st), '10,000 taps in 34 chunks replay exactly (100 marks a frame)');
+})();
+
+group('wave K #15, #16: floss identity, needs, kitting, brand tables');
+(function () {
+  assertEqual([X.flossId('DMC', '04'), X.flossId('', '310'), X.flossId('Anchor', '0403')], ['dmc:4', 'dmc:310', 'anchor:403'], 'flossId');
+  var cells = []; for (var i = 0; i < 2000; i++) cells.push(i < 1500 ? 0 : 1);
+  var p1 = X.normalize({ palette: [{ brand: 'DMC', code: '310' }, { brand: 'DMC', code: '321' }, { brand: 'DMC', code: '3865', kind: 'back' }],
+    chart: { w: 50, h: 40, cells: cells } }, null);
+  var p2 = X.normalize({ palette: [{ brand: 'DMC', code: '310', keyCount: 9000 }] }, null);
+  var needs = X.flossNeeds(p1);
+  assertEqual([needs.dmc['310'].skeins, needs.dmc['321'].skeins, needs.dmc['3865'].skeins], [2, 1, 1], 'flossNeeds per colour (backstitch rows one skein)');
+  var kit = X.kitList([{ id: 'a', title: 'Pac-Man', data: p1 }, { id: 'b', title: 'Big', data: p2 }], { dmc: { 310: { owned: 3 } } });
+  assertEqual(kit.projects[0].rows.filter(function (r) { return r.code === '310'; })[0], { id: 'dmc:310', brand: 'DMC', code: '310', printed: '310', name: 'Black', need: 2, allocated: 2, buy: 0, setAside: [] },
+    'the first project takes 2 of the 3 skeins of DMC 310 you own');
+  var big310 = kit.projects[1].rows[0];
+  assertEqual([big310.need, big310.allocated, big310.setAside], [big310.need, 1, [{ id: 'a', n: 2 }]], 'the next one gets what is left, and sees 2 set aside for Pac-Man');
+  assertEqual(X.kitList([{ id: 'a', data: p1 }], [{ brand: 'DMC', code: '321', owned: 5 }]).projects[0].rows[1].buy, 0, 'Store.flossStash() arrays work too');
+  assertEqual(X.brandTables().map(function (t) { return t.brand; }), ['DMC'], 'brandTables: DMC only until a licensed table is loaded');
+  var none = X.convert('DMC', '310', 'Anchor');
+  assertTrue(none.none && /no Anchor colour table/.test(none.reason), 'convert to a brand with no table says so plainly', none.reason);
+  assertEqual(X.registerBrandTable({ brand: 'Anchor', rows: ['403|Black|1e1e1e'] }).ok, false, 'a table without provenance is refused');
+  var reg = X.registerBrandTable({ brand: 'Anchor', rows: ['403|Black|101010', '46|Red|c8102e', 'bad'], provenance: { source: 'test fixture', licence: 'CC0' } });
+  assertEqual([reg.ok, reg.n], [true, 2], 'a table with provenance registers (bad rows skipped)');
+  var cv = X.convert('DMC', '310', 'Anchor');
+  assertEqual([cv.code, cv.word, cv.provenance.source], ['403', 'close', 'test fixture'], 'DMC 310 -> Anchor 403, with a plain word and its source');
+  var back = X.convert('Anchor', '46', 'DMC');
+  assertTrue(back.brand === 'DMC' && back.deltaE < 10, 'and back from Anchor to DMC', JSON.stringify(back));
+  var subs = X.substitutes('DMC', '3846', { dmc: { 3845: { owned: 1 }, 310: { owned: 2 }, 3846: { owned: 1 } } }, 2);
+  assertEqual(subs.map(function (s) { return s.code; }), ['3845', '310'], 'substitutes: nearest in the stash first, never the colour itself');
+})();
+
+group('wave K #17, #20, #18: calculators, kinds, joining charts, templates');
+(function () {
+  var fp = X.fabricPlan({ w: 140, h: 140, count: 14 });
+  assertEqual([fp.design.wIn, fp.cut.wIn, fp.cuts[1].fits, fp.cuts[1].spareIn, fp.hoop], [10, 16, true, 2, null],
+    'fabricPlan: 10 in design, 16 in cut with 3 in margins, fits a fat quarter with 2 in spare, too big for a 14 in hoop');
+  assertEqual(X.fabricPlan({ w: 70, h: 70, count: 14 }).hoop.in, 9, 'a 5 in design wants a 9 in hoop (its diagonal plus an inch)');
+  assertEqual(X.fabricPlan({ w: 140, h: 140, count: 14, margin: 'hoop' }).cut.wIn, 14, 'hoop margins are 2 in');
+  assertEqual(fp.frame, { wIn: 16, hIn: 20, opening: { w: 10.5, h: 10.5 } }, 'and the frame to buy');
+  var ff = X.frameFit({ w: 160, h: 130 }, { wIn: 8, hIn: 10 }, [14, 16, 18, 22]);
+  assertEqual(ff.map(function (q) { return q.fits; }), [false, false, true, true], 'frameFit: an 8 x 10 frame needs 18 ct for 160 x 130');
+  assertEqual(X.normalize({ kind: 'diamond' }, null).kind, 'diamond', 'normalize keeps a kind');
+  assertEqual('kind' in X.normalize({ kind: 'cross' }, null), false, 'cross-stitch stores no kind (older saves unchanged)');
+  assertEqual('kind' in X.normalize({ kind: 'bogus' }, null), false, 'an unknown kind is dropped');
+  var cells = []; for (var i = 0; i < 1000; i++) cells.push(0);
+  var dd = X.normalize({ kind: 'diamond', palette: [{ code: '310' }], chart: { w: 40, h: 25, cells: cells } }, null);
+  assertEqual(X.materials(dd, 0).text, '1,000 drills · 6 packs of 200', 'diamond painting: drills in packs of 200 with 10% spare');
+  assertEqual(X.KINDS[X.kindOf(dd)].pageWord, 'section', 'and its own words');
+  assertTrue(/skeins/.test(X.materials(X.normalize({ palette: [{ code: '310' }], chart: { w: 40, h: 25, cells: cells } }, null), 0).text), 'cross-stitch is still skeins');
+  var fil = X.normalize({ kind: 'filet', palette: [{ code: '' }], chart: { w: 6, h: 1, cells: [-1, -1, 0, 0, 0, -1] } }, null);
+  assertEqual(X.filetRowText(X.writtenRows(fil).rows[0], fil), 'Row 1 (left to right): 2 open, 3 filled, 1 open', 'filet rows read as open and filled meshes');
+  /* joining four quadrants */
+  function quad(code, w, h, v) {
+    var c = []; for (var k = 0; k < w * h; k++) c.push(v);
+    return X.normalize({ palette: [{ code: code }, { code: '310' }], chart: { w: w, h: h, cells: c }, pages: [{ n: 1, region: { x: 0, y: 0, w: w, h: h } }] }, null);
+  }
+  var qs = [quad('321', 5, 4, 0), quad('310', 3, 4, 1), quad('321', 5, 2, 0), quad('700', 3, 2, 0)];
+  var lay = X.quadrantLayout(qs, ['xs-pokemon-tl', 'xs-pokemon-tr', 'xs-pokemon-bl', 'xs-pokemon-br']);
+  assertEqual(lay, [{ x: 0, y: 0 }, { x: 5, y: 0 }, { x: 0, y: 4 }, { x: 5, y: 4 }], 'quadrantLayout from tl / tr / bl / br names');
+  var st = X.bitsState('', 12); X.setBit(st, 0, 1); qs[3].progress.done = X.bitsB64(st); qs[3] = X.normalize(qs[3], null);
+  var j = X.joinCharts(qs.map(function (q, k) { return { data: q, x: lay[k].x, y: lay[k].y }; }));
+  assertEqual([j.w, j.h, j.data.palette.map(function (p) { return p.code + ':' + p.stitchCount; })], [8, 6, ['321:30', '310:12', '700:6']],
+    'joinCharts: one 8 x 6 chart, colours merged by code');
+  assertEqual([X.getBit(j.data.progress.done, 4 * 8 + 5), j.data.pages.map(function (p) { return p.region.x + ',' + p.region.y; })], [true, ['0,0', '5,0', '0,4', '5,4']],
+    'done squares and page regions move with their part');
+  var tp = X.templateFromProject({ craftData: X.normalize({ palette: [{ code: '310' }], chart: { w: 2, h: 1, cells: [0, 0] }, progress: { done: 'Aw==' }, parking: [{ key: 'x' }] }, null) });
+  assertEqual([tp.craftData.progress.doneCount, tp.craftData.parking.length, tp.craftData.chart.w], [0, 0, 2], 'templateFromProject keeps the chart, drops progress and parking');
+})();
+
+group('wave K #6: a chart set in a symbol font, from text items');
+(function () {
+  /* 12 x 10 chart, pitch 6.83, two symbol fonts; rows as "A A A" items,
+     gaps as wide spaces, a ruler "10", and the key's own big symbols */
+  var items = [], P = 6.83;
+  function item(s, x, y, font, size) { items.push({ str: s, transform: [size || 5.46, 0, 0, size || 5.46, x, y], fontName: font, width: s.length * 3 }); }
+  for (var r = 0; r < 10; r++) {
+    var y = 500 - r * P + (r % 2 ? 0.17 : 0);
+    item('O O O O O O', 100, y, 'fA');                         // cols 0-5
+    item(' ', 100 + 6 * P, y, 'fA');
+    if (r < 6) item('2 2 2 2', 100 + 8 * P, y + 0.2, 'fB');   // cols 8-11, rows 0-5
+  }
+  item('10', 100 + 9 * P, 515, 'fR', 6.83);
+  item('O', 30, 300, 'fK', 14); item('666', 60, 300, 'fT', 12);
+  item('2', 30, 280, 'fK2', 14); item('3347', 60, 280, 'fT', 12);
+  item('310', 60, 260, 'fT', 12);
+  var gc = X.glyphCells(items, { maxSize: 8 });
+  assertEqual([gc.length, Math.abs(gc.pitch - 6.83) < 0.03], [84, true], 'glyphCells: one per symbol, rulers and words left out, pitch found across baselines');
+  var entries = [{ code: '666', kind: 'cross' }, { code: '3347', kind: 'cross' }, { code: '310', kind: 'cross', stitchCount: 0 }];
+  var ents = X.keySymbolCodes(items, entries);
+  assertEqual(ents.map(function (e) { return e.symbolCode || null; }), [{ font: 'fK', code: 'O' }, { font: 'fK2', code: '2' }, null], 'keySymbolCodes: the symbol printed on each key row');
+  var res = X.gridFromGlyphs(gc, { entries: [{ code: '666', kind: 'cross', symbol: 'O' }, { code: '3347', kind: 'cross', symbol: '2' }, { code: '310', kind: 'cross' }] });
+  assertEqual([res.ok, res.w, res.h, res.palette[0].stitchCount, res.palette[1].stitchCount], [true, 12, 10, 60, 24], 'gridFromGlyphs: the chart, matched by the printed symbol');
+  assertTrue(/1 key colour has no symbol/.test(res.warnings.join(' ')), 'a key colour with no symbol in the chart is said out loud', res.warnings.join(' | '));
+  var big = X.gridFromGlyphs(gc, { entries: [{ code: '666', symbol: 'O' }], design: { w: 14, h: 12 } });
+  assertEqual([big.w, big.h, big.unresolved.length], [14, 12, 1], 'a printed size bigger than the symbols is kept, and an unknown symbol is a placeholder');
+  assertEqual(X.gridFromGlyphs([], {}).ok, false, 'no symbols: ok false');
+})();
+
+group('wave K #19: the printable chart knows the progress');
+(function () {
+  var cells = []; for (var i = 0; i < 40 * 20; i++) cells.push(i % 2);
+  var d = X.normalize({ palette: [{ code: '310' }, { code: '321' }], chart: { w: 40, h: 20, cells: cells },
+    pages: [{ n: 8, label: 'Page 9', region: { x: 0, y: 0, w: 20, h: 20 } }, { n: 9, label: 'Page 10', region: { x: 20, y: 0, w: 20, h: 20 } }] }, null);
+  var st = X.bitsState('', 800);
+  for (var y = 0; y < 20; y++) for (var x = 0; x < 20; x++) X.setBit(st, y * 40 + x, 1);
+  X.setBit(st, 25, 1);
+  d.progress.done = X.bitsB64(st);
+  d = X.parkAt(X.normalize(d, null), { x: 30, y: 5, paletteIndex: 1, corner: 'br' });
+  var plain = X.printableHTML(d, {});
+  assertEqual(plain.indexOf('class="done"') < 0 && plain.indexOf('class="park"') < 0, true, 'without the options the print is as before');
+  var html = X.printableHTML(d, { progress: true, pageNumbers: 'original', parking: true, overlap: 2 });
+  assertEqual((html.match(/class="page chart-page"/g) || []).length, 2, 'pageNumbers original: one page per printed page');
+  assertEqual((html.match(/<span class="tag">p(9|10)<\/span>/g) || []).length, 2, 'labelled p9 and p10, as on paper');
+  assertEqual((html.match(/class="done"/g) || []).length, 2, 'done squares hatched on both (p10 has one, plus p9\'s overlap)');
+  assertEqual((html.match(/class="park"/g) || []).length, 1, 'the parked thread is marked');
+  assertEqual((html.match(/class="overlap"/g) || []).length, 2, 'and two squares of overlap are greyed');
+  var left = X.printableHTML(d, { progress: true, pageNumbers: 'original', remaining: true });
+  assertEqual((left.match(/class="page chart-page"/g) || []).length, 1, 'print what\'s left: a finished page is skipped');
+})();
+
+group('wave K follow-ups: goals kept, OCR key lines, replay frames');
+(function () {
+  var d = X.normalize({ palette: [{ code: '310' }, { code: '321' }], chart: { w: 2, h: 1, cells: [0, 1] },
+    goals: [{ id: 'a', kind: 'page', page: 8, by: 1800000000000, label: 'finish page 9 by Sunday', createdAt: 5 },
+      { id: 'b', kind: 'perDay', n: 500 }, { kind: 'colour', color: 1 }, { kind: 'colour', color: 7 }, { kind: 'bogus' }, 'x'] }, null);
+  assertEqual(d.goals, [{ id: 'a', kind: 'page', createdAt: 5, page: 8, by: 1800000000000, label: 'finish page 9 by Sunday' },
+    { id: 'b', kind: 'perDay', createdAt: 0, n: 500 }, { id: 'g2', kind: 'colour', createdAt: 0, color: 1 }],
+    'normalize keeps goals (bad kinds and colours that are not there dropped)');
+  assertEqual(X.normalize(d, null).goals, d.goals, 'idempotent');
+  assertEqual('goals' in X.normalize({ palette: [] }, null), false, 'a save with no goals gains no goals key');
+  assertEqual(X.toCountsMode(d).goals.length, 3, 'counts mode keeps them');
+  var tap = X.parseKey('Key to colours\nDMC Cotton 816 garnet\nDMC Cotton 796 royal blue\nDMC Cotton 597 turquoise\n' +
+    'DMC Cotton 909 emerald green\nDMC Cotton 913 nile green\nDMC Cotton 938 coffee brown\nDMC Cotton 783 gold\nDMC Cotton White');
+  assertEqual(tap.entries.map(function (e) { return e.code; }), ['816', '796', '597', '909', '913', '938', '783', 'White'],
+    'parseKey reads the OCR line shape "DMC Cotton 816 garnet" (the tapestry key)');
+  assertEqual(tap.entries[0].name, 'garnet', 'keeping the printed name');
+  assertEqual(X.parseKey('DMC Cotton 9999 rose\nDMC Cotton 8121 sky\nDMC Cotton 4444 sea').entries.length, 0,
+    'a code the DMC table does not know after "DMC Cotton" stays blank');
+  var orr = X.parseKey('^ Crimson 120\nLt Red 6\nSteel Blue 108\n\\ Yellow 9\nWhite 1\nBlack 12\nDk Moss Green 60\nX Purple 32\nJ. & P. Coats');
+  assertEqual(orr.entries.length, 0, 'J. & P. Coats numbers are not read as DMC codes');
+  assertTrue(/J\. & P\. Coats numbers/.test(orr.warnings.join(' ')), 'and the warning says why', orr.warnings.join(' | '));
+  /* Store.readMarks() shape -> replay frames carry bits */
+  var rp = X.replayMarks([{ at: 10, marks: [[0, 1], [3, 1]] }, { at: 20, marks: [[3, 0]] }], 4);
+  var f1 = rp.next();
+  assertEqual([f1.at, Array.prototype.slice.call(f1.bits), f1.changed], [10, [1, 0, 0, 1], [0, 3]], 'a replay frame carries at, bits (one byte a square) and changed');
+  var f2 = rp.next();
+  assertEqual([f2.bits === f1.bits, Array.prototype.slice.call(f2.bits), rp.next()], [true, [1, 0, 0, 0], null], 'bits is one shared array (copy to keep a frame); null at the end');
+})();
+
+group('wave K audit fixes: keyCount 0, glyph soup names, Anchor leading zeros');
+(function () {
+  var pal = X.normalize({ palette: [{ code: '310', keyCount: 0 }, { code: '321' }, { code: '322', keyCount: 12 }, { code: '666', keyCount: 'x' }] }, null).palette;
+  assertEqual([pal[0].keyCount, 'keyCount' in pal[1], pal[2].keyCount, 'keyCount' in pal[3]], [0, false, 12, false],
+    'normalize: a printed 0 stays 0, an absent or unreadable count stays absent (audit D21)');
+  var k = X.parseKey('Color Key\nDMC Anchor Madeira\n| 310 403 2400 Zlnn9999MM\n= 321 9046 0510 3Zlllnn9MMM\n' +
+    '~ 666 46 0210 Bright Red\nBackstitch\n/ 3799 236 1713 fZZyYiiii');
+  var names = k.entries.map(function (e) { return e.code + ':' + e.name + (e.nameUnreadable ? '!' : ''); });
+  assertEqual(k.entries.filter(function (e) { return /\d/.test(e.name || ''); }).length, 0, 'parseKey: no colour name is a run of chart symbols');
+  assertTrue(names.indexOf('666:Bright Red') >= 0 && k.entries.some(function (e) { return e.nameUnreadable; }),
+    'a real name is kept; a soup name is emptied and flagged nameUnreadable', names.join(' | '));
+  assertTrue(/could not be read \(chart symbols/.test(k.warnings.join(' ')), 'and the warning says so', k.warnings.join(' | '));
+  var a = X.parseKey('Anchor\nX Anchor 0400 Grey\n+ Anchor 0403 Black\nO Anchor 0002 White');
+  assertEqual(a.entries.map(function (e) { return e.brand + ' ' + e.code; }), ['Anchor 0400', 'Anchor 0403', 'Anchor 0002'],
+    'Anchor codes keep their leading zeros as printed, and stay Anchor (never DMC 400 / 403 / 2)');
+  assertEqual([X.flossId('Anchor', '0400'), X.flossId('DMC', '400')], ['anchor:400', 'dmc:400'], 'and their identity keeps the brand');
+})();
+
+group('wave K: budgets on a 500 x 500 chart');
+(function () {
+  var w = 500, h = 500, cells = new Int16Array(w * h), i, seed = 7;
+  function rnd() { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; }
+  for (i = 0; i < cells.length; i++) cells[i] = ((i % w) >> 4) % 40;
+  for (i = 0; i < 20000; i++) cells[Math.floor(rnd() * cells.length)] = 40 + Math.floor(rnd() * 20);
+  var pal = []; for (i = 0; i < 60; i++) pal.push({ code: String(100 + i) });
+  var pages = []; for (i = 0; i < 25; i++) pages.push({ n: i, region: { x: (i % 5) * 100, y: Math.floor(i / 5) * 100, w: 100, h: 100 } });
+  var d = X.normalize({ palette: pal, chart: { w: w, h: h, cells: cells }, pages: pages }, null);
+  function ms(f) { var t0 = performance.now(); f(); return performance.now() - t0; }
+  var t = {
+    bulk: ms(function () { X.bulkPlan(d, { color: 3 }); }),
+    pages: ms(function () { X.pageProgress(d); }),
+    next: ms(function () { X.nextBlockFor(d, 3, { x: 250, y: 250 }, 'right'); }),
+    islands: ms(function () { X.islands(d, 45); }),
+    route: ms(function () { X.islandRoute(d, 45, { x: 0, y: 0 }, { max: 200 }); }),
+    at: ms(function () { X.islandAt(d, 250, 250); }),
+    rows: ms(function () { X.writtenRows(d, { chunk: 10, done: true, scope: { page: 12 } }); }),
+    totals: ms(function () { X.totals(d); })
+  };
+  note('500 x 500 (ms): ' + Object.keys(t).map(function (k) { return k + ' ' + t[k].toFixed(1); }).join(', '));
+  assertTrue(t.bulk < 60 && t.pages < 60 && t.next < 60 && t.rows < 60 && t.totals < 150, 'bulk plan, page progress, next block, a page of rows and totals each stay interactive');
+  assertTrue(t.islands < 150 && t.at < 250, 'islands of one colour and the island readout too');
+  assertTrue(t.route < 1500, 'a 200-hop route is a one-off sheet computation (under 1.5 s)', t.route.toFixed(0) + ' ms');
 })();
 
 /* =====================================================================

@@ -508,7 +508,8 @@
         row = { y: key, order: lineDir * key, items: [] };
         rows.push(row);
       }
-      row.items.push({ x: x, end: x + w, h: h, str: it.str, turned: isRotated(it) !== sideways });  // turned: against the page
+      row.items.push({ x: x, end: x + w, h: h, str: it.str, turned: isRotated(it) !== sideways,  // turned: against the page
+        font: it.fontName || '', box: itemBox(it, w) });   // wave K: for layout() only, never read by the text pipeline
     }
     // A total order, so two runs over the same page can never disagree: ties
     // on the baseline are broken on the first item's position.
@@ -2404,7 +2405,9 @@
       });
     });
     lines = moveInterruptions(lines, bodyH);
-    lines.forEach(function (l) { delete l.col; delete l.row; });
+    // wave K: where each line sits (layout() reads it; readDoc and textOf
+    // copy only the text fields, so the text output never sees it)
+    lines.forEach(function (l) { l.geo = rowGeo(l.row, l.col); delete l.col; delete l.row; });
     pageBodyH = 0;
     return { lines: lines, split: res.split };
   }
@@ -2866,6 +2869,7 @@
     var caseState = newCaseState();   // restoreCase, document-wide
     var applied = {};
     var fontsOn = {};
+    var ocrPages = [];
     var chain = Promise.resolve();
     var noteFonts = function (p, items) {
       var f = {};
@@ -2878,6 +2882,22 @@
         if (isCancelled(signal)) throw abortError();
         if (onProgress) {
           try { onProgress(p, total); } catch (e) { /* UI errors are not our problem */ }
+        }
+        // wave K: OCR lines attached to an image-only page (handle.setPageText)
+        var given = typeof opts.pageText === 'function' ? opts.pageText(p) : null;
+        if (given) {
+          checked[p] = true;
+          fontsOn[p] = {};
+          ocrPages.push(p);
+          pages.push({
+            keys: [],
+            number: p,
+            ocr: true,
+            lines: given.map(function (l) {
+              return { text: normUnicode(l.text), margin: !!l.margin, edge: l.edge == null ? 1 : l.edge, pos: l.pos == null ? 0.5 : l.pos };
+            })
+          });
+          return null;
         }
         return doc.getPage(p).then(function (page) {
           return visibleItems(page, null, caseState).then(function (vis) {
@@ -2986,7 +3006,10 @@
         columnsDetected: columnsDetected,
         emptyPages: emptyPages,
         garbled: garbleScore(rawSample).garbled,
-        ocrNoise: ocrNoise(text)
+        ocrNoise: ocrNoise(text),
+        // wave K: pages whose text was read from a picture (setPageText):
+        // the UI must say "check every row" for them
+        ocrPages: ocrPages.slice().sort(function (a, b) { return a - b; })
       };
     });
   }
@@ -3509,6 +3532,7 @@
         }
 
         var caseState = newCaseState();   // see restoreCase: the pages read so far
+        var attached = {};                // wave K: page -> OCR lines (setPageText)
 
         function textOf(pageNo) {
           var stop = guard();
@@ -3545,6 +3569,7 @@
             onProgress: xopts.onProgress,
             maxPages: xopts.maxPages,
             allowEmpty: !!xopts.allowEmpty,
+            pageText: function (p) { return attached[p] || null; },
             signal: both
           }).then(null, function (err) { throw friendlyError(err); });
         }
@@ -3616,7 +3641,7 @@
           });
         }
 
-        return {
+        var handle = {
           doc: doc,
           numPages: doc.numPages || 0,
           textOf: textOf,
@@ -3624,10 +3649,1723 @@
           renderPage: renderPage,
           destroy: release
         };
+        // wave K: page structure, glyphs, layers, regions (section 8)
+        return addStructure(handle, {
+          doc: doc,
+          guard: guard,
+          stopped: function () { return isCancelled(signal) || destroyed; },
+          caseState: caseState,
+          attached: attached
+        });
       })
       .then(null, function (err) {
         throw friendlyError(err);
       });
+  }
+
+  /* ================================================================== *
+   * 8. Page structure (wave K): where things are, not only what they say
+   *
+   * Everything here is additive. The text pipeline above is untouched;
+   * buildRows only gives each row item its font and page box, and
+   * pageLines each line a `geo`, which readDoc and textOf never copy.
+   * The contract is docs/wave-k/api/pdftext.md.
+   *
+   *   handle.layout(n)        lines with boxes and fonts, image draws,
+   *                           drawing regions, captions, layers, a kind hint
+   *   handle.textIn(n, rect)  the text inside a rectangle
+   *   handle.glyphs(n)        every glyph: font, code, unicode, box, advance
+   *   handle.renderGlyph(font, code)  one glyph of an embedded font
+   *   handle.layers()         optional content (size layers)
+   *   handle.renderRegion(n, rect)    any rectangle at any density, capped
+   *   handle.renderTiles(n, rect, opts, onTile)
+   *   handle.pageKinds()      a cheap per-page guess with reasons
+   *
+   * Coordinates are the page as shown: pdf.js viewport at scale 1, origin
+   * top left, y down; `nbox` is the same box over the page's width and
+   * height (0..1).
+   * ================================================================== */
+  var LAYOUT_VERSION = 1;
+  var MAX_RENDER_PIXELS = 4194304;     // 2048 x 2048: a phone's canvas is safe below this
+  var MAX_RENDER_SIDE = 4096;
+  var LAYOUT_CACHE = 8;                // pages kept on a handle
+  var MAX_GLYPHS = 120000;             // a 500 x 500 symbol chart page fits
+  var MAX_SEGMENTS = 60000;            // axis-aligned segments kept per page for grid checks
+  var BACKGROUND_SHARE = 0.85;         // a path this much of the page is the page's ground
+  var PANEL_SHARE = 0.5;               // ...a fill this big is a panel behind other things
+  // "Figure 3", "Fig. 3", "DIAGRAM B1", "Diagram B"; not "(Figure 3)", which
+  // is a step naming its figure, not the caption printed under it
+  var CAPTION_RE = /^(fig(?:ure)?s?\.?|diagram|diag\.|illustration|illus\.|chart|photo|picture|image)\s*([A-Z]?[0-9]{1,3}[a-z]?|[A-Z](?![a-z]))\b/i;
+  var CAPTION_AGAIN_RE = /\s(?=(?:fig(?:ure)?s?\.?|diagram|diag\.)\s*(?:[A-Z]?[0-9]{1,3}[a-z]?|[A-Z](?![a-z]))\b)/ig;
+
+  /** A path that is one axis-aligned rectangle: a `re`, or four or five
+   * points each on two edges of the box (corners only). */
+  function isRectPath(ops, coords, OPS) {
+    if (!ops || !coords) return false;
+    var rects = 0, other = 0;
+    for (var i = 0; i < ops.length; i++) {
+      if (ops[i] === OPS.rectangle) rects++;
+      else if (ops[i] === OPS.moveTo || ops[i] === OPS.lineTo) other++;
+      else if (ops[i] !== OPS.closePath) return false;
+    }
+    if (rects) return rects === 1 && !other;
+    if (other < 4 || other > 5 || coords.length < 8) return false;
+    var xs = [], ys = [];
+    for (var k = 0; k + 1 < coords.length; k += 2) { xs.push(coords[k]); ys.push(coords[k + 1]); }
+    var x0 = Math.min.apply(null, xs), x1 = Math.max.apply(null, xs), y0 = Math.min.apply(null, ys), y1 = Math.max.apply(null, ys);
+    var e = Math.max(0.01, Math.min(x1 - x0, y1 - y0) * 0.02);
+    for (k = 0; k < xs.length; k++) {
+      var onX = Math.abs(xs[k] - x0) <= e || Math.abs(xs[k] - x1) <= e;
+      var onY = Math.abs(ys[k] - y0) <= e || Math.abs(ys[k] - y1) <= e;
+      if (!onX || !onY) return false;
+    }
+    return x1 - x0 > 0 && y1 - y0 > 0;
+  }
+  var CAPTION_MAX_CHARS = 90;
+
+  /** A text item's box in PDF space [x0, y0, x1, y1]: its advance by its
+   * font height, a fifth of it below the baseline. Any rotation. */
+  function itemBox(it, w) {
+    var t = it && it.transform;
+    if (!t || t.length < 6) return null;
+    var size = Math.sqrt(t[0] * t[0] + t[1] * t[1]) || Math.abs(t[3]) || 0;
+    if (!(size > 0)) return [t[4], t[5], t[4], t[5]];
+    return boxM(t, 0, -0.22, (w > 0 ? w : 0) / size, 0.78);
+  }
+
+  /** {box (PDF space), font, size, col} of a built row. */
+  function rowGeo(row, col) {
+    if (!row || !row.items) return null;
+    var b = null, fonts = {}, best = '', bestN = -1, size = 0;
+    row.items.forEach(function (it) {
+      if (it.box) b = b ? [Math.min(b[0], it.box[0]), Math.min(b[1], it.box[1]), Math.max(b[2], it.box[2]), Math.max(b[3], it.box[3])] : it.box.slice();
+      var n = (it.str || '').replace(/\s/g, '').length;
+      if (it.font) fonts[it.font] = (fonts[it.font] || 0) + n;
+      if (n && it.h > size) size = it.h;
+    });
+    for (var f in fonts) if (fonts[f] > bestN) { bestN = fonts[f]; best = f; }
+    return { box: b, font: best, size: size, col: typeof col === 'number' ? col : 0 };
+  }
+
+  /** PDF-space box -> {x0,y0,x1,y1} in the page as shown (viewport transform vt). */
+  function toViewBox(vt, b) {
+    if (!b) return null;
+    var q = boxM(vt, b[0], b[1], b[2], b[3]);
+    return { x0: r2(q[0]), y0: r2(q[1]), x1: r2(q[2]), y1: r2(q[3]) };
+  }
+  function r2(v) { return Math.round(v * 100) / 100; }
+  function r4(v) { return Math.round(v * 10000) / 10000; }
+  function normBox(b, W, H) {
+    if (!b || !(W > 0) || !(H > 0)) return null;
+    return { x0: r4(b.x0 / W), y0: r4(b.y0 / H), x1: r4(b.x1 / W), y1: r4(b.y1 / H) };
+  }
+  function vArea(b) { return b ? Math.max(0, b.x1 - b.x0) * Math.max(0, b.y1 - b.y0) : 0; }
+  function vCut(a, b) {
+    return { x0: Math.max(a.x0, b.x0), y0: Math.max(a.y0, b.y0), x1: Math.min(a.x1, b.x1), y1: Math.min(a.y1, b.y1) };
+  }
+  function vUnion(a, b) {
+    if (!a) return { x0: b.x0, y0: b.y0, x1: b.x1, y1: b.y1 };
+    return { x0: Math.min(a.x0, b.x0), y0: Math.min(a.y0, b.y0), x1: Math.max(a.x1, b.x1), y1: Math.max(a.y1, b.y1) };
+  }
+  /** A caller's rect in page units ({x0,y0,x1,y1}, or x/y/w/h; `norm` for 0..1). */
+  function readRect(rect, W, H) {
+    if (!rect) return { x0: 0, y0: 0, x1: W, y1: H };
+    var x0 = rect.x0, y0 = rect.y0, x1 = rect.x1, y1 = rect.y1;
+    if (x0 == null && rect.x != null) { x0 = rect.x; y0 = rect.y; x1 = rect.x + (rect.w || rect.width || 0); y1 = rect.y + (rect.h || rect.height || 0); }
+    x0 = +x0 || 0; y0 = +y0 || 0; x1 = +x1 || 0; y1 = +y1 || 0;
+    if (rect.norm) { x0 *= W; x1 *= W; y0 *= H; y1 *= H; }
+    return { x0: Math.min(x0, x1), y0: Math.min(y0, y1), x1: Math.max(x0, x1), y1: Math.max(y0, y1) };
+  }
+  function hexOf(a) {
+    if (!a || a.length < 3) return null;
+    var h = '#';
+    for (var i = 0; i < 3; i++) h += ('0' + Math.max(0, Math.min(255, Math.round(+a[i] || 0))).toString(16)).slice(-2);
+    return h;
+  }
+  function baseFontName(name) { return String(name || '').replace(/^[A-Z]{6}\+/, ''); }
+
+  /**
+   * One walk of a page's operator list: image draws, painted paths, glyphs
+   * and the optional-content layer each sits in. Boxes in PDF space.
+   * @param {{fnArray:number[], argsArray:Array}} ol
+   * @param {Object} OPS pdfjsLib.OPS
+   * @param {{glyphs?:boolean}} [opts]
+   * @returns {{images, paths, glyphs, layers, ops, segments}}
+   */
+  function pageGraphics(ol, OPS, opts) {
+    opts = opts || {};
+    var wantGlyphs = opts.glyphs !== false;
+    var fns = (ol && ol.fnArray) || [], args = (ol && ol.argsArray) || [];
+    var gs = { ctm: [1, 0, 0, 1, 0, 0], clip: null, fill: '#000000', stroke: '#000000', fillPat: false,
+      lw: 1, font: '', fs: 10, cs: 0, ws: 0, hs: 1, lead: 0, rise: 0, mode: 0, ca: 1 };
+    var stack = [], oc = [];
+    var tm = [1, 0, 0, 1, 0, 0], tlm = [1, 0, 0, 1, 0, 0];
+    var images = [], paths = [], glyphs = [], layers = {}, segments = 0;
+    var pending = null;              // the path built and not yet painted
+    var runNo = 0;
+    var copy = function (g) { var o = {}; for (var k in g) o[k] = g[k]; return o; };
+    var layer = function () {
+      for (var i = oc.length - 1; i >= 0; i--) if (oc[i]) return oc[i];
+      return null;
+    };
+    var withClip = function (b) {
+      if (!gs.clip) return { box: b, clipped: false };
+      var c = boxCut(b, gs.clip);
+      return { box: c, clipped: boxArea(c) < boxArea(b) * 0.98 };
+    };
+    var addImage = function (id, w, h, mask, inline, m) {
+      var b = boxM(m || gs.ctm, 0, 0, 1, 1), cl = withClip(b);
+      if (!(boxArea(cl.box) > 0)) return;
+      images.push({ id: typeof id === 'string' ? id : null, op: i, box: cl.box, full: b, px: w > 0 && h > 0 ? { w: w, h: h } : null,
+        mask: !!mask, inline: !!inline, layer: layer(), clipped: cl.clipped, colour: mask ? gs.fill : null });
+    };
+    /* the axis-aligned segments of a path, for the grid check */
+    var segsOf = function (ops, coords, m) {
+      var vx = [], hy = [], rects = [];
+      var x = 0, y = 0, sx = 0, sy = 0, k = 0;
+      var lx = Infinity, ly = Infinity, hx = -Infinity, hy2 = -Infinity;
+      var pt = function (px, py) {
+        if (px < lx) lx = px; if (px > hx) hx = px;
+        if (py < ly) ly = py; if (py > hy2) hy2 = py;
+      };
+      var seg = function (x0, y0, x1, y1) {
+        var p = applyM(m, x0, y0), q = applyM(m, x1, y1);
+        var dx = Math.abs(q[0] - p[0]), dy = Math.abs(q[1] - p[1]);
+        if (dx < 0.3 && dy > 1) vx.push((p[0] + q[0]) / 2, Math.min(p[1], q[1]), Math.max(p[1], q[1]));
+        else if (dy < 0.3 && dx > 1) hy.push((p[1] + q[1]) / 2, Math.min(p[0], q[0]), Math.max(p[0], q[0]));
+      };
+      var full = true;
+      for (var i = 0; i < ops.length; i++) {
+        var op = ops[i];
+        var keepSeg = segments < MAX_SEGMENTS;
+        if (!keepSeg) full = false;
+        if (op === OPS.moveTo) { x = sx = coords[k]; y = sy = coords[k + 1]; pt(x, y); k += 2; }
+        else if (op === OPS.lineTo) {
+          if (keepSeg) { seg(x, y, coords[k], coords[k + 1]); segments++; }
+          x = coords[k]; y = coords[k + 1]; pt(x, y); k += 2;
+        }
+        else if (op === OPS.curveTo) { pt(coords[k], coords[k + 1]); pt(coords[k + 2], coords[k + 3]); x = coords[k + 4]; y = coords[k + 5]; pt(x, y); k += 6; }
+        else if (op === OPS.curveTo2 || op === OPS.curveTo3) { pt(coords[k], coords[k + 1]); x = coords[k + 2]; y = coords[k + 3]; pt(x, y); k += 4; }
+        else if (op === OPS.closePath) { if (keepSeg) seg(x, y, sx, sy); x = sx; y = sy; }
+        else if (op === OPS.rectangle) {
+          var rx0 = coords[k], ry0 = coords[k + 1], rx1 = coords[k] + coords[k + 2], ry1 = coords[k + 1] + coords[k + 3];
+          pt(rx0, ry0); pt(rx1, ry1);
+          if (keepSeg) {
+            var rb = boxM(m, rx0, ry0, rx1, ry1);
+            rects.push(rb[0], rb[1], rb[2], rb[3]);
+            segments++;
+          }
+          x = sx = rx0; y = sy = ry0;
+          k += 4;
+        }
+      }
+      return { vx: vx, hy: hy, rects: rects, bb: isFinite(lx) ? [lx, ly, hx, hy2] : null, full: full };
+    };
+    var paint = function (fill, stroke) {
+      var p = pending;
+      pending = null;
+      if (!p) return;
+      var b = p.box;
+      if (stroke) {
+        var pad = Math.max(0.25, gs.lw * Math.sqrt(Math.abs(gs.ctm[0] * gs.ctm[3] - gs.ctm[1] * gs.ctm[2])) / 2);
+        b = [b[0] - pad, b[1] - pad, b[2] + pad, b[3] + pad];
+      }
+      var cl = withClip(b);
+      if (!(cl.box[2] >= cl.box[0] && cl.box[3] >= cl.box[1])) return;
+      if (boxArea(cl.box) <= 0 && !(cl.box[2] - cl.box[0] > 0 || cl.box[3] - cl.box[1] > 0)) return;
+      paths.push({ box: cl.box, fill: fill ? (gs.fillPat ? 'pattern' : gs.fill) : null, stroke: stroke ? gs.stroke : null,
+        rect: p.rect, nops: p.nops, layer: layer(), vx: p.segs.vx, hy: p.segs.hy, rects: p.segs.rects,
+        alpha: gs.ca });
+    };
+    var moveText = function (x, y) {
+      tlm = [tlm[0], tlm[1], tlm[2], tlm[3], tlm[4] + x * tlm[0] + y * tlm[2], tlm[5] + x * tlm[1] + y * tlm[3]];
+      tm = tlm.slice();
+    };
+    var show = function (list) {
+      if (!list || !list.length) return;
+      runNo++;
+      var adv = 0, m = mulM(gs.ctm, tm);
+      var scale = Math.sqrt(Math.abs(m[0] * m[3] - m[1] * m[2])) || 1;
+      for (var i = 0; i < list.length; i++) {
+        var gl = list[i];
+        if (typeof gl === 'number') { adv -= gl * gs.fs / 1000 * gs.hs; continue; }
+        if (!gl) continue;
+        var w = typeof gl.width === 'number' ? gl.width : 500;
+        var a = (w * gs.fs / 1000 + gs.cs + (gl.isSpace ? gs.ws : 0)) * gs.hs;
+        if (wantGlyphs && glyphs.length < MAX_GLYPHS) {
+          var gb = boxM(m, adv, gs.rise - 0.2 * gs.fs, adv + w * gs.fs / 1000 * gs.hs, gs.rise + 0.8 * gs.fs);
+          glyphs.push({ font: gs.font, code: gl.originalCharCode, unicode: typeof gl.unicode === 'string' ? gl.unicode : '',
+            fontChar: gl.fontChar, box: gb, advance: a * scale, size: gs.fs * scale, space: !!gl.isSpace,
+            invisible: gs.mode === 3 || gs.mode === 7, run: runNo, layer: layer() });
+        }
+        adv += a;
+      }
+      tm = [tm[0], tm[1], tm[2], tm[3], tm[4] + adv * tm[0], tm[5] + adv * tm[1]];
+    };
+    for (var i = 0; i < fns.length; i++) {
+      var fn = fns[i], a = args[i] || [];
+      switch (fn) {
+        case OPS.save: stack.push(copy(gs)); break;
+        case OPS.restore: if (stack.length) gs = stack.pop(); break;
+        case OPS.transform: gs.ctm = mulM(gs.ctm, a); break;
+        case OPS.paintFormXObjectBegin:
+          stack.push(copy(gs));
+          if (a[0] && a[0].length === 6) gs.ctm = mulM(gs.ctm, a[0]);
+          if (a[1] && a[1].length === 4) gs.clip = boxCut(gs.clip, boxM(gs.ctm, a[1][0], a[1][1], a[1][2], a[1][3]));
+          break;
+        case OPS.paintFormXObjectEnd: if (stack.length) gs = stack.pop(); break;
+        case OPS.beginGroup: stack.push(copy(gs)); break;
+        case OPS.endGroup: if (stack.length) gs = stack.pop(); break;
+        case OPS.beginMarkedContentProps:
+          var id = null;
+          if (a[0] === 'OC' && a[1]) {
+            if (a[1].type === 'OCG' && a[1].id) id = a[1].id;
+            else if (a[1].ids && a[1].ids.length) id = a[1].ids[0];
+            if (id) layers[id] = true;
+          }
+          oc.push(id);
+          break;
+        case OPS.beginMarkedContent: oc.push(null); break;
+        case OPS.endMarkedContent: oc.pop(); break;
+        case OPS.setGState:
+          (a[0] || []).forEach(function (kv) {
+            if (!kv) return;
+            if (kv[0] === 'ca') gs.ca = kv[1];
+            else if (kv[0] === 'LW') gs.lw = +kv[1] || 0;
+            else if (kv[0] === 'Font' && kv[1] && typeof kv[1][1] === 'number') gs.fs = kv[1][1];
+          });
+          break;
+        case OPS.setLineWidth: gs.lw = +a[0] || 0; break;
+        case OPS.setFillRGBColor: gs.fill = hexOf(a) || gs.fill; gs.fillPat = false; break;
+        case OPS.setStrokeRGBColor: gs.stroke = hexOf(a) || gs.stroke; break;
+        case OPS.setFillColorN: if (a[0] === 'TilingPattern' || a[0] === 'Shading' || typeof a[0] === 'string') gs.fillPat = true; break;
+        case OPS.constructPath:
+          var mm = a[2];
+          if (!(mm && mm.length === 4 && isFinite(mm[0]) && isFinite(mm[2]))) { pending = null; break; }
+          var pb = boxM(gs.ctm, mm[0], mm[2], mm[1], mm[3]);
+          // pdf.js leaves a curve's own points out of the min/max: take
+          // every coordinate (control points too: a box that holds the curve)
+          var sg = segsOf(a[0] || [], a[1] || [], gs.ctm);
+          if (sg.bb) {
+            var cb = boxM(gs.ctm, sg.bb[0], sg.bb[1], sg.bb[2], sg.bb[3]);
+            pb = [Math.min(pb[0], cb[0]), Math.min(pb[1], cb[1]), Math.max(pb[2], cb[2]), Math.max(pb[3], cb[3])];
+          }
+          if (pending) {      // two builds before one paint: one path
+            pb = [Math.min(pb[0], pending.box[0]), Math.min(pb[1], pending.box[1]), Math.max(pb[2], pending.box[2]), Math.max(pb[3], pending.box[3])];
+          }
+          if (pending) {
+            sg.vx = pending.segs.vx.concat(sg.vx); sg.hy = pending.segs.hy.concat(sg.hy); sg.rects = pending.segs.rects.concat(sg.rects);
+          }
+          pending = { box: pb, rect: !pending && isRectPath(a[0], a[1], OPS), nops: (a[0] || []).length + (pending ? pending.nops : 0), segs: sg };
+          break;
+        case OPS.clip:
+        case OPS.eoClip:
+          if (pending) gs.clip = boxCut(gs.clip, pending.box);
+          break;
+        case OPS.endPath: pending = null; break;
+        case OPS.fill:
+        case OPS.eoFill: paint(true, false); break;
+        case OPS.stroke:
+        case OPS.closeStroke: paint(false, true); break;
+        case OPS.fillStroke:
+        case OPS.eoFillStroke:
+        case OPS.closeFillStroke:
+        case OPS.closeEOFillStroke: paint(true, true); break;
+        case OPS.shadingFill:
+          if (gs.clip) paths.push({ box: gs.clip.slice(), fill: 'shading', stroke: null, rect: true, nops: 1, layer: layer(), vx: [], hy: [], rects: [], alpha: gs.ca });
+          break;
+        case OPS.paintImageXObject: addImage(a[0], a[1], a[2], false, false); break;
+        case OPS.paintInlineImageXObject: addImage(null, a[0] && a[0].width, a[0] && a[0].height, false, true); break;
+        case OPS.paintImageMaskXObject: addImage(null, a[0] && a[0].width, a[0] && a[0].height, true, true); break;
+        case OPS.paintSolidColorImageMask: addImage(null, 1, 1, true, true); break;
+        case OPS.paintImageXObjectRepeat:
+          // [id, scaleX, scaleY, positions]: one draw per position
+          var pos = a[3] || [];
+          for (var q = 0; q + 1 < pos.length; q += 2) {
+            addImage(a[0], 0, 0, false, false, mulM(gs.ctm, [a[1], 0, 0, a[2], pos[q], pos[q + 1]]));
+          }
+          break;
+        case OPS.paintImageMaskXObjectRepeat:
+          var mp = a[5] || [];
+          for (var r = 0; r + 1 < mp.length; r += 2) {
+            addImage(null, a[0] && a[0].width, a[0] && a[0].height, true, true, mulM(gs.ctm, [a[1], a[2], a[3], a[4], mp[r], mp[r + 1]]));
+          }
+          break;
+        case OPS.paintImageMaskXObjectGroup:
+          (a[0] || []).forEach(function (im) {
+            addImage(null, im && im.width, im && im.height, true, true, im && im.transform ? mulM(gs.ctm, im.transform) : null);
+          });
+          break;
+        case OPS.beginText: tm = [1, 0, 0, 1, 0, 0]; tlm = tm.slice(); break;
+        case OPS.setFont: gs.font = a[0] || ''; if (typeof a[1] === 'number') gs.fs = a[1]; break;
+        case OPS.setCharSpacing: gs.cs = +a[0] || 0; break;
+        case OPS.setWordSpacing: gs.ws = +a[0] || 0; break;
+        case OPS.setHScale: gs.hs = (+a[0] || 100) / 100; break;
+        case OPS.setLeading: gs.lead = +a[0] || 0; break;
+        case OPS.setTextRise: gs.rise = +a[0] || 0; break;
+        case OPS.setTextRenderingMode: gs.mode = +a[0] || 0; break;
+        case OPS.setTextMatrix: tm = a.slice(0, 6); tlm = tm.slice(); break;
+        case OPS.moveText: moveText(+a[0] || 0, +a[1] || 0); break;
+        case OPS.setLeadingMoveText: gs.lead = -(+a[1] || 0); moveText(+a[0] || 0, +a[1] || 0); break;
+        case OPS.nextLine: moveText(0, -gs.lead); break;
+        case OPS.showText:
+        case OPS.showSpacedText: show(a[0]); break;
+        case OPS.nextLineShowText: moveText(0, -gs.lead); show(a[0]); break;
+        case OPS.nextLineSetSpacingShowText:
+          gs.ws = +a[0] || 0; gs.cs = +a[1] || 0; moveText(0, -gs.lead); show(a[2]); break;
+        default: break;
+      }
+    }
+    return { images: images, paths: paths, glyphs: glyphs, layers: Object.keys(layers), ops: fns.length, segments: segments };
+  }
+
+  /* ---- Periodicity: is a set of positions a lattice? ------------------ */
+  var PERIOD_MIN_LINES = 6;
+  var PERIOD_FIT = 0.7;
+
+  /** {pitch, count, min, max} when the positions sit on one pitch, else null. */
+  function periodOf(pos, minPitch, jitter) {
+    if (!pos || pos.length < PERIOD_MIN_LINES) return null;
+    var s = pos.slice().sort(function (a, b) { return a - b; });
+    // positions within `jitter` of each other are one line (glyphs of
+    // different widths centred in one column wander by half a point)
+    var tol = jitter > 0.35 ? jitter : 0.35;
+    var u = [], start = 0, sum = s[0];
+    for (var i = 1; i <= s.length; i++) {
+      if (i < s.length && s[i] - s[i - 1] <= tol) { sum += s[i]; continue; }
+      u.push(sum / (i - start));
+      start = i;
+      if (i < s.length) sum = s[i];
+    }
+    if (u.length < PERIOD_MIN_LINES) return null;
+    var d = [];
+    for (i = 1; i < u.length; i++) d.push(u[i] - u[i - 1]);
+    var bins = {}, best = null, bestN = 0;
+    d.forEach(function (v) {
+      if (v < (minPitch || 1.5)) return;
+      var k = Math.round(v * 4) / 4;
+      bins[k] = (bins[k] || 0) + 1;
+      var n = bins[k] + (bins[k - 0.25] || 0) + (bins[k + 0.25] || 0);
+      if (n > bestN) { bestN = n; best = k; }
+    });
+    if (!best) return null;
+    // the pitch is the mean of the diffs near the modal one; a diff that is
+    // a whole number of pitches (an empty cell) still fits
+    var sum = 0, n = 0;
+    d.forEach(function (v) { if (Math.abs(v - best) <= best * 0.1) { sum += v; n++; } });
+    var pitch = n ? sum / n : best;
+    var fit = 0;
+    d.forEach(function (v) {
+      var k = Math.round(v / pitch);
+      if (k >= 1 && Math.abs(v - k * pitch) <= pitch * 0.15) fit++;
+    });
+    if (fit / d.length < PERIOD_FIT) return null;
+    // the extent is the longest run that stays on the lattice: a centre
+    // mark or a frame just outside the grid is not a grid line
+    var bestRun = null, runStart = 0;
+    var fits = function (v) { var k = Math.round(v / pitch); return k >= 1 && k <= 3 && Math.abs(v - k * pitch) <= pitch * 0.15; };
+    for (i = 1; i <= u.length; i++) {
+      if (i < u.length && fits(u[i] - u[i - 1])) continue;
+      if (!bestRun || i - runStart > bestRun[1] - bestRun[0]) bestRun = [runStart, i];
+      runStart = i;
+    }
+    if (bestRun[1] - bestRun[0] < PERIOD_MIN_LINES) return null;
+    return { pitch: pitch, count: bestRun[1] - bestRun[0], min: u[bestRun[0]], max: u[bestRun[1] - 1] };
+  }
+
+  /**
+   * Cluster painted paths into drawing regions (boxes already in view
+   * space), and describe each: a grid, a swatch, a rule, a box or a figure.
+   * Paths are joined when their boxes touch on a coarse raster (one cell
+   * of about 4 pt), so it costs the area painted, never paths squared.
+   */
+  function drawingRegions(paths, W, H) {
+    var out = { drawings: [], backgrounds: 0 };
+    if (!paths || !paths.length || !(W > 0) || !(H > 0)) return out;
+    var pageA = W * H;
+    var cell = Math.max(4, Math.sqrt(pageA / 160000));
+    var cols = Math.ceil(W / cell) + 1, rows = Math.ceil(H / cell) + 1;
+    var grid = new Int32Array(cols * rows);
+    for (var g = 0; g < grid.length; g++) grid[g] = -1;
+    var parent = new Int32Array(paths.length);
+    for (var p = 0; p < paths.length; p++) parent[p] = p;
+    var find = function (x) { while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; };
+    var join = function (a, b) { a = find(a); b = find(b); if (a !== b) parent[b] = a; };
+    var keep = new Uint8Array(paths.length);
+    var mark = function (i, x0, y0, x1, y1) {
+      var c0 = Math.max(0, Math.floor(x0 / cell)), c1 = Math.min(cols - 1, Math.floor(x1 / cell));
+      var r0 = Math.max(0, Math.floor(y0 / cell)), r1 = Math.min(rows - 1, Math.floor(y1 / cell));
+      for (var r = r0; r <= r1; r++) {
+        for (var c = c0; c <= c1; c++) {
+          var k = r * cols + c;
+          if (grid[k] >= 0) join(grid[k], i);
+          grid[k] = i;
+        }
+      }
+    };
+    var half = cell / 2;
+    paths.forEach(function (pt, i) {
+      var b = pt.vbox;
+      if (!b) return;
+      var a = vArea(b);
+      var white = pt.fill === '#ffffff' && !pt.stroke;
+      if (a >= pageA * BACKGROUND_SHARE || (pt.fill && !pt.stroke && a >= pageA * PANEL_SHARE)) { out.backgrounds++; return; }
+      if (white && a >= pageA * 0.02) { out.backgrounds++; return; }   // a white knock-out panel
+      keep[i] = 1;
+      // a stroked frame joins what touches its edges, not all it encloses
+      if (pt.stroke && !pt.fill && pt.rect && a > cell * cell * 64) {
+        mark(i, b.x0 - half, b.y0 - half, b.x1 + half, b.y0 + half);
+        mark(i, b.x0 - half, b.y1 - half, b.x1 + half, b.y1 + half);
+        mark(i, b.x0 - half, b.y0 - half, b.x0 + half, b.y1 + half);
+        mark(i, b.x1 - half, b.y0 - half, b.x1 + half, b.y1 + half);
+      } else {
+        mark(i, b.x0 - half, b.y0 - half, b.x1 + half, b.y1 + half);
+      }
+    });
+    var groups = {};
+    paths.forEach(function (pt, i) {
+      if (!keep[i]) return;
+      var r = find(i);
+      (groups[r] = groups[r] || []).push(pt);
+    });
+    Object.keys(groups).forEach(function (k) {
+      var d = describeDrawing(groups[k], W, H);
+      if (d) out.drawings.push(d);
+    });
+    out.drawings.sort(function (a, b) { return (a.box.y0 - b.box.y0) || (a.box.x0 - b.box.x0); });
+    return out;
+  }
+
+  function topColours(tally, n) {
+    return Object.keys(tally).map(function (h) { return { hex: h, n: tally[h] }; })
+      .sort(function (a, b) { return b.n - a.n; }).slice(0, n || 8);
+  }
+
+  function describeDrawing(list, W, H) {
+    var box = null, fills = 0, strokes = 0, rects = 0, fillT = {}, strokeT = {}, layer = null, layerMixed = false;
+    var vx = [], hy = [], vl = [], hl = [], rx = [], ry = [], rw = [], rh = [];
+    list.forEach(function (pt) {
+      box = vUnion(box, pt.vbox);
+      if (pt.fill) { fills++; fillT[pt.fill] = (fillT[pt.fill] || 0) + 1; }
+      if (pt.stroke) { strokes++; strokeT[pt.stroke] = (strokeT[pt.stroke] || 0) + 1; }
+      if (pt.rect) {
+        rects++;
+        rx.push(pt.vbox.x0); ry.push(pt.vbox.y0); rw.push(pt.vbox.x1 - pt.vbox.x0); rh.push(pt.vbox.y1 - pt.vbox.y0);
+      }
+      if (pt.vsegs) {
+        for (var i = 0; i + 1 < pt.vsegs.vx.length; i += 2) { vx.push(pt.vsegs.vx[i]); vl.push(pt.vsegs.vx[i + 1]); }
+        for (i = 0; i + 1 < pt.vsegs.hy.length; i += 2) { hy.push(pt.vsegs.hy[i]); hl.push(pt.vsegs.hy[i + 1]); }
+        for (i = 0; i + 3 < pt.vsegs.rects.length; i += 4) {
+          var w = pt.vsegs.rects[i + 2] - pt.vsegs.rects[i], h = pt.vsegs.rects[i + 3] - pt.vsegs.rects[i + 1];
+          if (w < 1.2 && h > 2) { vx.push((pt.vsegs.rects[i] + pt.vsegs.rects[i + 2]) / 2); vl.push(h); }
+          else if (h < 1.2 && w > 2) { hy.push((pt.vsegs.rects[i + 1] + pt.vsegs.rects[i + 3]) / 2); hl.push(w); }
+          else if (w > 1.5 && h > 1.5 && list.length < 4) { rx.push(pt.vsegs.rects[i]); ry.push(pt.vsegs.rects[i + 1]); rw.push(w); rh.push(h); }
+        }
+      }
+      if (layer === null) layer = pt.layer || null;
+      else if (pt.layer !== layer) layerMixed = true;
+    });
+    if (!box) return null;
+    var bw = box.x1 - box.x0, bh = box.y1 - box.y0;
+    var kind = 'figure', grid = null;
+    // grid lines: many vertical and horizontal segments on one pitch each;
+    // filled cells: many squares of one size on a lattice
+    // grid lines are the long ones: a tick or a centre arrow beside the
+    // grid is not one of them (a grid drawn cell edge by cell edge keeps all)
+    var longOnly = function (pos, len) {
+      var mx = 0, i2, keep = [];
+      for (i2 = 0; i2 < len.length; i2++) if (len[i2] > mx) mx = len[i2];
+      for (i2 = 0; i2 < pos.length; i2++) if (len[i2] >= mx * 0.5) keep.push(pos[i2]);
+      return keep.length >= PERIOD_MIN_LINES ? keep : pos;
+    };
+    var px = periodOf(longOnly(vx, vl), 1.5), py = periodOf(longOnly(hy, hl), 1.5);
+    var cellsMode = false;
+    if (!(px && py) && rx.length >= 40) {
+      // filled cells: the commonest cell size is the pitch, and most cells
+      // start on one phase of it (runs of one colour merged into one wider
+      // fill still start on the lattice)
+      var mw = modeOf(rw, 0.05), mh = modeOf(rh, 0.05);
+      if (mw > 1 && mh > 1) {
+        px = latticeOf(rx, mw);
+        py = latticeOf(ry, mh);
+        cellsMode = true;
+      }
+    }
+    if (px && py && px.count >= PERIOD_MIN_LINES && py.count >= PERIOD_MIN_LINES) {
+      kind = 'grid';
+      grid = { cols: Math.round((px.max - px.min) / px.pitch) + (cellsMode ? 1 : 0),
+        rows: Math.round((py.max - py.min) / py.pitch) + (cellsMode ? 1 : 0),
+        pitchX: r2(px.pitch), pitchY: r2(py.pitch), x0: r2(px.min), y0: r2(py.min), drawn: cellsMode ? 'cells' : 'lines' };
+      if (grid.cols < 2 || grid.rows < 2) { kind = 'figure'; grid = null; }
+    }
+    if (kind === 'figure') {
+      var thin = Math.min(bw, bh), long = Math.max(bw, bh);
+      var fillKeys = Object.keys(fillT);
+      if (thin <= 3 && long >= 12 && list.length <= 4) kind = 'rule';
+      else if (list.length <= 3 && rects === list.length && fills === list.length && !strokes &&
+        fillKeys.length === 1 && fillKeys[0] !== '#ffffff' && bw >= 10 && bh >= 10 && bw <= W * 0.4 && bh <= H * 0.4 &&
+        bw / bh >= 0.25 && bw / bh <= 4) kind = 'swatch';
+      else if (list.length <= 2 && rects === list.length) kind = 'box';
+    }
+    return {
+      box: { x0: r2(box.x0), y0: r2(box.y0), x1: r2(box.x1), y1: r2(box.y1) },
+      nbox: normBox(box, W, H),
+      paths: list.length, fills: fills, strokes: strokes, rects: rects,
+      fillColours: topColours(fillT), strokeColours: topColours(strokeT),
+      kind: kind, grid: grid, layer: layerMixed ? null : layer
+    };
+  }
+
+  /** The commonest value, binned at `bin`. */
+  function modeOf(a, bin) {
+    var t = {}, best = 0, bestN = 0;
+    a.forEach(function (v) {
+      var k = Math.round(v / bin);
+      t[k] = (t[k] || 0) + 1;
+      if (t[k] > bestN) { bestN = t[k]; best = k; }
+    });
+    return best * bin;
+  }
+
+  /**
+   * Positions on a lattice of about `pitch`: the phase most of them share
+   * (in tenths of the pitch) and, among those, the pitch refined from the
+   * span. -> {pitch, count, min, max, share} or null (under half on phase).
+   */
+  function latticeOf(pos, pitch) {
+    if (!pos || pos.length < PERIOD_MIN_LINES || !(pitch > 0)) return null;
+    var bins = new Array(10), i;
+    for (i = 0; i < 10; i++) bins[i] = 0;
+    var ref = Infinity;
+    for (i = 0; i < pos.length; i++) if (pos[i] < ref) ref = pos[i];
+    // the cell size only says the pitch to about 1%, which drifts a whole
+    // cell over a hundred rows: try pitches around it and keep the one the
+    // positions agree on best (the length of their mean phase vector)
+    var step = Math.max(1, Math.floor(pos.length / 4000)), bestR = -1, bestP = pitch;
+    for (var t = -30; t <= 30; t++) {
+      var p = pitch * (1 + t * 0.0015), sc = 0, ss = 0, n = 0;
+      for (i = 0; i < pos.length; i += step) {
+        var ang = 2 * Math.PI * (pos[i] - ref) / p;
+        sc += Math.cos(ang); ss += Math.sin(ang); n++;
+      }
+      var R = Math.sqrt(sc * sc + ss * ss) / n;
+      if (R > bestR) { bestR = R; bestP = p; }
+    }
+    pitch = bestP;
+    pos.forEach(function (v) {
+      var f = ((v - ref) / pitch) % 1;
+      bins[Math.floor(f * 10) % 10]++;
+    });
+    var bi = 0, bn = -1;
+    for (i = 0; i < 10; i++) {
+      var n = bins[i] + bins[(i + 9) % 10] + bins[(i + 1) % 10];
+      if (n > bn) { bn = n; bi = i; }
+    }
+    if (bn < pos.length * 0.5) return null;
+    var on = pos.filter(function (v) {
+      var f = ((v - ref) / pitch) % 1;
+      var d = Math.abs(f - (bi + 0.5) / 10);
+      return Math.min(d, 1 - d) <= 0.15;
+    });
+    var u = [];
+    on.sort(function (a, b) { return a - b; }).forEach(function (v) {
+      if (!u.length || v - u[u.length - 1] > pitch * 0.3) u.push(v);
+    });
+    if (u.length < PERIOD_MIN_LINES) return null;
+    var lo = u[0], hi = u[u.length - 1];
+    var steps = Math.round((hi - lo) / pitch);
+    return { pitch: steps > 0 ? (hi - lo) / steps : pitch, count: u.length, min: lo, max: hi, share: r2(bn / pos.length) };
+  }
+
+  function median(a) {
+    if (!a.length) return 0;
+    var s = a.slice().sort(function (x, y) { return x - y; });
+    return s[Math.floor(s.length / 2)];
+  }
+
+  /**
+   * "Figure 3" / "Fig. 3" / "Diagram B" lines, each joined to the nearest
+   * picture or drawing: one above or below it that it overlaps across, or
+   * that it sits inside; failing that the nearest by edge distance.
+   */
+  function captions(lines, images, drawings, W, H) {
+    var out = [], pairs = [];
+    var targets = [];
+    images.forEach(function (im, i) {
+      var side = Math.min(im.box.x1 - im.box.x0, im.box.y1 - im.box.y0);
+      // a strip down the page edge (a border, a tab) is nobody's figure
+      if (side >= 20 && vArea(im.box) >= W * H * 0.004 && vArea(im.box) < W * H * BACKGROUND_SHARE) targets.push({ type: 'image', index: i, box: im.box });
+    });
+    drawings.forEach(function (d, i) {
+      if (d.kind !== 'rule' && vArea(d.box) >= W * H * 0.003) targets.push({ type: 'drawing', index: i, box: d.box });
+    });
+    lines.forEach(function (l) {
+      var text = String(l.text || '').trim();
+      if (!text || text.length > CAPTION_MAX_CHARS || !l.box) return;
+      var m = CAPTION_RE.exec(text);
+      if (!m) return;
+      var word = m[1].toLowerCase();
+      var ref = (/^fig/.test(word) ? 'Figure' : /^diag/.test(word) ? 'Diagram' : /^illus/.test(word) ? 'Illustration'
+        : word.charAt(0).toUpperCase() + word.slice(1)) + ' ' + m[2];
+      var b = l.box;
+      var lh = Math.max(4, b.y1 - b.y0);
+      targets.forEach(function (t) {
+        var tb = t.box;
+        var ox = Math.min(b.x1, tb.x1) - Math.max(b.x0, tb.x0);
+        var oy = Math.min(b.y1, tb.y1) - Math.max(b.y0, tb.y0);
+        var gx = Math.max(0, Math.max(b.x0, tb.x0) - Math.min(b.x1, tb.x1));
+        var gy = Math.max(0, Math.max(b.y0, tb.y0) - Math.min(b.y1, tb.y1));
+        var gap, score;
+        if (ox > 0 && oy > 0) { gap = 0; score = 0; }                      // inside or across it
+        else if (ox >= Math.min(b.x1 - b.x0, tb.x1 - tb.x0) * 0.3) { gap = gy; score = gy; }   // above or below
+        else if (oy > 0) { gap = gx; score = gx * 1.5; }                     // beside
+        else { gap = Math.sqrt(gx * gx + gy * gy); score = gap * 2; }
+        if (score <= Math.max(H * 0.12, lh * 6)) pairs.push({ c: out.length, t: t, gap: gap, score: score });
+      });
+      out.push({ text: text, line: l.i == null ? null : l.i, box: b, ref: ref, label: m[2], target: null, gap: null });
+    });
+    // one caption per picture and one picture per caption, nearest first
+    pairs.sort(function (a, b) { return a.score - b.score; });
+    var takenT = {};
+    pairs.forEach(function (p) {
+      var key = p.t.type + p.t.index;
+      if (out[p.c].target || takenT[key]) return;
+      takenT[key] = true;
+      out[p.c].target = { type: p.t.type, index: p.t.index };
+      out[p.c].gap = r2(p.gap);
+    });
+    return out;
+  }
+
+  /* ---- Page kind hints ------------------------------------------------- */
+  var KEY_WORD_RE = /\b(?:key|legend|floss|colou?rs? used|symbols?|thread list|dmc|anchor|skeins?)\b/i;
+  var CODE_RE = /^(?:[A-Z]{0,3}\s?)?\d{2,4}[A-Z]?$|^(?:B5200|blanc|ecru|white)$/i;
+  var SHEET_TILE_RE = /^\d{1,2}\s?[A-Za-z]$|^[A-Za-z]\s?\d{1,2}$/;
+  var SHEET_WORD_RE = /\b(?:grainline|place on fold|cut \d+|fold line|notch|seam allowance|test square|pattern piece)\b/i;
+  var LAYOUT_WORD_RE = /^\s*(?:(?:quilt (?:layout|assembly|diagram|top)|layout diagram|assembly diagram|block layout)\b|row \d+\s*$)/i;
+  var PROSE_LINE_WORDS = 7;
+
+  /**
+   * A guess at what a page is, with the reasons, from a layout. `pageNo` and
+   * `chart` (a glyph lattice from glyphGrid, or null) sharpen it.
+   * -> {guess, confidence, reasons, scores}
+   */
+  function pageKind(lay) {
+    var W = lay.width, H = lay.height, A = W * H || 1;
+    var lines = lay.lines || [], images = lay.images || [], drawings = lay.drawings || [];
+    var scores = { chart: 0, key: 0, photo: 0, instructions: 0, sheet: 0, layout: 0, cover: 0, blank: 0 };
+    var reasons = { chart: [], key: [], photo: [], instructions: [], sheet: [], layout: [], cover: [], blank: [] };
+    var say = function (k, s, why) { scores[k] += s; reasons[k].push(why); };
+    var words = 0, prose = 0, codes = 0, keyWords = 0, tiles = 0, sheetWords = 0, layoutWords = 0, maxSize = 0, sizes = [];
+    lines.forEach(function (l) {
+      var t = String(l.text || '');
+      var w = t.split(/\s+/).filter(Boolean);
+      words += w.length;
+      if (w.length >= PROSE_LINE_WORDS && /[a-z]{3,}/.test(t)) prose++;
+      w.forEach(function (x) { if (CODE_RE.test(x)) codes++; });
+      if (KEY_WORD_RE.test(t)) keyWords++;
+      if (SHEET_TILE_RE.test(t.trim())) tiles++;
+      if (SHEET_WORD_RE.test(t)) sheetWords++;
+      if (LAYOUT_WORD_RE.test(t)) layoutWords++;
+      if (l.size > maxSize) maxSize = l.size;
+      if (l.size > 0) sizes.push(l.size);
+    });
+    var body = median(sizes) || 10;
+    var imgA = 0, bigImg = 0, clippedImgs = 0, smallImgs = 0;
+    images.forEach(function (im) {
+      var a = vArea(im.box);
+      if (a > bigImg) bigImg = a;
+      imgA += a;
+      if (im.clipped) clippedImgs++;
+      if (a < A * 0.05 && a > A * 0.002) smallImgs++;
+    });
+    var gridA = 0, tableA = 0, figA = 0, swatches = 0, fillsN = 0, strokeOnlyA = 0, squarish = 0;
+    images.forEach(function (im) {
+      var w = im.box.x1 - im.box.x0, h = im.box.y1 - im.box.y0;
+      if (w >= 24 && h >= 24 && w <= W * 0.3 && h <= H * 0.3 && w / h > 0.6 && w / h < 1.65) squarish++;
+    });
+    drawings.forEach(function (d) {
+      var a = vArea(d.box);
+      // a chart's cells are small and many; a ruled table (a size chart,
+      // a quilt's block grid) has big cells
+      if (d.kind === 'grid' && d.grid && d.grid.pitchX <= 14 && d.grid.pitchY <= 14 && d.grid.cols >= 10 && d.grid.rows >= 10) gridA = Math.max(gridA, a);
+      else if (d.kind === 'grid') tableA = Math.max(tableA, a);
+      if (d.kind === 'figure') figA += a;
+      if (d.kind === 'swatch') swatches++;
+      fillsN += d.fills;
+      if (!d.fills && d.strokes) strokeOnlyA += a;
+    });
+    var chart = lay.chart;
+    if (!lines.length && !images.length && !drawings.length) say('blank', 1, 'nothing on the page');
+    if (chart && chart.cells >= 100) say('chart', Math.min(1, 0.5 + chart.cells / 2000), 'a lattice of ' + chart.cols + ' x ' + chart.rows + ' symbols set in a font');
+    if (gridA >= A * 0.12) say('chart', Math.min(1, 0.4 + gridA / A), 'a ruled grid over ' + Math.round(gridA / A * 100) + '% of the page');
+    if (fillsN >= 800) say('chart', 0.35, fillsN + ' filled shapes');
+    if (bigImg >= A * 0.35) say('photo', 0.5 + Math.min(0.4, bigImg / A - 0.35), 'one picture covers ' + Math.round(bigImg / A * 100) + '% of the page');
+    if (bigImg >= A * 0.35 && words < 60) say('photo', 0.2, 'little text (' + words + ' words)');
+    if (prose >= 8) say('instructions', Math.min(1, 0.3 + prose / 40), prose + ' lines of running text');
+    if (keyWords && codes >= 6) say('key', Math.min(1, 0.35 + codes / 60), codes + ' colour codes beside "' + 'key' + '" words');
+    else if (codes >= 15 && prose < 8 && !tableA) say('key', 0.2, codes + ' code-like numbers');
+    if (swatches >= 4 || (smallImgs >= 6 && codes >= 4)) say('key', 0.25, (swatches || smallImgs) + ' small swatches');
+    if (squarish >= 8 && !layoutWords) say('key', 0.35, squarish + ' square pictures (fabric or colour swatches)');
+    if (tableA >= A * 0.1) say('instructions', 0.2, 'a ruled table');
+    if (layoutWords && (tableA || gridA)) say('layout', 0.3, 'a grid of blocks');
+    if (tiles >= 1 && strokeOnlyA >= A * 0.2) say('sheet', 0.5, 'tile labels and line drawings');
+    if (sheetWords) say('sheet', Math.min(0.5, 0.2 * sheetWords), sheetWords + ' pattern-piece words');
+    if (W > 1500 || H > 1500) say('sheet', 0.4, 'a large sheet (' + Math.round(W / 72 * 25.4) + ' x ' + Math.round(H / 72 * 25.4) + ' mm)');
+    if (strokeOnlyA >= A * 0.45 && prose < 4) say('sheet', 0.25, 'mostly outline drawing');
+    if (layoutWords) say('layout', Math.min(0.6, 0.3 * layoutWords), 'layout words');
+    if (layoutWords && (clippedImgs >= 8 || figA >= A * 0.25)) say('layout', 0.35, (clippedImgs >= 8 ? clippedImgs + ' clipped fabric pictures' : 'a large figure'));
+    if (lay.page === 1) {
+      if (bigImg >= A * 0.2) say('cover', 0.45, 'first page with a big picture');
+      if (maxSize >= body * 2.2 && lines.length <= 30) say('cover', 0.3, 'a big title');
+      if (prose < 6) say('cover', 0.1, 'little running text');
+    }
+    if (prose >= 8 && scores.photo) scores.photo *= 0.5;
+    var order = Object.keys(scores).sort(function (a, b) { return scores[b] - scores[a]; });
+    var top = order[0], second = order[1];
+    if (!(scores[top] > 0)) {
+      return { guess: words ? 'instructions' : 'blank', confidence: 0.2, reasons: [words ? 'some text, nothing else stands out' : 'nothing stands out'], scores: scores };
+    }
+    var conf = Math.max(0.05, Math.min(0.95, scores[top] / (scores[top] + scores[second] + 0.25)));
+    Object.keys(scores).forEach(function (k) { scores[k] = r2(Math.min(1, scores[k])); });
+    return { guess: top, confidence: r2(conf), reasons: reasons[top], scores: scores };
+  }
+
+  /* ---- Symbol fonts ------------------------------------------------------ */
+  /** Fonts whose runs are symbols one to a cell ("O O O", "2 2 2 2"). */
+  function chartFonts(glyphs, minGlyphs) {
+    var t = {};
+    var runs = {};
+    glyphs.forEach(function (g) {
+      if (g.invisible) return;
+      var key = g.font + '#' + g.run;
+      var r = runs[key] || (runs[key] = { font: g.font, s: '' });
+      r.s += g.space || g.unicode === ' ' ? ' ' : (g.unicode || '?');
+    });
+    Object.keys(runs).forEach(function (k) {
+      var r = runs[k], f = t[r.font] || (t[r.font] = { single: 0, other: 0 });
+      r.s.split(/\s+/).forEach(function (w) {
+        if (!w) return;
+        if (w.length === 1) f.single++;
+        else if (/^(.)\1+$/.test(w) || !/[A-Za-z0-9]{2}/.test(w)) f.single += w.length;   // "OOO" touching cells
+        else f.other += w.length;
+      });
+    });
+    var out = [];
+    for (var f in t) {
+      var all = t[f].single + t[f].other;
+      if (all < (minGlyphs || 30)) continue;
+      if (t[f].single >= all * 0.85) { out.push(f); continue; }
+      // or its glyphs stand on a lattice of their own ("8O8p" touching)
+      var bx = [], by = [], sz = [];
+      glyphs.forEach(function (g) {
+        var b = g.vbox || g.box;
+        if (g.font !== f || g.space || g.invisible || !b) return;
+        bx.push((b.x0 + b.x1) / 2); by.push((b.y0 + b.y1) / 2); sz.push(g.size);
+      });
+      var s = median(sz) || 5;
+      var lx = periodOf(bx, s * 0.3, s * 0.3), ly = periodOf(by, s * 0.3, s * 0.3);
+      if (lx && ly && lx.count >= 8 && ly.count >= 8 && Math.abs(lx.pitch - ly.pitch) <= Math.max(lx.pitch, ly.pitch) * 0.25) out.push(f);
+    }
+    return out;
+  }
+
+  /**
+   * Bucket glyphs (view-space boxes, `vbox`) into a lattice.
+   * opts {fonts:[fontId], rect:{x0..}, sizeTol:0.2}
+   * -> {cols, rows, pitchX, pitchY, x0, y0, cells, symbols:[{key, font, base, code,
+   *     unicode, count}], grid:[[symbolIndex|-1]], fit, clashes} or null
+   */
+  function glyphGrid(glyphs, opts) {
+    opts = opts || {};
+    var fonts = opts.fonts || chartFonts(glyphs, 30);
+    if (!fonts.length) return null;
+    var want = {};
+    fonts.forEach(function (f) { want[f] = true; });
+    var rect = opts.rect || null;
+    var gl = glyphs.filter(function (g) {
+      if (!want[g.font] || g.space || g.invisible || !g.vbox || g.unicode === ' ') return false;
+      if (!rect) return true;
+      var cx = (g.vbox.x0 + g.vbox.x1) / 2, cy = (g.vbox.y0 + g.vbox.y1) / 2;
+      return cx >= rect.x0 && cx <= rect.x1 && cy >= rect.y0 && cy <= rect.y1;
+    });
+    if (gl.length < 4) return null;
+    var size = median(gl.map(function (g) { return g.size; }));
+    var tol = opts.sizeTol || 0.2;
+    gl = gl.filter(function (g) { return Math.abs(g.size - size) <= size * tol; });
+    var cx = gl.map(function (g) { return (g.vbox.x0 + g.vbox.x1) / 2; });
+    var cy = gl.map(function (g) { return (g.vbox.y0 + g.vbox.y1) / 2; });
+    var jit = size * 0.3;
+    var px = periodOf(cx, size * 0.3, jit), py = periodOf(cy, size * 0.3, jit);
+    // a font set off the cell centres (quarter stitches in a corner) can
+    // break the lattice for all: take the pitch from the biggest font
+    // that has one, then place every glyph against it
+    if (!px || !py) {
+      var by = {};
+      gl.forEach(function (g, i) { (by[g.font] = by[g.font] || []).push(i); });
+      Object.keys(by).sort(function (a, b) { return by[b].length - by[a].length; }).some(function (f) {
+        var ix = by[f];
+        if (ix.length < 20) return false;
+        var fx = periodOf(ix.map(function (i) { return cx[i]; }), size * 0.3, jit);
+        var fy = periodOf(ix.map(function (i) { return cy[i]; }), size * 0.3, jit);
+        if (!px && fx) px = fx;
+        if (!py && fy) py = fy;
+        return px && py;
+      });
+    }
+    if (!px || !py) return null;
+    // the lattice's phase is the median offset of every glyph from it,
+    // and its first line sits at or before the first glyph
+    var phase = function (vals, per) {
+      var off = vals.map(function (v) { var f = (v - per.min) / per.pitch; return f - Math.round(f); }).sort(function (a, b) { return a - b; });
+      var o = per.min + off[Math.floor(off.length / 2)] * per.pitch;
+      var lo = Infinity, hi = -Infinity;
+      for (var q = 0; q < vals.length; q++) { if (vals[q] < lo) lo = vals[q]; if (vals[q] > hi) hi = vals[q]; }
+      o -= Math.ceil((o - lo) / per.pitch - 0.5) * per.pitch;
+      return { pitch: per.pitch, min: o, max: o + Math.round((hi - o) / per.pitch) * per.pitch };
+    };
+    px = phase(cx, px);
+    py = phase(cy, py);
+    var cols = Math.round((px.max - px.min) / px.pitch) + 1, rows = Math.round((py.max - py.min) / py.pitch) + 1;
+    if (cols * rows > 4000000) return null;
+    var symbols = [], symAt = {}, grid = [], r, c;
+    for (r = 0; r < rows; r++) { var row = new Array(cols); for (c = 0; c < cols; c++) row[c] = -1; grid.push(row); }
+    var fit = 0, clashes = 0, cells = 0, offCell = 0;
+    for (var i = 0; i < gl.length; i++) {
+      var fc = (cx[i] - px.min) / px.pitch, fr = (cy[i] - py.min) / py.pitch;
+      c = Math.round(fc); r = Math.round(fr);
+      if (Math.abs(fc - c) <= 0.2 && Math.abs(fr - r) <= 0.2) fit++;
+      if (r < 0 || r >= rows || c < 0 || c >= cols) continue;
+      if (Math.abs(fc - c) > 0.35 || Math.abs(fr - r) > 0.35) { offCell++; continue; }   // between cells: not a whole stitch
+      var g = gl[i];
+      var key = (g.base || g.font) + ':' + g.code;
+      var si = symAt[key];
+      if (si === undefined) {
+        si = symAt[key] = symbols.length;
+        symbols.push({ key: key, font: g.font, base: g.base || '', code: g.code, unicode: g.unicode, count: 0 });
+      }
+      if (grid[r][c] >= 0) { if (grid[r][c] !== si) clashes++; continue; }
+      grid[r][c] = si;
+      symbols[si].count++;
+      cells++;
+    }
+    return { cols: cols, rows: rows, pitchX: r2(px.pitch), pitchY: r2(py.pitch), x0: r2(px.min), y0: r2(py.min),
+      cells: cells, symbols: symbols, grid: grid, fit: r2(fit / gl.length), clashes: clashes, offCell: offCell, fonts: fonts };
+  }
+
+  /* ---- Painting probe ---------------------------------------------------- */
+  var paintProbe = null;      // {at, ok}
+  /** Does this tab paint frames? A hidden pane never fires rAF. -> Promise<boolean> */
+  function canPaint() {
+    var now = Date.now();
+    if (paintProbe && now - paintProbe.at < 1500) return Promise.resolve(paintProbe.ok);
+    if (typeof window.requestAnimationFrame !== 'function') return Promise.resolve(false);
+    return new Promise(function (resolve) {
+      var done = false;
+      var finish = function (ok) {
+        if (done) return;
+        done = true;
+        paintProbe = { at: Date.now(), ok: ok };
+        resolve(ok);
+      };
+      try { window.requestAnimationFrame(function () { finish(true); }); } catch (e) { finish(false); }
+      setTimeout(function () { finish(false); }, 250);
+    });
+  }
+
+  /** Pieces of text a wide gap apart on one baseline ("Fig. 2      Fig. 2"
+   * under two drawings is two captions), with their PDF-space boxes. */
+  var SEGMENT_GAP = 1.5;      // a gap this many heights wide splits a line
+  function segmentsOf(items, rotate) {
+    var rows = buildRows(items, rotate), out = [];
+    rows.forEach(function (row) {
+      var cur = null;
+      row.items.forEach(function (it) {
+        if (!it.box) return;
+        // the same words printed again over themselves (a second layout
+        // layer, faux bold) are one caption, not two run together
+        if (cur && it.x < cur.end && cur.text.indexOf(String(it.str).trim()) >= 0 &&
+            Math.min(cur.end, it.end) - Math.max(cur.x0, it.x) >= (it.end - it.x) * 0.5) return;
+        var gap = cur ? it.x - cur.end : 0;
+        if (!cur || gap > Math.max(it.h, cur.h) * SEGMENT_GAP) {
+          if (cur) out.push(cur);
+          cur = { text: '', box: it.box.slice(), end: it.end, h: it.h, x0: it.x };
+        }
+        cur.text += (cur.text && gap > it.h * 0.15 && !/\s$/.test(cur.text) && !/^\s/.test(it.str) ? ' ' : '') + it.str;
+        cur.box = [Math.min(cur.box[0], it.box[0]), Math.min(cur.box[1], it.box[1]), Math.max(cur.box[2], it.box[2]), Math.max(cur.box[3], it.box[3])];
+        cur.end = Math.max(cur.end, it.end);
+        cur.h = Math.max(cur.h, it.h);
+      });
+      if (cur) out.push(cur);
+    });
+    return out;
+  }
+
+  /** Caption candidates: the pieces that start like a caption, each with
+   * its view box and the layout line it belongs to (`i`). */
+  function captionPieces(items, rotate, vt, lines) {
+    var out = [];
+    var pieces = [];
+    segmentsOf(items, rotate).forEach(function (s) {
+      var text = normUnicode(String(s.text || '')).trim();
+      if (!CAPTION_RE.test(text)) return;
+      // "Fig. 2 Fig. 2" set as one run: one caption per drawing, the box
+      // shared out by characters
+      var cuts = [0], m;
+      CAPTION_AGAIN_RE.lastIndex = 0;
+      while ((m = CAPTION_AGAIN_RE.exec(text))) cuts.push(m.index + 1);
+      if (cuts.length === 1) { pieces.push({ text: text, box: s.box }); return; }
+      var b = s.box, wide = b[2] - b[0] >= b[3] - b[1];
+      cuts.push(text.length);
+      for (var c = 0; c + 1 < cuts.length; c++) {
+        var f0 = cuts[c] / text.length, f1 = cuts[c + 1] / text.length;
+        var sub = wide ? [b[0] + (b[2] - b[0]) * f0, b[1], b[0] + (b[2] - b[0]) * f1, b[3]]
+          : [b[0], b[1] + (b[3] - b[1]) * f0, b[2], b[1] + (b[3] - b[1]) * f1];
+        pieces.push({ text: text.slice(cuts[c], cuts[c + 1]).trim(), box: sub });
+      }
+    });
+    pieces.forEach(function (s) {
+      var text = s.text;
+      var box = toViewBox(vt, s.box);
+      for (var d = 0; d < out.length; d++) {
+        if (out[d].text === text && vArea(vCut(out[d].box, box)) > 0) return;    // printed twice in one place
+      }
+      var cx = (box.x0 + box.x1) / 2, cy = (box.y0 + box.y1) / 2, li = null;
+      for (var k = 0; k < lines.length; k++) {
+        var b = lines[k].box;
+        if (b && cx >= b.x0 - 1 && cx <= b.x1 + 1 && cy >= b.y0 - 1 && cy <= b.y1 + 1) { li = k; break; }
+      }
+      out.push({ text: text, box: box, i: li });
+    });
+    return out;
+  }
+
+  /** Yield to the page once. A message, not a timer: timers in a hidden
+   * tab are held back to one a second (or a minute), messages are not. */
+  function pause() {
+    return new Promise(function (resolve) {
+      if (typeof MessageChannel === 'function') {
+        var ch = new MessageChannel();
+        ch.port1.onmessage = function () { ch.port1.close(); resolve(); };
+        ch.port2.postMessage(0);
+      } else setTimeout(resolve, 0);
+    });
+  }
+
+  function nowMs() {
+    return (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+  }
+
+  function namedError(name, message) {
+    var e = new Error(message);
+    e.name = name;
+    return e;
+  }
+
+  /**
+   * Add the wave K calls to an open handle. `ctx` = {doc, guard, stopped,
+   * caseState}: guard(callSignal) -> Error|null as in open().
+   */
+  function addStructure(handle, ctx) {
+    var doc = ctx.doc;
+    var cache = [];                 // [{n, glyphs, lay}] newest last
+    var fontChars = {};             // fontId -> code -> fontChar (for renderGlyph)
+    var ocPromise = null;
+
+    var cached = function (n, glyphs) {
+      for (var i = cache.length - 1; i >= 0; i--) {
+        if (cache[i].n === n && (!glyphs || cache[i].glyphs)) return cache[i].lay;
+      }
+      return null;
+    };
+    var remember = function (n, glyphs, lay) {
+      cache = cache.filter(function (c) { return c.n !== n; });
+      cache.push({ n: n, glyphs: glyphs, lay: lay });
+      while (cache.length > LAYOUT_CACHE) cache.shift();
+    };
+    var pageNo = function (n) {
+      n = parseInt(n, 10);
+      return isFinite(n) && n >= 1 && n <= (doc.numPages || 0) ? n : 0;
+    };
+    var fontInfo = function (page, id) {
+      var fo = null;
+      try { if (page.commonObjs.has(id)) fo = page.commonObjs.get(id); } catch (e) { fo = null; }
+      if (!fo) return { id: id, name: '', base: '', embedded: null, type3: false, hasToUnicode: null };
+      return {
+        id: id, name: fo.name || '', base: baseFontName(fo.name), embedded: !fo.missingFile,
+        type3: !!fo.isType3Font, hasToUnicode: !!(fo.toUnicode && fo.toUnicode._map && Object.keys(fo.toUnicode._map).length),
+        symbolic: /symbol|dingbat|wingding|webding|ursa|pattern ?maker|cross ?stitch|kg-?chart|zapf/i.test(fo.name || '')
+      };
+    };
+
+    /** The full layout of page n. opts {signal, glyphs, graphics} */
+    function layout(n, opts) {
+      opts = opts || {};
+      var stop = ctx.guard(opts.signal);
+      if (stop) return Promise.reject(stop);
+      var p = pageNo(n);
+      if (!p) return Promise.reject(new Error('No page ' + n + ' in that PDF.'));
+      var wantGlyphs = !!opts.glyphs;
+      var graphics = opts.graphics !== false;
+      var hit = graphics ? cached(p, wantGlyphs) : null;
+      if (hit) return Promise.resolve(hit);
+      var t0 = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+      return doc.getPage(p).then(function (page) {
+        var mid = ctx.guard(opts.signal);
+        if (mid) throw mid;
+        var OPS = window.pdfjsLib && window.pdfjsLib.OPS;
+        return visibleItems(page, null, ctx.caseState).then(function (vis) {
+          var size = pageSize(page);
+          var vp = page.getViewport({ scale: 1 });
+          var vt = vp.transform, W = vp.width, H = vp.height;
+          var tA = nowMs();
+          var res = pageLines(vis.items, size.width, size.height, page.rotate);
+          var textMs = nowMs() - tA;
+          var olP = graphics && OPS ? page.getOperatorList() : Promise.resolve(null);
+          return olP.then(function (ol) {
+            var after = ctx.guard(opts.signal);
+            if (after) throw after;
+            var tB = nowMs();
+            var gr = ol ? pageGraphics(ol, OPS, { glyphs: true }) : { images: [], paths: [], glyphs: [], layers: [], ops: 0, segments: 0 };
+            var walkMs = nowMs() - tB;
+            // let the page breathe between the walk and the region pass (a big
+            // chart page is two pieces of work of a few hundred ms on a phone)
+            return pause().then(function () {
+            var stopNow = ctx.guard(opts.signal);
+            if (stopNow) throw stopNow;
+            var tP = nowMs();
+            var fonts = {};
+            var info = function (id) {
+              if (!id) return null;
+              if (!fonts[id]) fonts[id] = fontInfo(page, id);
+              return fonts[id];
+            };
+            var lines = attachedLines(p) || res.lines.map(function (l, i) {
+              var g = l.geo || {};
+              var box = toViewBox(vt, g.box);
+              var fi = info(g.font);
+              return { i: i, text: l.text, box: box, nbox: normBox(box, W, H), font: fi ? fi.base : '', fontId: g.font || '',
+                size: r2(g.size || 0), col: g.col || 0, margin: !!l.margin };
+            });
+            var images = gr.images.map(function (im) {
+              var box = toViewBox(vt, im.box);
+              return { id: im.id, op: im.op, box: box, nbox: normBox(box, W, H), px: im.px, mask: im.mask, inline: im.inline,
+                layer: im.layer, clipped: im.clipped, colour: im.colour };
+            });
+            gr.paths.forEach(function (pt) {
+              pt.vbox = toViewBox(vt, pt.box);
+              // grid segments into view space (an axis swap on a turned page)
+              var vxs = [], hys = [];
+              var turned = Math.abs(vt[1]) > Math.abs(vt[0]);
+              // flat [position, length, ...]
+              for (var k = 0; k + 2 < pt.vx.length; k += 3) {
+                var q = applyM(vt, pt.vx[k], pt.vx[k + 1]);
+                (turned ? hys : vxs).push(turned ? q[1] : q[0], pt.vx[k + 2] - pt.vx[k + 1]);
+              }
+              for (k = 0; k + 2 < pt.hy.length; k += 3) {
+                var q2 = applyM(vt, pt.hy[k + 1], pt.hy[k]);
+                (turned ? vxs : hys).push(turned ? q2[0] : q2[1], pt.hy[k + 2] - pt.hy[k + 1]);
+              }
+              var rs = [];
+              for (k = 0; k + 3 < pt.rects.length; k += 4) {
+                var rb = toViewBox(vt, [pt.rects[k], pt.rects[k + 1], pt.rects[k + 2], pt.rects[k + 3]]);
+                rs.push(rb.x0, rb.y0, rb.x1, rb.y1);
+              }
+              pt.vsegs = { vx: vxs, hy: hys, rects: rs };
+            });
+            var tC = nowMs();
+            var dr = drawingRegions(gr.paths, W, H);
+            var regionMs = nowMs() - tC;
+            var glyphs = gr.glyphs.map(function (g) {
+              var box = toViewBox(vt, g.box);
+              var fi = info(g.font);
+              if (g.font && g.fontChar != null) {
+                var fc = fontChars[g.font] || (fontChars[g.font] = {});
+                if (!(g.code in fc)) fc[g.code] = g.fontChar;
+              }
+              return { font: g.font, base: fi ? fi.base : '', code: g.code, unicode: g.unicode, box: box, vbox: box,
+                nbox: normBox(box, W, H), advance: r2(g.advance), size: r2(g.size), space: g.space, invisible: g.invisible,
+                run: g.run, layer: g.layer };
+            });
+            var chart = glyphGrid(glyphs, {});
+            var lay = {
+              page: p, width: r2(W), height: r2(H), rotate: page.rotate || 0,
+              lines: lines, images: images, drawings: dr.drawings, backgrounds: dr.backgrounds,
+              captions: captions(captionPieces(vis.items, page.rotate, vt, lines), images, dr.drawings, W, H),
+              layers: gr.layers,
+              fonts: fonts,
+              chart: chart ? { cols: chart.cols, rows: chart.rows, cells: chart.cells, pitchX: chart.pitchX, pitchY: chart.pitchY,
+                fonts: chart.fonts, symbols: chart.symbols.length, fit: chart.fit } : null
+            };
+            lay.kind = pageKind(lay);
+            glyphs.forEach(function (g) { delete g.vbox; });
+            if (wantGlyphs) lay.glyphs = glyphs;
+            var t1 = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+            lay.stats = { ms: Math.round(t1 - t0), ops: gr.ops, items: vis.items.length, glyphs: gr.glyphs.length,
+              paths: gr.paths.length, segments: gr.segments,
+              // main-thread work only (ms also waits on the pdf.js worker)
+              mainMs: Math.round(textMs + walkMs + (t1 - tP)), textMs: Math.round(textMs), walkMs: Math.round(walkMs), regionMs: Math.round(regionMs) };
+            if (typeof page.cleanup === 'function') page.cleanup();
+            if (graphics) remember(p, wantGlyphs, lay);
+            return lay;
+            });
+          });
+        });
+      });
+    }
+
+    /* ---- OCR text for an image-only page (wave K, asked by ocr) -------- */
+    var attached = ctx.attached || {};
+
+    /** Copies of the OCR lines attached to page p, or null. */
+    function attachedLines(p) {
+      var a = attached[p];
+      if (!a) return null;
+      return a.map(function (l) {
+        var o = {};
+        for (var k in l) if (k !== 'pos' && k !== 'edge') o[k] = l[k];
+        return o;
+      });
+    }
+
+    /** Non-blank characters of page p's own text, furniture left out. */
+    function realChars(p) {
+      return doc.getPage(p).then(function (page) {
+        return visibleItems(page, null, ctx.caseState).then(function (vis) {
+          var size = pageSize(page);
+          var res = pageLines(vis.items, size.width, size.height, page.rotate);
+          if (typeof page.cleanup === 'function') page.cleanup();
+          var n = 0;
+          res.lines.forEach(function (l) { if (!l.margin) n += String(l.text || '').replace(INVISIBLE_RE, '').replace(/\s/g, '').length; });
+          return { chars: n, width: size.width, height: size.height };
+        });
+      });
+    }
+
+    /**
+     * Give page n the lines OCR read from its picture (Ocr.toTextItems).
+     * Refused, never overwriting, when the page has real text of its own.
+     * null or [] takes them off again. -> Promise<{ok, lines, reason}>
+     */
+    function setPageText(n, items, opts) {
+      opts = opts || {};
+      var stop = ctx.guard(opts.signal);
+      if (stop) return Promise.reject(stop);
+      var p = pageNo(n);
+      if (!p) return Promise.reject(new Error('No page ' + n + ' in that PDF.'));
+      cache = cache.filter(function (c) { return c.n !== p; });
+      if (!items || !items.length) {
+        var had = !!attached[p];
+        delete attached[p];
+        return Promise.resolve({ ok: true, lines: 0, cleared: had });
+      }
+      return realChars(p).then(function (rc) {
+        if (rc.chars >= MIN_PAGE_CHARS) {
+          return { ok: false, lines: 0, reason: 'That page already has its own text (' + rc.chars + ' characters); OCR lines are only for picture pages.' };
+        }
+        var vp = { width: rc.width, height: rc.height };
+        var W = vp.width, H = vp.height;
+        var lines = [];
+        items.forEach(function (it) {
+          var text = String(it && it.text != null ? it.text : '').replace(/\s+/g, ' ').trim();
+          if (!text) return;
+          var box = it.box || null, nb = it.nbox || null;
+          if (!box && nb) box = { x0: nb.x0 * W, y0: nb.y0 * H, x1: nb.x1 * W, y1: nb.y1 * H };
+          if (box && !nb) nb = normBox(box, W, H);
+          var cy = nb ? (nb.y0 + nb.y1) / 2 : 0.5;
+          var margin = it.margin != null ? !!it.margin : (cy <= MARGIN_BAND || cy >= 1 - MARGIN_BAND);
+          var pos = nb ? 1 - nb.y1 : 0.5;                       // the baseline from the bottom, like pageLines
+          lines.push({ i: lines.length, text: text, box: box, nbox: nb, font: 'ocr', fontId: null,
+            size: it.size || (box ? r2(box.y1 - box.y0) : 0), col: 0, margin: margin, ocr: true,
+            conf: it.conf == null ? null : it.conf, words: it.words || null,
+            pos: pos, edge: Math.min(pos, 1 - pos) });
+        });
+        if (!lines.length) { delete attached[p]; return { ok: true, lines: 0 }; }
+        attached[p] = lines;
+        return { ok: true, lines: lines.length };
+      });
+    }
+
+    /** Pages that carry OCR lines now, ascending. */
+    function ocrPagesNow() {
+      return Object.keys(attached).map(Number).sort(function (a, b) { return a - b; });
+    }
+
+    /** The text whose items' centres lie inside rect. */
+    function textIn(n, rect, opts) {
+      opts = opts || {};
+      var stop = ctx.guard(opts.signal);
+      if (stop) return Promise.reject(stop);
+      var p = pageNo(n);
+      if (!p) return Promise.resolve({ text: '', lines: [] });
+      if (attached[p]) {
+        return doc.getPage(p).then(function (page) {
+          var vp0 = page.getViewport({ scale: 1 });
+          var r = readRect(rect, vp0.width, vp0.height);
+          var got = attachedLines(p).filter(function (l) {
+            if (!l.box) return false;
+            var cx = (l.box.x0 + l.box.x1) / 2, cy = (l.box.y0 + l.box.y1) / 2;
+            return cx >= r.x0 && cx <= r.x1 && cy >= r.y0 && cy <= r.y1;
+          });
+          return { text: got.map(function (l) { return l.text; }).join('\n'), lines: got, ocr: true };
+        });
+      }
+      return doc.getPage(p).then(function (page) {
+        return visibleItems(page, null, ctx.caseState).then(function (vis) {
+          var vp = page.getViewport({ scale: 1 });
+          var vt = vp.transform, W = vp.width, H = vp.height;
+          var r = readRect(rect, W, H);
+          var inside = vis.items.filter(function (it) {
+            if (!it || typeof it.str !== 'string' || !it.str.length || !it.transform) return false;
+            var b = toViewBox(vt, itemBox(it, it.width || 0));
+            if (!b) return false;
+            var cx = (b.x0 + b.x1) / 2, cy = (b.y0 + b.y1) / 2;
+            return cx >= r.x0 && cx <= r.x1 && cy >= r.y0 && cy <= r.y1;
+          });
+          var rows = buildRows(inside, page.rotate);
+          var deglyph = pageLooksSpaced(rows);
+          var lines = [];
+          rows.forEach(function (row) {
+            var text = normUnicode(rowText(row, deglyph));
+            if (!text) return;
+            var g = rowGeo(row, 0);
+            var box = toViewBox(vt, g && g.box);
+            lines.push({ text: text, box: box, nbox: normBox(box, W, H), fontId: g ? g.font : '', size: r2(g ? g.size : 0) });
+          });
+          if (typeof page.cleanup === 'function') page.cleanup();
+          return { text: lines.map(function (l) { return l.text; }).join('\n'), lines: lines };
+        });
+      });
+    }
+
+    function find(n, re, opts) {
+      return layout(n, opts).then(function (lay) {
+        var test = typeof re === 'string'
+          ? function (t) { return t.toLowerCase().indexOf(re.toLowerCase()) >= 0; }
+          : function (t) { re.lastIndex = 0; return re.test(t); };
+        return lay.lines.filter(function (l) { return test(l.text); });
+      });
+    }
+
+    function glyphsOf(n, opts) {
+      opts = opts || {};
+      return layout(n, { signal: opts.signal, glyphs: true }).then(function (lay) {
+        var W = lay.width, H = lay.height;
+        var rect = opts.rect ? readRect(opts.rect, W, H) : null;
+        var want = null;
+        if (opts.font) { want = {}; [].concat(opts.font).forEach(function (f) { want[f] = true; }); }
+        var gl = lay.glyphs.filter(function (g) {
+          if (want && !want[g.font] && !want[g.base]) return false;
+          if (!rect || !g.box) return true;
+          var cx = (g.box.x0 + g.box.x1) / 2, cy = (g.box.y0 + g.box.y1) / 2;
+          return cx >= rect.x0 && cx <= rect.x1 && cy >= rect.y0 && cy <= rect.y1;
+        });
+        return { page: lay.page, width: W, height: H, fonts: lay.fonts, glyphs: gl, chartFonts: chartFonts(lay.glyphs, 30) };
+      });
+    }
+
+    /** A lattice of symbol glyphs on page n (see glyphGrid). */
+    function chartOf(n, opts) {
+      opts = opts || {};
+      return glyphsOf(n, { signal: opts.signal, rect: opts.rect }).then(function (g) {
+        var withBox = g.glyphs.map(function (x) {
+          var o = {};
+          for (var k in x) o[k] = x[k];
+          o.vbox = x.box;
+          return o;
+        });
+        var res = glyphGrid(withBox, { fonts: opts.fonts });
+        if (res) res.page = g.page;
+        return res;
+      });
+    }
+
+    /** One glyph of an embedded font, drawn to fit a px square. */
+    function renderGlyph(fontId, code, opts) {
+      opts = opts || {};
+      var stop = ctx.guard(opts.signal);
+      if (stop) return Promise.reject(stop);
+      var px = Math.max(4, Math.min(256, opts.px || 24));
+      var pad = Math.max(0, Math.min(px / 3, opts.pad == null ? 2 : opts.pad));
+      var fc = fontChars[fontId] && fontChars[fontId][code];
+      if (fc == null) return Promise.resolve(null);
+      return doc.getPage(1).then(function (page) {
+        var objs = page.commonObjs, fo = null;
+        try { if (objs.has(fontId)) fo = objs.get(fontId); } catch (e) { fo = null; }
+        if (!fo || fo.isType3Font || typeof fo.getPathGenerator !== 'function') return null;
+        var gen = null;
+        try {
+          if (!objs.has(fo.loadedName + '_path_' + fc)) return null;
+          gen = fo.getPathGenerator(objs, fc);
+        } catch (e) { return null; }
+        if (typeof document === 'undefined' || !gen) return null;
+        var em = px * 2, S = em * 3;
+        var big = document.createElement('canvas');
+        big.width = S; big.height = S;
+        var g = big.getContext('2d');
+        if (!g) return null;
+        g.save();
+        g.translate(em, em * 2);
+        g.beginPath();
+        try { gen(g, em); } catch (e) { g.restore(); return null; }
+        g.fillStyle = '#000';
+        g.fill();
+        g.restore();
+        var d = g.getImageData(0, 0, S, S).data;
+        var x0 = S, y0 = S, x1 = -1, y1 = -1;
+        for (var y = 0; y < S; y++) {
+          for (var x = 0; x < S; x++) {
+            if (d[(y * S + x) * 4 + 3] > 24) {
+              if (x < x0) x0 = x; if (x > x1) x1 = x;
+              if (y < y0) y0 = y; if (y > y1) y1 = y;
+            }
+          }
+        }
+        var out = document.createElement('canvas');
+        out.width = px; out.height = px;
+        var o = out.getContext('2d');
+        if (x1 < 0) { out.ink = null; return out; }       // a blank glyph (a space)
+        var iw = x1 - x0 + 1, ih = y1 - y0 + 1;
+        var k = Math.min((px - 2 * pad) / iw, (px - 2 * pad) / ih);
+        if (opts.fit === false) k = Math.min(k, 0.5);   // keep the em scale (em = 2 px)
+        var dw = iw * k, dh = ih * k;
+        if (opts.colour) {
+          o.fillStyle = opts.colour;
+          o.fillRect(0, 0, px, px);
+          o.globalCompositeOperation = 'destination-in';
+        }
+        o.drawImage(big, x0, y0, iw, ih, (px - dw) / 2, (px - dh) / 2, dw, dh);
+        o.globalCompositeOperation = 'source-over';
+        out.ink = { x0: r4((x0 - em) / em), y0: r4((em * 2 - y1 - 1) / em), x1: r4((x1 + 1 - em) / em), y1: r4((em * 2 - y0) / em) };
+        big.width = 0; big.height = 0;
+        return out;
+      });
+    }
+
+    function ocConfig() {
+      if (!ocPromise) {
+        ocPromise = typeof doc.getOptionalContentConfig === 'function'
+          ? doc.getOptionalContentConfig().then(null, function () { return null; })
+          : Promise.resolve(null);
+      }
+      return ocPromise;
+    }
+
+    function layersOf() {
+      var stop = ctx.guard();
+      if (stop) return Promise.reject(stop);
+      return ocConfig().then(function (cfg) {
+        var groups = cfg && typeof cfg.getGroups === 'function' ? cfg.getGroups() : null;
+        var list = [];
+        if (groups) {
+          Object.keys(groups).forEach(function (id) {
+            var g = groups[id];
+            list.push({ id: id, name: g.name || '', visible: g.visible !== false, intent: g.intent || null });
+          });
+        }
+        var order = cfg && typeof cfg.getOrder === 'function' ? cfg.getOrder() : null;
+        return { none: !list.length, layers: list, order: order || [] };
+      });
+    }
+
+    /** A fresh config with `spec` applied, or null for the default. */
+    function layerConfig(spec) {
+      if (!spec || typeof doc.getOptionalContentConfig !== 'function') return Promise.resolve(null);
+      return doc.getOptionalContentConfig().then(function (cfg) {
+        var groups = cfg && cfg.getGroups ? cfg.getGroups() : null;
+        if (!groups) return { cfg: null, unknown: [].concat(spec.on || [], spec.off || [], spec.only || []) };
+        var ids = Object.keys(groups), unknown = [];
+        var resolve = function (want) {
+          var hit = ids.filter(function (id) { return id === want || groups[id].name === want; });
+          if (!hit.length) {
+            var low = String(want).toLowerCase();
+            hit = ids.filter(function (id) { return String(groups[id].name || '').toLowerCase() === low; });
+          }
+          if (!hit.length) unknown.push(want);
+          return hit;
+        };
+        if (spec.only) {
+          var keep = {};
+          [].concat(spec.only).forEach(function (w) { resolve(w).forEach(function (id) { keep[id] = true; }); });
+          ids.forEach(function (id) { cfg.setVisibility(id, !!keep[id]); });
+        }
+        [].concat(spec.on || []).forEach(function (w) { resolve(w).forEach(function (id) { cfg.setVisibility(id, true); }); });
+        [].concat(spec.off || []).forEach(function (w) { resolve(w).forEach(function (id) { cfg.setVisibility(id, false); }); });
+        return { cfg: cfg, unknown: unknown };
+      });
+    }
+
+    /** Draw `rect` of page n. See the API file for opts. */
+    function renderRegion(n, rect, opts) {
+      opts = opts || {};
+      var stop = ctx.guard(opts.signal);
+      if (stop) return Promise.reject(stop);
+      var p = pageNo(n);
+      if (!p) return Promise.reject(new Error('No page ' + n + ' in that PDF.'));
+      if (typeof document === 'undefined') return Promise.reject(new Error('This device cannot draw the page.'));
+      var stopped = function () { return ctx.stopped() || isCancelled(opts.signal); };
+      var intent = opts.intent === 'print' ? 'print' : 'display';
+      return canPaint().then(function (ok) {
+        if (!ok && intent !== 'print') {
+          if (opts.whenHidden === 'fail') throw namedError('HiddenError', 'The page is hidden, so it can’t be drawn right now.');
+          if (opts.whenHidden !== 'wait') intent = 'print';
+        }
+        return Promise.all([doc.getPage(p), layerConfig(opts.layers)]);
+      }).then(function (got) {
+        var page = got[0], lc = got[1];
+        var mid = ctx.guard(opts.signal);
+        if (mid) throw mid;
+        var vp1 = page.getViewport({ scale: 1 });
+        var r = readRect(rect, vp1.width, vp1.height);
+        r = vCut(r, { x0: 0, y0: 0, x1: vp1.width, y1: vp1.height });
+        var rw = r.x1 - r.x0, rh = r.y1 - r.y0;
+        if (!(rw > 0 && rh > 0)) throw new Error('That rectangle is outside the page.');
+        var scale = 1;
+        if (opts.scale > 0) scale = opts.scale;
+        else if (opts.width > 0) scale = opts.width / rw;      // an exact pixel width (sew-visual)
+        else if (opts.height > 0) scale = opts.height / rh;
+        else if (opts.dpi > 0) scale = opts.dpi / 72;
+        else if (opts.maxSide > 0) scale = opts.maxSide / Math.max(rw, rh);
+        else if (opts.maxWidth > 0) scale = opts.maxWidth / rw;
+        var clamped = false;
+        var cap = Math.min(MAX_RENDER_PIXELS, opts.maxPixels > 0 ? opts.maxPixels : MAX_RENDER_PIXELS);
+        if (rw * scale * rh * scale > cap) { scale = Math.sqrt(cap / (rw * rh)); clamped = true; }
+        if (Math.max(rw, rh) * scale > MAX_RENDER_SIDE) { scale = MAX_RENDER_SIDE / Math.max(rw, rh); clamped = true; }
+        var cw = Math.max(1, Math.round(rw * scale)), ch = Math.max(1, Math.round(rh * scale));
+        var vp = page.getViewport({ scale: scale, offsetX: -r.x0 * scale, offsetY: -r.y0 * scale });
+        var canvas = document.createElement('canvas');
+        canvas.width = cw; canvas.height = ch;
+        var g = canvas.getContext('2d');
+        if (!g) throw new Error('This device cannot draw the page.');
+        if (opts.background !== false) { g.fillStyle = opts.background || '#ffffff'; g.fillRect(0, 0, cw, ch); }
+        var params = { canvasContext: g, viewport: vp, intent: intent };
+        if (lc && lc.cfg) params.optionalContentConfigPromise = Promise.resolve(lc.cfg);
+        var task = page.render(params);
+        var done = task && task.promise ? task.promise : Promise.resolve();
+        var watch = null, timer = null;
+        var aborted = new Promise(function (resolve, reject) {
+          watch = setInterval(function () {
+            if (!stopped()) return;
+            if (task && typeof task.cancel === 'function') { try { task.cancel(); } catch (e) { /* done */ } }
+            reject(ctx.guard(opts.signal) || abortError());
+          }, 40);
+          if (opts.budgetMs > 0) {
+            timer = setTimeout(function () {
+              if (task && typeof task.cancel === 'function') { try { task.cancel(); } catch (e) { /* done */ } }
+              reject(namedError('TimeoutError', 'That page took too long to draw.'));
+            }, opts.budgetMs);
+          }
+        });
+        var finish = function () {
+          if (watch) { clearInterval(watch); watch = null; }
+          if (timer) { clearTimeout(timer); timer = null; }
+          if (typeof page.cleanup === 'function') { try { page.cleanup(); } catch (e) { /* busy */ } }
+        };
+        return Promise.race([done, aborted]).then(function () {
+          finish();
+          var after = ctx.guard(opts.signal);
+          if (after) { canvas.width = 0; canvas.height = 0; throw after; }
+          var region = { page: p, box: { x0: r2(r.x0), y0: r2(r.y0), x1: r2(r.x1), y1: r2(r.y1) }, scale: scale,
+            clamped: clamped, intent: intent, layersUnknown: lc && lc.unknown && lc.unknown.length ? lc.unknown : null };
+          if (opts.imageData) {
+            var data = g.getImageData(0, 0, cw, ch);
+            data.region = region;
+            canvas.width = 0; canvas.height = 0;
+            return data;
+          }
+          canvas.region = region;
+          if (region.layersUnknown) canvas.layersUnknown = region.layersUnknown;
+          return canvas;
+        }, function (err) {
+          finish();
+          canvas.width = 0; canvas.height = 0;
+          if (err && (err.name === 'TimeoutError' || err.name === 'AbortError')) throw err;
+          if (stopped() || (err && err.name === 'RenderingCancelledException')) throw ctx.guard(opts.signal) || abortError();
+          throw err;
+        });
+      });
+    }
+
+    /** rect in tiles no bigger than the pixel cap, one at a time. */
+    function renderTiles(n, rect, opts, onTile) {
+      opts = opts || {};
+      var p = pageNo(n);
+      if (!p) return Promise.reject(new Error('No page ' + n + ' in that PDF.'));
+      return doc.getPage(p).then(function (page) {
+        var vp1 = page.getViewport({ scale: 1 });
+        var r = vCut(readRect(rect, vp1.width, vp1.height), { x0: 0, y0: 0, x1: vp1.width, y1: vp1.height });
+        var scale = opts.scale > 0 ? opts.scale : opts.dpi > 0 ? opts.dpi / 72 : 2;
+        var cap = Math.min(MAX_RENDER_PIXELS, opts.maxPixels > 0 ? opts.maxPixels : MAX_RENDER_PIXELS);
+        var side = Math.min(MAX_RENDER_SIDE, Math.floor(Math.sqrt(cap))) / scale;   // a tile's side in page units
+        var nx = Math.max(1, Math.ceil((r.x1 - r.x0) / side)), ny = Math.max(1, Math.ceil((r.y1 - r.y0) / side));
+        var tiles = [];
+        for (var ty = 0; ty < ny; ty++) {
+          for (var tx = 0; tx < nx; tx++) {
+            tiles.push({ col: tx, row: ty, box: { x0: r.x0 + tx * side, y0: r.y0 + ty * side,
+              x1: Math.min(r.x1, r.x0 + (tx + 1) * side), y1: Math.min(r.y1, r.y0 + (ty + 1) * side) } });
+          }
+        }
+        var chain = Promise.resolve();
+        tiles.forEach(function (t, i) {
+          chain = chain.then(function () {
+            var o = {};
+            for (var k in opts) o[k] = opts[k];
+            o.scale = scale;
+            delete o.maxSide; delete o.dpi;
+            return renderRegion(p, t.box, o).then(function (cv) {
+              t.i = i;
+              t.px = { w: cv.width, h: cv.height };
+              return Promise.resolve(typeof onTile === 'function' ? onTile(cv, t) : null).then(function () {
+                if (!opts.keep) { cv.width = 0; cv.height = 0; }
+              });
+            });
+          });
+        });
+        return chain.then(function () { return { tiles: tiles, cols: nx, rows: ny, scale: scale }; });
+      });
+    }
+
+    /** The decoded bitmap of image draw `index` on page n (capped to maxSide). */
+    function renderImage(n, index, opts) {
+      opts = opts || {};
+      var maxSide = opts.maxSide > 0 ? opts.maxSide : 1024;
+      return layout(n, { signal: opts.signal }).then(function (lay) {
+        var im = lay.images[index];
+        if (!im) throw new Error('No picture ' + index + ' on page ' + n + '.');
+        var fallback = function () {
+          var w = im.box.x1 - im.box.x0, h = im.box.y1 - im.box.y0;
+          var want = im.px ? Math.max(im.px.w / Math.max(w, 1), im.px.h / Math.max(h, 1)) : 2;
+          var scale = Math.min(Math.max(want, 1), maxSide / Math.max(w, h, 1));
+          return renderRegion(n, im.box, { scale: scale, signal: opts.signal, whenHidden: opts.whenHidden }).then(function (cv) {
+            // a picture drawn whole and unturned comes back at its own pixel size
+            if (!im.px || im.clipped) { cv.image = null; return cv; }
+            var k = Math.min(1, maxSide / Math.max(im.px.w, im.px.h));
+            var tw = Math.max(1, Math.round(im.px.w * k)), th = Math.max(1, Math.round(im.px.h * k));
+            if (tw === cv.width && th === cv.height) { cv.image = { w: im.px.w, h: im.px.h, rendered: true }; return cv; }
+            var o = document.createElement('canvas');
+            o.width = tw; o.height = th;
+            o.getContext('2d').drawImage(cv, 0, 0, tw, th);
+            o.region = cv.region;
+            o.image = { w: im.px.w, h: im.px.h, rendered: true };
+            cv.width = 0; cv.height = 0;
+            return o;
+          });
+        };
+        if (im.mask || (!im.id && !im.inline)) return fallback();
+        return doc.getPage(lay.page).then(function (page) {
+          return page.getOperatorList().then(function (ol) {
+            if (!im.id) {
+              // a small picture pdf.js inlined: its pixels are in the op's args
+              var OPS = window.pdfjsLib.OPS;
+              var a = ol.fnArray[im.op] === OPS.paintInlineImageXObject && ol.argsArray[im.op];
+              return a && a[0] ? a[0] : null;
+            }
+            var objs = im.id.indexOf('g_') === 0 ? page.commonObjs : page.objs;
+            // pdf.js does not send a page's pictures twice: once the page
+            // has been cleaned up the bitmap is gone, and the crop rendered
+            // at the picture's own density (fallback) stands in for it
+            return new Promise(function (resolve) {
+              var t = setTimeout(function () { resolve(null); }, 250);
+              try { objs.get(im.id, function (o) { clearTimeout(t); resolve(o); }); } catch (e) { clearTimeout(t); resolve(null); }
+            });
+          }).then(function (o) {
+            if (!o || !(o.width > 0) || !(o.height > 0)) { page.cleanup(); return fallback(); }
+            var k = Math.min(1, maxSide / Math.max(o.width, o.height));
+            var cw = Math.max(1, Math.round(o.width * k)), ch = Math.max(1, Math.round(o.height * k));
+            var full = document.createElement('canvas');
+            full.width = o.width; full.height = o.height;
+            var g = full.getContext('2d');
+            if (o.bitmap) g.drawImage(o.bitmap, 0, 0);
+            else if (o.data) {
+              var id = g.createImageData(o.width, o.height), src = o.data, dst = id.data, px = o.width * o.height, j;
+              if (o.kind === 3) dst.set(src.subarray(0, px * 4));
+              else if (o.kind === 2) for (j = 0; j < px; j++) { dst[j * 4] = src[j * 3]; dst[j * 4 + 1] = src[j * 3 + 1]; dst[j * 4 + 2] = src[j * 3 + 2]; dst[j * 4 + 3] = 255; }
+              else if (o.kind === 1) {
+                var rowBytes = (o.width + 7) >> 3;
+                for (j = 0; j < px; j++) {
+                  var yy = Math.floor(j / o.width), xx = j % o.width;
+                  var bit = (src[yy * rowBytes + (xx >> 3)] >> (7 - (xx & 7))) & 1;
+                  dst[j * 4] = dst[j * 4 + 1] = dst[j * 4 + 2] = bit ? 255 : 0; dst[j * 4 + 3] = 255;
+                }
+              } else { page.cleanup(); full.width = 0; return fallback(); }
+              g.putImageData(id, 0, 0);
+            } else { page.cleanup(); full.width = 0; return fallback(); }
+            page.cleanup();
+            if (k === 1) { full.image = { w: o.width, h: o.height }; return full; }
+            var out = document.createElement('canvas');
+            out.width = cw; out.height = ch;
+            out.getContext('2d').drawImage(full, 0, 0, cw, ch);
+            full.width = 0; full.height = 0;
+            out.image = { w: o.width, h: o.height };
+            return out;
+          });
+        });
+      });
+    }
+
+    /** A guess per page, one page at a time, yielding between pages. */
+    function pageKinds(opts) {
+      opts = opts || {};
+      var total = doc.numPages || 0;
+      if (opts.maxPages > 0) total = Math.min(total, Math.floor(opts.maxPages));
+      var out = [];
+      var chain = Promise.resolve();
+      var mem = function () {
+        try { return performance && performance.memory ? performance.memory.usedJSHeapSize : null; } catch (e) { return null; }
+      };
+      for (var q = 1; q <= total; q++) {
+        (function (pn) {
+          chain = chain.then(function () {
+            var stop = ctx.guard(opts.signal);
+            if (stop) throw stop;
+            if (typeof opts.onProgress === 'function') { try { opts.onProgress(pn, total); } catch (e) { /* UI */ } }
+            var m0 = mem();
+            return layout(pn, { signal: opts.signal }).then(function (lay) {
+              var k = lay.kind, m1 = mem();
+              out.push({ page: pn, guess: k.guess, confidence: k.confidence, reasons: k.reasons, scores: k.scores,
+                ms: lay.stats.ms, mainMs: lay.stats.mainMs, ops: lay.stats.ops, heap: m0 != null && m1 != null ? m1 - m0 : null });
+              return pause();     // let the page breathe
+            });
+          });
+        })(q);
+      }
+      return chain.then(function () { return out; });
+    }
+
+    // renderPage(n, {layers | whenHidden}) goes through renderRegion (the
+    // whole page); without those options it is exactly the old call.
+    var plainRender = handle.renderPage;
+    handle.renderPage = function (n, ropts) {
+      if (!ropts || (!ropts.layers && !ropts.whenHidden)) return plainRender(n, ropts);
+      var o = {};
+      for (var k in ropts) o[k] = ropts[k];
+      return renderRegion(n, null, o);
+    };
+    // textOf(n) of a page given OCR lines is those lines; any other page is
+    // exactly the old call
+    var plainTextOf = handle.textOf;
+    handle.textOf = function (n) {
+      var p = pageNo(n);
+      if (p && attached[p] && !ctx.guard()) {
+        return Promise.resolve(attached[p].map(function (l) { return l.text; }).join('\n'));
+      }
+      return plainTextOf(n);
+    };
+    handle.setPageText = setPageText;
+    handle.ocrPages = ocrPagesNow;
+    handle.layout = layout;
+    handle.textIn = textIn;
+    handle.find = find;
+    handle.glyphs = glyphsOf;
+    handle.chart = chartOf;
+    handle.renderGlyph = renderGlyph;
+    handle.layers = layersOf;
+    handle.layerConfig = layerConfig;
+    handle.renderRegion = renderRegion;
+    handle.renderTiles = renderTiles;
+    handle.renderImage = renderImage;
+    handle.pageKinds = pageKinds;
+    return handle;
   }
 
   window.PdfText = {
@@ -3636,6 +5374,28 @@
     isAvailable: isAvailable,
     SIZE_WARN_BYTES: SIZE_WARN_BYTES,
     MIN_PAGE_CHARS: MIN_PAGE_CHARS,
+    /* wave K: page structure (docs/wave-k/api/pdftext.md) */
+    LAYOUT_VERSION: LAYOUT_VERSION,
+    MAX_RENDER_PIXELS: MAX_RENDER_PIXELS,
+    MAX_RENDER_SIDE: MAX_RENDER_SIDE,
+    canPaint: canPaint,
+    glyphGrid: function (glyphs, opts) {
+      return glyphGrid((glyphs || []).map(function (g) {
+        if (g.vbox || !g.box) return g;
+        var o = {};
+        for (var k in g) o[k] = g[k];
+        o.vbox = g.box;
+        return o;
+      }), opts);
+    },
+    chartFonts: chartFonts,
+    _pageGraphics: pageGraphics,
+    _drawingRegions: drawingRegions,
+    _captions: captions,
+    _pageKind: pageKind,
+    _periodOf: periodOf,
+    _latticeOf: latticeOf,
+    _itemBox: itemBox,
     /** Exposed for the dev fixtures page / tests. */
     _emptyPageNumbers: emptyPageNumbers,
     _normUnicode: normUnicode,

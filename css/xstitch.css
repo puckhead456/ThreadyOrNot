@@ -290,7 +290,7 @@
 .xs-key-iso,
 .xs-key-edit {
   flex: 0 0 auto;
-  width: 40px;
+  width: 44px;
   height: 44px;
   border-radius: var(--radius-sm);
   color: var(--text-muted);
@@ -299,7 +299,7 @@
 .xs-key-iso.on { color: var(--text); background: var(--surface-2); }
 .xs-key-have {
   flex: 0 0 auto;
-  width: 40px;
+  width: 44px;
   height: 44px;
 }
 .xs-key-have.on { background: var(--primary); color: var(--primary-text); border-color: var(--primary); }
@@ -454,6 +454,8 @@
   color: var(--text-muted);
 }
 .xs-thumb-img img { max-width: 100%; max-height: 110px; display: block; }
+.xs-thumb-img .xs-thumb-chart { max-width: 100%; max-height: 110px; display: block; image-rendering: pixelated; }
+.xs-thumb-none { font-size: 12px; }
 .xs-thumb-label { font-size: 12px; text-align: center; }
 .xs-thumb-done {
   position: absolute;
@@ -955,3 +957,137 @@
   #xs-stitch-btn { transition: none; }
   #xs-stitch-btn.pressed { transform: none; }
 }
+
+/* --------------------------------------------------------------------------
+   Wave K (xs-app): the grid read's check, colours not told apart, the
+   stitched piece in the tap button, Stitch mode, parking, Find my place.
+   Theme variables only.
+   -------------------------------------------------------------------------- */
+
+.xs-grid-check { margin: 8px 0; }
+.xs-grid-unresolved {
+  margin: 6px 0 8px;
+  padding: 8px 10px;
+  border-left: 4px solid var(--danger);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  font-size: 14px;
+}
+.btn.check-demoted { font-weight: 600; }
+
+/* a key row the read could not name: visible, never blank */
+.xs-key-row.unresolved .xs-swatch {
+  outline: 2px dashed var(--danger);
+  outline-offset: 1px;
+}
+.xs-key-row.unresolved .xs-key-sub { color: var(--danger); font-weight: 700; }
+.xs-resolve-list { margin: 8px 0; }
+.xs-resolve-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 48px;
+  text-align: left;
+  background: none;
+  border: 0;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.xs-resolve-row:focus-visible { outline: 3px solid var(--primary); outline-offset: -3px; }
+
+/* the stitched piece (XSRender) sits exactly where the flat preview sits */
+.xs-stitched { z-index: 0; }
+.stitch-canvas.xs-live[hidden] { display: none; }
+.xs-stitch-note { margin: 4px 0 0; font-size: 12px; text-align: center; }
+
+.xs-stitch-mode-btn { margin-top: 8px; width: 100%; min-height: 44px; }
+
+/* Stitch mode: the chart fills the free rectangle the HUD leaves */
+.work-surface .xs-work-chart {
+  position: absolute;
+  inset: 0;
+  display: flex;
+}
+.work-surface .xs-chart-wrap.xs-work {
+  height: auto;
+  min-height: 0;
+  flex: 1 1 auto;
+  border-radius: var(--radius-sm);
+}
+/* Stitch mode's corner row: ‹ › ↶ −1 +1 must fit 375 px (and 320 px) with
+   every button still at least 44 px */
+.work-hud.xs-work-hud .work-btns { gap: 6px; padding-left: 8px; padding-right: 8px; }
+.work-hud.xs-work-hud .work-btn { min-width: 54px; min-height: 54px; padding: 0 8px; }
+.work-hud.xs-work-hud .work-row-plus { min-width: 84px; }
+@media (max-width: 340px) {
+  .work-hud.xs-work-hud .work-btn { min-width: 46px; min-height: 50px; padding: 0 4px; }
+  .work-hud.xs-work-hud .work-row-plus { min-width: 66px; }
+}
+/* Pixel Wyrm's display face is twice as wide: keep "553 / 1,047" on one line
+   (the theme's own work-mode sizes are for one big cell, not two) */
+html[data-theme="dragon-pixel"] #screen-craft.work-mode .work-cell.xs-work-cell .work-big { font-size: 24px; }
+html[data-theme="dragon-pixel"] #screen-craft.work-mode .work-cell.xs-work-cell .work-of { font-size: 11px; }
+html[data-theme="dragon-pixel"] #screen-craft.work-mode .work-cell.xs-work-cell .work-sub { font-size: 9px; line-height: 1.5; }
+/* the shell's panel label is sized for a row beside chips; ours sits above the tools */
+.work-hud.xs-work-hud .work-panel > .work-panel-label { flex: 0 0 auto; }
+/* under the HUD (surfaceUnderHud): edge to edge, the HUD panels float over it */
+.work-surface .xs-work-chart.xs-under-hud .xs-chart-wrap.xs-work { border-radius: 0; }
+.xs-work-empty { padding: 96px 16px; text-align: center; color: var(--primary-text); }
+/* the readout is compact so the chart keeps the screen */
+#screen-craft.work-mode .work-cell.xs-work-cell .work-big { font-size: 34px; }
+#screen-craft.work-mode .work-cell.xs-work-cell .work-of { font-size: 16px; }
+#screen-craft.work-mode .work-cell.xs-work-cell .work-cap { font-size: 11px; letter-spacing: 1px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#screen-craft.work-mode .work-cell.xs-work-cell .work-sub { font-size: 12px; }
+.xs-work-keys { font-size: 12px; margin-top: 8px; }
+
+/* parking */
+.xs-park-tip { padding: 10px 12px; margin: 8px 0; }
+.xs-park-tip p { margin: 0 0 6px; }
+.xs-park-corners { display: flex; gap: 6px; }
+.xs-park-corner-btn { min-width: 48px; min-height: 44px; font-size: 18px; }
+.xs-park-corner-btn.on { background: var(--primary); color: var(--primary-text); border-color: var(--primary); }
+.xs-park-note { width: 100%; margin: 6px 0 8px; min-height: 44px; }
+.xs-park-list .xs-key-main { flex: 1 1 auto; min-width: 0; }
+
+/* find my place */
+.xs-keypad {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  margin: 8px 0;
+}
+.xs-keypad .xs-key { min-height: 48px; font-size: 20px; font-variant-numeric: tabular-nums; }
+.xs-find-words { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+.xs-key-word { min-height: 40px; }
+.xs-find-msg { min-height: 1.4em; margin: 6px 0; font-size: 14px; }
+.xs-find-msg.is-off { color: var(--danger); font-weight: 700; }
+.xs-goal-link { display: block; margin: 6px 0; min-height: 40px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .xs-stitched { transition: none !important; }
+}
+
+/* #14 Row by row: done runs inside a row */
+.xs-run.xs-run-done { opacity: 0.55; text-decoration: line-through; }
+.xs-run.xs-run-part .xs-run-n { font-weight: 800; color: var(--primary); }
+.xs-row-scope { margin-bottom: 4px; }
+/* two short lines rather than one cut in the middle of "island 3/12" */
+#screen-craft.work-mode .work-cell.xs-work-cell .work-sub {
+  white-space: normal; overflow: hidden; max-width: 100%;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; line-height: 1.25;
+}
+#screen-craft.work-mode .work-read { gap: 6px; }
+/* #9 the designer's own symbol, and #7 the key read from a picture */
+.xs-swatch .xs-glyph { width: 18px; height: 18px; display: block; margin: auto; }
+.xs-keyread-row { align-items: flex-start; gap: 10px; }
+.xs-keyread-row.is-partial .xs-key-code, .xs-keyread-row.is-blank .xs-key-code { color: var(--danger); }
+.xs-keyread-fix { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; align-items: center; }
+.xs-keyread-cand { min-height: 40px; display: inline-flex; align-items: center; gap: 4px; }
+.xs-keyread-cand.on { background: var(--primary); color: var(--primary-text); }
+.xs-keyread-input { min-height: 40px; width: 9em; max-width: 100%; }
+.xs-size-doubt { border-left: 4px solid var(--danger); padding: 6px 10px; margin: 6px 0; background: var(--surface-2); border-radius: var(--radius-sm); }
+.xs-tile-seams { margin: 6px 0; padding-left: 18px; font-size: 14px; }
+.xs-tile-seams .is-off { color: var(--danger); font-weight: 700; }
+.xs-kind-select { width: 100%; min-height: 44px; }

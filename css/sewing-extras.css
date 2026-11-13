@@ -1,0 +1,171 @@
+/* Thready or Not — css/sewing-extras.css
+   The sewing sheets from the project's "⋯" menu (js/app-sewing-extras.js, wave K sew-extras).
+   Theme variables only; every class starts with swx-. Phone first. */
+
+.swx-sheet .sheet-body { overflow-wrap: anywhere; }
+.swx-head { margin: 0 0 10px; }
+.swx-h { margin: 16px 0 6px; font-size: 16px; font-family: var(--font-display); color: var(--text); }
+.swx-h4 { margin: 12px 0 4px; font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-muted); }
+.swx-section { margin: 10px 0 4px; }
+.swx-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 0 0 10px; }
+.swx-units { margin: 4px 0 8px; }
+.swx-seg button { min-height: 40px; }
+.swx-pair { display: flex; flex-wrap: wrap; gap: 0 12px; align-items: flex-end; }
+.swx-pair > .field { flex: 1 1 140px; min-width: 0; }
+.swx-in-short { max-width: 9em; }
+.swx-in-mid { max-width: 14em; }
+.swx-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; }
+.swx-why { margin: 4px 0 8px; font-size: 12px; color: var(--text-muted); }
+.swx-sub { display: block; font-size: 13px; color: var(--text-muted); }
+.swx-result .swx-sub, .swx-flag .swx-sub, p > .swx-sub { display: inline; }
+.swx-by { font-size: 12px; color: var(--text-muted); }
+.swx-num { font-weight: 600; }
+.swx-approx {
+  font-weight: 600;
+  border-bottom: 1px dotted var(--text-muted);
+  white-space: nowrap;
+}
+.swx-result { margin: 6px 0; line-height: 1.6; }
+.swx-quote { margin: 4px 0; font-style: italic; }
+
+/* verdict lines: ✓ exact, ≈ close, ≠ off, ? not checked */
+.swx-flag {
+  margin: 6px 0;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  font-size: 13px;
+  line-height: 1.45;
+  background: var(--surface-2);
+  color: var(--text);
+}
+.swx-flag-glyph { font-weight: 700; }
+.swx-flag-exact { border-color: var(--success); }
+.swx-flag-exact .swx-flag-glyph { color: var(--success); }
+.swx-flag-close { border-style: dashed; }
+.swx-flag-off { border-color: var(--danger); border-width: 2px; }
+.swx-flag-off .swx-flag-glyph { color: var(--danger); }
+.swx-flag-unchecked { border-style: dashed; color: var(--text-muted); }
+
+/* cutting board */
+.swx-group { margin: 14px 0 6px; border-radius: var(--radius-sm); }
+.swx-group.is-target { outline: 2px solid var(--primary); outline-offset: 4px; }
+.swx-group-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.swx-group-head .swx-h { margin: 6px 0; flex: 1 1 auto; min-width: 0; }
+.swx-count { font-size: 13px; color: var(--text-muted); white-space: nowrap; }
+.swx-apply { margin: 0 0 6px; font-size: 13px; color: var(--text); }
+.swx-apply-unknown { color: var(--text-muted); }
+.swx-list { margin: 0; }
+.swx-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.swx-row-main { flex: 1 1 160px; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.swx-piece { font-weight: 600; color: var(--text); }
+.swx-row.is-sub { padding-left: 18px; }
+.swx-row.is-done .swx-piece { color: var(--text-muted); }
+.swx-row.is-target { outline: 2px solid var(--primary); outline-offset: -2px; }
+.swx-counter { display: flex; align-items: center; gap: 6px; }
+.swx-cut-minus {
+  min-width: 44px; min-height: 44px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 20px;
+}
+.swx-cut-minus:disabled { opacity: 0.4; }
+.swx-cut-btn { min-height: 44px; white-space: nowrap; }
+.swx-cut-btn.is-done { background: var(--success); color: var(--accent-text); border-color: transparent; }
+.swx-cut-all { min-height: 44px; }
+.swx-notion { font-style: italic; }
+.swx-fuse { padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2); }
+.swx-fuse .swx-h { margin-top: 2px; }
+.swx-scale { margin: 14px 0; }
+.swx-scale summary, .swx-tool summary { cursor: pointer; min-height: 44px; display: flex; align-items: center; font-weight: 600; }
+.swx-scale-holder { max-width: 100%; overflow: hidden; }
+
+/* colour chips and swatches */
+.swx-chip {
+  display: inline-block; flex: 0 0 auto;
+  width: 22px; height: 22px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+}
+.swx-chip.is-unset {
+  background: repeating-linear-gradient(45deg, var(--surface-2), var(--surface-2) 4px, var(--surface) 4px, var(--surface) 8px);
+}
+.swx-swatch { display: inline-flex; width: 44px; height: 44px; align-items: center; justify-content: center; flex: 0 0 auto; }
+.swx-swatch .swx-chip { width: 36px; height: 36px; }
+.swx-swatch-img { width: 44px; height: 44px; object-fit: cover; border-radius: 6px; border: 1px solid var(--border); }
+.swx-colour { width: 48px; height: 44px; padding: 2px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); }
+
+/* quilt top */
+.swx-quilt-stage { width: 100%; }
+.swx-quilt-canvas { display: block; width: 100%; height: min(60vh, 420px); border-radius: var(--radius-sm); background: var(--surface-2); }
+.swx-quilt-note { font-size: 13px; color: var(--text-muted); }
+.swx-rows { display: block; width: 100%; height: auto; max-height: 60vh; border: 1px solid var(--border); background: var(--surface-2); }
+.swx-cell { fill: var(--surface); stroke: var(--border); stroke-width: 0.06; }
+.swx-rowband { opacity: 0.28; filter: grayscale(1); }
+.swx-rowband.is-made { opacity: 1; filter: none; }
+.swx-cell-label { fill: var(--text); font-family: var(--font-body); }
+
+/* calculators */
+.swx-tool { border-top: 1px solid var(--border); padding: 2px 0 6px; }
+.swx-tool:last-of-type { border-bottom: 1px solid var(--border); }
+.swx-tool-body { padding: 0 0 6px; }
+.swx-measure { display: flex; flex-direction: column; gap: 4px; margin-top: 4px; }
+.swx-measured { min-height: 44px; }
+.swx-measured.is-done { background: var(--success); color: var(--accent-text); border-color: transparent; }
+
+/* fabric */
+.swx-fabline { padding: 8px 0; border-bottom: 1px solid var(--border); }
+.swx-fabline:last-child { border-bottom: none; }
+.swx-toggle { margin: 6px 0; }
+
+/* timer */
+.swx-timer {
+  margin: 14px 0 6px;
+  text-align: center;
+  font-family: var(--font-display);
+  font-size: 64px;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+.swx-timer.is-up { color: var(--primary); }
+.swx-timer-status { text-align: center; min-height: 1.4em; color: var(--text-muted); }
+.swx-actions .btn { flex: 1 1 120px; min-height: 48px; }
+
+/* glossary */
+.swx-gloss { margin-top: 8px; }
+.swx-dl { margin: 0; }
+.swx-dl dt { font-weight: 700; margin-top: 10px; color: var(--text); }
+.swx-dl dd { margin: 2px 0 0; color: var(--text); }
+
+/* fitting log */
+.swx-fit-form { margin: 10px 0; padding: 10px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2); }
+.swx-fit-form textarea { width: 100%; box-sizing: border-box; }
+.swx-fit-photo img { width: 64px; height: 64px; object-fit: cover; border-radius: 6px; border: 1px solid var(--border); }
+.swx-fit-del { min-height: 44px; }
+.swx-carry { margin: 6px 0; }
+
+.swx-offscreen { position: fixed; left: -9999px; top: 0; opacity: 0; }
+.swx-live { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+@media (prefers-reduced-motion: reduce) {
+  .swx-rowband { transition: none; }
+}
+
+/* phone: never wider than the sheet */
+.swx-sheet .sheet-body { min-width: 0; }
+.swx-sheet .sheet-body > *, .swx-section > *, .swx-group > * { max-width: 100%; box-sizing: border-box; }
+.swx-bar { flex-direction: column; align-items: stretch; }
+.swx-bar > *, .swx-units, .swx-units > .seg { width: 100%; min-width: 0; }
+.swx-seg button { min-width: 0; padding: 4px 6px; white-space: normal; }
+.swx-counter { flex: 0 0 auto; margin-left: auto; }
+.swx-row.is-sub .swx-piece::before { content: ''; display: inline-block; width: 10px; height: 10px; margin-right: 6px;
+  border-left: 2px solid var(--text-muted); border-bottom: 2px solid var(--text-muted); vertical-align: 2px; }
+@media (min-width: 560px) {
+  .swx-bar { flex-direction: row; flex-wrap: wrap; }
+  .swx-bar > * { width: auto; flex: 1 1 220px; }
+}
+.swx-row > .swx-flag { flex: 1 1 100%; margin-top: 0; }

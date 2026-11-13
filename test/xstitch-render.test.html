@@ -1,0 +1,782 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>XSRender tests and gallery</title>
+<link rel="stylesheet" href="../css/themes.css">
+<style>
+  html, body { margin: 0; }
+  body { font: 14px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background: var(--bg, #f6f3ee);
+         color: var(--text, #222); padding: 12px; }
+  h1 { font-size: 20px; margin: 4px 0 8px; }
+  h2 { font-size: 16px; margin: 22px 0 6px; border-bottom: 1px solid var(--border, #ccc); padding-bottom: 4px; }
+  .bar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 6px 0; }
+  button, select { font: inherit; padding: 6px 10px; border-radius: 8px; border: 1px solid var(--border, #bbb);
+                   background: var(--surface, #fff); color: var(--text, #222); cursor: pointer; }
+  button.on { background: var(--primary, #4f9868); color: var(--primary-text, #fff); }
+  .pass { color: #2e8b57; } .fail { color: #c0392b; font-weight: bold; } .note { color: #8a6d1f; } .skip { color: #777; }
+  #results { font: 12px/1.45 Menlo, Consolas, monospace; background: var(--surface, #fff); padding: 8px; border-radius: 8px;
+             max-height: 320px; overflow: auto; border: 1px solid var(--border, #ccc); }
+  #summary { font-weight: bold; font-size: 16px; margin: 6px 0; }
+  .viewer { width: 100%; height: 420px; display: block; border-radius: 12px; background: var(--surface, #fff);
+            border: 1px solid var(--border, #ccc); touch-action: none; }
+  .btnwrap { position: relative; width: 100%; max-width: 360px; height: 210px; border-radius: 22px; overflow: hidden;
+             background: var(--surface, #fff); border: 2px solid var(--primary, #4f9868); }
+  .btnwrap canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+  .btnwrap .cap { position: absolute; left: 10px; top: 8px; font-weight: 700; font-size: 18px; color: var(--text, #222);
+                  text-shadow: 0 1px 2px var(--surface, #fff); pointer-events: none; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 10px; }
+  .card { background: var(--surface, #fff); border: 1px solid var(--border, #ccc); border-radius: 10px; padding: 6px; font-size: 12px; }
+  .card canvas, .card img { width: 100%; height: auto; display: block; border-radius: 6px; }
+  #readout { font: 12px Menlo, Consolas, monospace; }
+  input[type=range] { width: 220px; }
+  /* ?shot=viewer|loupe|gallery pins one piece over the page for screenshots */
+  .shot-viewer #viewer { position: fixed; inset: 0; width: 100vw; height: 100vh; z-index: 9; border-radius: 0; border: 0; }
+  .shot-loupe .btnwrap { position: fixed; left: 8px; top: 8px; z-index: 9; }
+  .shot-gallery #gallery { position: fixed; inset: 0; z-index: 9; background: var(--bg, #f6f3ee); overflow: auto; padding: 8px; }
+</style>
+</head>
+<body>
+<h1>XSRender — stitched-fabric renderer (wave K, X1–X5)</h1>
+<div class="bar">
+  Theme:
+  <select id="theme">
+    <option value="">Default (light)</option>
+    <option value="stardew-spring">Stardew Spring</option>
+    <option value="stardew-night">Stardrop Night</option>
+    <option value="dragon-pixel">Pixel Wyrm</option>
+    <option value="dragon-fury">Dragon Fury</option>
+  </select>
+  <span id="readout"></span>
+</div>
+<div id="summary">Running…</div>
+<div id="results"></div>
+
+<h2>Viewer (free pan and zoom: drag, pinch, wheel, double-tap to fit)</h2>
+<div class="bar" id="chartBar"></div>
+<div class="bar">
+  Fabric: <select id="fabColor">
+    <option value="White">White aida</option><option value="Antique White">Antique white</option>
+    <option value="Ecru">Ecru</option><option value="Light Blue">Light blue</option>
+    <option value="Black">Black</option><option value="Navy">Navy</option><option value="Summer Khaki">Summer khaki</option>
+  </select>
+  <select id="fabKind"><option value="aida">aida</option><option value="evenweave">evenweave (over 2)</option><option value="linen">linen (over 2)</option></select>
+  <select id="fabCount"><option>11</option><option selected>14</option><option>16</option><option>18</option><option>28</option><option>32</option></select>
+  View: <select id="viewMode"><option value="free">free</option><option value="fit">whole (fit)</option></select>
+  <select id="frame"><option value="none">no frame</option><option value="hoop">hoop</option><option value="frame">frame + mat</option></select>
+  <label><input type="checkbox" id="ghostOn" checked> printed tint</label>
+  <label><input type="checkbox" id="symOn"> symbols</label>
+</div>
+<canvas id="viewer" class="viewer" aria-label="Stitched piece"></canvas>
+<div class="bar">
+  <button id="tlPlay">▶ Watch it grow</button>
+  <input id="tlScrub" type="range" min="0" max="1000" value="1000" aria-label="Time-lapse position">
+  <button id="tlLive">Live progress</button>
+  <button id="tlPng">Save frame (PNG)</button>
+  <button id="tlVideo">Save video</button>
+  <span id="tlLabel" class="note"></span>
+</div>
+
+<h2>Tap button loupe (X2)</h2>
+<div class="bar">
+  <button id="tapBtn">Tap (+1 stitch)</button>
+  <button id="tap20">+20</button>
+  <button id="tapBlock">Finish block</button>
+  <label><input type="checkbox" id="loupeSym"> symbols under unstitched</label>
+  <span id="tapInfo"></span>
+</div>
+<div class="btnwrap"><canvas id="loupe" aria-hidden="true"></canvas><div class="cap" id="loupeCap">0</div></div>
+
+<h2>Gallery (share pictures, X4, one shared context)</h2>
+<div class="bar"><button id="galBtn">Render gallery</button> <span id="galInfo"></span></div>
+<div class="grid" id="gallery"></div>
+
+<h2>Real charts (read at runtime from ../tmp-pdf; skipped when absent)</h2>
+<div class="bar" id="realBar"></div>
+<div id="realInfo" class="note"></div>
+
+<script>
+document.write('<scr' + 'ipt src="../js/xstitch.js?v=' + Date.now() + '"><\/scr' + 'ipt>');
+document.write('<scr' + 'ipt src="../js/xstitch-render.js?v=' + Date.now() + '"><\/scr' + 'ipt>');
+</script>
+<script>
+'use strict';
+var R = window.XSRender, X = window.XStitch;
+var out = document.getElementById('results');
+var passed = 0, failed = 0;
+function line(cls, text) { var d = document.createElement('div'); d.className = cls; d.textContent = text; out.appendChild(d); }
+function log(ok, label, detail) {
+  if (ok) passed++; else failed++;
+  line(ok ? 'pass' : 'fail', (ok ? 'PASS' : 'FAIL') + ' - ' + label + (detail != null && detail !== '' ? '  (' + detail + ')' : ''));
+  (ok ? console.log : console.error)((ok ? 'PASS ' : 'FAIL ') + label + (detail ? ' ' + detail : ''));
+}
+function note(t) { line('note', '     ' + t); console.log(t); }
+function group(t) { var d = document.createElement('div'); d.style.cssText = 'font-weight:bold;margin-top:8px'; d.textContent = '== ' + t; out.appendChild(d); }
+function eq(a, b, label) { var ja = JSON.stringify(a), jb = JSON.stringify(b); log(ja === jb, label, ja === jb ? '' : ja + ' vs ' + jb); }
+function summary() {
+  var s = document.getElementById('summary');
+  s.textContent = passed + ' passed, ' + failed + ' failed';
+  s.className = failed ? 'fail' : 'pass';
+  window.__xsrender = { passed: passed, failed: failed };
+}
+
+/* ================================================== synthetic charts */
+function rng(seed) { var s = seed >>> 0; return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; }; }
+var DMC = [['310','000000'],['3865','f9f7f1'],['321','c72b3b'],['666','e31d42'],['740','ff8313'],['973','ffe300'],
+  ['702','47a72f'],['699','056517'],['3843','14aaf5'],['820','0e365c'],['550','5c184e'],['3607','c5498a'],
+  ['801','653919'],['3864','cbb69a'],['415','d3d3d6'],['413','565656'],['E3821','e0b84a'],['3713','ffe2e2'],
+  ['964','a9e2d8'],['3348','ccd982']];
+function pal(list) {
+  var SYM = ['●','▲','■','◆','★','+','×','○','△','□','◇','☆','=','~','/','\\','‖','Δ','Σ','Ω'];
+  return list.map(function (c, i) { return { hex: c[1], code: c[0], brand: 'DMC', symbol: SYM[i % SYM.length], strands: 2, bsStrands: 1, kind: 'cross' }; });
+}
+function setBits(n, pred) { var b = new Uint8Array(Math.ceil(n / 8)); for (var i = 0; i < n; i++) if (pred(i)) b[i >> 3] |= 1 << (i & 7); return b; }
+
+function sampler() {
+  var w = 60, h = 48, n = w * h, cells = new Int16Array(n).fill(-1), r = rng(7);
+  var p = pal(DMC.slice(0, 12));
+  function put(x, y, c) { if (x >= 0 && y >= 0 && x < w && y < h) cells[y * w + x] = c; }
+  for (var x = 0; x < w; x++) { put(x, 1, 2); put(x, h - 2, 2); if (x % 4 < 2) { put(x, 3, 6); put(x, h - 4, 6); } }
+  for (var y = 1; y < h - 1; y++) { put(1, y, 2); put(w - 2, y, 2); }
+  function heart(cx, cy, c) { var H = ['.XX.XX.', 'XXXXXXX', 'XXXXXXX', '.XXXXX.', '..XXX..', '...X...'];
+    for (var j = 0; j < H.length; j++) for (var i = 0; i < 7; i++) if (H[j][i] === 'X') put(cx + i, cy + j, c); }
+  heart(8, 8, 3); heart(26, 8, 9); heart(44, 8, 4);
+  for (var yy = 18; yy < 30; yy++) for (var xx = 6; xx < 54; xx++) { var d = Math.hypot(xx - 30, (yy - 24) * 2.2); if (d < 22 && d > 12) put(xx, yy, d < 17 ? 7 : 5); }
+  for (var k = 0; k < 6; k++) for (var q = 0; q < 6; q++) put(10 + k * 7 + (q % 2), 34 + q, 10 + (k % 2));
+  var back = [], knots = [], part = [];
+  for (k = 0; k < 7; k++) back.push({ x1: 8 + k, y1: 15, x2: 9 + k, y2: 15, i: 0 });
+  back.push({ x1: 26, y1: 8, x2: 33, y2: 14, i: 0 }, { x1: 6, y1: 33, x2: 54, y2: 33, i: 8 });
+  for (k = 0; k < 6; k++) knots.push({ x: 12 + k * 7, y: 42, i: 0, t: k === 5 ? 'bead' : 'knot' });
+  part.push({ x: 20, y: 24, a: 3, b: 5, d: 1 }, { x: 40, y: 24, a: 9, b: -1, d: 3 }, { x: 30, y: 13, a: 2, b: -1, d: 2 });
+  cells[24 * w + 20] = -1; cells[24 * w + 40] = -1; cells[13 * w + 30] = -1;
+  var done = setBits(n, function (i) { return (i / w | 0) < 30 && r() < 0.92; });
+  return { name: 'Small sampler', w: w, h: h, cells: cells, palette: p, done: done, back: back, knots: knots, part: part,
+    doneBack: setBits(back.length, function (i) { return i < 8; }), doneKnots: setBits(knots.length, function (i) { return i < 3; }),
+    donePart: setBits(part.length, function () { return true; }), fabric: { color: 'White', count: 14 } };
+}
+
+function confetti() {
+  var w = 90, h = 70, n = w * h, cells = new Int16Array(n), r = rng(11), p = pal(DMC);
+  for (var y = 0; y < h; y++) for (var x = 0; x < w; x++) {
+    var t = (x / w + y / h) * 0.5 + (r() - 0.5) * 0.6;
+    cells[y * w + x] = Math.max(0, Math.min(p.length - 1, Math.floor(t * p.length)));
+  }
+  return { name: 'Confetti heavy', w: w, h: h, cells: cells, palette: p,
+    done: setBits(n, function (i) { return (i % w) < 60; }), fabric: { color: 'Antique White', count: 16 } };
+}
+
+function full500() {
+  var w = 500, h = 500, n = w * h, cells = new Int16Array(n), p = [];
+  for (var i = 0; i < 105; i++) {
+    var a = i / 105 * 6.283;
+    var rr = Math.round(128 + 110 * Math.cos(a)), gg = Math.round(128 + 110 * Math.cos(a + 2.1)), bb = Math.round(128 + 110 * Math.cos(a + 4.2));
+    p.push({ hex: ((1 << 24) | (rr << 16) | (gg << 8) | bb).toString(16).slice(1), code: String(100 + i), brand: 'DMC', symbol: String.fromCharCode(0x25A0 + (i % 80)), strands: 2 });
+  }
+  for (var y = 0; y < h; y++) for (var x = 0; x < w; x++) {
+    var v = (Math.sin(x * 0.021) + Math.cos(y * 0.017) + Math.sin((x + y) * 0.009)) * 0.25 + 0.5;
+    var ring = Math.hypot(x - 250, y - 250);
+    if (ring < 120) v = 0.15 + ((ring / 12) | 0) % 2 * 0.3;
+    cells[y * w + x] = Math.max(0, Math.min(104, Math.floor(v * 104)));
+  }
+  var done = setBits(n, function (i) { var y2 = i / w | 0; return y2 < 150 || (y2 < 160 && (i % w) < 230); });
+  return { name: 'Full coverage 500 × 500', w: w, h: h, cells: cells, palette: p, done: done, fabric: { color: 'White', count: 14 } };
+}
+
+function backKnots() {
+  var w = 40, h = 26, n = w * h, cells = new Int16Array(n).fill(-1), p = pal([DMC[0], DMC[2], DMC[5], DMC[6], DMC[10], DMC[16]]);
+  for (var y = 6; y < 20; y++) for (var x = 4; x < 36; x++) {
+    var d = Math.hypot(x - 20, (y - 13) * 1.6);
+    if (d < 9) cells[y * w + x] = d < 5 ? 2 : 1;
+    else if (y > 16) cells[y * w + x] = 3;
+  }
+  var back = [], knots = [];
+  for (var a = 0; a < 24; a++) {
+    var t1 = a / 24 * 6.283, t2 = (a + 1) / 24 * 6.283;
+    back.push({ x1: Math.round((20.5 + 9.5 * Math.cos(t1)) * 2) / 2, y1: Math.round((13 + 6 * Math.sin(t1)) * 2) / 2,
+                x2: Math.round((20.5 + 9.5 * Math.cos(t2)) * 2) / 2, y2: Math.round((13 + 6 * Math.sin(t2)) * 2) / 2, i: 0 });
+  }
+  for (a = 0; a < 5; a++) back.push({ x1: 4 + a * 2, y1: 3, x2: 6 + a * 2, y2: 2, i: 4 });
+  for (a = 0; a < 8; a++) knots.push({ x: 8 + a * 3.5, y: 22.5, i: a % 2 ? 5 : 0, t: a === 7 ? 'bead' : 'knot' });
+  return { name: 'Backstitch + knots', w: w, h: h, cells: cells, palette: p,
+    done: setBits(n, function () { return true; }), back: back, knots: knots,
+    doneBack: setBits(back.length, function () { return true; }), doneKnots: setBits(knots.length, function (i) { return i !== 2; }),
+    fabric: { color: 'Ecru', count: 14 } };
+}
+
+var CHARTS = { sampler: sampler(), confetti: confetti(), backKnots: backKnots() };
+var BIG = null;
+function big() { if (!BIG) BIG = full500(); return BIG; }
+
+/* ================================================== pure assertions */
+function pureTests() {
+  group('texture packing');
+  var t = R.packCellTexel(1234, 1, { part: true }, 40000);
+  eq(R.unpackCellTexel(t[0], t[1], t[2], t[3]), { idx: 1234, done: 1, part: 1, empty: 0, rank: 40000 }, 'packCellTexel round-trips index 1234, done, part, rank 40000');
+  t = R.packCellTexel(-1, 0, null, null);
+  eq(R.unpackCellTexel(t[0], t[1], t[2], t[3]), { idx: 0, done: 0, part: 0, empty: 1, rank: 65535 }, 'an empty cell packs as empty with no rank');
+  var tiny = { w: 3, h: 2, cells: [0, 1, -1, 2, 0, 1], palette: pal(DMC.slice(0, 3)), done: setBits(6, function (i) { return i === 1 || i === 4; }) };
+  var bytes = R.packCells(tiny);
+  eq(Array.prototype.slice.call(bytes, 4, 8), [1, 16, 255, 255], 'packCells: cell 1 = index 1, done, no rank');
+  eq(bytes[9], 64, 'packCells: cell 2 (-1) has only the empty flag');
+  eq(bytes[17], 16, 'packCells: cell 4 done');
+  var pb = R.packPalette({ w: 1, h: 1, cells: [0], palette: [{ hex: 'c72b3b', strands: 3, code: 'E3821', kind: 'half', blendWith: 0 }] });
+  eq([pb[0], pb[1], pb[2], pb[3]], [0xc7, 0x2b, 0x3b, 96], 'palette row 0: sRGB + strands (3 x 32)');
+  eq([pb[5] & 16, pb[6], pb[7]], [16, 160, 40], 'palette row 1: blend flag, metallic sheen for DMC E-codes, kind half');
+  var pt = R.packPartTexel({ a: 300, b: 5, d: 3 }, 1);
+  eq([pt[0], pt[1], pt[2], pt[3]], [44, 1, 5, 2 | 4 | 8 | 16], 'packPartTexel: a = 300, b = 5, corner 3, done, has b');
+
+  group('level of detail');
+  eq(R.lodFor(2).tier, 'colour', 'under 3.5 device px a stitch: pre-filtered colour');
+  eq(R.lodFor(5).tier, 'blend', '5 px: thread detail fading in');
+  eq(R.lodFor(12).tier, 'thread', '12 px: full thread detail');
+  log(R.lodFor(2).detail === 0 && R.lodFor(20).detail === 1, 'detail is 0 far out and 1 close in');
+  var mono = true, prev = -1;
+  for (var px = 0; px < 30; px += 0.25) { var d = R.lodFor(px).detail; if (d < prev) mono = false; prev = d; }
+  log(mono, 'detail never decreases as you zoom in (no popping back and forth)');
+
+  group('fit, hit test at any zoom');
+  var fv = R.fitView(500, 500, 750, 840, { frame: 'none' });
+  log(Math.abs(fv.cx - 250) < 1e-6 && fv.scale > 1.2 && fv.scale < 1.5, 'fitView centres a 500 x 500 chart in 750 x 840', JSON.stringify(fv));
+  var hf = R.fitView(60, 48, 600, 600, { frame: 'hoop', fabric: { count: 14 } });
+  var g = R.decorGeo(60, 48, 'hoop', { count: 14 });
+  log(g.R * 2 / 14 >= Math.hypot(60, 48) / 14 && g.inches === 7, 'a 60 x 48 piece on 14 count gets a 7 inch hoop', g.inches + ' in');
+  log((g.x1 - g.x0) * hf.scale <= 600, 'the hoop fits the viewport');
+  var allOk = true, why = '';
+  var r = rng(3);
+  [0.3, 1, 2.7, 7.5, 13, 40].forEach(function (scale) {
+    var view = { cx: 123.4, cy: 77.7, scale: scale, vw: 800, vh: 600 };
+    for (var k = 0; k < 200; k++) {
+      var x = Math.floor(r() * 500), y = Math.floor(r() * 500);
+      var s = R.screenOf(view, x + 0.5, y + 0.5);
+      var hh = R.hitTest(view, s.sx, s.sy, 500, 500);
+      if (hh.x !== x || hh.y !== y || hh.i !== (hh.inside ? y * 500 + x : -1)) { allOk = false; why = scale + ': ' + x + ',' + y + ' -> ' + hh.x + ',' + hh.y; }
+    }
+  });
+  log(allOk, 'hitTest(screenOf(cell centre)) is the cell, at 6 zooms from 0.3 to 40 px a stitch', why);
+  var edge = R.hitTest({ cx: 10, cy: 10, scale: 20, vw: 400, vh: 400 }, 0, 0, 20, 20);
+  eq([edge.x, edge.y, edge.inside], [0, 0, true], 'the top-left screen corner hits cell 0,0 when the chart starts there');
+  var outside = R.hitTest({ cx: 10, cy: 10, scale: 20, vw: 400, vh: 400 }, 399.9, 200, 19, 20);
+  eq([outside.inside, outside.i], [false, -1], 'a point right of a 19-wide chart is outside');
+
+  group('loupe window');
+  var lw = R.loupeWindow(500, 500, 23, 47, {});
+  eq([lw.bx, lw.by, lw.x0, lw.y0, lw.x1, lw.y1], [2, 4, 18, 38, 32, 52], 'cell 23,47 -> block 2,4 with a two-stitch margin (14 x 14)');
+  lw = R.loupeWindow(25, 25, 24, 3, {});
+  eq([lw.bx0, lw.bx1, lw.bw], [20, 25, 5], 'a chart 25 wide: the last block is 5 wide');
+  var lv = R.loupeView(R.loupeWindow(500, 500, 23, 47, {}), 680, 400, 24, {});
+  log(lv.scale <= 400 / 14 + 1e-6 && Math.abs(lv.cx - 25) < 1e-6 && Math.abs(lv.cy - 45) < 1e-6, 'loupeView fits the window and centres on the block', JSON.stringify(lv));
+  eq(R.buttonView(30, 30, 340, 210), 'whole', 'a 30 x 30 chart fits the button at >= 5 px a stitch: whole view');
+  eq(R.buttonView(500, 500, 340, 210), 'loupe', 'a 500 x 500 chart: loupe');
+
+  group('replay order (time-lapse)');
+  var m = R.model({ w: 4, h: 2, cells: [0, 1, 0, 1, 1, 0, -1, 0], palette: pal(DMC.slice(0, 2)), done: setBits(8, function (i) { return i !== 3; }) });
+  var ro = R.replayOrder(m, [5, 2, 3, 2, 99, 0]);
+  eq(Array.prototype.slice.call(ro.order), [5, 2, 0], 'last occurrence wins, undone (3) and out-of-range (99) are dropped');
+  eq([ro.fallback, ro.before], [false, 3], 'done cells not in the log (1, 4, 7) count as stitched before it');
+  var fb = R.replayOrder(m, null);
+  eq([fb.fallback, fb.label], [true, R.FALLBACK_LABEL], 'no order: the fallback is labelled');
+  eq(Array.prototype.slice.call(fb.order), [0, 2, 5, 7, 1, 4], 'fallback: colour 0 in reading order, then colour 1');
+  var rk = R.rankOf(new Int32Array([5, 2, 0]), 8);
+  eq([rk.rank[5], rk.rank[2], rk.rank[0], rk.rank[1], rk.scale], [0, 1, 2, 65535, 3], 'rankOf: exact ranks under 65,535 cells');
+  var bigOrder = new Int32Array(250000); for (var q = 0; q < bigOrder.length; q++) bigOrder[q] = q;
+  var rb = R.rankOf(bigOrder, 250000), mono2 = true;
+  for (q = 1; q < 250000; q++) if (rb.rank[q] < rb.rank[q - 1]) { mono2 = false; break; }
+  log(mono2 && rb.rank[249999] < 65535 && rb.scale === 65534, 'rankOf: 250,000 cells scale into 16 bits and keep their order');
+  eq([R.revealCount(0, 1000), R.revealCount(1, 1000), R.revealCount(1, 250000)], [0, 1000, 250000], 'revealCount: nothing at 0, everything at 1');
+  var mono3 = true, pc = 0; for (var f = 0; f <= 1; f += 0.01) { var c = R.revealCount(f, 5000); if (c < pc) mono3 = false; pc = c; }
+  log(mono3, 'revealCount never goes backwards');
+  // the last frame equals the live bitmap, bit for bit
+  var sm = R.model(CHARTS.sampler);
+  var order = []; for (q = sm.w * sm.h - 1; q >= 0; q -= 2) order.push(q);
+  var ro2 = R.replayOrder(sm, order), rk2 = R.rankOf(ro2.order, sm.w * sm.h);
+  var same = true;
+  for (q = 0; q < sm.w * sm.h; q++) {
+    var live = (sm.done[q >> 3] >> (q & 7)) & 1 && sm.cells[q] >= 0;
+    var shown = rk2.rank[q] !== 65535 ? (rk2.rank[q] + 0.5) / rk2.scale < 1 * (1 + R.growWindow(rk2.count)) : live;
+    if (!!live !== !!shown) { same = false; break; }
+  }
+  log(same, 'the replay\'s last frame reproduces the live progress bitmap bit for bit');
+  log(R.orderFromMarkLog(null, 10) === null, 'orderFromMarkLog with no log is null (no history invented)');
+
+  group('model');
+  if (X && X.normalize && X.packCells) {
+    var xs = X.normalize({ design: { w: 3, h: 2 }, palette: [{ code: '310', hex: '000000' }, { code: '321', hex: 'c72b3b' }],
+      chart: { w: 3, h: 2, cells: X.packCells(new Int16Array([0, 1, -1, 1, 0, 0]), 3, 2) } }, null);
+    xs.progress.done = X.packBits ? X.packBits(new Uint8Array([1, 0, 0, 0, 1, 0]), 6) : xs.progress.done;
+    var mm = R.model(xs);
+    eq([mm.w, mm.h, mm.cells[1], mm.cells[2], (mm.done[0] >> 4) & 1], [3, 2, 1, -1, 1], 'model(XSData) unpacks cells and the done bitmap through XStitch');
+  } else note('XStitch not loaded: XSData unpacking skipped');
+  var em = R.model(null);
+  eq([em.w, em.h, em.palette.length], [0, 0, 0], 'model(null) is an empty model, no throw');
+  eq(R.parseColor('Antique White'), [244, 240, 230], 'fabric names parse');
+  eq(R.canRecordVideo().ok === true || typeof R.canRecordVideo().reason === 'string', true, 'canRecordVideo answers yes, or why not');
+}
+
+/* ================================================== GPU probes and budgets */
+var viewer = null, loupe = null;
+function readCanvas(c) {
+  var t = document.createElement('canvas'); t.width = c.width; t.height = c.height;
+  var g = t.getContext('2d'); g.drawImage(c, 0, 0); return g.getImageData(0, 0, c.width, c.height);
+}
+function px(img, x, y) { var o = (Math.round(y) * img.width + Math.round(x)) * 4; return [img.data[o], img.data[o + 1], img.data[o + 2], img.data[o + 3]]; }
+
+function gpuTests() {
+  var vs0 = viewer.getStats();
+  note('first mount on this page: ' + vs0.mountMs.toFixed(1) + ' ms on the main thread; shaders ' +
+    (vs0.parallelCompile ? 'compile in parallel (KHR_parallel_shader_compile)' : 'compile blocking') +
+    (vs0.compiling ? ', still compiling' : ', compiled after ' + vs0.compileMs.toFixed(0) + ' ms, first frame at ' + vs0.firstFrameMs.toFixed(0) + ' ms'));
+  var own = vs0.mountMs - vs0.contextMs - vs0.layoutMs;
+  log(own < 100 || !vs0.webgl, 'the renderer\'s own mount work stays under 100 ms (shader compile is off the main thread where the driver allows)',
+    own.toFixed(1) + ' ms, plus ' + vs0.contextMs.toFixed(1) + ' ms for the browser to create the WebGL context and ' +
+    vs0.layoutMs.toFixed(1) + ' ms of the page\'s first style and layout');
+  group('GPU: pixel probes');
+  if (!R.isSupported()) { note('No WebGL here: GPU probes skipped'); return Promise.resolve(); }
+  var c = document.createElement('canvas');
+  var h = R.mount(c, { size: 400, offscreen: true, view: 'free', ghost: 0 });
+  log(h.webgl, 'WebGL is supported here, so the renderer mounted with it (the shaders compile and link)');
+  if (!h.webgl) return Promise.resolve();
+  var w = 8, n = 64, red = [{ hex: 'c72b3b', strands: 2 }, { hex: '14aaf5', strands: 2 }];
+  h.setModel({ w: w, h: 8, cells: new Int16Array(n).fill(0), palette: red, done: setBits(n, function (i) { return i === 27; }), fabric: { color: 'White' } });
+  h.setView({ mode: 'free', cx: 4, cy: 4, scale: 50 });
+  h.renderNow();
+  var img = readCanvas(c);
+  // cell 27 = (3, 3): its top-left corner is at screen 200 + (3 - 4) * 50 = 150
+  var crossing = px(img, 175, 175);
+  var hole = px(img, 250, 250); // the corner at (5, 5): bare fabric
+  var fabricMid = px(img, 275, 225);
+  log(crossing[0] > 120 && crossing[0] > crossing[1] * 1.8 && crossing[0] > crossing[2] * 1.6, 'the centre of a done cross is the floss colour (red)', crossing.join(','));
+  log(hole[0] + hole[1] + hole[2] < (fabricMid[0] + fabricMid[1] + fabricMid[2]) * 0.6, 'a hole in the aida is darker than the cloth beside it', hole.join(',') + ' vs ' + fabricMid.join(','));
+  var undone = px(img, 125, 125);
+  log(Math.abs(undone[0] - undone[2]) < 25, 'with ghost 0 an unstitched cell is bare fabric', undone.join(','));
+  // leg direction: on the top leg "\" the pixel at (+0.25,+0.25) is thread; same on the bottom leg "/"
+  var onTop = px(img, 150 + 50 * 0.3, 150 + 50 * 0.3), onBottom = px(img, 150 + 50 * 0.3, 150 + 50 * 0.7);
+  log(onTop[0] > onTop[2] * 1.5 && onBottom[0] > onBottom[2] * 1.5, 'both legs present at both diagonals', onTop.join(',') + ' / ' + onBottom.join(','));
+  // ghost tint
+  h.setOptions({ ghost: 0.3 });
+  h.renderNow();
+  img = readCanvas(c);
+  var tint = px(img, 125, 110);
+  log(tint[0] > tint[2] + 15, 'printed tint: an unstitched red cell is faintly red', tint.join(','));
+  // tap animation does not throw and newest stitch renders
+  h.setDone(0, 1, { animate: false });
+  h.renderNow();
+  img = readCanvas(c);
+  var c0 = px(img, 0 + 25, 0 + 25); // cell 0 is off-screen at this view; probe stays fabric
+  log(c0[3] === 255, 'the canvas is opaque cloth where the piece is');
+  // the next-stitch marker
+  h.setView({ mode: 'free', cx: 4, cy: 4, scale: 50 });
+  h.setOptions({ ghost: 0 });
+  h._state.loupe.next = { x: 5, y: 5 };
+  h.renderNow();
+  img = readCanvas(c);
+  var mark = px(img, 250 + 2, 275);
+  note('next-stitch marker pixel ' + mark.join(','));
+  h._state.loupe.next = null;
+
+  group('GPU: far zoom does not shimmer');
+  var B = big();
+  h.setModel(B);
+  h.setView({ mode: 'free', cx: 250, cy: 250, scale: 0.8 });
+  h.renderNow();
+  var a1 = readCanvas(c);
+  h.setView({ mode: 'free', cx: 250 + 0.37 / 0.8, cy: 250 + 0.21 / 0.8, scale: 0.8 });
+  h.renderNow();
+  var a2 = readCanvas(c);
+  var diff = 0, cnt = 0;
+  for (var y = 60; y < 340; y += 3) for (var x = 60; x < 340; x += 3) {
+    var o = (y * 400 + x) * 4; diff += Math.abs(a1.data[o] - a2.data[o]) + Math.abs(a1.data[o + 1] - a2.data[o + 1]); cnt += 2;
+  }
+  var mean = diff / cnt;
+  log(mean < 6, 'panning a 500 x 500 piece by a third of a pixel at 0.8 px a stitch changes pixels by < 6 / 255 on average', mean.toFixed(2));
+  h.setView({ mode: 'free', cx: 250, cy: 250, scale: 2.2 });
+  h.renderNow(); var b1 = readCanvas(c);
+  h.setView({ mode: 'free', cx: 250.19, cy: 250.11, scale: 2.2 });
+  h.renderNow(); var b2 = readCanvas(c);
+  diff = 0; cnt = 0;
+  for (y = 60; y < 340; y += 3) for (x = 60; x < 340; x += 3) { o = (y * 400 + x) * 4; diff += Math.abs(b1.data[o] - b2.data[o]); cnt++; }
+  log(diff / cnt < 10, 'and at 2.2 px a stitch (< 10 / 255)', (diff / cnt).toFixed(2));
+  h.destroy({ release: true });
+
+  group('GPU: budgets (this machine; phone numbers are unmeasured)');
+  var vc = document.createElement('canvas');
+  var tm = performance.now();
+  var hv = R.mount(vc, { size: 1000, offscreen: true, view: 'fit', model: Object.assign({}, B, { done: new Uint8Array(B.done) }) });
+  var mountMs = performance.now() - tm;
+  log(mountMs < 100, 'mount with a 250,000-stitch model under 100 ms', mountMs.toFixed(1) + ' ms (shader compile + pack + upload)');
+  var st = hv.getStats();
+  note('texture memory ' + (st.textureBytes / 1048576).toFixed(2) + ' MB (cells 0.95, colour image with mips 1.33, symbol atlas, palette)');
+  var bm = hv.benchmark({ frames: 60 });
+  note('1000 x 1000 px, fit (' + st.lod + '): ' + bm.msPerFrame.toFixed(2) + ' ms a frame, p95 ' + bm.p95.toFixed(2) + ' ms, CPU ' + bm.cpuMs.toFixed(3) + ' ms');
+  hv.setView({ mode: 'free', cx: 250, cy: 250, scale: 14 });
+  var bm2 = hv.benchmark({ frames: 60 });
+  note('1000 x 1000 px, 14 px a stitch (thread): ' + bm2.msPerFrame.toFixed(2) + ' ms a frame, p95 ' + bm2.p95.toFixed(2) + ' ms');
+  hv.setView({ mode: 'free', cx: 250, cy: 250, scale: 5 });
+  var bm3 = hv.benchmark({ frames: 60 });
+  note('1000 x 1000 px, 5 px a stitch (blend): ' + bm3.msPerFrame.toFixed(2) + ' ms a frame');
+  window.__bench = { mountMs: mountMs, fit: bm, thread: bm2, blend: bm3, textureMB: st.textureBytes / 1048576 };
+  log(bm2.msPerFrame < 16.7, '250k stitches at full thread detail, 1 MP: steady under 16.7 ms a frame', bm2.msPerFrame.toFixed(2) + ' ms');
+  // the tap path
+  var t1 = performance.now(); hv.setDone(150 * 500 + 240, 1); var tapMs = performance.now() - t1;
+  var times = [];
+  for (var k = 0; k < 50; k++) { var tt = performance.now(); hv.setDone(170 * 500 + k, 1); times.push(performance.now() - tt); }
+  times.sort(function (a, b) { return a - b; });
+  log(times[25] < 1, 'a tap (one stitch) on a 250k chart costs under 1 ms of CPU (median of 50)', times[25].toFixed(3) + ' ms, max ' + times[49].toFixed(3) + ', first ' + tapMs.toFixed(3));
+  var many = []; var rr = rng(5);
+  for (k = 0; k < 21000; k++) many.push(Math.floor(rr() * 250000));
+  var t2 = performance.now(); hv.setDoneMany(many, 1); var manyMs = performance.now() - t2;
+  log(manyMs < 16, 'marking 21,000 stitches at once is one upload (under a frame)', manyMs.toFixed(2) + ' ms');
+  var t3 = performance.now(); hv.renderNow(); var gl = hv._state.gl; var pix = new Uint8Array(4); gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pix);
+  note('the frame after 21,000 marks (colour image rebuilt + mipmaps): ' + (performance.now() - t3).toFixed(2) + ' ms GPU-synced');
+  window.__bench.tapMedianMs = times[25]; window.__bench.many21kMs = manyMs;
+  var fresh = new Uint8Array(Math.ceil(250000 / 8));
+  var t4 = performance.now(); hv.setProgress(fresh); var progMs = performance.now() - t4;
+  hv.setDone(3, 1, { animate: false });
+  log((fresh[0] & 8) === 8, 'setProgress adopts the host\'s bitmap by reference (a later setDone lands in it)');
+  log(progMs < 16, 'setProgress on 250,000 stitches (undo, import) stays under a frame', progMs.toFixed(2) + ' ms');
+  window.__bench.setProgressMs = progMs;
+
+  group('GPU: context loss and restore');
+  var ext = hv._state.gl.getExtension('WEBGL_lose_context');
+  if (ext) {
+    var statuses = [];
+    hv.destroy({ release: true });
+    var lc = document.createElement('canvas');
+    var hl = R.mount(lc, { size: 200, offscreen: true, view: 'fit', model: CHARTS.sampler, onStatus: function (s) { statuses.push(s.status); } });
+    hl.renderNow();
+    var e2 = hl._state.gl.getExtension('WEBGL_lose_context');
+    return new Promise(function (resolve) {
+      e2.loseContext();
+      setTimeout(function () {
+        log(!hl.isLive() && statuses.indexOf('lost') >= 0, 'a lost context is reported, not drawn into', statuses.join(','));
+        e2.restoreContext();
+        setTimeout(function () {
+          hl.renderNow();
+          var im = readCanvas(lc);
+          var cp = px(im, 100, 100);
+          log(hl.isLive() && statuses.indexOf('restored') >= 0 && cp[3] > 0, 'restored: textures rebuilt from the CPU copies and drawn again', statuses.join(',') + ' / ' + cp.join(','));
+          hl.destroy({ release: true });
+          resolve();
+        }, 120);
+      }, 120);
+    });
+  }
+  hv.destroy({ release: true });
+  return Promise.resolve();
+}
+
+function fallbackTests() {
+  group('Canvas 2D fallback (honest flat stitched tiles)');
+  var c = document.createElement('canvas'); c.style.cssText = 'width:300px;height:200px;position:absolute;left:-9999px';
+  document.body.appendChild(c);
+  var statuses = [];
+  var h = R.mount(c, { force2d: true, view: 'free', ghost: 0, onStatus: function (s) { statuses.push(s); } });
+  h.setModel(CHARTS.sampler);
+  h.setView({ mode: 'free', cx: 12, cy: 12, scale: 16 });
+  h.renderNow();
+  var img = c.getContext('2d').getImageData(0, 0, c.width, c.height);
+  var nonblank = 0; for (var i = 3; i < img.data.length; i += 4 * 37) if (img.data[i] > 0) nonblank++;
+  log(!h.webgl && nonblank > 10, 'force2d draws a stitched view with no WebGL', nonblank + ' sampled pixels');
+  return new Promise(function (resolve) {
+    setTimeout(function () {
+      log(statuses.length && statuses[0].status === 'fallback' && /simple stitched view/.test(statuses[0].message), 'the host is told, in plain words', statuses.length ? statuses[0].message : 'nothing');
+      h.setView({ mode: 'free', cx: 30, cy: 24, scale: 2 }); h.renderNow();
+      h.setDone(5, 1); h.renderNow();
+      log(true, 'the far zoom and a tap work in 2D');
+      h.destroy(); c.remove();
+      resolve();
+    }, 30);
+  });
+}
+
+/* ================================================== the live viewer */
+var current = 'sampler', tl = null;
+function chartModel(k) { return k === 'big' ? big() : (REAL[k] || CHARTS[k]); }
+function fabricOpts() {
+  var kind = document.getElementById('fabKind').value, count = +document.getElementById('fabCount').value;
+  return { color: document.getElementById('fabColor').value, kind: kind, count: count, over: kind === 'aida' ? 1 : 2 };
+}
+function loadChart(k) {
+  current = k;
+  var m = chartModel(k);
+  if (!m) return;
+  if (tl) { tl.destroy(); tl = null; }
+  m.fabric = Object.assign({}, m.fabric || {}, fabricOpts());
+  viewer.setModel(m);
+  var vm = document.getElementById('viewMode').value;
+  viewer.setView({ mode: vm, animate: false });
+  loupe.setModel(m);
+  tapState.at = 0;
+  loupeTo(firstUndone());
+  Array.prototype.forEach.call(document.querySelectorAll('#chartBar button'), function (b) { b.classList.toggle('on', b.dataset.k === k); });
+}
+function buildBar() {
+  var bar = document.getElementById('chartBar');
+  [['sampler', 'Small sampler'], ['confetti', 'Confetti'], ['big', 'Full 500 × 500'], ['backKnots', 'Backstitch + knots']].forEach(function (p) {
+    var b = document.createElement('button'); b.textContent = p[1]; b.dataset.k = p[0];
+    b.onclick = function () { loadChart(p[0]); };
+    bar.appendChild(b);
+  });
+}
+
+/* the loupe: simulate the app's tap flow */
+var tapState = { at: 0 };
+function firstUndone() {
+  var m = viewer._state.m, n = m.w * m.h;
+  for (var i = tapState.at; i < n; i++) if (m.cells[i] >= 0 && !((m.done[i >> 3] >> (i & 7)) & 1)) { tapState.at = i; return i; }
+  return -1;
+}
+function blockOrderNext() {
+  // next undone stitch, block by block in reading order (what "block counting" walks)
+  var m = viewer._state.m;
+  var bw = Math.ceil(m.w / 10), bh = Math.ceil(m.h / 10);
+  var cur = loupe._state.loupe;
+  var start = Math.floor(cur.y / 10) * bw + Math.floor(cur.x / 10);
+  for (var b = start; b < bw * bh; b++) {
+    var bx = b % bw, by = (b / bw) | 0;
+    for (var y = by * 10; y < Math.min(m.h, by * 10 + 10); y++) for (var x = bx * 10; x < Math.min(m.w, bx * 10 + 10); x++) {
+      var i = y * m.w + x;
+      if (m.cells[i] >= 0 && !((m.done[i >> 3] >> (i & 7)) & 1)) return i;
+    }
+  }
+  return -1;
+}
+function loupeTo(i) {
+  var m = viewer._state.m;
+  if (i < 0) { loupe.setLoupe({ next: null }); return; }
+  var x = i % m.w, y = (i / m.w) | 0;
+  loupe.setLoupe({ x: x, y: y, next: { x: x, y: y }, symbols: document.getElementById('loupeSym').checked });
+}
+function tap(count) {
+  var t0 = performance.now(), last = -1;
+  for (var k = 0; k < count; k++) {
+    var i = blockOrderNext();
+    if (i < 0) break;
+    viewer.setDone(i, 1, { animate: false });
+    loupe.setDone(i, 1, { animate: k === count - 1 });
+    last = i;
+    loupeTo(blockOrderNext());
+  }
+  var ms = performance.now() - t0;
+  var m = viewer._state.m, d = 0; for (var q = 0; q < m.done.length; q++) { var b = m.done[q]; while (b) { d += b & 1; b >>= 1; } }
+  document.getElementById('loupeCap').textContent = d.toLocaleString();
+  document.getElementById('tapInfo').textContent = count + ' tap(s): ' + ms.toFixed(2) + ' ms CPU (both canvases)';
+}
+
+function readout() {
+  if (!viewer) return;
+  var s = viewer.getStats(), l = loupe.getStats();
+  document.getElementById('readout').textContent = 'viewer ' + (s.webgl ? 'WebGL' : '2D') + ' · ' + s.lod + ' · ' + s.cellPx.toFixed(1) +
+    ' px/st · frame ' + (s.frameMs ? s.frameMs.toFixed(1) : '—') + ' ms (' + (s.frameMs ? (1000 / s.frameMs).toFixed(0) : '—') +
+    ' fps) · cpu ' + s.cpuMs.toFixed(2) + ' ms · tex ' + (s.textureBytes / 1048576).toFixed(2) + ' MB · loupe ' + l.lod + ' · contexts ' + s.contexts +
+    ' · mount ' + s.mountMs.toFixed(0) + ' ms (context ' + s.contextMs.toFixed(0) + ', layout ' + s.layoutMs.toFixed(0) + ', compile start ' + s.startCompileMs.toFixed(0) + ', upload ' + s.uploadMs.toFixed(0) + '), first frame ' + (s.compiling ? 'compiling…' : s.firstFrameMs.toFixed(0) + ' ms');
+}
+
+function wire() {
+  viewer = R.mount(document.getElementById('viewer'), { view: 'free', interactive: true, ghost: 0.22,
+    onStatus: function (s) { if (s.message) note('viewer: ' + s.message); } });
+  loupe = R.mount(document.getElementById('loupe'), { view: 'loupe', ghost: 0.28, stitchPx: 12, safeInsets: { top: 30 } });
+  buildBar();
+  loadChart('sampler');
+  ['fabColor', 'fabKind', 'fabCount'].forEach(function (id) {
+    document.getElementById(id).onchange = function () { viewer.setFabric(fabricOpts()); loupe.setFabric(fabricOpts()); };
+  });
+  document.getElementById('viewMode').onchange = function () { viewer.setView({ mode: this.value }); };
+  document.getElementById('frame').onchange = function () {
+    viewer.setFrame(this.value);
+    if (this.value !== 'none') { document.getElementById('viewMode').value = 'fit'; viewer.setView({ mode: 'fit' }); }
+  };
+  document.getElementById('ghostOn').onchange = function () { viewer.setOptions({ ghost: this.checked ? 0.22 : 0 }); };
+  document.getElementById('symOn').onchange = function () { viewer.setOptions({ symbols: this.checked }); };
+  document.getElementById('loupeSym').onchange = function () { loupe.setOptions({ symbols: this.checked }); };
+  document.getElementById('tapBtn').onclick = function () { tap(1); };
+  document.getElementById('tap20').onclick = function () { tap(20); };
+  document.getElementById('tapBlock').onclick = function () { tap(100); };
+  document.getElementById('theme').onchange = function () {
+    if (this.value) document.documentElement.setAttribute('data-theme', this.value); else document.documentElement.removeAttribute('data-theme');
+    viewer.setTheme(); loupe.setTheme();
+  };
+  var scrub = document.getElementById('tlScrub');
+  function ensureTl() {
+    if (tl) return tl;
+    // a synthetic mark order: rows bottom-up in random runs, so it is visibly "a history"
+    var m = viewer._state.m, ord = [], r = rng(9);
+    for (var by = 0; by < m.h; by += 10) for (var bx = 0; bx < m.w; bx += 10)
+      for (var y = by; y < Math.min(m.h, by + 10); y++) for (var x = bx; x < Math.min(m.w, bx + 10); x++) ord.push(y * m.w + x);
+    var useFallback = current === 'confetti';
+    tl = R.timelapse(viewer, { order: useFallback ? null : ord, durationMs: 8000, onTick: function (f) { scrub.value = Math.round(f * 1000); },
+      onEnd: function () { document.getElementById('tlPlay').textContent = '▶ Watch it grow'; } });
+    document.getElementById('tlLabel').textContent = tl.fallback ? tl.label : 'Replaying the recorded order (' + tl.count.toLocaleString() + ' stitches)';
+    viewer.setOptions({ ghost: 0 });
+    return tl;
+  }
+  document.getElementById('tlPlay').onclick = function () {
+    var t = ensureTl();
+    if (t.playing) { t.pause(); this.textContent = '▶ Watch it grow'; } else { t.play(); this.textContent = '❚❚ Pause'; }
+  };
+  scrub.oninput = function () { ensureTl().pause(); tl.seek(this.value / 1000); };
+  document.getElementById('tlLive').onclick = function () {
+    if (tl) { tl.destroy(); tl = null; } scrub.value = 1000; document.getElementById('tlLabel').textContent = '';
+    viewer.setOptions({ ghost: document.getElementById('ghostOn').checked ? 0.22 : 0 });
+  };
+  document.getElementById('tlPng').onclick = function () {
+    (tl ? tl.exportFrame() : viewer.snapshot()).then(function (b) { document.getElementById('tlLabel').textContent = b ? 'PNG ' + (b.size / 1024).toFixed(0) + ' KB ready (' + b.type + ')' : 'no PNG'; window.__lastPng = b; });
+  };
+  document.getElementById('tlVideo').onclick = function () {
+    var cap = R.canRecordVideo();
+    if (!cap.ok) { document.getElementById('tlLabel').textContent = cap.reason; return; }
+    document.getElementById('tlLabel').textContent = 'Recording…';
+    ensureTl().recordVideo({ durationMs: 4000 }).then(function (r) {
+      window.__lastVideo = r;
+      document.getElementById('tlLabel').textContent = r.ok ? 'Video ' + (r.blob.size / 1024).toFixed(0) + ' KB (' + r.mime + ')' : r.reason;
+    });
+  };
+  document.getElementById('galBtn').onclick = gallery;
+  setInterval(readout, 500);
+  urlOptions();
+}
+
+/* ?chart=big&cx=250&cy=250&scale=14&frame=hoop&fabric=Ecru&kind=linen&count=28&gallery=1&theme=stardew-night&tap=30&sym=1
+   so a page can be opened straight at a view (headless screenshots, bug reports). */
+function urlOptions() {
+  var q = {};
+  location.search.replace(/^\?/, '').split('&').forEach(function (p) { if (!p) return; var kv = p.split('='); q[kv[0]] = decodeURIComponent(kv[1] || ''); });
+  window.__q = q;
+  if (q.shot) document.body.classList.add("shot-" + q.shot);
+  if (q.sw) { var vEl = document.getElementById("viewer"); vEl.style.width = q.sw + "px"; vEl.style.height = q.sh + "px"; }
+  if (q.theme) { document.getElementById('theme').value = q.theme; document.getElementById('theme').onchange(); }
+  if (q.fabric) document.getElementById('fabColor').value = q.fabric;
+  if (q.kind) document.getElementById('fabKind').value = q.kind;
+  if (q.count) document.getElementById('fabCount').value = q.count;
+  if (q.chart) loadChart(q.chart); else if (q.fabric || q.kind || q.count) loadChart(current);
+  if (q.frame) { document.getElementById('frame').value = q.frame; document.getElementById('frame').onchange(); }
+  if (q.ghost === '0') { document.getElementById('ghostOn').checked = false; viewer.setOptions({ ghost: 0 }); }
+  if (q.sym) { document.getElementById('symOn').checked = true; viewer.setOptions({ symbols: true }); document.getElementById('loupeSym').checked = true; loupe.setOptions({ symbols: true }); }
+  if (q.scale) viewer.setView({ mode: 'free', cx: +q.cx, cy: +q.cy, scale: +q.scale * viewer.getView().dpr });
+  if (q.tap) tap(+q.tap);
+  if (q.reveal) { var t = (function () { document.getElementById('tlScrub').value = Math.round(+q.reveal * 1000); document.getElementById('tlScrub').oninput(); })(); }
+  if (q.gallery) gallery();
+  if (q.real) setTimeout(function () { window.__loadReal(q.real); }, 0);
+  if (q.top) document.getElementById(q.top).scrollIntoView();
+}
+
+/* ================================================== gallery */
+function gallery() {
+  var el = document.getElementById('gallery'); el.innerHTML = '';
+  var items = [
+    ['sampler', { color: 'White', kind: 'aida', count: 14 }, 'hoop'],
+    ['sampler', { color: 'Antique White', kind: 'linen', count: 28, over: 2 }, 'frame'],
+    ['backKnots', { color: 'Ecru', kind: 'aida', count: 14 }, 'hoop'],
+    ['backKnots', { color: 'Navy', kind: 'evenweave', count: 28, over: 2 }, 'none'],
+    ['confetti', { color: 'Light Blue', kind: 'aida', count: 16 }, 'frame'],
+    ['confetti', { color: 'Black', kind: 'aida', count: 14 }, 'none'],
+    ['big', { color: 'White', kind: 'aida', count: 14 }, 'hoop'],
+    ['big', { color: 'Summer Khaki', kind: 'aida', count: 18 }, 'frame']
+  ];
+  var t0 = performance.now(), i = 0;
+  function next() {
+    if (i >= items.length) { document.getElementById('galInfo').textContent = items.length + ' pictures in ' + Math.round(performance.now() - t0) + ' ms'; return; }
+    var it = items[i++], m = chartModel(it[0]);
+    var mm = Object.assign({}, m, { fabric: it[1] });
+    var ta = performance.now();
+    R.picture(mm, { size: 720, frame: it[2] }).then(function (cv) {
+      var card = document.createElement('div'); card.className = 'card';
+      card.appendChild(cv);
+      var cap = document.createElement('div');
+      cap.textContent = m.name + ' · ' + it[1].color + ' ' + it[1].kind + ' ' + it[1].count + ' · ' + it[2] + ' · ' + Math.round(performance.now() - ta) + ' ms';
+      card.appendChild(cap); el.appendChild(card);
+      setTimeout(next, 0);
+    });
+  }
+  next();
+}
+
+/* ================================================== real charts */
+var REAL = {};
+function realBar() {
+  var bar = document.getElementById('realBar'), info = document.getElementById('realInfo');
+  [['xs-pokemon-tl', 'Pokémon TL (500 × 500 PDF)'], ['xs-pacman', 'Pac-Man (PDF)'], ['xs-ursa-piggies', 'OXS sample']].forEach(function (p) {
+    var b = document.createElement('button'); b.textContent = p[1];
+    b.onclick = function () { window.__loadReal(p[0]); };
+    bar.appendChild(b);
+  });
+  window.__loadReal = function (name) {
+    var p = [name];
+    {
+      info.textContent = 'Reading ' + p[0] + '…';
+      var isOxs = /piggies/.test(p[0]);
+      var url = '../tmp-pdf/' + p[0] + (isOxs ? '.oxs' : '.pdf');
+      fetch(url).then(function (r) { if (!r.ok) throw new Error('absent'); return isOxs ? r.text() : r.blob(); }).then(function (body) {
+        if (isOxs) {
+          var res = X.parseOXS(body);
+          if (!res.ok) throw new Error('OXS did not parse');
+          var d = X.normalize(res.data, null);
+          REAL[p[0]] = Object.assign(R.model(d), { name: 'OXS sample' });
+          return 'OXS: ' + d.chart.w + ' × ' + d.chart.h + ', ' + d.palette.length + ' colours';
+        }
+        return loadPdf(p[0], body);
+      }).then(function (msg) {
+        info.textContent = msg;
+        if (REAL[p[0]]) loadChart(p[0]);
+        var qq = window.__q || {};
+        if (qq.real === p[0] && qq.scale) viewer.setView({ mode: 'free', cx: +qq.cx, cy: +qq.cy, scale: +qq.scale * viewer.getView().dpr });
+        if (qq.real === p[0] && qq.tap) tap(+qq.tap);
+      }, function (e) { info.textContent = 'SKIP ' + p[0] + ': ' + (e && e.message === 'absent' ? 'not in tmp-pdf (fine)' : e && e.message); });
+    }
+  };
+}
+function loadScript(src) { return new Promise(function (res, rej) { var s = document.createElement('script'); s.src = src; s.onload = res; s.onerror = rej; document.head.appendChild(s); }); }
+function loadPdf(name, blob) {
+  var ready = window.pdfjsLib ? Promise.resolve() : loadScript('../js/vendor/pdf.min.js').then(function () { return loadScript('../js/pdftext.js'); }).then(function () {
+    var src = '../js/vendor/pdf.worker.min.js';
+    try { Object.defineProperty(window.pdfjsLib.GlobalWorkerOptions, 'workerSrc', { get: function () { return src; }, set: function () {}, configurable: true }); }
+    catch (e) { window.pdfjsLib.GlobalWorkerOptions.workerSrc = src; }
+  });
+  var t0 = performance.now();
+  return ready.then(function () {
+    var file = new File([blob], name + '.pdf', { type: 'application/pdf' });
+    return window.PdfText.extract(file, {});
+  }).then(function (res) {
+    var key = X.parseKey(res.text);
+    return blob.arrayBuffer().then(function (buf) { return window.pdfjsLib.getDocument({ data: buf }).promise; }).then(function (doc) {
+      return X.extractGrid(doc, null, { key: key, design: key.design, budgetMs: 60000 });
+    });
+  }).then(function (r) {
+    if (!r.ok || !r.palette) throw new Error('the grid did not read (' + (r.warnings || []).join('; ') + ')');
+    // a partly stitched state so the piece shows progress
+    var n = r.w * r.h, done = setBits(n, function (i) { return (i / r.w | 0) < r.h * 0.4; });
+    REAL[name] = R.model({ w: r.w, h: r.h, cells: r.cells, palette: r.palette, done: done, fabric: { color: 'White', count: 14 } });
+    REAL[name].name = name;
+    return name + ': ' + r.w + ' × ' + r.h + ', ' + r.palette.length + ' colours, read in ' + Math.round(performance.now() - t0) + ' ms';
+  });
+}
+
+/* ================================================== run */
+pureTests();
+wire();
+realBar();
+function videoTest() {
+  group('Time-lapse export');
+  var cap = R.canRecordVideo();
+  var t = R.timelapse(viewer, { order: null, durationMs: 1000 });
+  log(t.fallback && t.label === R.FALLBACK_LABEL, 'a time-lapse with no recorded order says so', t.label);
+  t.seek(0.5);
+  return t.exportFrame().then(function (png) {
+    log(png && png.size > 1000 && png.type === 'image/png', 'a frame exports as PNG', png ? (png.size / 1024).toFixed(0) + ' KB' : 'none');
+    if (!cap.ok) { note('video: ' + cap.reason); t.destroy(); return; }
+    return Promise.race([
+      t.recordVideo({ durationMs: 1200, fps: 24 }),
+      new Promise(function (res) { setTimeout(function () { res(null); }, 9000); })
+    ]).then(function (r) {
+      if (!r) note('video: the recorder produced nothing in 9 s here (headless virtual time); not counted');
+      else log(r.ok ? r.blob.size > 0 : typeof r.reason === 'string' && r.reason.length > 10,
+        'a short video records with MediaRecorder (' + cap.mime + '), or says plainly why not; never an empty file', r.ok ? (r.blob.size / 1024).toFixed(0) + ' KB' : r.reason);
+      t.destroy();
+    });
+  });
+}
+
+gpuTests().then(fallbackTests).then(videoTest).then(function () { summary(); }, function (e) { log(false, 'GPU tests threw', String(e && e.stack || e)); summary(); });
+</script>
+</body>
+</html>

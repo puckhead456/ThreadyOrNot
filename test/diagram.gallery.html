@@ -197,7 +197,12 @@ var FIXTURES = [
   /* Wave H: knitting, read by Knits (`craft`). Compare with the photo beside
      each card; the defects found are in docs/wave-h/knit-3d.md. */
   { id: 'k-bernat',   file: 'knit-bernat-topdown-pullover.pdf',      label: 'knit · bernat top-down raglan', craft: 'knitting' },
-  { id: 'k-socks',    file: 'knit-interweave-8-socks.pdf',           label: 'knit · interweave 8 socks', craft: 'knitting' },
+  { id: 'k-socks',    file: 'knit-interweave-8-socks.pdf',           label: 'knit · interweave 8 socks', craft: 'knitting',
+    /* wave K (K3): stranded colour from the chart, stitch by stitch — a made-up
+       peerie band on the synthetic Speed Bump sock, one cell left unread (it
+       keeps the main colour). Compare with the colourwork photo, p23. */
+    synth: [{ label: 'K3 · stranded peerie band on leg rounds 21–29 (one cell unread)', mode: 'rounds', page: 23,
+      build: function () { return window.KnitSynth.strandedSock(true); } }] },
   { id: 'k-magic',    file: 'knit-fromtheheart-magicloop-socks.pdf', label: 'knit · magic-loop socks', craft: 'knitting' },
   { id: 'k-lace',     file: 'knit-interweave-lace.pdf',              label: 'knit · interweave lace', craft: 'knitting' },
   { id: 'k-rico',     file: 'knit-rico-triangular-shawl.pdf',        label: 'knit · rico triangular shawl', craft: 'knitting' },

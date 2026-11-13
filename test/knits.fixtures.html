@@ -172,7 +172,9 @@ var FILES = ['knit-bernat-topdown-pullover.pdf', 'knit-interweave-8-socks.pdf', 
   'knit-patons-mockneck-cable.pdf', 'knit-patons-boyfriend-cable.pdf', 'knit-patons-boxy-cable.pdf',
   'knit-patons-cabled-yoke.pdf', 'knit-sandnes-raglan-child.pdf',
   'knit-pg-57273-stocking-knitters-manual.txt', 'knit-pg-62646-ladys-knitting-book.txt',
-  'knit-pg-26113-handbook-wool-knitting-crochet.txt', 'knit-pg-61105-begin-to-knit.txt'];
+  'knit-pg-26113-handbook-wool-knitting-crochet.txt', 'knit-pg-61105-begin-to-knit.txt',
+  // wave K (docs/wave-k/fixtures.md): skipped cleanly when absent
+  'knit-cascade-saddle-cardigan.pdf', 'knit-cascade-heathers-cardigan.pdf', 'knit-redheart-season-cardigan.pdf'];
 
 function finish() {
   if (knownList.length) {
@@ -201,7 +203,7 @@ if (Q.dump) {
   load(FILES).then(function () {
     out.textContent = '';
     [runBernat, runSpeedBump, runTimeTraveler, runOtherSocks, runMagicLoop, runLace, runRico, runSandnes, runNicoll, runPolishQA,
-     runMockNeck, runBoyfriend, runBoxy, runCabledYoke, runSandnesRaglan, runCupples, runCorbould, runHandbook, runBeginToKnit].forEach(function (f) {
+     runMockNeck, runBoyfriend, runBoxy, runCabledYoke, runSandnesRaglan, runCupples, runCorbould, runHandbook, runBeginToKnit, runWaveK].forEach(function (f) {
       try { f(); } catch (e) { log(false, f.name + ' threw: ' + e.message, e.stack); }
     });
     finish();
@@ -1286,6 +1288,228 @@ function runNicoll() {
   ok(r.text !== undefined, 'Nicoll: extract ran');
   ok((r.emptyPages || []).length >= 200, 'Nicoll: no text layer after p2 (' + (r.emptyPages || []).length + ' empty pages)');
   eq(rowsOf(K.parse(r.text || '')).length, 0, 'Nicoll: the cover sheet yields no rows');
+}
+
+// ===================================================================== wave K
+// knit-parse (docs/wave-k/knit-parse.md, brainstorm 01 E1..E20)
+function waveParts(txt) { return K.splitSections(txt); }
+function partNamed(ps, group, name) { return ps.filter(function (s) { return (group === null || (s.group && s.group.name === group)) && s.name === name; })[0] || null; }
+function mc(s) { return s ? s.makeCount + (s.makeCountInferred ? ' ' + s.makeCountWhy : '') : null; }
+
+function runWaveK() {
+  h('h2', 'Wave K (knit-parse)');
+  var b = text('knit-bernat-topdown-pullover.pdf'), bf = text('knit-patons-boyfriend-cable.pdf'), cy = text('knit-patons-cabled-yoke.pdf');
+  var sk = text('knit-interweave-8-socks.pdf'), ml = text('knit-fromtheheart-magicloop-socks.pdf');
+  // ---- P8: pairs by default, the round word (E9, E13)
+  if (b) { var bp = waveParts(b); eq(mc(partNamed(bp, null, 'Sleeves')), '2 pair', 'E9 Bernat: Sleeves x2, inferred (a pullover has two sleeves)');
+    eq(partNamed(bp, null, 'Sleeves').rowWord, 'rnd', 'E13 Bernat: the sleeves are worked in rounds - rowWord rnd'); }
+  if (bf) { var bfp = waveParts(bf); eq([mc(partNamed(bfp, null, 'Sleeves')), mc(partNamed(bfp, null, 'Back'))], ['2 pair', '1'], 'E9 Boyfriend: Sleeves x2 inferred, Back x1');
+    eq(partNamed(bfp, null, 'Back').rowWord, 'row', 'E13 Boyfriend: a flat Back says row'); }
+  if (cy) eq(mc(partNamed(waveParts(cy), null, 'Sleeves')), '2 pair', 'E9 Cabled Yoke: Sleeves x2 inferred');
+  if (sk) {
+    var sp = waveParts(sk), tt = sp.filter(function (s) { return s.group && s.group.name === 'Time Traveler Socks'; });
+    ok(tt.length >= 5 && tt.every(function (s) { return s.makeCount === 2 && s.makeCountInferred; }), 'E9 Time Traveler: every part x2 - a sock pattern is a pair',
+      js(tt.map(function (s) { return s.name + ' x' + s.makeCount; })));
+    eq(partNamed(sp, 'Time Traveler Socks', 'Foot').rowWord, 'rnd', 'E13 Time Traveler Foot ("Next rnd ...") says rnd, not row');
+    ok(sp.filter(function (s) { return s.group && s.group.name === 'Stranded Boot Stockings'; }).every(function (s) { return s.makeCount === 2; }), 'E9 Stranded Boot: every part x2 (stockings)');
+  }
+  if (ml) ok(waveParts(ml).every(function (s) { return s.makeCount === 2 && s.makeCountInferred; }), 'E9 magic-loop socks: every part x2',
+    js(waveParts(ml).map(function (s) { return s.name + ' x' + s.makeCount; })));
+
+  // ---- P7: book import, parser half (E10, E11, E12)
+  var lc = text('knit-interweave-lace.pdf');
+  if (lc) {
+    var lb = K.bookPatterns(lc);
+    eq(lb ? lb.length : null, 10, 'E12 lace book: all 10 patterns listed (Oriel, Spectrum, Arrowhead too)');
+    eq(lb && lb.map(function (x) { return x.name; }).slice(0, 2), ['Sophia Lace Shrug', 'Oriel Lace Blouse'], 'E12 lace book: in contents order');
+    eq(lb && pick(lb[0].gauge, ['stsPer4in', 'rowsPer4in']), { stsPer4in: 15, rowsPer4in: 28 }, 'E11 Sophia: its own gauge, 15 sts x 28 rows / 4 in');
+    eq(lb && lb[0].pages, { from: 3, to: 4 }, 'P7 Sophia: pages 3-4 (research §4a)');
+    eq(lb && lb[3].pages, { from: 12, to: 15 }, 'P7 Icelandic shawl: pages 12-15 (research §4d) - only charts on these pages are its own');
+    eq(lb && lb[2].sizes, ['32 1/2"', '35"', '39"', '42 1/2"', '46 1/2"', '51"'], 'P7 Henley: its own six sizes');
+    var lps = waveParts(lc);
+    eq(lps.filter(function (s) { return s.unread; }).map(function (s) { return s.name + '@' + s.group.index; }), ['Oriel Lace Blouse@1', 'Spectrum Scarf@4', 'Arrowhead Shawl@8'],
+      'E12 lace book: the three patterns with no rows read are offered as one unread part each, at their book index');
+    eq(partNamed(lps, 'Icelandic Lace Shawl', 'Shawl').group.index, 3, 'P7: group.index is the place in the contents (Icelandic = 3)');
+  }
+  if (sk) {
+    var sb = K.bookPatterns(sk);
+    eq(sb && pick(sb[0].gauge, ['stsPer4in', 'rowsPer4in']), { stsPer4in: 32, rowsPer4in: 46 }, 'E11 Time Traveler: its own gauge "GAUGE 32 sts and 46 rnds = 4"" (no colon)');
+    eq(sb && sb[0].pages, { from: 3, to: 9 }, 'P7 Time Traveler: pages 3-9');
+    eq(sb && sb[7].pages, { from: 32, to: 34 }, 'P7 Stranded Boot: pages 32-34 - its p34 Leg chart is not Time Traveler\'s');
+    var sps = waveParts(sk), ttn = sps.filter(function (s) { return s.group && s.group.name === 'Time Traveler Socks'; }).map(function (s) { return s.name; });
+    eq(ttn, ['Toe', 'Foot', 'Gusset', 'Turn Heel', 'Heel Flap', 'Leg', 'Cuff'], 'E10 Time Traveler parts: Toe, Foot, Gusset, Turn Heel, Heel Flap, Leg, Cuff - no "Knits" (the advert), "HEEL / Shape Gusset" is the gusset');
+    ok(!sps.some(function (s) { return /^knits$/i.test(s.name); }), 'E10: no part named "Knits" anywhere in the sock book');
+    eq(sps.filter(function (s) { return s.group && s.group.name === 'Stranded Boot Stockings'; }).map(function (s) { return s.name; }), ['Cuff', 'Leg', 'Heel', 'Turn Heel', 'Gusset', 'Foot'],
+      'E10 Stranded Boot: "Cut CC. Turn heel:" and "...Gusset:" name their parts - no "Cuff (continued 2)"');
+    ok(!/insert the left needle into/i.test((partNamed(sps, 'Time Traveler Socks', 'Cuff') || {}).placement || ''), 'E12: the glossary\'s SSK how-to is not a placing note of the Cuff');
+    eq(partNamed(sps, 'Time Traveler Socks', 'Leg').pages, { from: 6, to: 6 }, 'P7: a part knows its pages (Leg p6)');
+  }
+
+  // ---- P1 (parser half): open stretches, as the counter reads one part
+  function partLines(ps, g, name, size) { var p = partNamed(ps, g, name); return p ? K.parse(p.text, { size: size }) : []; }
+  if (bf) {
+    var fl = partLines(waveParts(bf), null, 'Front', 2);
+    var fst = lineWith(fl, 'same length as Back'), frg = lineWith(fl, 'Shape raglans');
+    eq(fst && pick(fst.stretch, ['open', 'ends', 'count']), { open: true, ends: { kind: 'sameAs', of: 'Back', at: 'beg of raglan shaping', endOn: 'ws' }, count: 93 },
+      'E1 Boyfriend L Front: "Cont even ... same length as Back" is an open stretch on 93 sts');
+    eq(frg && [frg.phase, frg.phaseRow, frg.phaseRowEnd], [2, 1, 2], 'E1 Boyfriend L Front: the raglan cast-offs are rows 1-2 AFTER the stretch (phase 2), not rows 5-6 before it');
+    eq(fl.stretches.map(function (s) { return s.ends.kind; }), ['length', 'sameAs'], 'E1 Boyfriend L Front: the 4" rib, then the stretch, in order');
+    var bk = partLines(waveParts(bf), null, 'Back (continued)', 2), bst = lineWith(bk, 'Cont in Box St Pat until');
+    eq(bst && pick(bst.stretch.ends, ['kind', 'value', 'unit', 'endOn', 'from']), { kind: 'length', value: 16.5, unit: 'in', endOn: 'ws', from: 'beg' }, 'E1 Boyfriend L Back: 16½" from beg, ending WS');
+    eq(lineWith(bk, 'Shape raglans').phaseRow, 1, 'E1 Boyfriend L Back: raglans counted from the stretch end');
+  }
+  if (b) {
+    var by = waveParts(b).filter(function (s) { return /Cont even in rnds on 204/.test(s.text); })[0];
+    var byl = by ? K.parse(by.text, { size: 1 }) : [], yst = lineWith(byl, 'Cont even in rnds on 204');
+    eq(yst && [yst.stretch.onSts, yst.stretch.count, yst.stretch.afterRow], [216, 216, 34], 'E8 Bernat M yoke: the stretch keeps "on 216 sts", after round 34');
+  }
+  var sr = text('knit-sandnes-raglan-child.pdf');
+  if (sr) {
+    var yk = waveParts(sr).filter(function (s) { return s.name === 'Yoke'; })[0], ykl = yk ? K.parse(yk.text, { size: 1 }) : [];
+    var rib = (ykl.stretches || [])[0];
+    eq(rib && [rib.ends.value, rib.ends.unit, rib.count], [7, 'cm', 52], 'E7 Sandnes 4 yrs yoke: "work 7 cm ribbing" is its own stretch on 52 sts');
+    var rr1 = ykl.filter(function (l) { return l.kind === 'row' && l.row === 1; })[0];
+    eq(rr1 && [rr1.phase, rr1.phaseRow], [1, 1], 'E7 Sandnes: round 1 comes after the rib stretch');
+  }
+
+  // ---- P6: shaping schedules on the research's lines
+  function shc(t, o) { var r = K.shaping(t, o); return r.schedule ? r.schedule.map(function (x) { return x.count; }) : null; }
+  if (bf) {
+    var f23 = lineWith(K.parse(bf, { size: 2 }), 'Dec 1 st at neck edge on next 4 rows');
+    eq(f23 && shc(f23.text, { size: 2, sizeCount: 6, start: 10 }), [9, 7, 6, 4], 'F23 Boyfriend L: neck rows 1-4, raglan on rows 2 and 4 (the alt rows after the turn row), 10 -> 4');
+    var f23s = lineWith(K.parse(bf, { size: 2 }), 'AT SAME TIME');
+    eq(f23s && pick(f23s.stretch, ['open', 'rows']), { open: false, rows: 4 }, 'F23 -> P1: the neck stretch is closed at exactly 4 rows (whole-document parse: the part read alone does not know its 10 sts, so it stays open there)');
+    var f32 = lineWith(K.parse(bf, { size: 2 }), 'every following 6th');
+    eq(f32 && K.shaping(f32.text, { size: 2, sizeCount: 6, start: 37 }).rows, 13, 'F32 Boyfriend L sleeve: inc next row and every 4th row to 45 = 13 rows (37 -> 45)');
+    eq(f32 && K.shaping(f32.text, { size: 0, sizeCount: 6, start: 37 }).rows, 61, 'F32 Boyfriend XS/S sleeve: every 6th row to 59 = 11 inc rows, 61 rows');
+  }
+  var bx = text('knit-patons-boxy-cable.pdf');
+  if (bx) {
+    var x21 = lineWith(K.parse(bx), 'following 6th rows twice more');
+    var x21r = x21 && K.shaping(x21.text, { size: 0, sizeCount: 6, start: 51 });
+    eq(x21r && [x21r.rows, x21r.endCount, x21r.schedule.filter(function (x) { return x.delta; }).map(function (x) { return x.row; })], [13, 57, [1, 7, 13]],
+      'X21 Boxy: next and following 6th rows twice more = rows 1, 7, 13, 51 -> 57 (the printed 57 agrees)');
+  }
+  var sd = text('knit-cascade-saddle-cardigan.pdf');
+  if (sd) {
+    var sl = lineWith(K.parse(sd), 'Increase 1 st at each end of the 5th row');
+    var slr = sl && K.shaping(sl.text, { size: 0, sizeCount: 3, start: 35 });
+    eq(slr && [slr.rows, slr.endCount], [83, 63], 'Saddle cardigan sleeve S: 5th row and every following 6th row, 13 times more = 14 inc rows, 35 -> 63 (printed 63)');
+    var sl2 = sl && K.shaping(sl.text, { size: 2, sizeCount: 3, start: 39 });
+    eq(sl2 && sl2.endCount, 75, 'Saddle cardigan sleeve L: 39 -> 75 (printed 75)');
+  }
+
+  // ---- P12: mirror against a cardigan that writes both fronts out (Heathers)
+  var ht = text('knit-cascade-heathers-cardigan.pdf');
+  if (ht) {
+    var flat = ht.replace(/\s+/g, ' ');
+    function sent(from, after) { var i = flat.indexOf(from, after || 0); if (i < 0) return null; var j = flat.indexOf('.', i + from.length); return flat.slice(i, j + 1); }
+    var lf = flat.indexOf('LEFT FRONT');
+    var pairs = [
+      ['Next row (WS) Purl to last 9 sts (incl selv sts), [k1, p1] 4 times', 'Next row (WS) P1 (selv st), [p1, k1] 4 times'],
+      ['Next row (WS) Bind off 4 sts once', 'Next row (RS) Bind off 4 sts once'],
+      ['Then bind off at beg of every RS row (neck edge)', 'Then bind off at beg of every WS row (neck edge)']
+    ];
+    pairs.forEach(function (pr, k) {
+      var rt = sent(pr[0]), lt = sent(pr[1], lf);
+      // the Left Front's armhole line is printed "...every RS row (armhole edge) 3 sts once, 2\nsts" - same words
+      var got = rt ? K.mirror(rt) : null;
+      var norm = function (x) { return String(x || '').toLowerCase().replace(/\s*\(incl selv sts?\)/g, '').replace(/\s+/g, ' ').trim(); };
+      eq(got && got.mirrored ? norm(got.text) : null, lt ? norm(lt) : 'missing', 'P12 Heathers: the Right Front\'s line mirrored = the Left Front as printed (' + (k + 1) + ')');
+    });
+    var sh = sent('beg of every WS row 5 (6, 6, 7) sts once'), shl = sent('beg of every RS row 5 (6, 6, 7) sts', lf);
+    eq(sh && K.mirror(sh).text.replace(/\s+/g, ' '), shl && shl.replace(/\s+/g, ' '), 'P12 Heathers: the shoulder bind-offs move to the other side (WS -> RS rows)');
+  }
+  // ---- P15: calculators on printed lines
+  if (bf) {
+    var f4 = lineWith(K.parse(bf, { size: 2 }), 'inc 3 sts evenly across last row');
+    var f4e = f4 && K.evenlyRow(f4.text, { count: 85, size: 2, sizeCount: 6 });
+    eq(f4e && [f4e.from, f4e.to, f4e.suggestion], [85, 88, true], 'F4 Boyfriend L: "inc 3 sts evenly across last row" spelled out over 85 -> 88 (printed 88)');
+    var f30 = lineWith(K.parse(bf, { size: 3 }), 'inc 2 (2-2-4-4-4) sts evenly');
+    var f30e = f30 && K.evenlyRow(f30.text, { count: 37, size: 3, sizeCount: 6 });
+    eq(f30e && f30e.to, 41, 'F30 Boyfriend XL sleeve: inc 4 evenly over 37 -> 41 (printed 41)');
+  }
+  // ---- knit-store follow-ups (docs/wave-k/knit-store.md "For the owner of js/knits.js")
+  if (lc) {
+    var hp = partNamed(waveParts(lc), 'Lace Fountain Hat', 'Hat'), hl = hp ? K.parse(hp.text) : [];
+    var hst = (hl.stretches || [])[0];
+    eq(hst && [hst.ends.value, hst.ends.unit, hst.count], [0.75, 'in', 124], 'KS1 lace hat: "rib for 3/4"" is 0.75 in on 124 sts (was read as 4 in)');
+    eq(pick(lineWith(hl, 'Rnd: Work in St st'), ['kind', 'row', 'count']), { kind: 'row', row: 1, count: 144 }, 'KS2 lace hat (part read alone): "Inc. Rnd: ..." is round 1, 144 sts - not a second set-up row');
+  }
+  if (b) {
+    var bsl = partNamed(waveParts(b), null, 'Sleeves'), bsll = bsl ? K.parse(bsl.text, { size: 0 }) : [], k5 = lineWith(bsll, 'Knit 5 (5-5-5-3-3) rnds even');
+    eq(k5 && [k5.plainRows, k5.repeatOf], [true, []], 'KS3 Bernat sleeve: "Knit 5 rnds even" is plain rounds - no back-reference to the decrease round');
+  }
+  if (sk) {
+    var sbp = waveParts(sk).filter(function (s) { return s.group && s.group.name === 'Stranded Boot Stockings'; });
+    var sleg = partNamed(sbp, 'Stranded Boot Stockings', 'Leg'), sheel = partNamed(sbp, 'Stranded Boot Stockings', 'Heel');
+    ok(sleg && /^Start with 84 sts\.$/m.test(sleg.text) && /Work through Rnd 84 of Leg chart/.test(sleg.text), 'KS4 Stranded Boot: the Leg is its own part, starting on the cuff\'s 84 sts');
+    var shl = sheel ? K.parse(sheel.text) : [];
+    eq(shl.filter(function (l) { return l.kind === 'row'; }).map(function (l) { return l.row + ':' + l.count; }), ['1:29', '2:29', '3:29', '4:29', '5:29', '6:29'],
+      'KS4 Stranded Boot: the heel flap is its own part, rows 1-6 on 29 sts (no restart inside the cuff)');
+    var scf = partNamed(sbp, 'Stranded Boot Stockings', 'Cuff'), scl = scf ? K.parse(scf.text) : [];
+    eq(scl.filter(function (l) { return l.kind === 'row'; }).length, 0, 'KS4 Stranded Boot: the Cuff holds no heel rows now');
+    var cst = (scl.stretches || [])[0], cstL = cst ? scl[cst.line] : null;
+    eq(cst && [cst.ends.value, cst.count, cstL.kind === 'setup' ? cst.within : 'own line'], [3, 84, 'own line'],
+      'KS5 Stranded Boot Cuff: the 3" rib stretch is on its own line, after the cast-on (84 sts)');
+  }
+  // ---- release audit (docs/wave-k/knit-audit.md)
+  if (bf) {
+    var bfps = waveParts(bf), sn = partNamed(bfps, null, 'Shape Neck');
+    var st0 = sn ? K.partStart(bf, sn.text, 2) : null;
+    eq(st0, 43, 'A2 Boyfriend L Shape Neck: the part starts on 43 sts (Knits.partStart)');
+    var snl = sn ? K.parse(sn.text, { size: 2, startCount: st0 }) : [];
+    eq((lineWith(snl, '1st row: (RS). K2. ssk. Pat across next 7') || {}).count, 10, 'A2 Boyfriend L: the "Turn" row is 10 sts on the left side (was "count unknown")');
+    eq(pick((lineWith(snl, 'AT SAME TIME') || {}).stretch, ['open', 'rows']), { open: false, rows: 4 }, 'A2 Boyfriend L: the "at the same time" neck shaping reads as a 4-row schedule in the part');
+    ok(/slip center 19 \(19-21-21\) sts onto a st holder/.test((lineWith(snl, 'Join yarn to rem sts') || {}).leadNote || ''), 'A2 Boyfriend: the join row keeps "slip center ... onto a st holder" (leadNote)');
+    var bfr = partNamed(bfps, null, 'Front');
+    eq(bfr && bfr.refBlock && [bfr.refBlock.from, bfr.refBlock.lines.length, /cast on 73/.test(bfr.refBlock.lines[0])], ['Back', 3, true],
+      'A4 Boyfriend Front: "Work from ** to ** as given for Back" carries the Back\'s cast-on and two rib rows');
+    var f16 = bfr ? lineWith(K.parse(bfr.text, { size: 2 }), 'Rep last 2 rows Twisted Ribbing') : null;
+    ok(f16 && !(f16.repeatOf && f16.repeatOf.indexOf(23) >= 0), 'A4 Boyfriend F16: the rib repeat no longer points at row 23');
+    eq(K.title(bf), 'Boyfriend\'s Cable Knit Pullover', 'A5 Boyfriend: the project is named from the pattern');
+  }
+  if (sd) {
+    eq(K.title(sd), 'Saddle Shoulder Cardigan', 'A5 saddle cardigan: named from the title over "Designed by" (p1, as printed)');
+    var sdu = waveParts(sd).filter(function (s) { return s.unread; }).map(function (s) { return s.name; });
+    ok(sdu.indexOf('Back') >= 0 && sdu.indexOf('Left Front') >= 0, 'A3 saddle cardigan: the prose pieces it cannot number (Back, Left Front) are offered as unread parts, not dropped', js(sdu));
+  }
+  if (sk) eq(K.title(sk), null, 'A5 sock book: a book of patterns gives no single name');
+  // ---- knit-ui follow-ups
+  var rh = text('knit-redheart-season-cardigan.pdf');
+  if (rh) {
+    var rhp = waveParts(rh), rhn = rhp.map(function (s) { return s.name; });
+    ok(rhn.indexOf('Back') >= 0 && rhn.indexOf('Right Front') >= 0 && !rhn.some(function (n) { return /^shape\b/i.test(n) || /^(?:small|medium|large)$/i.test(n); }),
+      'Red Heart season cardigan: parts Back and Right Front - "Shape Shoulder(s)" is a section of them, "Small:" / "Medium:" buttonhole rows are not parts', js(rhn));
+    var rhf = partNamed(rhp, null, 'Right Front');
+    ok(rhf && /Cast on 35 \(39, 43, 47, 51\) sts/.test(rhf.text) && /Bind off 7 \(8, 9, 10, 10\) sts at beginning of next row/.test(rhf.text),
+      'Red Heart: the Right Front (the source of "Left Front: Work same as Right Front, reversing all shaping") holds its cast-on and shoulder');
+    var rhm = K.parse(rh).meta.materials;
+    eq(rhm && [rhm.needles.length && rhm.needles[0].mm, rhm.yarn.length && rhm.yarn[0].per], [[5.5], [3, 4, 4, 5, 5]], 'P20 Red Heart: meta.materials of the whole document - 5.5 mm needles, 3 (4, 4, 5, 5) skeins');
+  }
+  if (bf) {
+    var mtot = K.mirror('K2. ssk. Pat to last 4 sts. K2tog. K2. 74 sts rem.');
+    ok(/74 sts rem\.$/.test(mtot.text) || mtot.mirrorYourself, 'P12: a printed total stays at the end of a mirrored row (or the row is flagged, never the total moved)');
+    ok(partNamed(waveParts(bf), null, 'Front').materials && partNamed(waveParts(bf), null, 'Front').materials.yarn.length === 2, 'P20 Boyfriend: each part carries the pattern\'s materials (2 yarns)');
+  }
+  // ---- P20: materials
+  if (b) {
+    var bm = K.materials(b);
+    eq(bm.yarn.map(function (y) { return [y.name, y.per[1], y.unit]; }), [['Terracotta Rose', 2, 'balls']], 'P20 Bernat: Terracotta Rose, 2 balls for size M');
+    eq(bm.needles.map(function (x) { return [x.mm, x.kind]; }), [[[5, 6], ['circular']], [[5.5, 6], ['dpn']]], 'P20 Bernat: 5 + 6 mm circular, 5.5 + 6 mm double-pointed');
+  }
+  if (bf) {
+    var bfm = K.materials(bf);
+    eq(bfm.yarn.map(function (y) { return [y.per[2], y.alternative]; }), [[10, false], [9, true]], 'P20 Boyfriend L: 10 balls Pewter Tweed, or 9 of the alternative yarn');
+  }
+  if (sr) eq(K.materials(sr).yarn[0].per, [2, 2, 2, 2, 3, 3], 'P20 Sandnes children: "(2) 2 (2) 2 (3) 3 balls" one per size');
+  if (sd) eq(K.materials(sd).needles.map(function (x) { return x.us; }), [['9', '10']], 'P20 Cascade saddle: US 9 & 10 (the "CO ... with US 9 knitting needles" rows are instructions)');
+  // ---- E18
+  var hb = text('knit-pg-26113-handbook-wool-knitting-crochet.txt');
+  if (hb) eq(K.dialectHints(hb).uk, false, 'E18 Handbook: no "Looks like UK terms" chip on a knitting import');
+  if (b) eq(K.importNotice(b), null, 'E18: a pattern with rows has no lookbook notice');
+  var lk = T['knit-sandnes-0216.pdf'];
+  if (lk && lk.text) eq((K.importNotice(lk.text) || {}).kind, 'lookbook', 'E18 Sandnes 0216 lookbook: says it is a lookbook with no instructions');
 }
 </script>
 </body>

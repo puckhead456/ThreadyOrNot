@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>KnitChart picture charts (fixtures)</title>
+<style>
+  body { font: 13px/1.4 Menlo, Consolas, monospace; background:#111; color:#eee; padding:16px; }
+  .pass { color:#7bd389; } .fail { color:#ff6b6b; background:#2a1414; } .skip { color:#888; }
+  .group { margin-top:18px; font-weight:bold; color:#9cf; border-bottom:1px solid #333; padding-bottom:4px; }
+  pre { white-space: pre-wrap; }
+  #summary { margin-top:20px; font-size:18px; font-weight:bold; }
+  body.shot { padding:0; margin:0; background:#fff; } body.shot h1, body.shot p, body.shot #summary { display:none; }
+  body.shot canvas { display:block; width:100%; }
+</style>
+</head>
+<body>
+<h1>KnitChart picture charts <span class="skip">(reads ../tmp-pdf at runtime and skips what is not there)</span></h1>
+<div id="out"></div>
+<div id="summary">running…</div>
+<script src="../js/vendor/pdf.min.js"></script>
+<script src="../js/pdftext.js"></script>
+<script src="../js/knit-chart.js"></script>
+<script src="../js/xstitch.js"></script>
+<script src="../js/xstitch-read.js"></script>
+<script>
+'use strict';
+(function () {
+  if (!window.pdfjsLib || !window.pdfjsLib.GlobalWorkerOptions) return;
+  var src = '../js/vendor/pdf.worker.min.js';
+  try { Object.defineProperty(window.pdfjsLib.GlobalWorkerOptions, 'workerSrc', { get: function () { return src; }, set: function () {} }); }
+  catch (e) { window.pdfjsLib.GlobalWorkerOptions.workerSrc = src; }
+})();
+var out = document.getElementById('out');
+var passed = 0, failed = 0, skipped = 0;
+var KC = window.KnitChart;
+function line(cls, text) { var d = document.createElement('div'); d.className = cls; d.textContent = text; out.appendChild(d); return d; }
+function pre(text) { var d = document.createElement('pre'); d.textContent = text; out.appendChild(d); }
+function log(okk, label, detail) { if (okk) passed++; else failed++; line(okk ? 'pass' : 'fail', (okk ? 'PASS' : 'FAIL') + ' - ' + label + (detail ? '  (' + detail + ')' : '')); }
+function skip(label, why) { skipped++; line('skip', 'SKIP - ' + label + ' (' + why + ')'); }
+function group(t) { line('group', t); }
+function done() {
+  var s = document.getElementById('summary');
+  s.textContent = passed + ' passed, ' + failed + ' failed' + (skipped ? ', ' + skipped + ' skipped' : '');
+}
+var FIXTURES = [];
+var Q = {};
+location.search.replace(/^\?/, '').split('&').forEach(function (kv) { if (!kv) return; var p = kv.split('='); Q[decodeURIComponent(p[0])] = decodeURIComponent(p[1] || ''); });
+
+function openFixture(name) {
+  return fetch('../tmp-pdf/' + name, { cache: 'no-store' }).then(function (r) {
+    if (!r.ok) return null;
+    return r.blob().then(function (b) { return PdfText.open(b); });
+  }, function () { return null; });
+}
+
+/* ?shot=file&page=n[&box=x0,y0,x1,y1 in page points, y down]: draw the page for a headless screenshot */
+function shot() {
+  document.body.className = 'shot';
+  return openFixture(Q.shot).then(function (h) {
+    if (!h) { line('skip', 'missing'); return; }
+    var n = +Q.page || 1;
+    var rect = Q.box ? (function (a) { return { x0: a[0], y0: a[1], x1: a[2], y1: a[3] }; })(Q.box.split(',').map(Number)) : null;
+    return h.renderRegion(n, rect, { width: +Q.w || 1400 }).then(function (cv) {
+      out.appendChild(cv);
+      // for a headless run (DUMP= saves the page text): the picture as a data URL on its own line
+      if (Q.data) pre('DATAURL ' + cv.toDataURL('image/jpeg', 0.85));
+    });
+  });
+}
+
+/* ?survey=file1,file2: every page's pictures, captions, kind, and what KnitChart finds */
+function survey() {
+  var files = Q.survey === 'all' ? FIXTURES.map(function (f) { return f.file; }) : Q.survey.split(',').map(function (s) { return /\.pdf$/.test(s) ? s : 'knit-' + s + '.pdf'; });
+  var chain = Promise.resolve();
+  files.forEach(function (f) {
+    chain = chain.then(function () {
+      return openFixture(f).then(function (h) {
+        if (!h) { skip(f, 'absent'); return; }
+        group(f + ' (' + h.numPages + ' p)');
+        var tAll = performance.now();
+        return KC.scan(h, {}).then(function (vec) {
+          var tv = performance.now();
+          return KC.pictures(h, { charts: vec, debug: true }).then(function (pics) {
+            pre('scan ' + Math.round(tv - tAll) + ' ms, pictures ' + Math.round(performance.now() - tv) + ' ms');
+            vec.forEach(function (r) { r.charts.forEach(function (c) { pre('p' + r.page + ' ' + c.source + ' "' + c.name + '" ' + c.cols + 'x' + c.rows + (c.cells ? ' cells' : '')); }); });
+            pics.forEach(function (r) {
+              var o = ['p' + r.page + ' ' + r.ms + ' ms'];
+              (r.debug || []).forEach(function (dbg) {
+                var res = dbg.res || {};
+                o.push('  img' + dbg.image + ' s=' + dbg.scale.toFixed(2) + ' ' + (res.w + 'x' + res.h) + ' ' + res.ms + 'ms lines=' + JSON.stringify(res.lines) + ' tone=' + JSON.stringify(res.tone) + ' rowsOnly=' + (res.rowsOnly ? res.rowsOnly.real + '@' + res.rowsOnly.pitch.toFixed(1) : '-'));
+                (res.lattices || []).forEach(function (l) {
+                  o.push('    lat ' + l.cols + 'x' + l.rows + ' px=' + l.pitchX.toFixed(1) + 'x' + l.pitchY.toFixed(1) + ' real=' + l.realH.toFixed(2) + '/' + l.realV.toFixed(2) + ' off=' + l.offH.toFixed(2) + '/' + l.offV.toFixed(2) +
+                    ' flat=' + l.flatFrac.toFixed(2) + ' medStd=' + l.medStd.toFixed(1) + ' sym=' + l.symFrac.toFixed(2) + ' classes=' + l.classes.map(function (k) { return k.n + ':' + k.rgb.join(','); }).join(' ') +
+                    ' inkR=' + (l.sides.right ? l.sides.right.filter(function (x) { return x.n >= 4; }).length : '-') + ' inkL=' + (l.sides.left ? l.sides.left.filter(function (x) { return x.n >= 4; }).length : '-'));
+                });
+                if (dbg.keyMaps) o.push('    key ' + JSON.stringify(dbg.keyMaps));
+              });
+              r.charts.forEach(function (c) {
+                o.push('  CAND ' + c.kind + ' "' + c.name + '" ' + c.cols + 'x' + c.rows + ' conf=' + c.confidence + ' start=' + c.startRow + ' read=' + c.rowNosRead + ' colour=' + c.colour +
+                  ' bbox=' + [c.bbox.x0, c.bbox.y0, c.bbox.x1, c.bbox.y1].map(Math.round).join(',') + '\n     ' + c.reasons.join(' | ') +
+                  (c.legend && c.legend.length ? '\n     legend ' + c.legend.map(function (e) { return e.color + '=' + e.fill + '×' + e.count; }).join(' ') : '') +
+                  (c.labelSide ? '\n     sides ' + JSON.stringify(c.labelSide).slice(0, 120) : ''));
+              });
+              if (o.length > 1) pre(o.join('\n'));
+            });
+          });
+        });
+        var c2 = Promise.resolve();
+        for (var n = 1; n <= h.numPages; n++) (function (n) {
+          c2 = c2.then(function () {
+            return h.layout(n).then(function (L) {
+              var t0 = performance.now();
+              return KC.fromHandle(h, n).then(function (vc) {
+                return KC.pictures(h, { pages: [n], charts: [{ page: n, charts: vc }] }).then(function (pr) { return vc.concat(pr[0] ? pr[0].charts : []); });
+              }).then(function (charts) {
+                var ms = Math.round(performance.now() - t0);
+                var o = ['p' + n + ' ' + Math.round(L.width) + 'x' + Math.round(L.height) + ' kind=' + L.kind.guess + ' ' + (L.kind.confidence || 0).toFixed(2)];
+                L.images.forEach(function (im, i) { o.push('  img' + i + ' box=' + [im.box.x0, im.box.y0, im.box.x1, im.box.y1].map(Math.round).join(',') + ' px=' + (im.px ? im.px.w + 'x' + im.px.h : '-') + (im.mask ? ' mask' : '')); });
+                L.drawings.forEach(function (d, i) { if (d.kind === 'grid' || (d.box.x1 - d.box.x0) > 80) o.push('  draw' + i + ' ' + d.kind + ' box=' + [d.box.x0, d.box.y0, d.box.x1, d.box.y1].map(Math.round).join(',') + ' paths=' + d.paths + (d.grid ? ' grid=' + d.grid.cols + 'x' + d.grid.rows : '')); });
+                L.captions.forEach(function (c) { o.push('  cap "' + c.text.slice(0, 50) + '" ' + (c.target ? c.target.type + c.target.index : '')); });
+                L.lines.forEach(function (ln) { if (/\b(chart|diagram|m.nster)\b/i.test(ln.text)) o.push('  line "' + ln.text.slice(0, 70) + '" y=' + Math.round(ln.box.y0)); });
+                charts.forEach(function (c) { o.push('  CHART ' + c.source + ' "' + c.name + '" ' + c.cols + 'x' + c.rows + (c.cells ? ' cells' : '') + ' box=' + (c.bbox ? [c.bbox.x0, c.bbox.y0, c.bbox.x1, c.bbox.y1].map(Math.round).join(',') : '-')); });
+                o.push('  ' + ms + ' ms');
+                pre(o.join('\n'));
+              });
+            });
+          });
+        })(n);
+        return c2;
+      });
+    });
+  });
+  return chain;
+}
+
+/* ?xs=file,file: XSRead.detect on every big picture (probe of the cross-stitch lattice finder) */
+function xsProbe() {
+  var files = Q.xs.split(',').map(function (s) { return /\.pdf$/.test(s) ? s : 'knit-' + s + '.pdf'; });
+  var chain = Promise.resolve();
+  files.forEach(function (f) {
+    chain = chain.then(function () {
+      return openFixture(f).then(function (h) {
+        if (!h) { skip(f, 'absent'); return; }
+        group(f);
+        var c2 = Promise.resolve();
+        for (var n = 1; n <= h.numPages; n++) (function (n) {
+          c2 = c2.then(function () {
+            return h.layout(n).then(function (L) {
+              var c3 = Promise.resolve();
+              L.images.forEach(function (im, i) {
+                var w = im.box.x1 - im.box.x0, hh = im.box.y1 - im.box.y0;
+                if (w < 90 || hh < 60) return;
+                c3 = c3.then(function () {
+                  var sc = Math.min(4, 1600 / Math.max(w, hh));
+                  return h.renderRegion(n, im.box, { scale: sc }).then(function (cv) {
+                    var t0 = performance.now();
+                    return window.XSRead.detect(cv, {}).then(function (d) {
+                      pre('p' + n + ' img' + i + ' ' + cv.width + 'x' + cv.height + ' ' + Math.round(performance.now() - t0) + 'ms ok=' + d.ok + ' ' + (d.reason || '') +
+                        ' crop=' + JSON.stringify(d.crop) + ' lat=' + JSON.stringify(d.lattice) + ' size=' + JSON.stringify(d.size) + ' conf=' + d.confidence + ' style=' + d.style +
+                        '\n   regions=' + JSON.stringify((d.regions || []).map(function (r) { return [r.kind, r.box, Math.round(r.score * 100) / 100, r.pitch]; })));
+                    });
+                  });
+                });
+              });
+              return c3;
+            });
+          });
+        })(n);
+        return c2;
+      });
+    });
+  });
+  return chain;
+}
+
+/* ?lines=file&page=n&img=i: the ruled lines the pixel half finds in one picture */
+function linesProbe() {
+  var f = /\.pdf$/.test(Q.lines) ? Q.lines : 'knit-' + Q.lines + '.pdf';
+  return openFixture(f).then(function (h) {
+    if (!h) { skip(f, 'absent'); return; }
+    var n = +Q.page;
+    return h.layout(n).then(function (L) {
+      var im = L.images[+Q.img || 0], b = im.box, w = b.x1 - b.x0, hh = b.y1 - b.y0;
+      var s = Math.max(1.5, Math.min(4, 1800 / Math.max(w, hh)));
+      return h.renderRegion(n, b, { scale: s }).then(function (cv) {
+        var id = cv.getContext('2d').getImageData(0, 0, cv.width, cv.height);
+        return KC.measurePicture({ w: id.width, h: id.height, data: id.data }, { debugLines: true }).then(function (res) {
+          function fmt(list) { return list.slice().sort(function (a, c) { return a.p - c.p; }).map(function (x) { return Math.round(x.p) + '[' + x.a0 + '-' + x.a1 + ' t' + x.thick + ']'; }).join(' '); }
+          pre('s=' + s + ' ' + cv.width + 'x' + cv.height + '\nH ' + fmt(res.lines.h) + '\nV ' + fmt(res.lines.v));
+          res.lattices.forEach(function (l) { pre('lat ' + l.cols + 'x' + l.rows + ' ys=' + l.ys.map(Math.round).join(',') + '\n xs=' + l.xs.map(Math.round).join(',') + ' real ' + l.realH.toFixed(2) + '/' + l.realV.toFixed(2)); });
+        });
+      });
+    });
+  });
+}
+
+/* The ledger (default mode): charts present by eye on the rendered page, what must be found.
+ * want: [kind, cols, rows] per chart; nameRe optional. present = charts really on the pages. */
+var LEDGER = [
+  { file: 'knit-cascade-color-yoke.pdf', present: 4, want: [['picture-grid', 6, 16, /Lower Body/], ['picture-grid', 6, 17, /Lower Sleeve/], ['picture-grid', 6, 24, /Lower Yoke/], ['picture-grid', 4, 10, /Upper Yoke/]] },
+  { file: 'knit-sandnes-bernies-mittens.pdf', present: 1, want: [['picture-grid', 20, 46]] },
+  { file: 'knit-cascade-mens-retro-fairisle.pdf', present: 1, want: [['picture-grid', 13, 46]] },
+  { file: 'knit-cascade-cable-yoke.pdf', present: 2, want: [['picture-grid', 21, 51, /XS, S, M, L/], ['picture-grid', 23, 63, /XL, 2XL, 3XL/]] },
+  { file: 'knit-redheart-fair-isle-hat.pdf', present: 0, want: [] },        // self-striping yarn: photos only
+  { file: 'knit-cascade-intarsia-skirt.pdf', present: 1, want: [], known: 'hand-drawn chart, no lattice, page never names it: not found yet' }
+];
+FIXTURES = LEDGER;
+function ledger() {
+  var chain = Promise.resolve(), tot = { present: 0, found: 0, measured: 0, fp: 0 };
+  LEDGER.forEach(function (row) {
+    chain = chain.then(function () {
+      return openFixture(row.file).then(function (h) {
+        if (!h) { skip(row.file, 'absent'); return; }
+        group(row.file);
+        var t0 = performance.now();
+        return KC.scan(h, { pictures: true }).then(function (pages) {
+          var ms = performance.now() - t0;
+          var got = [];
+          pages.forEach(function (p) { p.charts.forEach(function (c) { if (c.kind === 'picture-grid' || c.kind === 'picture') got.push(c); }); });
+          var used = {};
+          row.want.forEach(function (w) {
+            var hit = null;
+            got.forEach(function (c, i) { if (!hit && !used[i] && c.kind === w[0] && c.cols === w[1] && c.rows === w[2] && (!w[3] || w[3].test(c.name || ''))) { hit = c; used[i] = true; } });
+            log(!!hit, row.file + ': ' + w[0] + ' ' + w[1] + ' × ' + w[2] + (w[3] ? ' ' + w[3] : ''), hit ? '' : 'got ' + got.map(function (c) { return c.kind + ' ' + c.cols + 'x' + c.rows + ' "' + c.name + '"'; }).join('; '));
+            if (hit) { tot.found++; tot.measured++; }
+          });
+          var fp = got.length - Object.keys(used).length;
+          tot.present += row.present; tot.fp += Math.max(0, fp);
+          log(fp <= 0, row.file + ': no photo or schematic offered as a chart', fp > 0 ? fp + ' extra' : '');
+          log(ms / h.numPages < 2500, row.file + ': under 2.5 s a page', Math.round(ms / h.numPages) + ' ms a page');
+          if (row.known) line('skip', 'known: ' + row.known);
+          line('skip', 'ledger ' + row.file + ': present ' + row.present + ', found ' + Object.keys(used).length + ', false positives ' + Math.max(0, fp) + ', ' + Math.round(ms / h.numPages) + ' ms a page');
+        });
+      });
+    });
+  });
+  return chain.then(function () { line('group', 'Ledger: present ' + tot.present + ', found and measured ' + tot.measured + ', false positives ' + tot.fp); });
+}
+
+var run = Q.shot ? shot : Q.survey ? survey : Q.xs ? xsProbe : Q.lines ? linesProbe : ledger;
+run().then(done, function (e) { log(false, 'page threw', String(e && e.stack || e)); done(); });
+</script>
+</body>
+</html>

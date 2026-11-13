@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Ocr fixtures</title>
+<style>
+  body { font: 13px/1.4 Menlo, Consolas, monospace; background:#111; color:#eee; padding:16px; }
+  .pass { color:#7bd389; }
+  .fail { color:#ff6b6b; background:#2a1414; }
+  .skip { color:#e0c060; }
+  .info { color:#bbb; white-space: pre-wrap; }
+  .group { margin-top:18px; font-weight:bold; color:#9cf; border-bottom:1px solid #333; padding-bottom:4px; }
+  table { border-collapse: collapse; margin: 8px 0; }
+  td, th { border: 1px solid #333; padding: 2px 6px; text-align: right; }
+  th { color: #9cf; }
+  td:first-child, th:first-child { text-align: left; }
+  #summary { margin-top:20px; font-size:18px; font-weight:bold; }
+  #summary.ok { color:#7bd389; }
+  #summary.bad { color:#ff6b6b; }
+  img.show { max-width: none; background: #fff; display: block; }
+</style>
+</head>
+<body>
+<h1>Ocr fixtures (real scans, read at run time)</h1>
+<p class="group">js/ocr.js against image-only pages in <code>../tmp-pdf/</code>. Those files are copyrighted,
+personal-use-only material and gitignored: nothing from them is in this file. Ground truth is only
+(a) the public-domain Nicoll phrases already quoted in docs/research/knitting.md §7a, (b) floss codes
+(identifiers) already written in docs/wave-e/xstitch-audit.md, and (c) each born-digital page's own text
+layer, read at run time. A missing file is skipped.<br>
+Options (the default is one pass at 200 dpi, sized for tools/headless-suite.sh with BUDGET=300000): <code>?only=id,id</code> · <code>?dpis=150,200,300</code> (the DPI sweep) · <code>?dump=1</code> (print what was read; never
+commit it) · <code>?survey=file,file</code> · <code>?show=file&amp;page=n&amp;dpi=100&amp;rect=x0,y0,x1,y1</code> (0..1).</p>
+<div id="out"></div>
+<div id="summary">running…</div>
+
+<script src="../js/vendor/pdf.min.js"></script>
+<script src="../js/pdftext.js"></script>
+<script src="../js/ocr.js"></script>
+<!-- the parsers OCR text would feed (hand-off check only) -->
+<script src="../js/patterns.js"></script>
+<script src="../js/knits.js"></script>
+<script src="../js/xstitch.js"></script>
+<script>
+'use strict';
+
+/* Keep headless Chrome's virtual time parked while we wait on workers (see
+   test/ocr.test.html). */
+try { performance.setResourceTimingBufferSize(1000000); } catch (e) {}
+var keepAlive = true;
+(function park() {
+  if (!keepAlive) return;
+  fetch('../js/vendor/pdf.worker.min.js', { cache: 'no-store' }).then(function (r) { return r.arrayBuffer(); })
+    .then(park, function () { setTimeout(park, 50); });
+})();
+
+var out = document.getElementById('out');
+var passed = 0, failed = 0, skipped = 0;
+function el(cls, text) { var d = document.createElement('div'); d.className = cls; d.textContent = text; out.appendChild(d); return d; }
+function log(ok, label, detail) {
+  if (ok) passed++; else failed++;
+  el(ok ? 'pass' : 'fail', (ok ? 'PASS' : 'FAIL') + ' - ' + label + (detail ? '  (' + detail + ')' : ''));
+}
+function skip(label) { skipped++; el('skip', 'SKIP - ' + label); }
+function info(t) { el('info', '  ' + t); console.log(t); }
+function group(t) { el('group', t); }
+function table(head, rows) {
+  var t = document.createElement('table'), h = '<tr>' + head.map(function (x) { return '<th>' + x + '</th>'; }).join('') + '</tr>';
+  rows.forEach(function (r) { h += '<tr>' + r.map(function (x) { return '<td>' + String(x).replace(/</g, '&lt;') + '</td>'; }).join('') + '</tr>'; });
+  t.innerHTML = h; out.appendChild(t);
+}
+function finish() {
+  var s = document.getElementById('summary');
+  s.textContent = passed + ' passed, ' + failed + ' failed' + (skipped ? ', ' + skipped + ' skipped' : '');
+  s.className = failed ? 'bad' : 'ok';
+  keepAlive = false;
+}
+
+var Q = {};
+location.search.replace(/^\?/, '').split('&').forEach(function (kv) { if (!kv) return; var p = kv.split('='); Q[decodeURIComponent(p[0])] = decodeURIComponent(p[1] || '1'); });
+var DUMP = !!Q.dump;
+var DPIS = (Q.dpis || '').split(',').map(Number).filter(Boolean);
+
+/* ------------------------------------------------------------------ *
+ * Text metrics
+ * ------------------------------------------------------------------ */
+function fold(s) {
+  return String(s)
+    .replace(/[‘’‚′]/g, "'").replace(/[“”„″]/g, '"')
+    .replace(/[‐-―−]/g, '-').replace(/ﬁ/g, 'fi').replace(/ﬂ/g, 'fl')
+    .replace(/ﬀ/g, 'ff').replace(/ﬃ/g, 'ffi').replace(/ﬄ/g, 'ffl')
+    .replace(/[   ]/g, ' ').replace(/…/g, '...')
+    .replace(/=== PAGE \d+ ===/g, ' ')
+    .replace(/\s+/g, ' ').trim();
+}
+function lev(a, b) {
+  var m = a.length, n = b.length, prev = new Array(n + 1), cur = new Array(n + 1), i, j;
+  for (j = 0; j <= n; j++) prev[j] = j;
+  for (i = 1; i <= m; i++) {
+    cur[0] = i;
+    for (j = 1; j <= n; j++) cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a.charCodeAt(i - 1) === b.charCodeAt(j - 1) ? 0 : 1));
+    var t = prev; prev = cur; cur = t;
+  }
+  return prev[n];
+}
+/* Best match of a phrase anywhere in the text (approximate substring, free start/end). */
+function bestWindow(phrase, text) {
+  var m = phrase.length, n = text.length, prev = new Array(n + 1), cur = new Array(n + 1), i, j;
+  for (j = 0; j <= n; j++) prev[j] = 0;
+  for (i = 1; i <= m; i++) {
+    cur[0] = i;
+    var pc = phrase.charCodeAt(i - 1);
+    for (j = 1; j <= n; j++) cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (pc === text.charCodeAt(j - 1) ? 0 : 1));
+    var t = prev; prev = cur; cur = t;
+  }
+  var best = Infinity;
+  for (j = 0; j <= n; j++) if (prev[j] < best) best = prev[j];
+  return best / m;
+}
+function words(s) { return fold(s).toLowerCase().split(' ').map(function (w) { return w.replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, ''); }).filter(Boolean); }
+/* Order-free word recall: share of reference words found in the OCR words (multiset). */
+function wordRecall(ref, hyp) {
+  var bag = {}, hit = 0, r = words(ref);
+  words(hyp).forEach(function (w) { bag[w] = (bag[w] || 0) + 1; });
+  r.forEach(function (w) { if (bag[w]) { bag[w]--; hit++; } });
+  return r.length ? hit / r.length : 1;
+}
+/* Character error rate on the folded strings, line order as each gives it. */
+function cer(ref, hyp) { var a = fold(ref), b = fold(hyp); return a.length ? lev(a, b) / a.length : 0; }
+function pct(x) { return (x * 100).toFixed(1) + '%'; }
+
+/* ------------------------------------------------------------------ *
+ * PDF access
+ * ------------------------------------------------------------------ */
+var handles = {};
+function openPdf(file) {
+  if (handles[file]) return handles[file];
+  handles[file] = fetch('../tmp-pdf/' + file + '.pdf').then(function (r) { return r.ok ? r.blob() : null; }, function () { return null; })
+    .then(function (b) { return b ? PdfText.open(b) : null; });
+  return handles[file];
+}
+
+/* Render a page (or a 0..1 rect of it) at a density, in bands under the
+   pdftext pixel cap, onto one canvas. */
+function renderAt(h, n, dpi, nrect) {
+  return h.renderRegion(n, null, { scale: 0.05 }).then(function (probe) {
+    var box = probe.region.box, W = box.x1 - box.x0, H = box.y1 - box.y0;
+    var r = nrect ? { x0: box.x0 + nrect[0] * W, y0: box.y0 + nrect[1] * H, x1: box.x0 + nrect[2] * W, y1: box.y0 + nrect[3] * H } : box;
+    var scale = dpi / 72, pw = Math.round((r.x1 - r.x0) * scale), ph = Math.round((r.y1 - r.y0) * scale);
+    var cap = (PdfText.MAX_RENDER_PIXELS || 4194304) * 0.95;
+    var bands = Math.max(1, Math.ceil(pw * ph / cap));
+    var big = document.createElement('canvas'); big.width = pw; big.height = ph;
+    var g = big.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, pw, ph);
+    var bandH = (r.y1 - r.y0) / bands, i = 0, t0 = performance.now();
+    function next() {
+      if (i >= bands) {
+        big.meta = { page: { w: W, h: H }, rect: r, scale: scale, renderMs: Math.round(performance.now() - t0), bands: bands };
+        return big;
+      }
+      var y0 = r.y0 + i * bandH, rr = { x0: r.x0, y0: y0, x1: r.x1, y1: Math.min(r.y1, y0 + bandH) };
+      i++;
+      return h.renderRegion(n, rr, { scale: scale }).then(function (cv) {
+        g.drawImage(cv, 0, Math.round((rr.y0 - r.y0) * scale), pw, Math.round((rr.y1 - rr.y0) * scale));
+        cv.width = cv.height = 0;
+        return next();
+      });
+    }
+    return next();
+  });
+}
+
+function textLayer(h, n) {
+  return Promise.resolve(h.textOf(n)).then(function (t) { return typeof t === 'string' ? t : (t && t.text) || ''; });
+}
+
+/* ------------------------------------------------------------------ *
+ * Ground truth (see the note at the top: nothing copied from tmp-pdf)
+ * ------------------------------------------------------------------ */
+/* Nicoll (1918, public domain), Plain Socks, PDF p125-132: the exact
+   sentences docs/research/knitting.md §7a quotes. */
+var NICOLL_PHRASES = [
+  'Cast on 80 stitches loosely on 3 needles, 28 stitches on the 1st needle, 24 stitches on the 2nd needle, and 28 stitches on the 3rd needle.',
+  'Knit every 7th and 8th stitches together in the front loops of the stitches; do this 9 times; then knit the succeeding 3rd and 4th stitches together; do this twice.',
+  'decreased 11 stitches, leaving 69',
+  'Knit 90 plain rounds, which will equal 8 inches',
+  'Repeat 3rd and 4th rows of heel until you have knitted 29 rows and have 15 slipped stitches on each side',
+  'Slip 1, purl 14, purl the next 2 stitches together, purl 3, purl the next 2 stitches together. Stop right here',
+  '16th and last row. Slip 1, knit 5, knit the next 2 stitches together in the back loops of the stitches, knit 1, knit the next 2 stitches together in the front loops of the stitches, knit 6, knit the last 2 stitches together in the back loops of the stitches.',
+  'You now have 80 stitches for the round, divided as follows: 23 stitches on needle No. 1, 34 stitches on needle No. 2, 23 stitches on needle No. 3',
+  'You will have 6 narrowings, all told, having decreased 12 stitches, which leaves 68',
+  'Knit 55 plain rounds for the foot, which will equal 5 inches.',
+  'decreased 52 stitches in 25 rounds and have reduced your sock to 16 stitches',
+  '5 steel knitting needles, size 14. 5 ounces of 4 or 5-ply fingering'
+];
+
+/* Floss codes are identifiers, not text: matryoshka, tapestry p5 and orr p19
+   are written in docs/wave-e/xstitch-audit.md; autumn and Satsuma sunshine
+   were read off the page by eye for this spike (wave K). `rect` is the key's
+   box on the page, 0..1 (found by eye; a box is not content). */
+var KEYS = [
+  { id: 'matryoshka-key', file: 'xs-tinymodernist-matryoshka', page: 1, rect: [0.08, 0.18, 0.45, 0.40],
+    codes: ['WHITE', '945', '892', '666', '907', '3849', '300', '310'],
+    anchor: ['2', '881', '33', '46', '255', '1070', '352', '403'] },
+  { id: 'autumn-key', file: 'xs-tinymodernist-autumn', page: 1, rect: [0.04, 0.165, 0.40, 0.32],
+    codes: ['725', '729', '922', '720', '869'],
+    anchor: ['305', '890', '1003', '326', '375'] },
+  { id: 'satsuma-key', file: 'xs-satsuma-sunshine', page: 1, rect: [0.03, 0.77, 0.34, 1.0],
+    codes: ['727', '740', '746', '919', '964', '972', '3609', '3805', '3845'] },
+  { id: 'tapestry-p5', file: 'xs-apl-tapestry-painted', page: 5, rect: [0.04, 0.45, 1.0, 1.0],
+    codes: ['816', '796', '597', '909', '913', '938', '783', 'WHITE'] },
+  { id: 'orr-p19', file: 'xs-apl-orr-book14', page: 19, rect: [0.66, 0.63, 0.97, 0.86], brand: 'J.&P. Coats',
+    codes: ['120', '6', '108', '9', '1', '12', '60', '32'],
+    names: ['Crimson', 'Red', 'Steel Blue', 'Yellow', 'White', 'Black', 'Moss Green', 'Purple'] }
+];
+
+/* Born-digital pages: the page's own text layer is the ground truth, so the
+   OCR's CER on real typeset booklets is measured without writing any text
+   down. Picked to span body text, a size table and a two-column layout. */
+var SELF = [
+  { id: 'westend-text', file: 'sew-peppermint-westend-jacket', pages: 'text' },
+  { id: 'peppermint-belle', file: 'sew-peppermint-belle-shirt', pages: [3, 6] },
+  { id: 'cascade-socks', file: 'knit-cascade-basic-socks', pages: [1] },
+  { id: 'bernat-basketweave', file: 'crochet-bernat-basketweave', pages: [1] },
+  { id: 'dmc-2173-key', file: 'xs-dmc-2173', pages: [1] }
+];
+
+/* Image-only pages with no written ground truth: read, timed and
+   confidence-profiled only (no accuracy claim). */
+var SCANS = [
+  { id: 'westend-image', file: 'sew-peppermint-westend-jacket', pages: [4, 9, 12],
+    // p4: measurements read off the page by eye (facts, not prose)
+    facts: { 4: ['1.5cm', '5/8', '5.4cm', '2 1/8', '1.65m', '6 buttons', '30-40cm'] } },
+  // p9 is a cutting layout whose labels run sideways: the failure case
+  { id: 'samford-image', file: 'sew-peppermint-samford-pants', pages: [9] }
+];
+
+function wanted(id) { return !Q.only || Q.only.split(',').indexOf(id) !== -1; }
+
+var rows = [];   // measurement table
+function measure(id, page, dpi, cv, r, extra) {
+  var row = { id: id, page: page, dpi: dpi, px: cv.width + 'x' + cv.height, renderMs: cv.meta.renderMs, ocrMs: r.ms, loadMs: r.loadMs, words: r.words.length, conf: r.conf };
+  for (var k in extra) row[k] = extra[k];
+  rows.push(row);
+  return row;
+}
+function lowConfShare(r, below) {
+  if (!r.words.length) return 0;
+  return r.words.filter(function (w) { return w.conf < below; }).length / r.words.length;
+}
+
+/* ------------------------------------------------------------------ *
+ * Runs
+ * ------------------------------------------------------------------ */
+async function runNicoll() {
+  group('Nicoll, Plain Socks (scanned 1918 book, PDF p125-132)');
+  var h = await openPdf('knit-apl-nicoll');
+  if (!h) return skip('knit-apl-nicoll.pdf not in tmp-pdf');
+  var dpis = DPIS.length ? DPIS : [200];
+  for (var di = 0; di < dpis.length; di++) {
+    var dpi = dpis[di], all = [], body = [];
+    for (var p = 125; p <= 132; p++) {
+      var cv = await renderAt(h, p, dpi);
+      var r = await Ocr.recognize(cv, { dpi: dpi });
+      measure('nicoll', p, dpi, cv, r, { low: pct(lowConfShare(r, 60)) });
+      all.push(r.text);
+      body.push(Ocr.toPlainText(r, { dropMargin: true }));
+      if (DUMP) info('--- p' + p + ' @' + dpi + '\n' + r.text);
+      cv.width = cv.height = 0;
+    }
+    var text = fold(all.join('\n'));
+    var scores = NICOLL_PHRASES.map(function (ph) { return bestWindow(fold(ph), text); });
+    var exactish = scores.filter(function (s) { return s <= 0.02; }).length;
+    var mean = scores.reduce(function (a, b) { return a + b; }, 0) / scores.length;
+    info('@' + dpi + ' dpi: phrase CER ' + scores.map(pct).join(' · ') + '; mean ' + pct(mean));
+    rows.push({ id: 'nicoll-phrases', page: '125-132', dpi: dpi, cer: pct(mean), exact: exactish + '/' + scores.length });
+    if (dpi === 200) {
+      log(mean <= 0.05, 'Nicoll @200: mean phrase CER at most 5%', pct(mean));
+      log(exactish >= 8, 'Nicoll @200: at least 8 of 12 phrases within 2% CER', exactish + '/12');
+    }
+    // The counts the knitting parser would need (§7a "counts only where printed").
+    var need = [['leaving 69', 69], ['reduced to 16 stitches', 16], ['80 stitches for the round', 80], ['which leaves 68', 68]];
+    var got = need.filter(function (x) { return bestWindow(fold(x[0]), text) === 0; }).length;
+    info('@' + dpi + ' dpi: printed-count phrases read exactly: ' + got + '/' + need.length);
+    if (window.Knits && Knits.parse) {
+      // Hand-off: the OCR text through the knitting parser, as an import would.
+      // §7a: rows only where printed (the heel's 1st..16th rows), counts only
+      // where printed (69, 16, 80, 68 among them).
+      // Running heads and page numbers ("[126]") are dropped first: kept, the
+      // parser takes each page number for a stitch count (measured in this
+      // spike: printed counts [126,127,2,2,2,2,128,132]).
+      var lines = Knits.parse(body.join('\n')) || [];
+      var lostFolio = (Knits.parse(all.join('\n')) || []).filter(function (l) { return l.kind === 'row' && l.count != null && l.countSource !== 'computed' && l.count > 124 && l.count < 133; }).length;
+      var keptFolio = lines.filter(function (l) { return l.kind === 'row' && l.count != null && l.countSource !== 'computed' && l.count > 124 && l.count < 133; }).length;
+      log(keptFolio === 0, 'Nicoll @' + dpi + ': with margins dropped, no page number becomes a stitch count', keptFolio + ' (' + lostFolio + ' with margins kept)');
+      var rowsK = lines.filter(function (l) { return l.kind === 'row'; });
+      var printed = rowsK.filter(function (l) { return l.count != null && l.countSource !== 'computed'; }).map(function (l) { return l.count; });
+      var heel = rowsK.filter(function (l) { return /^\s*\d+(st|nd|rd|th)\b/i.test(l.text || ''); }).length;
+      var want = [69, 16, 80, 68].filter(function (n) { return printed.indexOf(n) !== -1; });
+      info('@' + dpi + ' Knits.parse on the OCR text: ' + rowsK.length + ' row lines (' + heel + ' start with an ordinal), printed counts [' +
+        printed.join(',') + ']; of 69/16/80/68: ' + want.length + '/4');
+      rows[rows.length - 1].parser = rowsK.length + ' rows, ' + want.length + '/4 counts';
+    }
+  }
+}
+
+async function runKeys() {
+  for (var i = 0; i < KEYS.length; i++) {
+    var k = KEYS[i];
+    if (!wanted(k.id)) continue;
+    group('Key: ' + k.id + ' (' + k.file + ' p' + k.page + ')');
+    var h = await openPdf(k.file);
+    if (!h) { skip(k.file + '.pdf not in tmp-pdf'); continue; }
+    var dpis = DPIS.length ? DPIS : [200];
+    for (var di = 0; di < dpis.length; di++) {
+      var dpi = dpis[di];
+      var cv = await renderAt(h, k.page, dpi, k.rect);
+      var modes = ['text', 'codes'];
+      for (var mi = 0; mi < modes.length; mi++) {
+        var r = await Ocr.recognize(cv, { dpi: dpi, mode: modes[mi] });
+        var codes = Ocr.codesFrom(r);
+        var got = {};
+        codes.forEach(function (c) { got[c.code] = (got[c.code] || 0) + 1; });
+        var hit = k.codes.filter(function (c) { return got[c]; });
+        var miss = k.codes.filter(function (c) { return !got[c]; });
+        var aHit = k.anchor ? k.anchor.filter(function (c) { return got[c]; }).length : null;
+        var sure = codes.filter(function (c) { return c.sure; });
+        var sureOff = sure.filter(function (c) { return k.codes.indexOf(c.code) === -1 && !(k.anchor && k.anchor.indexOf(c.code) !== -1); });
+        measure(k.id, k.page, dpi + ' ' + modes[mi], cv, r, { codes: hit.length + '/' + k.codes.length, anchor: aHit == null ? '' : aHit + '/' + k.anchor.length, sureOther: sureOff.length });
+        info('@' + dpi + ' ' + modes[mi] + ': codes ' + hit.length + '/' + k.codes.length + (miss.length ? ' (missed ' + miss.join(',') + ')' : '') +
+          (k.anchor ? '; Anchor ' + aHit + '/' + k.anchor.length : '') + '; "sure" codes not in the key: ' + sureOff.length +
+          ' (other numbers on the page: ' + sureOff.slice(0, 12).map(function (c) { return c.code; }).join(',') + ')');
+        if (k.names && modes[mi] === 'text') {
+          var nt = fold(r.text).toLowerCase(), nh = k.names.filter(function (n) { return nt.indexOf(n.toLowerCase()) !== -1; }).length;
+          info('@' + dpi + ' colour names read: ' + nh + '/' + k.names.length);
+        }
+        if (modes[mi] === 'text' && window.XStitch && XStitch.parseKey) {
+          // Hand-off: the OCR text through the key parser, as an import would.
+          var kr = XStitch.parseKey(r.text) || { entries: [] };
+          var ents = (kr.entries || []).map(function (e) { return String(e.code || '').toUpperCase(); });
+          var right = ents.filter(function (c) { return k.codes.indexOf(c) !== -1 || (k.anchor && k.anchor.indexOf(c) !== -1); });
+          var wrong = ents.filter(function (c) { return !(k.codes.indexOf(c) !== -1 || (k.anchor && k.anchor.indexOf(c) !== -1)); });
+          var rowsRight = k.codes.filter(function (c) { return ents.indexOf(c) !== -1; }).length;
+          info('@' + dpi + ' XStitch.parseKey on the OCR text: ' + ents.length + ' entries, ' + rowsRight + '/' + k.codes.length +
+            ' key codes found, ' + wrong.length + ' entries with a code not in the key' + (wrong.length ? ' (' + wrong.slice(0, 8).join(',') + ')' : ''));
+          rows[rows.length - 1].parser = rowsRight + '/' + k.codes.length + ' ok, ' + wrong.length + ' wrong';
+        }
+        if (DUMP) info('--- ' + modes[mi] + ' @' + dpi + '\n' + r.text);
+      }
+      cv.width = cv.height = 0;
+    }
+    // The whole page, as a reader with no key box would see it: how many
+    // "sure" codes come from chart symbols, prose and sizes instead of the key.
+    var wp = await renderAt(h, k.page, 200);
+    var rw = await Ocr.recognize(wp, { dpi: 200 });
+    var cw = Ocr.codesFrom(rw), gw = {};
+    cw.forEach(function (c) { gw[c.code] = 1; });
+    var wHit = k.codes.filter(function (c) { return gw[c]; }).length;
+    var wOff = cw.filter(function (c) { return c.sure && k.codes.indexOf(c.code) === -1 && !(k.anchor && k.anchor.indexOf(c.code) !== -1); });
+    measure(k.id + ' (whole page)', k.page, 200, wp, rw, { codes: wHit + '/' + k.codes.length, sureOther: wOff.length });
+    info('whole page @200: codes ' + wHit + '/' + k.codes.length + '; "sure" codes not in the key: ' + wOff.length);
+    wp.width = wp.height = 0;
+  }
+}
+
+async function pagesOf(h, spec, file) {
+  if (Array.isArray(spec)) return spec;
+  var ex; try { ex = await h.extract({}); } catch (e) { ex = null; }
+  var all = [];
+  for (var n = 1; n <= h.numPages; n++) all.push(n);
+  var empty = ex ? (ex.emptyPages || []) : all.slice();
+  if (spec === 'empty') return empty;
+  return all.filter(function (n) { return empty.indexOf(n) === -1; });
+}
+
+async function runSelf() {
+  for (var i = 0; i < SELF.length; i++) {
+    var s = SELF[i];
+    if (!wanted(s.id)) continue;
+    group('Text-layer check: ' + s.id + ' (OCR of the drawn page vs the page\'s own text)');
+    var h = await openPdf(s.file);
+    if (!h) { skip(s.file + '.pdf not in tmp-pdf'); continue; }
+    var pages = (await pagesOf(h, s.pages, s.file)).slice(0, 3);
+    var dpis = DPIS.length ? DPIS : [200];
+    for (var pi = 0; pi < pages.length; pi++) {
+      var n = pages[pi], ref = await textLayer(h, n);
+      if (fold(ref).length < 200) { info('p' + n + ': under 200 characters of text, not measured'); continue; }
+      for (var di = 0; di < dpis.length; di++) {
+        var dpi = dpis[di];
+        var cv = await renderAt(h, n, dpi);
+        var r = await Ocr.recognize(cv, { dpi: dpi });
+        var c = cer(ref, r.text), wr = wordRecall(ref, r.text), wp = wordRecall(r.text, ref);
+        measure(s.id, n, dpi, cv, r, { cer: pct(c), wordRecall: pct(wr), wordPrecision: pct(wp), refChars: fold(ref).length });
+        info('p' + n + ' @' + dpi + ': CER ' + pct(c) + ' (reading order counts), word recall ' + pct(wr) + ', word precision ' + pct(wp) +
+          ', ' + r.ms + ' ms OCR + ' + cv.meta.renderMs + ' ms draw');
+        if (DUMP) info('--- OCR p' + n + ' @' + dpi + '\n' + r.text);
+        cv.width = cv.height = 0;
+      }
+    }
+  }
+}
+
+async function runScans() {
+  for (var i = 0; i < SCANS.length; i++) {
+    var s = SCANS[i];
+    if (!wanted(s.id)) continue;
+    group('Image-only page, no ground truth: ' + s.id);
+    var h = await openPdf(s.file);
+    if (!h) { skip(s.file + '.pdf not in tmp-pdf'); continue; }
+    var pages = (await pagesOf(h, s.pages, s.file)).slice(0, s.max || 3);
+    if (!pages.length) { info('no image-only pages found'); continue; }
+    var dpi = DPIS[0] || 200;
+    for (var pi = 0; pi < pages.length; pi++) {
+      var cv = await renderAt(h, pages[pi], dpi);
+      var r = await Ocr.recognize(cv, { dpi: dpi });
+      measure(s.id, pages[pi], dpi, cv, r, { low: pct(lowConfShare(r, 60)) });
+      info('p' + pages[pi] + ' @' + dpi + ': ' + r.words.length + ' words, mean conf ' + r.conf + ', ' + pct(lowConfShare(r, 60)) + ' of words under conf 60, ' + r.ms + ' ms');
+      if (s.facts && s.facts[pages[pi]]) {
+        var ft = fold(r.text), fl = s.facts[pages[pi]], fh = fl.filter(function (f) { return ft.indexOf(f) !== -1; });
+        info('  facts read exactly: ' + fh.length + '/' + fl.length + (fh.length < fl.length ? ' (missed ' + fl.filter(function (f) { return fh.indexOf(f) === -1; }).join(' · ') + ')' : ''));
+        rows[rows.length - 1].exact = fh.length + '/' + fl.length;
+      }
+      if (DUMP) info('--- p' + pages[pi] + '\n' + r.text);
+      cv.width = cv.height = 0;
+    }
+  }
+}
+
+async function survey(files) {
+  group('Survey');
+  for (var i = 0; i < files.length; i++) {
+    var h = await openPdf(files[i]);
+    if (!h) { skip(files[i]); continue; }
+    var ex; try { ex = await h.extract({}); } catch (e) { ex = { chars: 0, emptyPages: ["all (" + e.message + ")"] }; }
+    var probe = await h.renderRegion(1, null, { scale: 0.05 });
+    info(files[i] + ': ' + h.numPages + ' pages, ' + ex.chars + ' chars, empty pages [' + (ex.emptyPages || []).join(',') + '], p1 ' +
+      Math.round(probe.region.box.x1) + 'x' + Math.round(probe.region.box.y1) + ' pt');
+  }
+}
+
+async function show() {
+  var h = await openPdf(Q.show);
+  if (!h) { skip(Q.show); return; }
+  var rect = Q.rect ? Q.rect.split(',').map(Number) : null;
+  var cv = await renderAt(h, Number(Q.page || 1), Number(Q.dpi || 100), rect);
+  var img = new Image(); img.className = 'show'; img.src = cv.toDataURL('image/png');
+  document.body.insertBefore(img, document.body.firstChild);
+  document.querySelector('h1').style.display = 'none';
+  Array.prototype.forEach.call(document.querySelectorAll('p.group'), function (p) { p.style.display = 'none'; });
+  info(Q.show + ' p' + (Q.page || 1) + ': ' + cv.width + 'x' + cv.height);
+}
+
+(async function main() {
+  var T0 = Date.now();
+  try {
+    if (!window.PdfText || !window.Ocr) { log(false, 'PdfText and Ocr load'); return finish(); }
+    if (Q.show) { await show(); return finish(); }
+    if (Q.survey) { await survey(Q.survey.split(',')); return finish(); }
+    var anyFile = await fetch('../tmp-pdf/SOURCES.md').then(function (r) { return r.ok; }, function () { return false; });
+    if (!anyFile) { skip('tmp-pdf/ is not here: every fixture skipped'); return finish(); }
+
+    group('Engine');
+    var t = performance.now();
+    var inst = await Ocr.install();
+    info('install: ' + inst.bytes + ' bytes fetched in ' + inst.ms + ' ms (local server; 0 bytes = already in the cache)');
+    log(await Ocr.installed(), 'engine installed into ' + Ocr.CACHE);
+
+    if (wanted('nicoll')) await runNicoll();
+    await runKeys();
+    await runSelf();
+    await runScans();
+
+    group('Measurements');
+    var cols = ['id', 'page', 'dpi', 'px', 'renderMs', 'ocrMs', 'loadMs', 'words', 'conf', 'cer', 'wordRecall', 'wordPrecision', 'exact', 'codes', 'anchor', 'sureOther', 'parser', 'low'];
+    table(cols, rows.map(function (r) { return cols.map(function (c) { return r[c] == null ? '' : r[c]; }); }));
+    info('JSON ' + JSON.stringify(rows));
+    if (performance.memory) info('main-thread JS heap now ' + Math.round(performance.memory.usedJSHeapSize / 1048576) + ' MB (the worker heap is separate)');
+    info('fixture wall time ' + Math.round((Date.now() - T0) / 1000) + ' s');
+    await Ocr.remove();
+  } catch (e) {
+    log(false, 'fixture run crashed: ' + (e && (e.stack || e.message) || e));
+  }
+  finish();
+})();
+</script>
+</body>
+</html>

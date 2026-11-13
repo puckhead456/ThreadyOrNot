@@ -857,3 +857,168 @@
   /* The cutting table jumps straight to the new fill. */
   .sw-ct-fill, .sw-ring-arc { transition: none; }
 }
+
+/* --------------------------------------------------------------------------
+ * Wave K (sew-app): size advisor, step figure, set-up chips, units in their
+ * step, notes, working mode surface, pattern sheet. Theme variables only.
+ * -------------------------------------------------------------------------- */
+.sw-yoursize { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; }
+.sw-yoursize-tag { font-size: 12px; font-weight: 700; letter-spacing: .04em; color: var(--text-muted); text-transform: uppercase; }
+.sw-yoursize-val { border-color: var(--primary); color: var(--text); }
+.sw-note { display: block; width: 100%; text-align: left; margin-top: 8px; padding: 8px 10px; border: 1px dashed var(--border);
+  border-radius: var(--radius-sm); background: var(--surface-2); color: var(--text); font: inherit; font-size: 14px; cursor: pointer; }
+.sw-step-card.sw-edited .sw-step-text::after { content: ' ✎'; color: var(--text-muted); font-size: .85em; }
+.sw-fig { display: block; width: 100%; margin-top: 10px; padding: 0; border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: #fff; overflow: hidden; cursor: zoom-in; flex: 0 0 auto; }
+.sw-fig[hidden], .sw-note[hidden], .sw-yoursize[hidden] { display: none; }
+.sw-fig-img { display: block; width: 100%; max-height: 26vh; object-fit: contain; }
+@media (max-height: 700px) { .sw-fig-img { max-height: 20vh; } }
+.sw-setup { display: flex; flex-wrap: wrap; gap: 6px; width: 100%; }
+.sw-setup[hidden] { display: none; }
+.sw-setup-chip { font-size: 13px; }
+button.sw-setup-chip { cursor: pointer; border-color: var(--accent-2); color: var(--text); background: var(--surface); }
+.sw-unit-strip { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 8px; }
+.sw-unit-strip[hidden] { display: none; }
+.sw-unit-chip.on { border-color: var(--primary); font-weight: 700; }
+.sw-unit-chip.done { color: var(--text-muted); }
+.sw-unit-minus { cursor: pointer; background: var(--surface); color: var(--text); }
+.sw-step-btn.sw-unit-btn .sw-step-mark { font-size: 40px; font-variant-numeric: tabular-nums; }
+.sw-under { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 8px 16px; margin: 6px 0 2px; }
+.sw-under:empty { display: none; }
+.sw-step-link[hidden], .sw-work-open[hidden] { display: none; }
+.sw-step-row-mark { margin-left: 4px; font-size: 12px; color: var(--text-muted); }
+.sw-step-own { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+.sw-step-own .btn { flex: 1 1 140px; }
+.sw-review-kind { margin: 6px 0; }
+
+/* size advisor */
+.sw-meas-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px 12px; margin-bottom: 12px; }
+.sw-meas { display: flex; flex-direction: column; gap: 4px; font-size: 14px; color: var(--text); }
+.sw-meas-label { color: var(--text-muted); font-size: 13px; }
+.sw-meas-line { display: flex; align-items: center; gap: 6px; }
+.sw-meas-line input { min-width: 0; flex: 1 1 auto; }
+.sw-meas-unit { color: var(--text-muted); font-size: 13px; }
+.sw-advice { padding: 12px 14px; margin: 4px 0 12px; border-color: var(--primary); }
+.sw-advice-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; }
+.sw-advice-tag { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: var(--text-muted);
+  border: 1px solid var(--border); border-radius: 999px; padding: 1px 8px; }
+.sw-advice-size { font-family: var(--font-display); font-size: 20px; font-weight: 700; color: var(--text); }
+.sw-advice-why { margin: 8px 0; padding-left: 18px; font-size: 14px; color: var(--text); }
+.sw-advice-why li { margin: 2px 0; }
+.sw-advice-ease, .sw-advice-using { font-size: 14px; color: var(--text); margin: 6px 0; }
+.sw-advice-use { margin-top: 8px; }
+.sw-rule { margin: 0 0 12px; padding: 8px 12px; border-left: 3px solid var(--accent-2); background: var(--surface-2);
+  border-radius: var(--radius-sm); font-size: 14px; color: var(--text); }
+.sw-rule-lead { color: var(--text-muted); }
+.sw-rule-page { margin-left: 6px; }
+.sw-size-chip.sw-suggested:not(.on) { border-style: dashed; border-color: var(--primary); }
+.sw-table td.sw-cell-unsure { color: var(--text-muted); font-style: italic; text-decoration: underline dotted; }
+.sw-table-unit { margin-top: 4px; }
+.sw-res-row .item-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.sw-res-check { font-size: 12px; color: var(--text-muted); }
+.sw-res-val { flex: 0 0 auto; }
+.sw-res-val.sw-cell-unsure { border-style: dashed; color: var(--text-muted); }
+.sw-res-un { font-size: 13px; margin: 2px 0; }
+
+/* working mode: the step's figure fills the free area the HUD leaves */
+.sw-work-fig { position: absolute; display: flex; align-items: center; justify-content: center; pointer-events: none; padding: 8px; }
+.sw-work-fig img { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: var(--radius-sm); background: #fff;
+  box-shadow: var(--shadow); }
+.sw-work-fig img[hidden] { display: none; }
+
+/* pattern sheet */
+.sw-sheet-a0, .sw-sheet-test, .sw-sheet-layers { font-size: 14px; color: var(--text); margin: 6px 0; }
+.sw-sheet-piece { font-weight: 600; }
+.sw-sheet-cuts { display: block; font-size: 13px; color: var(--text-muted); }
+.sw-tape-host { overflow-x: auto; margin-bottom: 8px; }
+.sw-tape-host svg { max-width: 100%; height: auto; }
+/* The figure sits beside the step text, so the big button stays above the fold (375 x 812 / 640). */
+.sw-step-card.sw-has-fig { display: grid; grid-template-columns: minmax(0, 1fr) 36%; grid-auto-rows: auto; column-gap: 10px; row-gap: 8px; align-content: start; }
+.sw-step-card.sw-has-fig > * { grid-column: 1; min-width: 0; }
+.sw-step-card.sw-has-fig > .sw-step-head { grid-column: 1 / -1; }
+.sw-step-card.sw-has-fig > .sw-fig { grid-column: 2; grid-row: 2 / span 4; align-self: start; margin-top: 0; }
+.sw-step-card.sw-has-fig .sw-fig-img { max-height: calc(34vh - 56px); }
+.sw-step-card.sw-has-fig .sw-step-text { max-height: calc(34vh - 56px); }
+
+/* ---- Wave K audit (sew-audit) ---- */
+/* The booklet's own nap-direction sentences, on the cutting and fabric sheets. */
+.sw-nap { padding: 10px 12px; margin: 4px 0 12px; border-left: 3px solid var(--accent-2); }
+.sw-nap-head { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: var(--text-muted); }
+.sw-nap-text { margin: 6px 0 0; font-size: 14px; color: var(--text); }
+.sw-rule-slightly { display: block; margin-top: 4px; }
+
+/* The step text: a few lines, then "Show the whole step" (never a tiny scroll box).
+   The card no longer clips (it hid the note and the size chips on long steps). */
+.sw-step-card { max-height: none; overflow: visible; }
+.sw-step-text { max-height: calc(1.45em * 6); overflow: hidden; }
+.sw-step-card.sw-has-fig .sw-step-text { max-height: calc(1.45em * 7); }
+.sw-step-card.sw-text-cut .sw-step-text {
+  -webkit-mask-image: linear-gradient(to bottom, #000 70%, transparent);
+  mask-image: linear-gradient(to bottom, #000 70%, transparent);
+}
+.sw-step-card.sw-text-open .sw-step-text { max-height: none; }
+.sw-text-more { align-self: flex-start; min-height: 44px; padding: 0 2px; font-size: 14px; }
+.sw-text-more[hidden] { display: none; }
+@media (max-height: 700px) {
+  .sw-step-text { max-height: calc(1.45em * 4); }
+  .sw-step-card.sw-has-fig .sw-step-text { max-height: calc(1.45em * 5); }
+}
+/* The figure beside the text: no taller than the text column needs. */
+.sw-step-card.sw-has-fig .sw-fig-img { max-height: calc(1.45 * 17px * 7 + 8px); }
+@media (max-height: 700px) { .sw-step-card.sw-has-fig .sw-fig-img { max-height: calc(1.45 * 17px * 5 + 8px); } }
+.sw-step-card.sw-has-fig > .sw-fig { grid-row: 2 / span 3; }
+/* A unit step: the button counts the unit; it is shorter so it and the strip's
+   "Step done" sit above the bottom bar on a 375 × 812 phone. */
+.sw-step-btn.sw-unit-btn { min-height: max(19vh, 128px); }
+.sw-step-btn.sw-unit-btn .stitch-hint { text-transform: none; letter-spacing: normal; font-size: 13px; }
+.sw-unit-strip { align-items: center; }
+.sw-unit-strip .sw-step-link { margin-left: auto; min-height: 44px; padding: 0 4px; font-weight: 700; }
+.sw-unit-minus { min-height: 44px; min-width: 44px; justify-content: center; }
+.sw-step-card.sw-unit-step .sw-step-text,
+.sw-step-card.sw-unit-step.sw-has-fig .sw-step-text { max-height: calc(1.45em * 5); }
+@media (max-height: 700px) {
+  .sw-step-card.sw-unit-step .sw-step-text,
+  .sw-step-card.sw-unit-step.sw-has-fig .sw-step-text { max-height: calc(1.45em * 3); }
+  .sw-step-card.sw-unit-step.sw-has-fig .sw-fig-img { max-height: calc(1.45 * 17px * 3 + 8px); }
+}
+/* Sewing mode: the whole step, not three lines of it. The text scrolls on its own when it
+   is very long (a scroll there never counts as a tap: the HUD lets only this box take it). */
+.work-hud.sw-work .work-line-tag:empty { display: none; }
+.work-hud.sw-work .work-line-text {
+  display: block; -webkit-line-clamp: unset; overflow-y: auto; max-height: 33vh;
+  line-height: 1.3; pointer-events: auto; touch-action: pan-y; overscroll-behavior: contain;
+}
+@media (max-height: 700px) { .work-hud.sw-work .work-line-text { max-height: 26vh; } }
+@media (orientation: landscape) and (max-height: 500px) { .work-hud.sw-work .work-line-text { max-height: 46vh; } }
+/* "Show the whole step" wins over every clamp above. */
+.sw-step-card.sw-text-open .sw-step-text,
+.sw-step-card.sw-text-open.sw-has-fig .sw-step-text,
+.sw-step-card.sw-text-open.sw-unit-step.sw-has-fig .sw-step-text { max-height: none; -webkit-mask-image: none; mask-image: none; }
+.sw-unit-lead { font-size: 12px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--text-muted); }
+.sw-unit-strip { gap: 6px 4px; }
+.sw-unit-strip .sw-unit-chip { padding-left: 8px; padding-right: 8px; }
+
+/* Room for the button on a 375 × 640 phone (sew-audit, gallery step-unit-fig at 640):
+   the set-up chips flow in the page / seam-allowance row, the "Show the whole step" pill
+   sits on the faded last line, and the unit strip is one line (chips scroll sideways). */
+.sw-step-meta { flex-wrap: wrap; justify-content: flex-start; gap: 4px 10px; }
+.sw-step-meta > .sw-setup { display: contents; }
+.sw-step-meta > .sw-setup[hidden] { display: none; }
+.sw-step-card.sw-text-cut .sw-text-more {
+  position: relative; z-index: 1; margin-top: -40px; align-self: flex-end; justify-self: end;
+  background: var(--surface); border-radius: 999px; padding: 0 10px; box-shadow: var(--shadow);
+}
+.sw-unit-strip { flex-wrap: nowrap; }
+.sw-unit-chips { display: flex; align-items: center; gap: 4px; flex: 1 1 auto; min-width: 0; overflow-x: auto;
+  scrollbar-width: none; padding: 2px 0; }
+.sw-unit-chips::-webkit-scrollbar { display: none; }
+.sw-unit-chips > * { flex: 0 0 auto; }
+.sw-unit-strip > .sw-unit-minus, .sw-unit-strip > .sw-step-link { flex: 0 0 auto; }
+.sw-unit-strip .sw-step-link { margin-left: 0; white-space: nowrap; }
+.sw-text-more { white-space: nowrap; max-width: 100%; }
+/* Sewing mode with −1, Undo, Back and Next on a narrow phone: the glyphs carry the meaning
+   (each button keeps its label for a screen reader); in Pixel Wyrm "Next" ran off the edge. */
+@media (max-width: 420px) {
+  .work-hud.sw-work .work-btns:has(> .work-btn:not([hidden]) ~ .work-btn:not([hidden]) ~ .work-btn:not([hidden]) ~ .work-btn:not([hidden])) .work-btn-word { display: none; }
+}
+@media (max-width: 420px) { .work-hud.sw-work.sw-work-four .work-btn-word { display: none; } }

@@ -4538,6 +4538,9 @@
       // wave G: {name, index} of the size this part belongs to; null when the
       // document has no groups
       o.group = s.group ? { name: s.group, index: gNames.indexOf(s.group) } : null;
+      // wave K (knitting only; crochet has no such hook): the craft adds its
+      // own fields to the part it hands out (round word, pages, pair reason)
+      if (PROFILE.partOut) PROFILE.partOut(s, o, lines, meta);
       return o;
     });
   }

@@ -1,0 +1,555 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Knitting UI (wave K, knit-ui) tests</title>
+<style>
+  body { font: 14px/1.4 Menlo, Consolas, monospace; background:#111; color:#eee; padding:16px; }
+  .pass { color:#7bd389; }
+  .fail { color:#ff6b6b; background:#2a1414; }
+  .group { margin-top:18px; font-weight:bold; color:#9cf; border-bottom:1px solid #333; padding-bottom:4px; }
+  #summary { margin-top:20px; font-size:18px; font-weight:bold; }
+  .note { color:#aaa; }
+</style>
+</head>
+<body>
+<h1>Knitting UI test suite (wave K, knit-ui)</h1>
+<p class="note">
+  What the knitter sees on the counter (docs/wave-k/api/knit-ui.md): the stretch card and
+  "I'm at the length" (P1), "I measured" (P10), the resolved repeat row (P2), the panels chip (P3),
+  the chart band geometry and the chart sheet (P4), colour runs (P11), the shaping card (P6).
+  Part 1 checks the pure <code>KnitChart</code> additions on a chart written here; part 2 loads
+  <code>index.html</code> in a 375 × 812 frame on a private store key, drives knitting projects made
+  from synthetic patterns, and checks a crochet project is untouched. Everything it makes is deleted.
+</p>
+<div id="out"></div>
+<div id="summary">running…</div>
+<script src="../js/knit-chart.js"></script>
+<script>
+'use strict';
+var out = document.getElementById('out');
+var passed = 0, failed = 0, finished = false;
+function log(ok, label, detail) {
+  if (ok) passed++; else failed++;
+  var d = document.createElement('div');
+  d.className = ok ? 'pass' : 'fail';
+  d.textContent = (ok ? 'PASS' : 'FAIL') + ' - ' + label + (detail ? '  (' + detail + ')' : '');
+  out.appendChild(d);
+}
+function group(t) { var d = document.createElement('div'); d.className = 'group'; d.textContent = t; out.appendChild(d); }
+function eq(a, b, label) { var A = JSON.stringify(a), B = JSON.stringify(b); log(A === B, label, A === B ? '' : 'got ' + A + ', want ' + B); }
+function ok(v, label, detail) { log(!!v, label, v ? '' : detail); }
+function finish() {
+  if (finished) return;
+  finished = true;
+  var s = document.getElementById('summary');
+  s.textContent = passed + ' passed, ' + failed + ' failed';
+  s.style.color = failed ? '#ff6b6b' : '#7bd389';
+}
+
+/* ====================================================================== *
+ * 1. KnitChart: where a row is, which cells are done, colour runs
+ * ====================================================================== */
+group('1. KnitChart row geometry, done cells, colour runs (synthetic chart)');
+(function () {
+  var KC = window.KnitChart;
+  // 6 columns x 4 rows, 10 pt cells, grid box (100,200)-(160,240); row numbers 1-4,
+  // RS rows (odd) numbered on the right
+  var ch = {
+    name: 'Chart A', source: 'vector', cols: 6, rows: 4, startRow: 1, rowStep: 1, rowNos: [1, 2, 3, 4],
+    labelSide: { 1: 'right', 3: 'right', 2: 'left', 4: 'left' },
+    bbox: { x0: 100, y0: 200, x1: 160, y1: 240 }, pitch: { x: 10, y: 10 },
+    cells: [
+      ['a', 'a', 'b', 'b', 'a', 'a'],
+      ['a', 'b', 'b', 'b', 'b', 'a'],
+      [null, 'a', 'c', 'c', 'a', null],
+      ['a', 'a', 'b', 'q', 'a', 'a']
+    ],
+    legend: [
+      { sym: 'a', meaning: 'MC', kind: 'stitch', stitch: 'k', text: 'k', run: 'k', consumes: 1, produces: 1, color: 'MC' },
+      { sym: 'b', meaning: 'CC1', kind: 'stitch', stitch: 'k', text: 'k', run: 'k', consumes: 1, produces: 1, color: 'CC1' },
+      { sym: 'c', meaning: 'k2tog', kind: 'stitch', stitch: 'k2tog', text: 'k2tog', consumes: 2, produces: 1 },
+      { sym: 'q', meaning: null, kind: 'unknown', consumes: null, produces: null }
+    ],
+    repeatBox: null
+  };
+  ok(typeof KC.rowBand === 'function' && typeof KC.colourRuns === 'function', 'the knit-ui additions are on KnitChart');
+  eq(KC.rowBand(ch, 1), { x0: 100, x1: 160, y0: 200, y1: 210, unit: 'pt', r: 0 }, 'row 1 band: the bottom 10 pt of the grid');
+  eq(KC.rowBand(ch, 3), { x0: 110, x1: 150, y0: 220, y1: 230, unit: 'pt', r: 2 }, 'row 3 band: narrowed to the cells drawn (stepped edge)');
+  eq(KC.rowBand(ch, 9), null, 'a row not on the chart has no band');
+  eq(KC.cellBox(ch, 1, 2), { x0: 120, y0: 210, x1: 130, y1: 220 }, 'cellBox');
+  var hit = KC.cellAt(ch, 125, 215);
+  eq(hit && [hit.r, hit.c, hit.rowNo, hit.sym, hit.entry && hit.entry.meaning], [1, 2, 2, 'b', 'CC1'], 'cellAt: row 2, column 3, CC1');
+  eq(KC.cellAt(ch, 102, 225), null, 'cellAt: outside a stepped edge is no cell');
+  eq(KC.cellAt(ch, 90, 205), null, 'cellAt: off the grid');
+  // done cells: RS reads right to left, so 2 stitches = the two rightmost columns
+  eq(KC.doneCols(ch, 1, 'rs', 2), { cols: [5, 4], repeat: null }, 'doneCols RS: 2 sts = columns 6 and 5');
+  eq(KC.doneCols(ch, 2, 'ws', 3), { cols: [0, 1, 2], repeat: null }, 'doneCols WS: left to right');
+  eq(KC.doneCols(ch, 3, 'rs', 2), { cols: [4], repeat: null }, 'doneCols: a k2tog cell is only done with both its stitches');
+  eq(KC.doneCols(ch, 3, 'rs', 3), { cols: [4, 3], repeat: null }, '... and after them');
+  // colour runs
+  var cr = KC.colourRuns(ch, 1, null);
+  eq(cr && cr.runs, [{ label: 'MC', n: 2 }, { label: 'CC1', n: 2 }, { label: 'MC', n: 2 }], 'row 1 in the round: MC 2 · CC1 2 · MC 2');
+  eq(cr && [cr.colours, cr.longestFloat, cr.unknown], [['MC', 'CC1'], { label: 'MC', n: 2 }, 0], 'colours, longest float, nothing unknown');
+  var c4 = KC.colourRuns(ch, 4, null);
+  eq(c4 && [c4.runs.map(function (x) { return x.label + x.n; }), c4.unknown], [['MC2', '?1', 'CC11', 'MC2'], 1], 'an unread cell shows "?" in its run, never a colour');
+  // a repeat box: the strip is one repeat, and the float joins round the repeat
+  var rch = JSON.parse(JSON.stringify(ch));
+  rch.repeatBox = { c0: 0, c1: 5, r0: 0, r1: 3 };
+  var rr = KC.colourRuns(rch, 1, null);
+  eq(rr && rr.repeat && [rr.repeat.runs, rr.repeat.width, rr.longestFloat], [[{ label: 'MC', n: 2 }, { label: 'CC1', n: 2 }, { label: 'MC', n: 2 }], 6, { label: 'MC', n: 4 }],
+    'with a repeat box: one repeat, and MC 2 + MC 2 meet round the repeat (float 4)');
+  eq(KC.doneCols(rch, 1, null, 8), { cols: [5, 4], repeat: 2 }, 'doneCols past the drawn width: 8 sts = repeat 2, two stitches in');
+  var plain = { cells: [['a']], legend: [{ sym: 'a', meaning: 'knit', kind: 'stitch' }], startRow: 1, rowStep: 1, rows: 1, cols: 1 };
+  eq(KC.colourRuns(plain, 1, null), null, 'a chart with no colours: no colour strip');
+  // calibration
+  eq(KC.calib({ top: 0.2, bottom: 0.8, rows: 7 }), { top: 0.2, bottom: 0.8, rows: 7, x0: 0, x1: 1, first: 1, step: 1 }, 'calib normalises');
+  eq(KC.calib({ top: 0.8, bottom: 0.2, rows: 7 }), null, 'calib: top below bottom is refused');
+  eq(KC.calib({ top: 0.2, bottom: 0.8 }), null, 'calib: no row count, no calibration');
+  var b1 = KC.calibBand({ top: 0.2, bottom: 0.8, rows: 7 }, 1), b7 = KC.calibBand({ top: 0.2, bottom: 0.8, rows: 7 }, 7);
+  ok(b1 && Math.abs(b1.y0 - 0.75) < 1e-9 && Math.abs(b1.y1 - 0.85) < 1e-9, 'calibBand row 1 is centred on the bottom mark', JSON.stringify(b1));
+  ok(b7 && Math.abs(b7.y0 - 0.15) < 1e-9 && Math.abs(b7.y1 - 0.25) < 1e-9, 'calibBand row 7 is centred on the top mark', JSON.stringify(b7));
+  eq(KC.calibBand({ top: 0.2, bottom: 0.8, rows: 7 }, 8), null, 'calibBand: a row past the marks is not placed');
+  eq(KC.calibBand({ top: 0.2, bottom: 0.8, rows: 4, step: 2 }, 4), null, 'calibBand with every other row charted: an even row is not on it');
+  var img = { cells: null, image: true, calib: { top: 0.1, bottom: 0.9, rows: 5 } };
+  eq(KC.rowBand(img, 3) && KC.rowBand(img, 3).unit, 'frac', 'rowBand on a picture chart uses its stored calibration');
+  eq(KC.rowBand({ cells: null, image: true }, 3), null, 'a picture chart with no calibration: no band (never a guess)');
+  window.__synthChart = ch;
+})();
+
+/* ====================================================================== *
+ * 2. The counter, in the real app
+ * ====================================================================== */
+(function () {
+  var KEY = 'stitchkeeper-wavek-knitui-test';
+  var f = document.createElement('iframe');
+  f.style.cssText = 'position:fixed;left:-2000px;top:0;width:375px;height:812px;border:0;';
+  var t0 = Date.now();
+  var made = [];
+  var timer = setTimeout(function () { log(false, 'the app frame booted and ran in time'); cleanup(); finish(); }, 45000);
+  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+  function cleanup() {
+    try {
+      var w = f.contentWindow;
+      if (w && w.Store) {
+        w.Store.projects().slice().forEach(function (p) {
+          if (/^KUI /.test(p.name)) {
+            if (w.BlobStore && w.BlobStore.deletePrefix) { try { w.BlobStore.deletePrefix('p:' + p.id + ':'); } catch (e) { /* ignore */ } }
+            w.Store.deleteProject(p.id);
+          }
+        });
+      }
+    } catch (e) { /* ignore */ }
+    try { localStorage.removeItem(KEY); } catch (e) { /* ignore */ }
+    if (f.parentNode) f.parentNode.removeChild(f);
+  }
+  f.onload = function () {
+    var w = f.contentWindow;
+    (function wait() {
+      if (!(w.App && w.Store && w.AppKnitting && w.document.getElementById('row-label'))) {
+        if (Date.now() - t0 < 30000) return setTimeout(wait, 100);
+        return;
+      }
+      run(w, w.document).then(function () { clearTimeout(timer); cleanup(); finish(); },
+        function (e) { clearTimeout(timer); log(false, 'part 2 threw', String(e && (e.stack || e.message) || e)); cleanup(); finish(); });
+    })();
+  };
+  f.src = '../index.html';
+  document.body.appendChild(f);
+
+  function knitProject(w, name, partName, text) {
+    var S = w.Store;
+    var p = S.createProject({ name: 'KUI ' + name, craft: 'knitting' });
+    S.updatePart(p.id, p.parts[0].id, { name: partName, patternText: text });
+    made.push(p.id);
+    S.setActiveProject(p.id);
+    w.App.render();
+    return S.project(p.id);
+  }
+  function q(d, sel) { return d.querySelector(sel); }
+  function txt(d, sel) { var n = d.querySelector(sel); return n ? n.textContent.replace(/\s+/g, ' ').trim() : null; }
+
+  async function run(w, d) {
+    var S = w.Store, App = w.App, AK = w.AppKnitting;
+    S.__setKeyForTests(KEY);
+    App.closeAllSheets();
+    await sleep(50);
+
+    group('2. pure helpers');
+    eq([AK.ui.frac(15.5), AK.ui.frac(6.25), AK.ui.frac(2.375), AK.ui.frac(10), AK.ui.frac(0.5), AK.ui.frac(3.14)], ['15½', '6¼', '2⅜', '10', '½', '3.1'], 'frac');
+    eq([AK.ui.panelShort('Cable Panel C'), AK.ui.panelShort('Chart A'), AK.ui.panelShort('Leg chart'), AK.ui.panelShort('Panel Pat B')], ['C', 'A', 'Leg', 'B'], 'panel short names');
+    eq(AK.ui.panelChip([{ name: 'Panel A', row: 7, of: 22 }, { name: 'Panel B', row: 3, of: 4 }, { name: 'Panel C', row: null, of: null }]).text,
+      'A 7/22 · B 3/4 · C row ?', 'the stacked panel chip, "row ?" when the length is unknown');
+    eq(AK.ui.repeatText({ via: {}, k: 1, n: 6, cycle: 3, of: 9 }, 'rnd'), 'repeat 3 of 9 · rnd 1 of 6', 'repeat text');
+    eq(AK.ui.repeatText({ via: null, k: null, n: null }, 'rnd'), '', 'nothing resolved: no repeat text');
+    var so = AK.ui.stretchText({ state: 'open', row: 12, count: 216, estimate: { rows: 101, end: 105, value: 15.5, unit: 'in', gaugeSource: 'swatch', approx: true } }, 'row');
+    // (knit-audit: the count a stretch prints is the one it ENDS on: "216 sts at the end")
+    eq([so.title, so.sub, so.approx], ['Stretch · row 12 of ≈ 101', '15½ in at your gauge, about row 105 · no row target until you end it · 216 sts at the end', true], 'open stretch with the gauge estimate: marked ≈');
+    var sn = AK.ui.stretchText({ state: 'open', row: 3, count: 93, estimate: null, line: { stretch: { parser: { ends: { kind: 'sameAs', of: 'Back', at: 'beg of raglan shaping' } } } } }, 'row');
+    eq([sn.title, sn.sub], ['Stretch · row 3', 'until the same length as Back to beg of raglan shaping · no row target until you end it · 93 sts at the end'], 'open stretch with no estimate: no number is invented');
+    var sp = AK.ui.stretchText({ state: 'planned', row: 4, of: 29, count: null }, 'rnd');
+    eq(sp.title, 'Stretch · rnd 4 of 29', 'planned stretch (after "Use"): a target');
+    var chk = KnitChart.colourRuns(window.__synthChart, 1, null);
+    eq(AK.ui.colourText(chk, null), 'MC 2 · CC1 2 · MC 2', 'colour text without a repeat');
+    var rc = JSON.parse(JSON.stringify(window.__synthChart)); rc.repeatBox = { c0: 2, c1: 3, r0: 0, r1: 3 };
+    eq(AK.ui.colourText(KnitChart.colourRuns(rc, 1, null), 17), 'CC1 2 · ×17', 'colour text for one repeat, ×17');
+
+    group('3. P1 the stretch card, "I\'m at the length", P10 "I measured"');
+    var STRETCH = [
+      'Back',
+      'Cast on 40 sts.',
+      'Row 1 (RS): K2, *p2, k2; rep from * to end.',
+      'Row 2 (WS): P2, *k2, p2; rep from * to end.',
+      'Rep last 2 rows until work measures 10 cm from beg, ending with a WS row.',
+      'Shape armholes: Cast off 3 sts at beg of next 2 rows. 34 sts.',
+      'Next row (RS): K1, ssk, knit to last 3 sts, k2tog, k1. 32 sts.'
+    ].join('\n');
+    var p1 = knitProject(w, 'stretch', 'Back', STRETCH);
+    var prt1 = function () { return S.activePart(S.project(p1.id)); };
+    S.setGauge(p1.id, { sts: 20, rows: 30, over: 10, unit: 'cm' });
+    S.jumpToRow(p1.id, prt1().id, 6);
+    App.render();
+    await sleep(30);
+    var si = S.stretchInfo ? S.stretchInfo(prt1()) : null;
+    ok(si, 'the store sees a stretch on row 7', JSON.stringify(S.lineForRow(prt1(), 7) && S.lineForRow(prt1(), 7).text));
+    var card = q(d, '#screen-project .knit-stretch');
+    ok(card, 'a stretch card is on the counter');
+    if (card) {
+      ok(/^Stretch · row \d+ of ≈ \d+$/.test(txt(d, '.knit-stretch-title')), 'its title: "Stretch · row N of ≈ M"', txt(d, '.knit-stretch-title'));
+      ok(/10 cm at the pattern’s gauge/.test(txt(d, '.knit-stretch-sub')), 'the length and whose gauge', txt(d, '.knit-stretch-sub'));
+      ok(/40 sts/.test(txt(d, '.knit-stretch-sub')), 'the stitch total is kept (40 sts)', txt(d, '.knit-stretch-sub'));
+      ok(q(d, '.knit-stretch-go') && /I’m at the length/.test(txt(d, '.knit-stretch-go')), 'the big "I’m at the length" button');
+      ok(q(d, '.knit-stretch-use') && /^Use ≈ \d+$/.test(txt(d, '.knit-stretch-use')), 'the estimate is opt-in: "Use ≈ N"', txt(d, '.knit-stretch-use'));
+      ok(!q(d, '#screen-project .knit-until-chip'), 'the old length chip does not repeat the card');
+      ok(/^Stretch · row \d+/.test(txt(d, '#pattern-line-tag')), 'the pattern tag says Stretch', txt(d, '#pattern-line-tag'));
+      eq(prt1().targetRows, null, 'the estimate is not a target until "Use"');
+      // "Use"
+      q(d, '.knit-stretch-use').click();
+      await sleep(30);
+      var si2 = S.stretchInfo(prt1());
+      eq(si2 && si2.state, 'planned', '"Use" plans the end (a target now)');
+      ok(/^Stretch · row \d+ of \d+$/.test(txt(d, '.knit-stretch-title') || ''), 'planned: the title drops the ≈', txt(d, '.knit-stretch-title'));
+      S.undo(); App.render(); await sleep(30);
+      eq(S.stretchInfo(prt1()).state, 'open', 'one Undo takes the plan back off');
+      // "I'm at the length"
+      var before = prt1().row;
+      q(d, '.knit-stretch-go').click();
+      await sleep(30);
+      ok(!q(d, '#screen-project .knit-stretch'), 'after "I’m at the length" the card is gone');
+      ok(/Cast off 3 sts/.test(txt(d, '#pattern-line-text') || ''), 'the next line is the armhole cast-off', txt(d, '#pattern-line-text'));
+      eq(prt1().row, before, 'the rows done do not change');
+      S.undo(); App.render(); await sleep(30);
+      ok(q(d, '#screen-project .knit-stretch'), 'one Undo reopens the stretch');
+      // P10: I measured
+      ok(q(d, '.knit-stretch-measure'), 'an "I measured" button on the card');
+      S.jumpToRow(p1.id, prt1().id, 20);
+      App.render();
+      var res = AK.measured(p1.id, prt1().id, 5, 'cm');
+      await sleep(80);
+      ok(res && res.rowsLeft !== null, 'I measured 5 cm after 20 rows: rows left worked out', JSON.stringify(res && [res.rowsPerUnit, res.rowsLeft, res.endRow]));
+      var conf = d.querySelector('.sheet-confirm');
+      ok(!!(res && res.gaugeOffer) === !!conf, 'a gauge offer is a question (a confirm sheet), never applied by itself');
+      eq(S.gaugeOf(p1.id).swatch.rows, null, 'the row gauge is unchanged until "Use it"');
+      App.closeAllSheets();
+      await sleep(30);
+    }
+
+    group('4. P2 the resolved repeat row');
+    var SLEEVE = [
+      'Sleeve',
+      'Cast on 60 sts. Join to work in the rnd.',
+      'Rnd 1: K2tog, knit to last 2 sts, ssk. 58 sts.',
+      'Rnds 2-6: Knit.',
+      'Rep last 6 rnds 8 times more. 42 sts.',
+      'Bind off.'
+    ].join('\n');
+    var p2 = knitProject(w, 'repeat', 'Sleeve', SLEEVE);
+    var prt2 = function () { return S.activePart(S.project(p2.id)); };
+    S.jumpToRow(p2.id, prt2().id, 19);
+    App.render();
+    await sleep(30);
+    var li = S.lineInfo ? S.lineInfo(prt2(), 19) : null;
+    if (li && li.via) {
+      ok(/^K2tog, knit to last 2 sts, ssk/.test(txt(d, '#pattern-line-text')), 'rnd 19: the decrease round is the main line, without its own "Rnd 1:" label', txt(d, '#pattern-line-text'));
+      ok(/Rep last 6 rnds 8 times more/.test(txt(d, '.knit-via') || ''), '... with the repeat sentence as a small second line');
+      ok(/Rnd 19 · repeat 4 of 9 · rnd 1 of 6/.test(txt(d, '#pattern-line-tag')), 'the tag says where you are in the repeat', txt(d, '#pattern-line-tag'));
+      S.jumpToRow(p2.id, prt2().id, 20); App.render(); await sleep(30);
+      ok(/^Knit/.test(txt(d, '#pattern-line-text')) && /rnd 2 of 6/.test(txt(d, '#pattern-line-tag')), 'next tap: "Knit · rnd 2 of 6"', txt(d, '#pattern-line-tag') + ' | ' + txt(d, '#pattern-line-text'));
+    } else {
+      log(true, 'the store did not resolve this repeat: today\'s sentence is shown (' + JSON.stringify(li && li.line && li.line.text) + ')');
+      ok(!q(d, '.knit-via'), '... and no second line');
+    }
+
+    group('5. P3 / P4 / P11 the chart chip, the chart sheet, colours');
+    var CH = [
+      'Hat',
+      'Cast on 6 sts. Join to work in the rnd.',
+      'Rnds 1-4: Work rnds 1-4 of Chart A.',
+      'Bind off.'
+    ].join('\n');
+    var p3 = knitProject(w, 'chart', 'Hat', CH);
+    var prt3 = function () { return S.activePart(S.project(p3.id)); };
+    var chart = JSON.parse(JSON.stringify(window.__synthChart));
+    S.setChartPages(p3.id, [{ page: 1, name: 'Chart A', noImage: true, chart: chart }], { undo: false });
+    S.jumpToRow(p3.id, prt3().id, 0);
+    App.render();
+    await sleep(30);
+    var chi = S.chartInfo(prt3());
+    if (chi && chi.row) {
+      ok(q(d, '#screen-project .knit-chart-chip'), 'the chart chip is there', JSON.stringify([chi.name, chi.row]));
+      var col = txt(d, '#screen-project .knit-colours');
+      ok(col && /^MC 2 · CC1 2 · MC 2/.test(col), 'the colour strip for round 1', col);
+      ok(q(d, '#screen-project .knit-extra .knit-chart-strip'), 'the chart strip is in the row (shown in working mode)');
+      var strip = q(d, '#screen-project .knit-extra .knit-chart-strip');
+      eq(strip && w.getComputedStyle(strip).display, 'none', '... hidden on the counter itself');
+      q(d, '#screen-project .knit-chart-chip').click();
+      await sleep(60);
+      ok(d.querySelector('.sheet-knit-chart'), 'the chart sheet opens');
+      ok(d.querySelector('.sheet-knit-chart .knit-chart-strip'), 'no page kept: the sheet draws the chart from what was read');
+      App.closeAllSheets();
+      S.jumpToRow(p3.id, prt3().id, 4); App.render(); await sleep(30);
+      ok(/\? ?1/.test(txt(d, '#screen-project .knit-colours') || '') && /not read/.test(txt(d, '#screen-project .knit-colours') || ''), 'round 4: the unread cell is "?" and said so', txt(d, '#screen-project .knit-colours'));
+    } else {
+      log(true, 'chartInfo found no chart row for "Work Chart A" here (' + JSON.stringify(chi && [chi.name, chi.row]) + '): nothing drawn');
+    }
+
+    group('6. P6 shaping card, P8 pair offer, P16 terms, P19 row notes, P14 clicker');
+    var SH = [
+      'Left Front',
+      'Cast on 30 sts.',
+      'Row 1 (RS): Knit.',
+      'Row 2 (WS): Purl.',
+      'Rows 3-13: Dec 1 st at neck edge on next 4 rows, AND AT THE SAME TIME dec 1 st at raglan edge on next and every alt row 6 times. 20 sts.',
+      'Bind off.'
+    ].join('\n');
+    var p6 = knitProject(w, 'shaping', 'Left Front', SH);
+    var prt6 = function () { return S.activePart(S.project(p6.id)); };
+    S.jumpToRow(p6.id, prt6().id, 5); App.render(); await sleep(30);
+    if (w.Knits && w.Knits.shaping) {
+      var shp = txt(d, '#screen-project .knit-shaping');
+      ok(shp && /Shaping · row 3 of 11/.test(shp), 'the shaping card on the 3rd row of the "at the same time" line', shp);
+      ok(shp && /Neck dec ✓ · 3 of 4/.test(shp) && /Raglan dec ✓ · 2 of 6/.test(shp), 'two tick counters: neck 3 of 4, raglan 2 of 6', shp);
+      ok(shp && /25 sts after this row \(worked out by the app\)/.test(shp), 'the stitches after the row, labelled as the app\'s arithmetic', shp);
+      S.jumpToRow(p6.id, prt6().id, 6); App.render(); await sleep(30);
+      shp = txt(d, '#screen-project .knit-shaping');
+      ok(shp && /Raglan — · 2 of 6 · dec next row/.test(shp), 'a row with no raglan decrease says when the next one is', shp);
+    }
+    var plain = knitProject(w, 'plain', 'Back', 'Back\nCast on 20 sts.\nRow 1: Knit.\nRow 2: Purl.');
+    App.render(); await sleep(30);
+    ok(!q(d, '#screen-project .knit-shaping'), 'no schedule: no shaping card (the plain sentence only)');
+    // P8: a pair not started
+    var socks = knitProject(w, 'socks', 'Sock', 'Sock\nCast on 64 sts. Join to work in the rnd.\nRnds 1-16: *K2, p2; rep from * to end.');
+    S.updatePart(socks.id, S.project(socks.id).parts[0].id, { makeCount: 2 });
+    App.render(); await sleep(30);
+    ok(!q(d, '#screen-project .knit-pair-offer'), 'P8 is asked at import now (app.js): no second offer on the counter');
+    ok(AK.__hookOnly === true, 'the counter paint runs from app.js\'s hook only (no watcher of its own)');
+    // P19: a note on rnd 3 of Sock 1 shows on rnd 3 of Sock 2
+    var spid = S.project(socks.id).parts[0].id;
+    var a = { name: 'Sock 1' }, b = { name: 'Sock 2' }, c2 = { name: 'Sleeves' };
+    eq(AK.noteKey(a, 3) === AK.noteKey(b, 3) && AK.noteKey(a, 3) !== AK.noteKey(c2, 3) && /^s[0-9a-z]{1,9}~3$/.test(AK.noteKey(a, 3)), true, 'note keys: Sock 1 and Sock 2 share a row\'s note; another part does not');
+    if (S.setStepNote) {
+      S.jumpToRow(socks.id, spid, 3);
+      S.setStepNote(socks.id, AK.noteKey(S.part(S.project(socks.id), spid), 3), 'switched to 2.5 mm');
+      App.render(); await sleep(30);
+      ok(/switched to 2\.5 mm/.test(txt(d, '#screen-project .knit-note-chip') || ''), 'the note shows on its row', txt(d, '#screen-project .knit-note-chip'));
+      S.jumpToRow(socks.id, spid, 4); App.render(); await sleep(30);
+      ok(!q(d, '#screen-project .knit-note-chip'), '... and not on the next row');
+    }
+    // P14: the clicker
+    var ev = function (k) { return new w.KeyboardEvent('keydown', { key: k }); };
+    eq([AK.clickerAction(ev('PageDown'), false), AK.clickerAction(ev('PageUp'), false), AK.clickerAction(ev('PageDown'), true), AK.clickerAction(ev('x'), false)],
+      ['forward', 'back', null, null], 'Page Down / Up move the row on the counter; in working mode the shell\'s own map does it');
+    S.setCraftSetting('knitting', 'clickerForward', 'b');
+    eq([AK.clickerAction(ev('b'), false), AK.clickerAction(ev('b'), true)], ['forward', 'forward'], 'a taught key moves the row, in working mode too');
+    S.setCraftSetting('knitting', 'clickerForward', '');
+    var r0 = S.activePart(S.project(socks.id)).row;
+    d.body.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'PageDown', bubbles: true, cancelable: true }));
+    await sleep(30);
+    eq(S.activePart(S.project(socks.id)).row, r0 + 1, 'a Page Down from a clicker completes the row on the knitting counter');
+    // P16: the terms on the line
+    S.jumpToRow(socks.id, spid, 1); App.render(); await sleep(30);
+    ok(!q(d, '#screen-project .knit-terms-chip') || /📖/.test(txt(d, '#screen-project .knit-terms-chip')), 'the terms chip (when the row has terms the glossary knows)');
+
+    group('7. P15 suggestions, P12 mirrored rows, P20 materials, P17 schematic, P11 key colours');
+    var K = w.Knits;
+    // P15
+    var EV = knitProject(w, 'evenly', 'Back', ['Back', 'Cast on 56 sts.', 'Row 1 (RS): Knit. 56 sts.', 'Row 2 (WS): Inc 8 sts evenly across. 64 sts.', 'Row 3: Knit.'].join('\n'));
+    S.jumpToRow(EV.id, EV.parts[0].id, 2); App.render(); await sleep(30);
+    if (K && K.evenlyRow) {
+      var calc = txt(d, '#screen-project .knit-calc');
+      ok(calc && /^Suggestion, worked out by the app from 56 sts: /.test(calc) && /M1/.test(calc), 'the "evenly" row gets a labelled suggestion', calc);
+    }
+    var PU = knitProject(w, 'pickup', 'Neckband', ['Neckband', 'Row 1: Pick up and knit 68 sts along neck edge.', 'Row 2: K1, p1 to end.'].join('\n'));
+    S.jumpToRow(PU.id, PU.parts[0].id, 1); App.render(); await sleep(30);
+    if (K && K.pickupRatio) {
+      ok(q(d, '#screen-project .knit-pickup-chip'), 'a pick-up row offers the pick-up helper');
+      eq(K.pickupRatio(68, 90).text, 'about 3 sts for every 4 rows', 'its arithmetic (knit-parse): 68 over 90 rows');
+    }
+    // P12
+    var RF = ['Right Front', 'Cast on 30 sts.', 'Row 1 (RS): K1, ssk, knit to end. 29 sts.', 'Row 2 (WS): Purl.'].join('\n');
+    var MP = knitProject(w, 'mirror', 'Right Front', RF);
+    var lfNew = S.addPart(MP.id, { name: 'Left Front' });
+    S.updatePart(MP.id, lfNew.id, { patternText: 'Left Front\nWork as for Right Front, reversing shaping.' });
+    var lf = S.project(MP.id).parts.filter(function (x) { return x.name === 'Left Front'; })[0];
+    if (lf && K && K.mirrorText) {
+      eq(AK.mirrorSource(S.project(MP.id), lf) && AK.mirrorSource(S.project(MP.id), lf).name, 'Right Front', '"as for Right Front, reversing shaping" finds the part to mirror');
+      S.setActivePart(MP.id, lf.id); App.render(); await sleep(30);
+      ok(/Write it out from Right Front, mirrored/.test(txt(d, '#screen-project .knit-mirror-chip') || ''), 'the counter offers to write it out mirrored', txt(d, '#screen-project .knit-mirror-chip'));
+      AK.openMirrorSheet(MP.id, lf.id, S.project(MP.id).parts[0].id);
+      await sleep(60);
+      var ms = d.querySelector('.sheet-knit-mirror');
+      ok(ms && /worked out by the app/i.test(ms.textContent), 'the preview labels each mirrored row "worked out by the app"');
+      var use = ms && Array.prototype.filter.call(ms.querySelectorAll('button'), function (b) { return /Use these rows/.test(b.textContent); })[0];
+      use && use.click(); await sleep(60);
+      var lt = S.part(S.project(MP.id), lf.id).patternText;
+      ok(/^Worked out by the app from Right Front/.test(lt), 'the rows are kept with the label', lt.split('\n')[0]);
+      ok(/k2tog, k1. 29 sts./i.test(lt), 'K1, ssk, knit to end. 29 sts. → … k2tog, k1. 29 sts. (the stitch total stays at the end)', lt);
+      App.render(); await sleep(30);
+      ok(/Worked out by the app from Right Front/.test(txt(d, '#screen-project .knit-mirror-chip') || ''), 'the counter keeps saying the app worked it out', txt(d, '#screen-project .knit-mirror-chip'));
+      App.closeAllSheets();
+    }
+    // P20
+    eq([AK.yarnFor({ name: 'Rose', per: [2, 3, 3], bySize: true, unit: 'balls' }, 1, ['S', 'M', 'L']),
+        AK.yarnFor({ name: 'Rose', per: [1], unit: 'skeins' }, 2, null),
+        AK.yarnFor({ name: 'Rose', per: [2, 3], bySize: false, unit: 'balls' }, 0, null)],
+      ['3 balls (size M)', '1 skein', '2 / 3 balls (one per size)'], 'yarn for your size; a list it cannot place is shown whole');
+    var MT = knitProject(w, 'materials', 'Hat', ['Hat', 'Yarn: Cascade 220, 2 skeins.', 'Needles: US 7 (4.5 mm) 16" circular needle.', 'Cast on 88 sts.', 'Rnd 1: Knit.'].join('\n'));
+    AK.openMaterialsSheet(MT.id); await sleep(60);
+    var msh = d.querySelector('.sheet-knit-materials');
+    log(true, 'materials read: ' + JSON.stringify(AK.materialsOf(S.project(MT.id))));
+    ok(msh && msh.querySelectorAll('.knit-mat-row').length >= 1, 'the materials sheet lists what it read from the pattern', msh && msh.textContent.slice(0, 160));
+    App.closeAllSheets(); await sleep(30);
+    // P17
+    var sch = AK.schematicSvg([{ row: 0, sts: 40 }, { row: 30, sts: 40 }], { sts: 20, rows: 30, over: 10, unit: 'cm', swatch: { sts: 18, rows: null } }, 'cm');
+    ok(sch && Math.abs(sch.width - 20) < 1e-9 && Math.abs(sch.length - 10) < 1e-9, '40 sts × 30 rows at 20 × 30 / 10 cm: 20 cm wide, 10 cm long', JSON.stringify(sch && [sch.width, sch.length]));
+    ok(sch && /your gauge makes it 2\.2 cm wider/i.test(sch.say), '18 sts / 10 cm makes it 2.2 cm wider', sch && sch.say);
+    eq(AK.schematicSvg([{ row: 0, sts: 40 }, { row: 30, sts: 40 }], { sts: 20, rows: null, over: 10 }, 'cm'), null, 'no row gauge: no schematic (never a guess)');
+    // P11 key colours
+    var kch = JSON.parse(JSON.stringify(window.__synthChart));
+    kch.legend[0].fill = '#1f2a44'; kch.legend[1].fill = '#e8c547';
+    eq(KnitChart.keyColours(kch).slice(0, 2), [{ label: 'MC', hex: '#1f2a44' }, { label: 'CC1', hex: '#e8c547' }], 'keyColours: the key\'s printed fills by label');
+    var YC = knitProject(w, 'keycolours', 'Hat', ['Hat', 'Cast on 6 sts. Join to work in the rnd.', 'Rnds 1-4: Work rnds 1-4 of Chart A.', 'Bind off.'].join('\n'));
+    S.setChartPages(YC.id, [{ page: 1, name: 'Chart A', noImage: true, chart: kch }], { undo: false });
+    S.jumpToRow(YC.id, YC.parts[0].id, 1); App.render(); await sleep(30);
+    var ych = q(d, '#screen-project .knit-yarn-chip');
+    ok(ych && /MC, CC1/.test(ych.textContent), 'a colour chart offers its key colours as the yarn colours', ych && ych.textContent);
+    if (ych) {
+      ych.click(); await sleep(30);
+      eq([S.yarnColorFor(S.project(YC.id), 'MC'), S.yarnColorFor(S.project(YC.id), 'CC1')], ['#1f2a44', '#e8c547'], 'one tap sets MC and CC1');
+      ok(!q(d, '#screen-project .knit-yarn-chip'), '... and the offer goes away');
+    }
+
+    group('8. P9 markers that move and marked stitches; stretch numbering for older projects');
+    var MK = knitProject(w, 'markers', 'Yoke', ['Yoke', 'Cast on 68 sts. Join to work in the rnd.', 'Rnd 1: Knit.', 'Rnd 2: Knit.'].join('\n'));
+    var realMI = S.markerInfo;
+    var mkA = { id: 'm1', name: 'raglan', at: 12, kind: 'stitch' }, mkB = { id: 'm2', name: 'raglan', at: 22, kind: 'stitch' };
+    S.markerInfo = function () {
+      return { markers: [mkA, mkB], source: 'carried', from: 'Neck', moved: true, marked: true, plain: [12, 9, 45],
+        segments: [12, 1, 9, 1, 45], segIndex: 0, next: { in: 12, marker: mkA, end: false }, atMarker: null, shifted: false, basis: 68, total: 68 };
+    };
+    try {
+      App.render(); await sleep(30);
+      var strip = q(d, '#screen-project .knit-markers:not(.work-markers)');
+      ok(strip && /◉ raglan st/.test(strip.textContent), 'a marker around a stitch is a ringed stitch "◉ raglan st"', strip && strip.textContent);
+      ok(strip && /12 ◉ 9 ◉ 45/.test(strip.textContent.replace(/\s+/g, ' ')), 'the plain stitches between the marked stitches: 12 ◉ 9 ◉ 45', strip && strip.textContent);
+      ok(strip && /moved with this row’s increases · carried on from Neck/.test(strip.textContent), 'it says the markers moved and where they came from', strip && strip.textContent);
+    } finally { S.markerInfo = realMI; }
+    App.render(); await sleep(30);
+    ok(!q(d, '#screen-project .knit-marker-moved'), 'with the real store answer and no markers, nothing extra');
+    // a project saved before stretch numbering gets the switch in ⋯
+    var OLD = knitProject(w, 'old', 'Back', STRETCH);
+    S.setRowPhases(OLD.id, false);
+    var items = w.App.ctx && AK ? null : null;
+    var def = (w.App.crafts ? w.App.crafts() : []).filter(function (c2) { return c2.id === 'knitting'; })[0];
+    var mi2 = AK.menuItems(S.project(OLD.id));
+    ok(mi2.some(function (x) { return /work until/.test(x.label); }), 'an older project offers "Number “work until” stretches as their own rows"', mi2.map(function (x) { return x.label; }).join(' | '));
+    var mi3 = AK.menuItems(S.project(p1.id));
+    ok(!mi3.some(function (x) { return /work until/.test(x.label); }), '... a new one (already numbered that way) does not');
+
+    group('10. knit-audit fixes (docs/wave-k/knit-audit.md)');
+    var sc = AK.ui.stretchText({ state: 'open', row: 2, count: null, estimate: null, line: { stretch: { parser: { ends: { kind: 'count', value: 61 } } } } }, 'row');
+    eq([sc.sub, sc.countEnd], ['until you have 61 sts · no row target until you end it', 61], 'a stitch-count stretch: "until you have 61 sts" (not "remain" on an increase)');
+    eq(AK.ui.repeatText({ via: {}, k: 1, n: 1, cycle: 1, of: 1 }, 'row'), '', '"3rd row: As 1st row." is not "repeat 1 of 1"');
+    eq(AK.ui.repeatText({ via: {}, k: 1, n: 2, cycle: 2, of: 5 }, 'row'), 'repeat 2 of 5 · row 1 of 2', '... a real repeat still is');
+    var RT = knitProject(w, 'trust', 'Back', 'Back\nCast on 20 sts.\nRow 1 (RS): Knit.\nRow 2 (WS): Purl.');
+    var rtp = S.project(RT.id), rtq = rtp.parts[0];
+    eq(AK.repeatTrusted(rtp, rtq, { state: 'open' }, { n: 1, cycle: 6, shown: { text: '4th row: P0 (2-2). Work 4th row Cable Panel C.' }, via: { text: 'Cont even in pat until …' } }), false,
+      'a "cont in pat" stretch resolved to ONE row is not shown (boyfriend Front: "4th row" on every row)');
+    eq(AK.repeatTrusted(rtp, rtq, null, { n: 2, cycle: 3, shown: { text: 'Next rnd *K1, pm, k12, pm, k1; rep from * once more.' }, via: { text: 'Cont in St st, rep Inc rnd every other rnd 9 more times' } }), false,
+      'a marker set-up round is never shown as a repeated round (Time Traveler toe)');
+    eq(AK.repeatTrusted(rtp, rtq, null, { n: 6, cycle: 2, shown: { text: 'Next rnd: K2tog. Knit to last 2 sts. ssk.' }, via: { text: 'Rep last 6 rnds 8 times more.' } }), true, '... a plain resolved round still is');
+    eq([AK.partInRounds({ patternText: 'Next rnd K0, work Row 1 of Foot chart over 32 sts.\nCont in patt until 7 in from tip of toe.' }), AK.partInRounds({ patternText: 'Row 1 (RS): Knit.\nRow 2 (WS): Purl.' })], [true, false],
+      'a part that only speaks of rounds is read in the round (chart right to left), a RS/WS part is not');
+    eq(AK.clip('US 8 (5 mm) and US 10 (6 mm) circular knitting needle 24" [61', 200), 'US 8 (5 mm) and US 10 (6 mm) circular knitting needle 24"', 'a printed needle line cut mid-bracket loses the dangling "[61"');
+    // P15 with the total printed after the row: the suggestion works from the count BEFORE it
+    var EV2 = knitProject(w, 'evenly2', 'Front', ['Front', 'Cast on 85 sts.', 'Row 1 (RS): *P1, k1tbl; rep from * to last st, p1.', 'Row 2 (WS): *K1, p1tbl; rep from * to last st, k1.', 'Rep last 2 rows for 4 in, ending on a WS row and inc 8 sts evenly across last row. 93 sts.', 'Next row (RS): Knit.'].join('\n'));
+    S.setGauge(EV2.id, { sts: 15, rows: 20, over: 4, unit: 'in' });
+    S.jumpToRow(EV2.id, EV2.parts[0].id, 4); App.render(); await sleep(30);
+    var calc2 = txt(d, '#screen-project .knit-calc');
+    if (K && K.evenlyRow && calc2) {
+      ok(/from 85 sts/.test(calc2) && !/from 93 sts/.test(calc2), '"inc 8 evenly … 93 sts": the suggestion is worked from 85, not 93 (it made 101)', calc2);
+      ok(!S.stretchInfo(S.activePart(S.project(EV2.id))) || /for the last row of this stretch/.test(calc2), '... and in a stretch it says it is for the last row', calc2);
+    } else log(true, 'no evenly suggestion on this row (' + calc2 + ')');
+    // past the last row a part gives: say so, and where it carries on
+    var PE = knitProject(w, 'pastend', 'Front', ['Front', 'Cast on 20 sts.', 'Row 1 (RS): Knit.', 'Rep last row until work measures 5 cm.', 'Next row (WS): Purl.'].join('\n'));
+    S.addPart(PE.id, { name: 'Front (continued)' }); S.setActivePart(PE.id, PE.parts[0].id);
+    var pep = function () { return S.part(S.project(PE.id), PE.parts[0].id); };
+    if (S.stretchInfo && S.endStretch) {
+      S.jumpToRow(PE.id, pep().id, 5);
+      if (S.stretchInfo(pep())) S.endStretch(PE.id, pep().id);
+      S.jumpToRow(PE.id, pep().id, 12); App.render(); await sleep(30);
+      if (!(pep().targetRows >= 1)) {
+        var pend = txt(d, '#screen-project .knit-past-end');
+        ok(pend && /end at row \d+\. It carries on in Front \(continued\)/.test(pend), 'past the last row: "The pattern’s rows for Front end at row N. It carries on in Front (continued)."', pend);
+        var go = q(d, '#screen-project .knit-past-end-go');
+        if (go) { go.click(); await sleep(30); eq(S.activePart(S.project(PE.id)).name, 'Front (continued)', '"Go to Front (continued)" opens it'); }
+      } else ok(!q(d, '#screen-project .knit-past-end'), 'the part has a target: the counter says it is done itself, no extra note');
+    }
+    // P12: "Work same as Right Front, reversing all shaping" inside the Right Front's own text
+    if (K && K.mirrorText) {
+      var TW = knitProject(w, 'twin', 'Right Front', ['Right Front', 'Cast on 30 sts.', 'Row 1 (RS): K1, ssk, knit to end. 29 sts.', 'Row 2 (WS): Purl.', 'Left Front', 'Work same as Right Front, reversing all shaping.'].join('\n'));
+      var twp = S.project(TW.id);
+      var tw = AK.mirrorTwin(twp, twp.parts[0]);
+      eq(tw && tw.newName, 'Left Front', 'the sentence at the end of the Right Front names a missing Left Front');
+      ok(tw && !/reversing|Left Front/.test(tw.srcText), '... its rows are the Right Front\'s rows only', tw && tw.srcText);
+      S.jumpToRow(TW.id, twp.parts[0].id, 1); App.render(); await sleep(30);
+      var twc = q(d, '#screen-project .knit-mirror-twin');
+      ok(twc && /Make the Left Front from this, mirrored/.test(twc.textContent), 'the counter offers to make the Left Front', twc && twc.textContent);
+      if (twc) {
+        twc.click(); await sleep(60);
+        var tws = d.querySelector('.sheet-knit-mirror');
+        var twu = tws && Array.prototype.filter.call(tws.querySelectorAll('button'), function (b) { return /Use these rows/.test(b.textContent); })[0];
+        twu && twu.click(); await sleep(60);
+        var lfp = S.project(TW.id).parts.filter(function (x) { return x.name === 'Left Front'; })[0];
+        ok(lfp && /^Worked out by the app from Right Front/.test(lfp.patternText), 'a Left Front part is added, labelled as worked out by the app', lfp && lfp.patternText.split('\n')[0]);
+        ok(lfp && /k2tog, k1\S*\s*29 sts\.?/i.test(lfp.patternText), '"K1, ssk, knit to end. 29 sts." mirrors with the total still at the end (knit-parse\'s mirror still moves a ". 29 sts." total into the row; the UI puts it back)', lfp && lfp.patternText);
+        App.render(); await sleep(30);
+        ok(!q(d, '#screen-project .knit-mirror-twin'), 'once it exists the offer is gone');
+        S.undo(); S.undo();
+        ok(!S.project(TW.id).parts.some(function (x) { return x.name === 'Left Front'; }), 'two Undos (the toast\'s one tap) take the new part away');
+      }
+      var bo = K.mirror ? K.mirror('Bind off 7 sts at beginning of next row.') : null;
+      log(true, 'knit-parse mirror of a bind-off without a side: ' + JSON.stringify(bo && bo.text));
+    }
+    App.closeAllSheets(); await sleep(30);
+
+    group('9. crochet is untouched');
+    var cro = S.createProject({ name: 'KUI crochet' });
+    made.push(cro.id);
+    S.updatePart(cro.id, cro.parts[0].id, { patternText: 'Rnd 1: 6 sc in MR. (6)\nRnd 2: inc x6. (12)\nRep rnd 2 until piece measures 10 cm.' });
+    S.setActiveProject(cro.id);
+    App.render();
+    await sleep(30);
+    ok(!Array.prototype.some.call(d.querySelectorAll('#screen-project [data-knit-ui]'), function (n) { return n.getClientRects().length > 0; }), 'no knit-ui node shows on a crochet project',
+      Array.prototype.filter.call(d.querySelectorAll('#screen-project [data-knit-ui]'), function (n) { return n.getClientRects().length > 0; }).map(function (n) { return n.className + '@' + (n.parentNode && n.parentNode.className); }).join(', '));
+    ok(!d.querySelector('#pattern-line-text .knit-via, #pattern-line-tag .knit-rep-tag'), 'crochet keeps its own pattern line (no resolved-repeat second line)');
+    ok(!q(d, '#screen-project .knit-stretch'), 'no stretch card on crochet');
+    var cr0 = S.activePart(S.project(cro.id)).row;
+    d.body.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'PageDown', bubbles: true, cancelable: true }));
+    await sleep(30);
+    eq(S.activePart(S.project(cro.id)).row, cr0, 'the knitting clicker keys do nothing on a crochet project');
+  }
+})();
+</script>
+</body>
+</html>
