@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sewing extras tests</title>
+<link rel="stylesheet" href="../css/app.css">
+<link rel="stylesheet" href="../css/themes.css">
+<link rel="stylesheet" href="../css/sewing.css">
+<link rel="stylesheet" href="../css/sewing-extras.css">
+<style>
+  #log { font: 13px/1.4 Menlo, Consolas, monospace; padding: 12px; }
+  .pass { color: #2e8b57; } .fail { color: #c0392b; font-weight: bold; }
+  .group { margin-top: 14px; font-weight: bold; }
+  #summary { font: bold 16px Menlo, Consolas, monospace; padding: 12px; }
+  body.demo #log, body.demo #summary { display: none; }
+</style>
+</head>
+<body>
+<div id="summary"></div>
+<div id="log">
+<p>Synthetic projects only: nothing here is copied from a real pattern. Uses its own storage key
+and removes it afterwards. <code>?demo=board</code> (or quilttop, quiltcalc, fabric, swatches, timer,
+glossary, fitting) leaves one sheet open for a screenshot; <code>&amp;theme=stardew-night</code> sets a theme.</p>
+</div>
+
+<script>
+// ?frame=375x812: show the page inside an iframe of exactly that size (headless Chrome will not make a window narrower than 500 px).
+(function () {
+  var m = /[?&]frame=(\d+)x(\d+)/.exec(location.search);
+  if (!m) return;
+  window.__framed = true;
+  var f = document.createElement('iframe');
+  f.src = location.href.replace(/[?&]frame=\d+x\d+/, '').replace(/\.html&/, '.html?');
+  f.style.cssText = 'position:fixed;left:0;top:0;border:0;width:' + m[1] + 'px;height:' + m[2] + 'px;background:#fff';
+  document.body.appendChild(f);
+})();
+</script>
+<script src="../js/patterns.js"></script>
+<script src="../js/store.js"></script>
+<script src="../js/sewing.js"></script>
+<script src="../js/sew-figures.js"></script>
+<script src="../js/sew-quilt.js"></script>
+<script src="../js/app-sewing-extras.js"></script>
+<script>
+'use strict';
+if (window.__framed) throw new Error('framed: the iframe runs the page');
+var KEY = 'stitchkeeper-wavek-sewextras';
+var logEl = document.getElementById('log');
+var passed = 0, failed = 0;
+function log(ok, label, detail) {
+  if (ok) passed++; else failed++;
+  var d = document.createElement('div');
+  d.className = ok ? 'pass' : 'fail';
+  d.textContent = (ok ? 'PASS' : 'FAIL') + ' - ' + label + (detail ? '  (' + detail + ')' : '');
+  logEl.appendChild(d);
+}
+function group(t) { var d = document.createElement('div'); d.className = 'group'; d.textContent = t; logEl.appendChild(d); }
+function ok(v, label, detail) { log(!!v, label, detail); }
+function eq(a, b, label) { var s = JSON.stringify(a) === JSON.stringify(b); log(s, label, s ? '' : 'got ' + JSON.stringify(a) + ', want ' + JSON.stringify(b)); }
+function wait(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+function sheet() { return document.querySelector('dialog.swx-sheet'); }
+function body() { var s = sheet(); return s ? s.querySelector('.sheet-body') : null; }
+function txt() { var b = body(); return b ? b.textContent : ''; }
+function q(sel) { var b = body(); return b ? b.querySelector(sel) : null; }
+function qa(sel) { var b = body(); return b ? Array.prototype.slice.call(b.querySelectorAll(sel)) : []; }
+function setVal(node, v) { node.value = v; node.dispatchEvent(new Event('change', { bubbles: true })); }
+function data(id) { return Sewing.normalize(Store.project(id).craftData, Store.project(id)); }
+function click(n) { if (n) n.click(); return n; }
+function byText(sel, re) { return qa(sel).filter(function (n) { return re.test(n.textContent); })[0] || null; }
+
+var params = new URLSearchParams(location.search);
+if (params.get('theme')) document.documentElement.setAttribute('data-theme', params.get('theme'));
+
+var prevKey = null;
+try { Store.__setKeyForTests(KEY); } catch (e) { /* ignore */ }
+try { localStorage.removeItem(KEY); Store.__setKeyForTests(KEY); } catch (e) { /* ignore */ }
+
+// ---------------------------------------------------------------- synthetic projects
+var QUILT_TEXT = '=== PAGE 1 ===\nFINISHED SIZE | 40" x 50"\nFabric Requirements\nBinding\n- cut enough strips 2 1/2" wide by the width of\nthe fabric A to make a final strip 190" long.\n' +
+  '1. Sew the squares into pairs. Make a total of 12 Unit 1 (3 1/2" x 6 1/2" unfinished).\n2. Join two Unit 1. Make 6 Unit 2.\n3. Press the seams. Fuse the label.\n' +
+  '4. Sew the units into rows. Join rows 1-4. Quilt as desired.\n=== PAGE 2 ===\nQuilt Layout\nB1\nB2\nB2\n';
+function mk(name, cd) { return Store.createProject({ craft: 'sewing', name: name, craftData: cd }); }
+var quilt = mk('Test quilt', {
+  kind: 'quilt',
+  fabric: [{ name: 'Fabric A Test Blue', amounts: ['1 3/4 yd'] }, { name: 'Fabric B Test Red', amounts: ['1/2 yd'] }],
+  cutting: [
+    { id: 'qa1', piece: '3 1/2" x WOF strip', qty: 2, note: 'Fabric A', material: 'other' },
+    { id: 'qa2', piece: '3 1/2" square', qty: 24, note: 'Fabric A, subcut', subcut: true, parentId: 'qa1', material: 'other' },
+    { id: 'qb1', piece: '4" x WOF strip', qty: 1, note: 'Fabric B', material: 'other' },
+    { id: 'qb2', piece: '4" square', qty: 8, note: 'Fabric B, subcut', subcut: true, parentId: 'qb1', material: 'other' }],
+  units: [{ id: 'u1', name: 'Unit 1', target: 12, done: 0, step: 1, size: '3 1/2" x 6 1/2" unfinished' }, { id: 'u2', name: 'Unit 2', target: 6, done: 0, step: 2 }],
+  steps: [{ n: 1, text: 'Sew the squares into pairs. Make a total of 12 Unit 1.' }, { n: 2, text: 'Join two Unit 1. Make 6 Unit 2.' },
+    { n: 3, text: 'Press the seams. Fuse the label.' }, { n: 4, text: 'Sew the units into rows. Join rows 1-4. Quilt as desired.' }],
+  sourceText: QUILT_TEXT
+});
+var rowsQuilt = mk('Rows quilt', {
+  kind: 'quilt',
+  fabric: [{ name: 'Fabric B Plain', amounts: ['1 yd'] }, { name: 'Fabric L Plain', amounts: ['1 yd'] }, { name: 'Fabric E Plain', amounts: ['1 yd'] }],
+  units: [{ id: 'r1', name: 'Unit 1', target: 4, done: 0 }],
+  steps: [{ n: 1, text: 'Join the rows.' }],
+  sourceText: '=== PAGE 3 ===\nJoin them:\n- Row 1: B (3¼"), L, E (4½"), L, B.\n- Row 2: E (2½"), L, B.\n- Row 3: L (3"), B, E.\n- Row 4: B (3"), E, L.\n'
+});
+var bag = mk('Test bag', {
+  kind: 'bag',
+  fabric: [{ name: 'Exterior', amounts: ['1/2 yd'] }, { name: 'Lining', amounts: ['1/2 yd'] }],
+  cutting: [
+    { id: 'b1', piece: 'Main Panel', qty: 2, material: 'main' },
+    { id: 'b2', piece: 'Main Panel', qty: 2, material: 'lining' },
+    { id: 'b3', piece: 'Main Panel', qty: 2, material: 'interfacing', product: 'Shape-flex SF101', application: 'fusible', productFrom: 'cut line' },
+    { id: 'b4', piece: 'Base Stabilizer', qty: 1, material: 'interfacing', product: 'Peltex 70', application: 'sew-in', productFrom: 'piece name' },
+    { id: 'b5', piece: 'Strap', qty: 1, material: 'main', note: 'Long version only' }],
+  notions: [{ text: '1 yard fusible Shape-flex SF101 interfacing' }, { text: '1 yard sew-in Peltex 70 stabilizer' }],
+  steps: [{ n: 1, text: 'Fuse the interfacing to the exterior Main Panels.' }, { n: 2, text: 'Sew the bag.' }],
+  sourceText: '=== PAGE 2 ===\nFuse woven interfacing to the exterior Main Panels and the Handle. Sew the bag.\n'
+});
+function dressData(extra) {
+  var cd = {
+    meta: { patternName: 'Test Dress' },
+    size: { sizeLabels: ['36', '38'], chosen: '38' },
+    fabric: [
+      { name: 'Fabric', width: '115cm / 45"', amounts: ['2.3 m / 2.5 yd', '2.4 m / 3 yd'] },
+      { name: 'Fabric', width: '150cm / 60"', amounts: ['1.9 m / 2 1/4 yd', '1.9 m / 2 1/4 yd'] }],
+    notions: [{ id: 'n1', text: 'Invisible zip 55 cm' }, { id: 'n2', text: 'Thread to match' }],
+    steps: [{ n: 1, text: 'Fuse the interfacing to the facing.' }, { n: 2, text: 'Understitch the facing. Understitch again. Edgestitch the hem.' }],
+    sourceText: '=== PAGE 4 ===\nPATTERN SYMBOLS:\nGrainline: Lay the arrow parallel to the selvage.\nNotches: Clip into the fabric\nat these marks.\n=== PAGE 6 ===\nFuse the interfacing to the facing.\nUnderstitch the facing. Understitch again. Edgestitch the hem.\n'
+  };
+  for (var k in extra) cd[k] = extra[k];
+  return cd;
+}
+var dress = mk('Test dress', dressData({}));
+var dress2 = mk('Test dress, first make', dressData({ fitting: [{ id: 'f1', at: 'lengthen/shorten line', amount: { value: 3, unit: 'cm' }, piece: 'Front Skirt', why: 'tall', date: '2026-10-01' }] }));
+var crochet = Store.createProject({ name: 'Not sewing' });
+
+var events = [];
+document.addEventListener('sewingextras:change', function (e) { events.push(e.detail); });
+
+var E = window.SewingExtras;
+
+// ---------------------------------------------------------------- demo mode
+var demo = params.get('demo');
+if (demo) {
+  document.body.classList.add('demo');
+  window.addEventListener('pagehide', function () { try { localStorage.removeItem(KEY); } catch (e) { /* ignore */ } });
+  var target = { board: quilt, quilttop: rowsQuilt, quiltcalc: quilt, fabric: dress, swatches: quilt, timer: bag, glossary: dress, fitting: dress }[demo] || quilt;
+  if (demo === 'board' && params.get('bag')) target = bag;
+  if (demo === 'quilttop') Store.updateCraftData(rowsQuilt.id, function (d) { d.units[0].done = 2; d.swatchColours = {}; });
+  if (demo === 'board' || demo === 'quilttop') {
+    E.__qa.setCtx(null);
+  }
+  setTimeout(function () {
+    E.open(demo, target, demo === 'fitting' ? { add: true } : {});
+    if (demo === 'quilttop') Store.updateCraftData(rowsQuilt.id, function () {});
+  }, 50);
+} else run();
+
+function run() {
+  var chain = Promise.resolve();
+  function step(fn, ms) { chain = chain.then(function () { try { var r = fn(); return Promise.resolve(r).then(function () { return wait(ms || 0); }); } catch (e) { log(false, 'threw: ' + e.message); } }); }
+
+  step(function () {
+    group('Contract');
+    ok(E && E.version >= 1, 'SewingExtras.version is 1 or more');
+    var ids = function (p) { return E.menuItems(p).map(function (i) { return i.id; }); };
+    eq(ids(quilt), ['board', 'quilttop', 'quiltcalc', 'fabric', 'swatches', 'timer', 'glossary'], 'a quilt lists its sheets (no fitting log)');
+    eq(ids(dress), ['fabric', 'swatches', 'timer', 'glossary', 'fitting'], 'a garment with no cutting list: no board, no quilt sheets, a fitting log');
+    ok(ids(bag).indexOf('board') === 0 && ids(bag).indexOf('quilttop') < 0, 'a bag gets the board and no quilt sheets');
+    eq(E.menuItems(crochet), [], 'a crochet project gets nothing');
+    var it = E.menuItems(quilt)[0];
+    ok(it.label && it.icon && it.hint, 'items carry label, icon and hint');
+    eq(E.open('nope', quilt), false, 'an unknown id returns false');
+    eq(E.open('fitting', quilt), false, 'a sheet that does not apply returns false');
+    eq(E.open('board', crochet), false, 'a crochet project opens nothing');
+    // a missing engine function = the item is not listed
+    var saved = Sewing.glossary;
+    Sewing.glossary = undefined;
+    ok(ids(dress).indexOf('glossary') < 0, 'with Sewing.glossary missing the glossary is not listed');
+    Sewing.glossary = saved;
+    ok(ids(quilt.id).length === 7, 'a project id works as well as a project');
+    group('Helpers');
+    eq(E.__qa.inchText(3.5), '3 1/2"', 'inches with eighths');
+    eq(E.__qa.inchText(0.125), '1/8"', 'a fraction alone');
+    eq(Math.round(E.__qa.parseLength('9 cm', 'imperial') * 1000) / 1000, 3.543, 'centimetres typed in an inch project are accepted');
+    eq(E.__qa.parseLength('3 1/2', 'imperial'), 3.5, 'a bare number in inches');
+    eq(Math.round(E.__qa.parseLength('10', 'metric') * 1000) / 1000, 3.937, 'a bare number in centimetres');
+    eq(E.__qa.parsePair('6 1/2 x 12 1/2', 'imperial'), { w: 6.5, h: 12.5 }, 'a pair of sizes');
+    eq([E.__qa.compare(310, 310), E.__qa.compare(182.5, 184), E.__qa.compare(150, 190)], ['exact', 'close', 'off'], 'exact, close and off');
+    eq(E.__qa.patternSystem(data(quilt.id)), 'imperial', 'a quilt is in inches');
+    eq(E.__qa.patternSystem(data(dress.id)), 'metric', 'a cm-first garment is metric');
+  });
+
+  // ---------------------------------------------------------------- board
+  var opener;
+  step(function () {
+    group('P6 / P7: cutting board');
+    opener = document.createElement('button');
+    opener.textContent = 'opener';
+    document.body.appendChild(opener);
+    opener.focus();
+    ok(E.open('board', quilt), 'the board opens');
+    ok(!!sheet(), 'a sheet is in the page');
+    ok(sheet().contains(document.activeElement), 'focus moved into the sheet');
+    ok(/0 of 32 pieces cut · 0 of 3 strips cut/.test(txt()), 'the header counts finished cuts and strips apart', txt().slice(0, 80));
+    eq(qa('.swx-group').length, 2, 'one group per fabric letter');
+    var a = qa('.swx-group')[0];
+    ok(/Fabric A/.test(a.textContent), 'Fabric A first');
+    var off = a.querySelector('.swx-flag-off');
+    ok(off && /Comes up short/.test(off.textContent) && /22/.test(off.textContent) && /24/.test(off.textContent), 'Fabric A\'s strips are flagged short, with both numbers');
+    ok(off && /worked out by the app/.test(off.textContent), 'and the check says it is worked out by the app');
+    var b = qa('.swx-group')[1];
+    ok(b.querySelector('.swx-flag-exact'), 'Fabric B\'s strip adds up');
+    ok(a.querySelector('.swx-row.is-sub'), 'subcuts sit under their strip');
+    ok(!qa('.swx-sub').some(function (s) { return /Fabric [A-Z]\b|subcut/.test(s.textContent); }), 'a note that only repeats the group ("Fabric A, subcut") is not shown');
+    ok(q('[data-focus-key="board-wof"]'), 'a usable-width field for strips');
+    ok(q('details.swx-scale'), 'a to-scale drawing is offered');
+  }, 10);
+  step(function () {
+    q('[data-focus-key="cut-qa2"]').focus(); click(q('[data-focus-key="cut-qa2"]'));
+    eq(data(quilt.id).cutting[1].cutCount, 1, 'a tap cuts one more');
+    ok(/1 of 32 pieces cut/.test(txt()), 'the header follows');
+    ok(document.activeElement && document.activeElement.getAttribute('data-focus-key') === 'cut-qa2', 'focus stays on the same chip after the rebuild');
+    click(q('[data-focus-key="all-qa2"]'));
+    eq(data(quilt.id).cutting[1].cutCount, 24, '"All" cuts the whole row');
+    click(q('[data-focus-key="minus-qa2"]'));
+    eq(data(quilt.id).cutting[1].cutCount, 23, '− takes one off');
+    ok(events.some(function (e) { return e.projectId === quilt.id && e.what === 'cut'; }), 'a change event was fired');
+    setVal(q('[data-focus-key="board-wof"]'), '42');
+    eq(data(quilt.id).fabricPrefs.wof, 42, 'the usable width is kept on the project');
+    var a = qa('.swx-group')[0];
+    ok(a.querySelector('.swx-flag-close') && /Only just fits/.test(a.textContent), 'at 42" Fabric A only just fits: close, said so');
+    click(byText('.swx-seg button', /^cm\b/));
+    ok(!qa('.swx-seg button').some(function (b) { return /Centimetres/.test(b.textContent); }), 'the unit switch says "cm" (a long word broke mid-word in Pixel Wyrm at 375 px)');
+    eq(data(quilt.id).fabricPrefs.unit, 'metric', 'the per-project unit switch is kept');
+    ok(/≈ 8\.9 cm × width of fabric/.test(txt()), 'strip sizes are shown in cm, marked ≈', '');
+    click(byText('.swx-seg button', /Inches/));
+    eq(data(quilt.id).fabricPrefs.unit, undefined, 'back to the pattern\'s own unit clears the switch');
+    click(byText('.swx-seg button', /By piece/));
+    ok(q('.swx-bypiece'), 'a by-piece view');
+    var det = q('details.swx-scale');
+    det.open = true; det.dispatchEvent(new Event('toggle'));
+  }, 30);
+  step(function () {
+    ok(q('.swx-scale .sew-board'), 'the to-scale board is drawn (SewQuilt.mountBoard)');
+    var ev = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+    var inSheet = q('button'); inSheet.focus(); inSheet.dispatchEvent(ev);
+    ok(!sheet(), 'Escape closes the sheet');
+    ok(document.activeElement === opener, 'focus returns to the opener');
+  }, 10);
+  step(function () {
+    E.open('board', bag, { fabric: 'main' });
+    var gs = qa('.swx-group');
+    ok(gs.length >= 3, 'the bag groups by fabric and by interfacing product');
+    var fus = gs.filter(function (g) { return /Fusible: iron it on/.test(g.textContent); })[0];
+    var sew = gs.filter(function (g) { return /Sew-in: no iron/.test(g.textContent); })[0];
+    ok(fus && /Shape-flex/.test(fus.textContent), 'the fusible product says how it goes on');
+    ok(sew && /Peltex/.test(sew.textContent), 'the sew-in product says how it goes on');
+    ok(q('.swx-fuse') && /Main Panels/.test(q('.swx-fuse').textContent), 'the "Fuse before you sew" card quotes the pattern');
+    var strap = byText('.swx-row', /Strap/);
+    ok(strap && /Long version only/.test(strap.textContent), 'a row\'s own note (one version or size only) is shown on the board', strap && strap.textContent);
+    ok(q('.swx-group.is-target'), 'opts.fabric marks the group asked for');
+    click(byText('.swx-seg button', /By piece/));
+    var mp = byText('.swx-bypiece .swx-row', /Main Panel/);
+    ok(mp && /2 .*· 2 .*· 2 Shape-flex SF101 \(fusible\)/.test(mp.textContent), 'by piece: Main Panel from fabric, lining and its interfacing', mp && mp.textContent);
+    E.close();
+  }, 10);
+
+  // ---------------------------------------------------------------- quilt top
+  step(function () {
+    group('P11: quilt top');
+    E.open('quilttop', quilt, { block: 'B2' });
+  }, 50);
+  step(function () {
+    ok(/0 of 18 units made/.test(txt()), 'the header counts units');
+    var rows = qa('.swx-list .swx-row');
+    ok(rows.length === 2 && /B2 ×2/.test(rows[1].textContent), 'the layout\'s block labels with their counts');
+    ok(/Unit 2: 0 of 6 made/.test(rows[1].textContent), 'each block with the unit that makes it');
+    ok(rows[1].classList.contains('is-target'), 'opts.block marks the block');
+    ok(/page 2/.test(q('.swx-quilt-note').textContent) && /does not draw a guess/.test(q('.swx-quilt-note').textContent) && !q('svg.swx-rows') && !q('canvas'), 'a picture layout with no stored page: said plainly, nothing invented', q('.swx-quilt-note').textContent);
+    E.close();
+    Store.updateCraftData(rowsQuilt.id, function (d) { d.units[0].done = 2; });
+    E.open('quilttop', rowsQuilt);
+  }, 50);
+  step(function () {
+    var svg = q('svg.swx-rows');
+    ok(svg, 'rows of fabric letters in the text are drawn');
+    eq(qa('.swx-rowband').length, 4, 'four rows');
+    eq(qa('.swx-rowband.is-made').length, 2, 'half the units made: two rows in colour');
+    ok(/≈ The rows light up in order/.test(q('.swx-quilt-note').textContent), 'and it says the order is the app\'s, not the pattern\'s');
+    E.close();
+  }, 10);
+
+  // ---------------------------------------------------------------- calculators
+  step(function () {
+    group('P8 / P9: quilt calculators');
+    Store.updateCraftData(quilt.id, function (d) { if (d.fabricPrefs) delete d.fabricPrefs.wof; });
+    E.open('quiltcalc', quilt);
+    ok(/Finished size printed in the pattern: 40/.test(txt()), 'the printed finished size prefills', txt().slice(0, 90));
+    var bind = q('[data-tool="binding"]');
+    ok(bind.open, 'binding is open first');
+    ok(/≈ 190"/.test(bind.textContent), 'binding (40 + 50) × 2 + 10 = 190, marked ≈');
+    ok(bind.querySelector('.swx-flag-exact') && /prints 190"/.test(bind.textContent), 'it matches the printed 190"');
+    ok(/worked out by the app/.test(bind.textContent), 'labelled as worked out by the app');
+    setVal(q('[data-focus-key="calc-w"]'), '41');
+  }, 10);
+  step(function () {
+    var bind = q('[data-tool="binding"]');
+    ok(bind.querySelector('.swx-flag-close') && /prints 190"/.test(bind.textContent) && /192"/.test(bind.textContent), 'a close result says close and shows both numbers', bind.textContent.slice(0, 200));
+    setVal(q('[data-focus-key="calc-w"]'), '101.6 cm');
+    var bind2 = q('[data-tool="binding"]');
+    ok(/≈ 190"/.test(bind2.textContent), 'centimetres are accepted in an inch project');
+    ok(/≈ \d/.test(q('[data-tool="backing"]').textContent), 'backing worked out, ≈');
+    ok(/≈ 48"/.test(q('[data-tool="batting"]').textContent), 'batting 40 + 8 = 48"');
+    var hst = q('[data-tool="hst"]');
+    ok(/≈ 3 7\/8"/.test(hst.textContent), 'HST two at a time for 3" finished: 3 7/8"');
+    ok(/≈ 4 1\/4"/.test(hst.textContent), 'QST: 4 1/4"');
+    ok(/≈ 4 1\/2"/.test(q('[data-tool="geese"]').textContent), 'geese one at a time: a 4 1/2" × 2 1/2" rectangle');
+    E.close();
+    E.open('quiltcalc', quilt, { tool: 'units' });
+  }, 10);
+  step(function () {
+    var u = q('[data-tool="units"]');
+    ok(u && u.open, 'opts.tool opens the units');
+    ok(/Should measure 3 1\/2" x 6 1\/2" unfinished/.test(u.textContent), 'the printed unit size');
+    var inp = q('[data-focus-key="measure-u1"]');
+    setVal(inp, '3 1/2 x 6 1/2');
+    ok(u.querySelector('.swx-measure-out .swx-flag-exact'), '"measure it": right size says so');
+    setVal(inp, '3 1/4 x 6 1/2');
+    ok(/Off by 1\/4"/.test(u.textContent) && /seam allowance/.test(u.textContent), 'a small unit says by how much and what to check');
+    click(q('[data-focus-key="measured-u1"]'));
+    eq(data(quilt.id).units[0].measured, true, '"Measured right" is kept on the unit');
+    E.close();
+  }, 10);
+
+  // ---------------------------------------------------------------- fabric
+  step(function () {
+    group('P13: fabric and shopping list');
+    E.open('fabric', dress);
+    ok(/For size 38/.test(txt()), 'for the chosen size');
+    setVal(q('[data-focus-key="fab-width"]'), '140');
+  }, 10);
+  step(function () {
+    eq(data(dress.id).fabricPrefs.width, { value: 140, unit: 'cm' }, 'my width is kept');
+    var lines = qa('.swx-fabline');
+    ok(lines.length === 1 && /2\.4 m/.test(lines[0].textContent) && /115cm/.test(lines[0].textContent), '140 cm uses the printed 115 cm figure, never a guess in between', lines[0] && lines[0].textContent);
+    setVal(q('[data-focus-key="fab-width"]'), '90');
+    ok(/narrower than every width/.test(txt()), 'narrower than every width says to measure');
+    setVal(q('[data-focus-key="fab-width"]'), '150');
+    setVal(q('[data-focus-key="fab-shrink"]'), '5');
+    ok(/With 5% shrinkage: ≈ 2 m/.test(txt()) && /worked out by the app/.test(txt()), 'shrinkage is ≈ and worked out by the app');
+    click(q('[data-focus-key="switch-Nap or one-way print"]'));
+    eq(data(dress.id).fabricPrefs.nap, true, 'nap is kept');
+    ok(/prints no with-nap figure/.test(txt()), 'nap with no printed figure: a sentence, not a number');
+  }, 10);
+  step(function () {
+    var shop = q('.swx-shop');
+    ok(/Invisible zip 55 cm/.test(shop.textContent), 'the notions are on the list');
+    click(q('[data-focus-key="have-n1"]'));
+    eq(data(dress.id).notions[0].have, true, '"already have" ticks the notion');
+    click(q('[data-focus-key="switch-All my sewing projects"]'));
+    ok(/Thread to match \(×5\)/.test(q('.swx-shop').textContent), 'across projects the same thing is listed once, with how many');
+    var zip = byText('.swx-shop .swx-row', /Invisible zip/);
+    ok(zip && /Test dress, first make$/.test(zip.textContent) && !/\(×/.test(zip.textContent), 'a notion already had in one project is listed only for the other');
+    ok(/Test dress, first make/.test(q('.swx-shop').textContent), 'and says which projects');
+    E.close();
+  }, 10);
+
+  // ---------------------------------------------------------------- swatches
+  step(function () {
+    group('P12: fabric colours');
+    E.open('swatches', quilt);
+    eq(qa('.swx-swatch-row').length, 2, 'one row per fabric');
+    ok(qa('.swx-chip.is-unset').length === 2, 'no colour set yet: plain chips');
+    setVal(q('[data-focus-key="colour-0"]'), '#3366cc');
+  }, 10);
+  step(function () {
+    var bagS = Store.craftSettings('sewing').extrasSwatches;
+    var stored = (data(quilt.id).swatchColours || {})[0] || (bagS && bagS[quilt.id] && bagS[quilt.id][0]);
+    eq(stored, '#3366cc', 'the colour is kept for this project');
+    ok(/Your colour/.test(txt()), 'and shown as the sewist\'s own');
+    E.close();
+    E.open('board', quilt);
+    var chip = q('.swx-group .swx-chip');
+    ok(chip && /rgb\(51, 102, 204\)/.test(chip.style.background), 'the cutting board group carries the colour');
+    E.close();
+  }, 10);
+
+  // ---------------------------------------------------------------- timer + glossary
+  step(function () {
+    group('P16: timer and glossary');
+    E.__qa.setCtx({ wake: { supported: true, isOn: function () { return false; }, toggle: function () { return true; } } });
+    E.open('timer', bag, { step: 0 });
+    ok(/Step 1 says to fuse/.test(txt()), 'the step\'s own wording');
+    eq(q('.swx-timer').textContent, '–:––', 'no default time');
+    ok(byText('button', /^Start$/).disabled, 'start waits for the sewist\'s time');
+    ok(/while this screen is on/.test(txt()), 'it says it only counts while the screen is on');
+    setVal(q('input[type="number"]'), '2');
+    eq(data(bag.id).fabricPrefs.fuseSeconds, 2, 'the time is kept on the project');
+    eq(q('.swx-timer').textContent, '0:02', 'shown');
+    click(byText('button', /^Start$/));
+    ok(E.__current().timer.state().running, 'running');
+    ok(q('[data-focus-key="switch-Keep the screen awake"]'), 'the shell\'s keep-awake switch is offered (its supported flag is a boolean)');
+    E.__qa.setCtx(null);
+  }, 2600);
+  step(function () {
+    ok(/Time is up/.test(txt()), 'counts down to "Time is up"');
+    ok(q('.swx-timer.is-up'), 'and shows it');
+    E.close();
+    E.open('glossary', dress);
+    var t = txt();
+    ok(/From the booklet/.test(t) && /Grainline/.test(t) && /at these marks/.test(t), 'the booklet\'s own symbol key first');
+    ok(/Used in this pattern/.test(t) && /understitch ×2/i.test(t), 'terms counted');
+    ok(/app’s own short words/.test(t), 'definitions said to be the app\'s');
+    var s = q('input[type="search"]');
+    s.value = 'notch'; s.dispatchEvent(new Event('input'));
+    ok(/Notches/.test(txt()) && !/Grainline/.test(txt()), 'the search narrows the list');
+    E.close();
+  }, 10);
+
+  // ---------------------------------------------------------------- fitting
+  step(function () {
+    group('P17: fitting log');
+    E.open('fitting', dress);
+    var carry = q('.swx-carry');
+    ok(carry && /from “Test dress, first make”/.test(carry.textContent), 'offers last time\'s changes from the same pattern');
+    click(carry);
+    eq(data(dress.id).fitting.length, 1, 'carried');
+    ok(data(dress.id).fitting[0].carried, 'marked as carried');
+    ok(/from last time/.test(txt()), 'and shown so');
+    click(q('[data-focus-key="fit-add"]'));
+    var f = q('.swx-fit-form');
+    ok(f, 'the form opens');
+    var inputs = f.querySelectorAll('input[type="text"]');
+    inputs[0].value = 'waist';
+    inputs[1].value = '-1 1/2';
+    f.querySelector('select').value = 'cm';
+    inputs[2].value = 'Bodice';
+    f.querySelector('textarea').value = 'Too loose at the first fitting';
+    click(byText('.swx-fit-form button', /^Save$/));
+  }, 50);
+  step(function () {
+    var fit = data(dress.id).fitting;
+    eq(fit.length, 2, 'a new change is noted');
+    eq(fit[1].amount, { value: -1.5, unit: 'cm' }, 'with its amount (negative = taken in)');
+    ok(/^\d{4}-\d\d-\d\d$/.test(fit[1].date), 'dated');
+    ok(/waist · -1\.5 cm · Bodice/.test(txt()), 'listed');
+    click(byText('.swx-fit-del', /Remove/));
+    eq(data(dress.id).fitting.length, 1, 'removed (one undo step)');
+    E.close();
+  }, 10);
+
+  // ---------------------------------------------------------------- clean up
+  step(function () {
+    group('Clean up');
+    [quilt, rowsQuilt, bag, dress, dress2, crochet].forEach(function (p) { Store.deleteProject(p.id); });
+    try {
+      var bagS = Store.craftSettings('sewing');
+      delete bagS.extrasSwatches;
+    } catch (e) { /* ignore */ }
+    try { localStorage.removeItem(KEY); } catch (e) { /* ignore */ }
+    ok(true, 'test projects and storage key removed');
+  }, 300);
+  chain.then(function () {
+    try { localStorage.removeItem(KEY); } catch (e) { /* ignore */ }
+    var s = document.getElementById('summary');
+    s.textContent = (failed ? '' : 'ALL PASS ') + passed + ' passed, ' + failed + ' failed';
+  });
+}
+</script>
+</body>
+</html>

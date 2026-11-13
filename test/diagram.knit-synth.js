@@ -323,7 +323,120 @@
     return m;
   }
 
+  /* ---- wave K (knit-3d): socks, a stranded band, a set-in sweater --------
+     The Speed Bump sock, size S (research §2b): CO 56, rib, leg, a 32-row
+     flap on 28, 10 short rows to 18, pick up to 80, gussets back to 56, foot,
+     a toe to 20, Kitchener. `split` gives it as the sections a sock pattern
+     imports as (Cuff / Leg / Heel Flap / Turn Heel / Gusset / Foot / Toe). */
+  function side(i) { return i % 2 ? 'ws' : 'rs'; }
+  function sockSections() {
+    var S = [], rs, i, c;
+    rs = []; for (i = 0; i < 16; i++) rs.push(kr(rib(56, 1, 1))); S.push({ name: 'Cuff', rounds: rs });
+    rs = []; for (i = 0; i < 50; i++) rs.push(kr(kline(56, 'k'))); S.push({ name: 'Leg', rounds: rs });
+    rs = []; for (i = 0; i < 32; i++) rs.push(kr(kline(28, i % 2 ? 'p' : 'k', side(i)), { side: side(i) }));
+    S.push({ name: 'Heel Flap', rounds: rs, mode: 'rows' });
+    rs = []; c = 27;
+    for (i = 0; i < 10; i++) { rs.push(kr(kline(c, i % 2 ? 'p' : 'k', side(i)), { side: side(i), shortRow: true })); c--; }
+    S.push({ name: 'Turn Heel', rounds: rs, mode: 'rows' });
+    rs = []; c = 80; for (i = 0; i < 24; i++) { if (i % 2 === 0) c -= 2; rs.push(kr(kline(c, 'k'))); } S.push({ name: 'Gusset', rounds: rs });
+    rs = []; for (i = 0; i < 40; i++) rs.push(kr(kline(56, 'k'))); S.push({ name: 'Foot', rounds: rs });
+    rs = []; c = 56; for (i = 0; i < 17; i++) { if (i % 2 === 0) c -= 2; rs.push(kr(kline(c, 'k'))); } S.push({ name: 'Toe', rounds: rs });
+    return S;
+  }
+  function sockTopDown() {
+    var rs = [];
+    sockSections().forEach(function (s) { rs = rs.concat(s.rounds); });
+    return km(rs, 'rounds', { start: 'unknown', graft: true });
+  }
+  /* A made-up 8-stitch, 9-row peerie band (not from any pattern), as the key
+     labels KnitChart gives: MC, CC1, CC2; '?' is a cell the reader left
+     unread. Knitting order, bottom row first. */
+  var PEERIE = [
+    'MMMMMMMM', 'MMM1MMMM', 'MM111MMM', 'M11211MM', '1122211M', 'M11211MM', 'MM111MMM', 'MMM1MMMM', 'MMMMMMMM'
+  ];
+  var PEERIE_PAL = { MC: '#efe6d2', CC1: '#9c2f2a', CC2: '#2b5a8a' };
+  function peerieCells(r, unread) {
+    var row = PEERIE[r % PEERIE.length], out = [];
+    for (var i = 0; i < row.length; i++) {
+      var ch = row.charAt(i);
+      if (unread && r === 4 && i === 7) { out.push({ sym: '?1', unknown: true, produces: 1, consumes: 1, text: '?' }); continue; }
+      out.push({ sym: ch, stitch: 'k', run: 'k', text: 'k', color: ch === 'M' ? 'MC' : 'CC' + ch, produces: 1, consumes: 1 });
+    }
+    return out;
+  }
+  /* The sock with the peerie band worked on leg rounds 20–28 (one cell unread). */
+  function strandedSock(unread) {
+    var m = sockTopDown(), G = global.DiagramGeo;
+    for (var r = 0; r < PEERIE.length; r++) {
+      var i = 20 + r;
+      m.rounds[i] = G.applyChart(m.rounds[i], peerieCells(r, unread), { palette: PEERIE_PAL, main: PEERIE_PAL.MC });
+      m.rounds[i].row = i + 1;
+    }
+    m.defaultColor = PEERIE_PAL.MC;
+    m.rounds.forEach(function (rd) { rd.color = PEERIE_PAL.MC; });
+    return m;
+  }
+
+  /* A plain set-in-sleeve pullover, synthetic (no pattern's numbers): Back
+     and Front CO 100, 10 rows k2 p2 rib, 80 rows stockinette, armhole: BO 5
+     at the start of the next 2 rows, then dec 1 each end every RS row 5
+     times (80), 40 rows more, BO. Sleeve CO 50, 10 rows rib, inc 1 each end
+     every 6th row 12 times (74), cap: BO 5 at the start of 2 rows, dec 1
+     each end every RS row to 30, BO. Neckband: 6 rounds k2 p2 on 84, worked
+     up from the neck. `states` = { back, front, sleeve, neckband }. */
+  function flatPiece(rows) {
+    var rs = [];
+    rows.forEach(function (o, i) {
+      var sd = side(i), list = o.rib ? rib(o.n, 2, 2, sd, sd === 'ws') : kline(o.n, sd === 'ws' ? 'p' : 'k', sd);
+      rs.push(kr(list, { side: sd }));
+    });
+    return km(rs, 'rows');
+  }
+  function bodyRows() {
+    var r = [], i, n = 100;
+    for (i = 0; i < 10; i++) r.push({ n: n, rib: true });
+    for (i = 0; i < 80; i++) r.push({ n: n });
+    n -= 5; r.push({ n: n }); n -= 5; r.push({ n: n });
+    for (i = 0; i < 10; i++) { if (i % 2 === 0) n -= 2; r.push({ n: n }); }
+    for (i = 0; i < 40; i++) r.push({ n: n });
+    return r;
+  }
+  function sleeveRows() {
+    var r = [], i, n = 50;
+    for (i = 0; i < 10; i++) r.push({ n: n, rib: true });
+    for (i = 0; i < 72; i++) { if (i % 6 === 5) n += 2; r.push({ n: n }); }
+    n -= 5; r.push({ n: n }); n -= 5; r.push({ n: n });
+    while (n > 30) { r.push({ n: n }); n -= 2; r.push({ n: n }); }
+    return r;
+  }
+  function sweaterParts(states) {
+    var s = states || {};
+    var nb = []; for (var i = 0; i < 6; i++) nb.push(kr(rib(84, 2, 2)));
+    return [
+      { id: 'sw-back', name: 'Back', makeCount: 1, state: s.back || 'done', model: flatPiece(bodyRows()) },
+      { id: 'sw-front', name: 'Front', makeCount: 1, state: s.front || 'done', model: flatPiece(bodyRows()) },
+      { id: 'sw-sleeve', name: 'Sleeves (make 2)', makeCount: 2, state: s.sleeve || 'working', model: flatPiece(sleeveRows()) },
+      { id: 'sw-neck', name: 'Neckband', makeCount: 1, state: s.neckband || 'todo', model: km(nb, 'rounds') }
+    ];
+  }
+  /* The sock as parts, with states: sections before `working` done, after it to do. */
+  function sockParts(working, at) {
+    var S = sockSections(), w = working == null ? 5 : working;
+    return S.map(function (s, k) {
+      var m = km(s.rounds, s.mode || 'rounds', k === S.length - 1 ? { start: 'unknown', graft: true } : { start: 'unknown' });
+      if (k === w) {
+        m.current = at == null ? Math.floor(s.rounds.length / 2) : at;
+        for (var i = m.current + 1; i < m.rounds.length; i++) { m.rounds[i].ghost = true; m.rounds[i].done = 0; }
+        m.rounds[m.current].done = Math.floor(m.rounds[m.current].count / 3);
+      }
+      return { id: 'sock-' + k, name: s.name, makeCount: 1, state: k < w ? 'done' : k === w ? 'working' : 'todo', model: m };
+    });
+  }
+
   global.KnitSynth = {
+    sweaterParts: sweaterParts, sockParts: sockParts, flatPiece: flatPiece,
+    side: side, sockSections: sockSections, sockTopDown: sockTopDown,
+    PEERIE: PEERIE, PEERIE_PAL: PEERIE_PAL, peerieCells: peerieCells, strandedSock: strandedSock,
     kst: kst, kline: kline, rib: rib, kr: kr, km: km,
     CABLES: CABLES, rsRow: rsRow, wsRow: wsRow, specWidth: specWidth,
     PANEL_A: PANEL_A, PANEL_B: PANEL_B, PANEL_C: PANEL_C, panelRs: panelRs,

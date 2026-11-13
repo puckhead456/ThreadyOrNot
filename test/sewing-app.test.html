@@ -1,0 +1,703 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sewing app tests</title>
+<style>
+  body { margin: 0; font: 13px/1.4 Menlo, Consolas, monospace; }
+  #log { padding: 12px 12px 12px 400px; }
+  .pass { color: #2e8b57; } .fail { color: #c0392b; font-weight: bold; } .info { color: #666; }
+  .group { margin-top: 14px; font-weight: bold; }
+  #summary { font: bold 16px Menlo, Consolas, monospace; padding: 12px 12px 12px 400px; }
+  #app { position: fixed; left: 0; top: 0; width: 375px; height: 812px; border: 0; background: #fff; }
+</style>
+</head>
+<body>
+<div id="summary">running…</div>
+<div id="log">
+<p>The real app (index.html) in a 375 × 812 frame on a private store key, driven through
+<code>SewingApp.__test</code> and the real DOM on synthetic projects built in code: nothing here is
+copied from a real pattern. Everything it makes is deleted at the end (projects, the key; no
+page images are made, so IndexedDB is not written).</p>
+</div>
+<script>
+'use strict';
+var KEY = 'stitchkeeper-wavek-sewapp-test';
+var logEl = document.getElementById('log');
+var passed = 0, failed = 0;
+function log(ok, label, detail) {
+  if (ok) passed++; else failed++;
+  var d = document.createElement('div');
+  d.className = ok ? 'pass' : 'fail';
+  d.textContent = (ok ? 'PASS' : 'FAIL') + ' - ' + label + (detail ? '  (' + detail + ')' : '');
+  logEl.appendChild(d);
+}
+function info(t) { var d = document.createElement('div'); d.className = 'info'; d.textContent = 'info - ' + t; logEl.appendChild(d); }
+function group(t) { var d = document.createElement('div'); d.className = 'group'; d.textContent = t; logEl.appendChild(d); }
+function ok(v, label, detail) { log(!!v, label, detail); }
+function eq(a, b, label) { var s = JSON.stringify(a) === JSON.stringify(b); log(s, label, s ? '' : 'got ' + JSON.stringify(a) + ', want ' + JSON.stringify(b)); }
+function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+function finish() {
+  var s = document.getElementById('summary');
+  s.textContent = (failed ? '' : 'ALL PASS ') + passed + ' passed, ' + failed + ' failed';
+}
+
+/* ---------------------------------------------------------------- synthetic patterns */
+// A garment booklet as the extractor would give it: a cm chart with a between-sizes rule,
+// a per-size run inside a step, a seam allowance, notions and press / foot / topstitch steps.
+var GARMENT_TEXT = [
+  '=== PAGE 1 ===',
+  'TEST WRAP DRESS',
+  'All seam allowances are 1.5 cm unless otherwise stated.',
+  'If your body measurements are in between sizes, we recommend that you choose the larger size. ' +
+    'If your measurements are only slightly different than our size chart, then choose the closest size.',
+  '=== PAGE 2 ===',
+  'SIZE CHART (cm)',
+  '36 38 40 42 44',
+  'Bust 84 88 92 96 100',
+  'Waist 66 70 74 78 82',
+  'Hip 90 94 98 102 106',
+  'NOTIONS',
+  '- Invisible zip 55 cm',
+  '- Lightweight fusible interfacing 50 cm',
+  '=== PAGE 3 ===',
+  'INSTRUCTIONS',
+  '1. Fuse the interfacing to the wrong side of the facings. Press well.',
+  '2. Sew the bodice darts. Press the darts towards the centre.',
+  '3. Insert the invisible zip into the centre back seam using a zipper foot.',
+  '4. Turn up the hem by 50 (52, 54, 56, 58) cm from the waist seam and press.',
+  '5. Topstitch the hem 6 mm from the folded edge. Give the dress a final press.',
+  ''
+].join('\n');
+
+var BAG_DATA = {
+  kind: 'bag',
+  fabric: [{ name: 'Exterior', amounts: ['1/2 yd'] }, { name: 'Lining', amounts: ['1/2 yd'] }],
+  cutting: [
+    { id: 'b1', piece: 'Main Panel', qty: 2, material: 'main' },
+    { id: 'b2', piece: 'Main Panel', qty: 2, material: 'lining' },
+    { id: 'b3', piece: 'Main Panel', qty: 2, material: 'interfacing', product: 'Shape-flex SF101', application: 'fusible', productFrom: 'cut line' }],
+  notions: [{ text: '1 yard fusible Shape-flex SF101 interfacing' }],
+  steps: [{ n: 1, text: 'Cut the main panels from the exterior and the lining.' }, { n: 2, text: 'Fuse the interfacing to the exterior Main Panels.' }, { n: 3, text: 'Sew the bag.' }],
+  sourceText: '=== PAGE 2 ===\nFuse woven interfacing to the exterior Main Panels. Sew the bag.\n'
+};
+
+var QUILT_DATA = {
+  kind: 'quilt',
+  fabric: [{ name: 'Fabric A Test Blue', amounts: ['1 yd'] }, { name: 'Fabric B Test Red', amounts: ['1/2 yd'] }],
+  cutting: [
+    { id: 'qa1', piece: '3 1/2" x WOF strip', qty: 2, note: 'Fabric A', material: 'other' },
+    { id: 'qa2', piece: '3 1/2" square', qty: 20, note: 'Fabric A, subcut', subcut: true, parentId: 'qa1', material: 'other' }],
+  units: [
+    { id: 'u1', name: 'Unit 1', target: 2, done: 0, step: 2, size: '3 1/2" x 6 1/2" unfinished' },
+    { id: 'u2', name: 'Unit 2', target: 1, done: 0, step: 2 },
+    { id: 'u3', name: 'Unit 3', target: 2, done: 0, step: 3 }],
+  steps: [
+    { n: 1, text: 'Cut the strips and subcut the squares.' },
+    { n: 2, text: 'Draw a diagonal line across the wrong side of each light square. Place a marked square right sides together on a dark square, matching the edges. Stitch on the line and trim a quarter inch beyond it. Press towards the dark fabric. Sew the squares into pairs, keeping the dark corners together. Make 2 Unit 1. Join a square to one pair to make 1 Unit 2. Check that each unit measures right before you go on.' },
+    { n: 3, text: 'Join Unit 1 and Unit 2. Make 2 Unit 3.' },
+    { n: 4, text: 'Sew the units into rows. Quilt as desired.' }],
+  sourceText: '=== PAGE 1 ===\nFINISHED SIZE | 40" x 50"\n'
+};
+
+/* ---------------------------------------------------------------- the app frame */
+var f = document.createElement('iframe');
+f.id = 'app';
+var made = [];
+var t0 = Date.now();
+var timer = setTimeout(function () {
+  log(false, 'the app frame booted and the suite finished in time');
+  cleanup(); finish();
+}, 150000);
+function cleanup() {
+  try {
+    var w = f.contentWindow;
+    if (w && w.Store) {
+      made.forEach(function (id) { try { if (w.Store.project(id)) w.Store.deleteProject(id); } catch (e) { /* ignore */ } });
+      w.Store.projects().slice().forEach(function (p) { if (/^SAT /.test(p.name)) w.Store.deleteProject(p.id); });
+    }
+  } catch (e) { /* ignore */ }
+  try { localStorage.removeItem(KEY); } catch (e) { /* ignore */ }
+}
+f.onload = function () {
+  var w = f.contentWindow;
+  (function wait() {
+    if (!(w.App && w.Store && w.SewingApp && w.document.getElementById('screen-home'))) {
+      if (Date.now() - t0 < 30000) return setTimeout(wait, 100);
+      log(false, 'the app frame loaded App, Store and SewingApp');
+      clearTimeout(timer); cleanup(); finish();
+      return;
+    }
+    run(w, w.document).then(function () {
+      clearTimeout(timer); cleanup(); finish();
+    }, function (e) {
+      clearTimeout(timer);
+      log(false, 'the suite threw', String(e && (e.stack || e.message) || e));
+      cleanup(); finish();
+    });
+  })();
+};
+f.src = '../index.html';
+document.body.appendChild(f);
+
+/* ---------------------------------------------------------------- the suite */
+async function run(w, d) {
+  var Store = w.Store, App = w.App, SA = w.SewingApp, T = SA.__test, S = w.Sewing;
+  Store.__setKeyForTests(KEY);
+  App.closeAllSheets();
+  // Never make sounds or wait on a backup nag in a test frame.
+  try { Store.updateSettings && Store.updateSettings({ sound: false }); } catch (e) { /* ignore */ }
+
+  function key(k, target) {
+    var e = new w.KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true });
+    (target || d.body).dispatchEvent(e);
+  }
+  function openSheet() { var all = d.querySelectorAll('dialog[open]'); return all.length ? all[all.length - 1] : null; }
+  function sheetText() { var s = openSheet(); return s ? s.textContent : ''; }
+  function inSheet(sel) { var s = openSheet(); return s ? Array.prototype.slice.call(s.querySelectorAll(sel)) : []; }
+  function byText(list, re) { return list.filter(function (n) { return re.test(n.textContent); })[0] || null; }
+  function rect(n) { var r = n.getBoundingClientRect(); return { top: Math.round(r.top), bottom: Math.round(r.bottom), h: Math.round(r.height), w: Math.round(r.width) }; }
+  function visible(n) { return !!n && !n.hidden && n.getClientRects().length > 0; }
+  function show(p) { Store.setActiveProject(p ? p.id : null); App.render(); }
+  function mk(name, cd) { var p = Store.createProject({ craft: 'sewing', name: name, craftData: cd }); made.push(p.id); return p; }
+  function data(id) { return S.normalize(Store.project(id).craftData, Store.project(id)); }
+  async function closeAll() { App.closeAllSheets(); await sleep(60); }
+  async function menuLabels() {
+    d.getElementById('c-menu').click();
+    await sleep(120);
+    var labels = inSheet('.menu-item').map(function (b) { return b.textContent; });
+    return labels;
+  }
+
+  group('Boot');
+  ok(SA.version && T, 'SewingApp and its test hook are there', SA.version);
+  ok(w.SewingExtras && w.SewingExtras.version >= 1, 'SewingExtras is loaded by index.html');
+
+  /* ============================================================ 1. import by paste */
+  group('Import (paste) and the check line');
+  var dress = mk('SAT dress', {});
+  show(dress);
+  ok(!d.getElementById('screen-craft').hidden, 'a sewing project paints #screen-craft');
+  SA.openSheet('import', dress.id);
+  await sleep(120);
+  var imp = openSheet();
+  ok(imp && /Import pattern/.test(imp.textContent), 'the import sheet opens');
+  var area = imp.querySelector('.sw-paste-area');
+  area.value = GARMENT_TEXT;
+  byText(inSheet('button'), /^Read this text$/).click();
+  await sleep(80);
+  ok(/What was found/.test(sheetText()), 'the review lists what was found');
+  var stepsRow = inSheet('.sw-review-row').filter(function (r) { var l = r.querySelector('.sw-review-label'); return l && l.textContent === 'Steps'; })[0];
+  ok(stepsRow && /5 found/.test(stepsRow.textContent), 'five steps found', stepsRow && stepsRow.textContent);
+  var importBtn = byText(inSheet('.sheet-foot button'), /Import/);
+  ok(importBtn && !importBtn.disabled, 'Import is enabled');
+  var gChk = T.importCheck(S.parse(GARMENT_TEXT), {});
+  info('import check: ' + gChk.verdict + ' · ' + gChk.rows.map(function (r) { return r.label + '=' + r.verdict + ' (' + (r.why || r.read || '') + ')'; }).join(' | '));
+  ok(gChk.verdict !== 'off', 'a clean booklet does not get an "off" check');
+  ok(!importBtn.classList.contains('check-demoted'), 'so Import stays the primary button', importBtn.className);
+  importBtn.click();
+  await sleep(250);
+  var dd = data(dress.id);
+  eq(dd.steps.length, 5, 'Import kept five steps');
+  ok(dd.seamAllowance && dd.seamAllowance.mm === 15, 'the 1.5 cm seam allowance', JSON.stringify(dd.seamAllowance));
+  ok(!openSheet() || !/Import pattern/.test(sheetText()), 'the import sheet closed (no PDF, so no page render)');
+
+  /* ============================================================ 2. size advisor */
+  group('P3 / P4: size advisor');
+  var chart = S.readSizeChart(dd);
+  ok(chart && chart.labels.join(' ') === '36 38 40 42 44', 'the chart is read with its five sizes', chart && chart.labels.join(' '));
+  // Engine note (for the owner of js/sewing.js): a rule that is the FIRST sentence of a page is
+  // dated to the page before, which also drops its "slightly different" companion (the page
+  // check fails). Reported, not asserted here: the synthetic rule sits mid-page.
+  var ruleAtTop = S.sizeRule('=== PAGE 1 ===\nIntro text here.\n=== PAGE 2 ===\nIf you are between sizes, choose the larger size.\n');
+  // sew-core fixed it (2026-11-13): asserted now, so a regression shows here too.
+  eq(ruleAtTop && ruleAtTop.page, 2, 'a size rule at the top of a page is dated to that page (sew-core fix)');
+  var adv = T.advice(dress.id, [{ label: 'Bust', value: '97', unit: 'cm' }, { label: 'Waist', value: '79', unit: 'cm' }, { label: 'Hip', value: '104', unit: 'cm' }]);
+  ok(adv && adv.suggestion && adv.suggestion.size === '42', '97 / 79 / 104 cm suggests 42', adv && JSON.stringify(adv.suggestion));
+  eq(adv && adv.suggestion && adv.suggestion.blend, [{ label: 'Hip', size: '44' }], 'with 44 at the hip (the pattern says choose the larger)');
+  // Through the real sheet: type the measurements into "My measurements".
+  SA.openSheet('size', dress.id);
+  await sleep(120);
+  var sizeSheet = openSheet();
+  ok(sizeSheet && /Size & alterations/.test(sizeSheet.textContent), 'the size sheet opens');
+  function typeMeasure(label, v) {
+    var inp = byText(inSheet('.sw-meas'), new RegExp('^' + label));
+    inp = inp && inp.querySelector('input');
+    if (!inp) return false;
+    inp.value = v; inp.dispatchEvent(new w.Event('change', { bubbles: true }));
+    return true;
+  }
+  ok(typeMeasure('Bust', '97') && typeMeasure('Waist', '79') && typeMeasure('Hip', '104'), 'bust, waist and hip typed in cm');
+  await sleep(60);
+  var advCard = inSheet('.sw-advice')[0];
+  ok(advCard && /Size 42, with 44 at the hip/.test(advCard.textContent), 'the suggestion card says 42 with 44 at the hip', advCard && advCard.textContent.slice(0, 120));
+  ok(advCard && /suggestion/i.test(advCard.textContent), 'it is labelled a suggestion');
+  eq(data(dress.id).size.chosen, '', 'nothing is chosen until Use is tapped');
+  var rule = inSheet('.sw-rule')[0];
+  ok(rule && /choose the larger size/.test(rule.textContent), 'the designer\'s own rule is quoted');
+  ok(rule && rule.querySelector('.sw-rule-slightly') && /choose the closest size/.test(rule.querySelector('.sw-rule-slightly').textContent),
+    'and its second rule ("only slightly different") is quoted on its own', rule && rule.textContent);
+  var useBtn = inSheet('.sw-advice-use')[0];
+  ok(useBtn && /Use 42/.test(useBtn.textContent), 'a Use 42 button');
+  var tapBox = useBtn ? rect(useBtn) : { h: 0 };
+  ok(tapBox.h >= 44, 'Use 42 is at least 44 px tall', tapBox.h + ' px');
+  useBtn.click();
+  await sleep(80);
+  eq(data(dress.id).size.chosen, '42', 'Use 42 chooses size 42');
+  ok(/You are using size 42/.test(sheetText()), 'the card then says it is in use');
+  var onTh = inSheet('.sw-table th.on')[0];
+  ok(onTh && onTh.textContent === '42', 'the chart lights the 42 column');
+  var res = T.resolved(dress.id);
+  var hem = res && res.items.filter(function (i) { return i.where === 'step'; })[0];
+  ok(hem && hem.value === '56 cm' && hem.step === 4, 'the per-size hem run resolves to 56 cm on step 4', hem && JSON.stringify(hem));
+  ok(/At size 42/.test(sheetText()) && /56 cm/.test(sheetText()), 'the sheet lists "At size 42" with the 56 cm');
+  var bare = inSheet('.sw-res-val').filter(function (v) { return /^\??\s*\d+(?:[.,]\d+)?$/.test(v.textContent.trim()); }).map(function (v) { return v.textContent; });
+  eq(bare, [], 'no per-size number is shown without its unit');
+  // Units: the per-project switch shows the chart in inches, marked ≈ (converted by the app).
+  var inchBtn = byText(inSheet('.sw-unit-seg button'), /inches/);
+  inchBtn.click();
+  await sleep(60);
+  eq(data(dress.id).fabricPrefs.unit, 'imperial', 'the per-project unit switch is kept');
+  var cell = inSheet('.sw-table td.on')[0];
+  ok(cell && /^≈/.test(cell.textContent), 'a cm chart shown in inches is marked ≈', cell && cell.textContent);
+  ok(/≈ = converted by the app/.test(sheetText()), 'and the key says ≈ is the app\'s conversion');
+  byText(inSheet('.sw-unit-seg button'), /^cm$/).click();
+  await sleep(60);
+  await closeAll();
+  // An uncertain cell: a dual-unit chart whose cm and inches disagree is shown "?".
+  var unsure = mk('SAT unsure chart', {
+    size: { sizeLabels: ['S', 'M', 'L'] },
+    measurements: { body: [{ label: 'Bust', values: ['84cm/33"', '88cm/40"', '92cm/36"'] }, { label: 'Hip', values: ['90cm/35"', '94cm/37"', '98cm/38.5"'] }] },
+    steps: [{ n: 1, text: 'Sew it.' }]
+  });
+  show(unsure);
+  SA.openSheet('size', unsure.id);
+  await sleep(120);
+  var unsureCells = inSheet('.sw-cell-unsure');
+  ok(unsureCells.length >= 1 && /\?$/.test(unsureCells[0].textContent), 'a cell the reader doubts is shown with "?"', unsureCells.map(function (c) { return c.textContent; }).join(' | ') || sheetText().slice(0, 160));
+  ok(unsureCells[0] && /not certain/.test(unsureCells[0].getAttribute('aria-label') || ''), 'and a screen reader hears "not certain"');
+  await closeAll();
+  // Body and finished rows: the first paint shows the body rows (it drew an empty table).
+  var both = mk('SAT body and finished', {
+    size: { sizeLabels: ['S', 'M', 'L'] },
+    measurements: { body: [{ label: 'Bust', values: ['84 cm', '88 cm', '92 cm'] }, { label: 'Hip', values: ['90 cm', '94 cm', '98 cm'] }],
+      finished: [{ label: 'Finished bust', values: ['90 cm', '94 cm', '98 cm'] }, { label: 'Finished hip', values: ['96 cm', '100 cm', '104 cm'] }] },
+    steps: [{ n: 1, text: 'Sew it.' }]
+  });
+  show(both);
+  SA.openSheet('size', both.id);
+  await sleep(120);
+  var bodyRows = inSheet('.sw-table tbody tr');
+  ok(bodyRows.length >= 2 && /Bust/.test(bodyRows[0].textContent), 'a chart with body and finished rows shows the body rows when the sheet opens', bodyRows.length + ' rows');
+  var finBtn = byText(inSheet('.segmented button, [role="radio"], button'), /^Finished$/);
+  if (finBtn) { finBtn.click(); await sleep(60); }
+  ok(inSheet('.sw-table tbody tr').some(function (tr) { return /Finished bust|Bust/.test(tr.textContent); }) && finBtn, 'and the Finished switch shows the finished rows');
+  await closeAll();
+  show(dress);
+  await sleep(40);
+
+  /* ============================================================ 3. the step card */
+  group('Step card: chips, your size, the button above the fold');
+  var st = T.state(dress.id);
+  eq(st.where, 'Step 1 of 5', 'Step 1 of 5 in the pattern\'s numbering');
+  ok(st.chips.some(function (c) { return /press/i.test(c); }) || st.chips.some(function (c) { return /fuse/i.test(c); }), 'a fuse / press chip on step 1', st.chips.join(' · '));
+  var btn = d.getElementById('sw-step-btn');
+  ok(visible(btn), 'the big button is shown');
+  var br = rect(btn);
+  ok(br.bottom <= 812, 'Step done is inside the 812 px screen', br.top + '–' + br.bottom);
+  for (var k = 0; k < 3; k++) T.advance(dress.id);
+  await sleep(40);
+  st = T.state(dress.id);
+  eq(st.where, 'Step 4 of 5', 'three taps: step 4');
+  var ys = d.querySelector('.sw-yoursize');
+  ok(visible(ys) && /Size 42/.test(ys.textContent) && /56 cm/.test(ys.textContent), 'step 4 shows "Size 42 · … 56 cm"', ys && ys.textContent);
+  ok(ys && /…up the hem by 56 cm/.test(ys.textContent), 'the words before the number are shown as a piece of the sentence ("…up the hem by")', ys && ys.textContent);
+  eq(data(dress.id).steps.filter(function (s) { return s.done; }).length, 3, 'three steps ticked');
+
+  /* ============================================================ 4. working mode */
+  group('P2: sewing working mode');
+  var scr = d.getElementById('screen-craft');
+  var workBtn = d.querySelector('.sw-work-open');
+  ok(visible(workBtn), '"Sewing mode" is offered under the button');
+  workBtn.click();
+  await sleep(100);
+  ok(scr.classList.contains('work-mode'), 'Sewing mode opens');
+  ok(Store.focusMode(dress.id) === true, 'and is remembered for the project');
+  var big = scr.querySelector('.work-big');
+  eq(big && big.textContent, '4', 'the readout shows step 4');
+  ok(/Turn up the hem/.test(scr.querySelector('.work-line-text').textContent), 'with the step text');
+  var wlt = scr.querySelector('.work-line-text');
+  ok(w.getComputedStyle(wlt).webkitLineClamp === 'none' && w.getComputedStyle(wlt).display === 'block', 'the step text is not cut to three lines in Sewing mode', w.getComputedStyle(wlt).webkitLineClamp);
+  var tipNow = (scr.querySelector('.work-tip') || {}).textContent || '';
+  ok(tipNow && !/anywhere/i.test(tipNow), 'the tip does not say "tap anywhere" (tapping the text only scrolls it)', tipNow);
+  ok(w.getComputedStyle(wlt).pointerEvents === 'auto', 'the step text takes its own touches (so reading never counts a step)');
+  var saHint = Array.prototype.filter.call(scr.querySelectorAll('.work-hint'), function (h) { return /Seam allowance/.test(h.textContent); })[0];
+  ok(!saHint || /^Seam allowance 1\.5 cm/.test(saHint.textContent), 'a seam allowance hint is in the pattern\'s own unit first', saHint && saHint.textContent);
+  ok(Array.prototype.some.call(scr.querySelectorAll('.work-hint'), function (h) { return /Size 42/.test(h.textContent) && /56 cm/.test(h.textContent); }), 'and the size-42 number as a hint');
+  ok(/Step 5/.test((scr.querySelector('.work-next-text') || {}).textContent || ''), 'the next step is previewed');
+  if (d.activeElement && d.activeElement.blur) d.activeElement.blur();
+  key(' ');
+  await sleep(60);
+  eq(T.state(dress.id).where, 'Step 5 of 5', 'Space = Step done');
+  key('ArrowLeft');
+  await sleep(60);
+  eq(T.state(dress.id).where, 'Step 4 of 5', '← = back a step');
+  key('PageDown');
+  await sleep(60);
+  eq(T.state(dress.id).where, 'Step 5 of 5', 'the pedal (PageDown) = Step done and on');
+  var und = scr.querySelector('.work-undo');
+  ok(und && !und.disabled, 'Undo is there');
+  und.click();
+  await sleep(60);
+  eq(T.state(dress.id).where, 'Step 4 of 5', 'Undo takes the step back');
+  var sR = rect(scr.querySelector('.work-surface'));
+  ok(sR.w >= 370 && sR.h >= 780, 'the surface fills the screen', sR.w + '×' + sR.h);
+  // Every working-mode button is a real tap target.
+  var small = Array.prototype.filter.call(scr.querySelectorAll('.work-btns button, .work-head button'), function (b) {
+    var r = b.getBoundingClientRect(); return visible(b) && (r.height < 44 || r.width < 44);
+  }).map(function (b) { return (b.getAttribute('aria-label') || b.textContent).slice(0, 20) + ' ' + Math.round(b.getBoundingClientRect().width) + '×' + Math.round(b.getBoundingClientRect().height); });
+  eq(small, [], 'no working-mode button under 44 × 44 px');
+  show(null);
+  show(dress);
+  await sleep(60);
+  ok(scr.classList.contains('work-mode'), 'reopening the project brings Sewing mode back');
+  key('Escape');
+  await sleep(60);
+  ok(!scr.classList.contains('work-mode'), 'Escape closes it');
+  ok(Store.focusMode(dress.id) === false, 'and forgets it');
+
+  /* ============================================================ 5. edits and notes survive a re-import */
+  group('Gap 7: step edits and notes survive a re-import');
+  SA.openSheet('steps', dress.id);
+  await sleep(120);
+  var tool = inSheet('[data-focus-key="tool-1"]')[0];
+  ok(tool, 'each step row has its tools button');
+  tool.click();
+  await sleep(60);
+  var editB = inSheet('.sw-step-edit')[0];
+  ok(editB && /Edit the text/.test(editB.textContent), '"Edit the text" is offered');
+  editB.click();
+  await sleep(100);
+  var ta = inSheet('.sw-edit-area')[0];
+  ta.value = 'Sew the bodice darts with a short stitch at the point. Press them towards the centre.';
+  byText(inSheet('.sheet-foot button'), /^Save$/).click();
+  await sleep(100);
+  ok(data(dress.id).steps[1].edited, 'step 2 is marked edited');
+  var noteB = inSheet('.sw-step-notebtn')[0] || null;
+  if (!noteB) { inSheet('[data-focus-key="tool-1"]')[0].click(); await sleep(60); noteB = inSheet('.sw-step-notebtn')[0]; }
+  ok(noteB, '"Add a note" is offered');
+  noteB.click();
+  await sleep(100);
+  var na = inSheet('.sw-note-area')[0];
+  na.value = 'Used a 2.0 stitch length';
+  byText(inSheet('.sheet-foot button'), /^Save$/).click();
+  await sleep(100);
+  eq(data(dress.id).steps[1].note, 'Used a 2.0 stitch length', 'the note is kept on step 2');
+  await closeAll();
+  SA.openSheet('import', dress.id);
+  await sleep(120);
+  openSheet().querySelector('.sw-paste-area').value = GARMENT_TEXT;
+  byText(inSheet('button'), /^Read this text$/).click();
+  await sleep(80);
+  byText(inSheet('.sheet-foot button'), /Import/).click();
+  await sleep(250);
+  var after = data(dress.id);
+  ok(/short stitch at the point/.test(after.steps[1].text), 'the edited text is still there after importing again');
+  eq(after.steps[1].note, 'Used a 2.0 stitch length', 'and so is the note');
+  eq(after.size.chosen, '42', 'the chosen size survives the re-import');
+  await closeAll();
+
+  /* ============================================================ 6. import check "off" demotes Import */
+  group('Gap 8: a check that says "off" demotes Import');
+  var chkProj = mk('SAT checked', {});
+  show(chkProj);
+  SA.openSheet('import', chkProj.id);
+  await sleep(120);
+  // Steps 1, 2 and 4: step 3 is missing, and a sewing sentence sits outside every step.
+  var GAPPY = '=== PAGE 1 ===\nINSTRUCTIONS\n1. Sew the front to the back at the shoulders. Press the seams open.\n' +
+    '2. Sew the side seams and finish the raw edges with a zigzag stitch.\n' +
+    '=== PAGE 2 ===\n4. Hem the sleeves by turning up 2 cm twice and stitching close to the fold.\n' +
+    '5. Sew on the buttons where marked on the pattern and press the whole top.\n';
+  openSheet().querySelector('.sw-paste-area').value = GAPPY;
+  byText(inSheet('button'), /^Read this text$/).click();
+  await sleep(100);
+  var chk = T.importCheck(S.parse(GAPPY), {});
+  info('importCheck verdict: ' + (chk && chk.verdict) + ' · ' + (chk && chk.rows.map(function (r) { return r.label + '=' + r.verdict; }).join(', ')));
+  var ib = byText(inSheet('.sheet-foot button'), /Import/);
+  if (chk && chk.verdict === 'off') {
+    ok(ib.classList.contains('check-demoted') || /demot/.test(ib.className), 'Import is demoted to a secondary button', ib.className);
+    ib.click();
+    await sleep(150);
+    var conf = openSheet();
+    ok(conf && conf !== null && /anyway|sure|check/i.test(conf.textContent), 'tapping it asks first (a plain confirm, never a block)', conf && conf.textContent.slice(0, 80));
+    var yes = conf && byText(Array.prototype.slice.call(conf.querySelectorAll('button')), /anyway|Import|Use/i);
+    if (yes) { yes.click(); await sleep(250); }
+    ok(data(chkProj.id).steps.length === 4, 'confirming imports the four steps', String(data(chkProj.id).steps.length));
+  } else {
+    ok(!ib.classList.contains('check-demoted'), 'a check that is not "off" leaves Import primary', ib.className);
+    log(false, 'the synthetic gap pattern did not produce an "off" check (cannot test the demotion)', chk && chk.verdict);
+  }
+  await closeAll();
+
+  /* ============================================================ 7. units on the big button */
+  group('P10 / S3: units in their step, on the big button');
+  var quilt = mk('SAT quilt', QUILT_DATA);
+  show(quilt);
+  await sleep(40);
+  T.stepDone(quilt.id);
+  await sleep(40);
+  var qs = T.state(quilt.id);
+  eq(qs.where, 'Step 2 of 4', 'on step 2');
+  ok(qs.unitBtn && qs.unitBtn.name === 'Unit 1' && qs.unitBtn.done === 0 && qs.unitBtn.target === 2, 'the big button counts Unit 1 · 0 / 2', JSON.stringify(qs.unitBtn));
+  var qbtn = d.getElementById('sw-step-btn');
+  ok(/UNIT 1/.test(qbtn.textContent) && /0 \/ 2/.test(qbtn.textContent), 'and says so', qbtn.textContent);
+  var strip = d.querySelector('.sw-unit-strip');
+  ok(visible(strip) && /Unit 2 0\/1/.test(strip.textContent), 'the step\'s other unit is in the chip strip (bare numbers keep the word "Unit")', strip.textContent);
+  var lettered = mk('SAT lettered units', { kind: 'quilt', steps: [{ n: 1, text: 'Make 2 Unit 1a and 2 Unit 1b.' }],
+    units: [{ id: 'l1', name: 'Unit 1a', target: 2, done: 0, step: 1 }, { id: 'l2', name: 'Unit 1b', target: 2, done: 0, step: 1 }] });
+  show(lettered);
+  await sleep(40);
+  var ls = d.querySelector('.sw-unit-strip');
+  ok(/^Units/.test(ls.textContent) && /1b 0\/2/.test(ls.textContent) && !/Unit 1b/.test(ls.textContent), 'lettered units: "Units" once, then 1a, 1b', ls.textContent);
+  show(quilt);
+  await sleep(40);
+  strip = d.querySelector('.sw-unit-strip');
+  qbtn = d.getElementById('sw-step-btn');
+  ok(strip.querySelector('.sw-unit-chip[aria-label="Unit 2, 0 of 1 made"]'), 'each chip keeps the full name for a screen reader');
+  ok(!d.querySelector('.sw-units .sw-unit'), 'no stacked unit cards for units that know their step');
+  var link = d.querySelector('.sw-step-link');
+  ok(visible(link) && strip.contains(link), '"Step done" becomes a link in the unit strip');
+  var lr = rect(link), qbr = rect(qbtn);
+  var barTop = (function () { var b = d.querySelector('#craft-body .bottombar'); return b ? Math.round(b.getBoundingClientRect().top) : 812; })();
+  ok(lr.bottom <= qbr.top, 'the Step done link sits above the big button (never under the fold)', lr.top + '–' + lr.bottom + ' vs button ' + qbr.top);
+  ok(qbr.bottom <= barTop, 'the unit button is above the bottom bar at 375 × 812 on a long step', qbr.top + '–' + qbr.bottom + ' vs bar ' + barTop);
+  ok(lr.h >= 44, 'and is a 44 px tap target', lr.h + ' px');
+  ok(Math.abs(rect(strip).h - lr.h) <= 6, 'the unit strip (chips, −1, Step done) is one line at 375 px', rect(strip).h + ' px');
+  // The short phone: 375 × 640.
+  f.style.height = '640px';
+  await sleep(150);
+  App.render();
+  await sleep(60);
+  var b640 = rect(d.getElementById('sw-step-btn')), bar640 = Math.round(d.querySelector('#craft-body .bottombar').getBoundingClientRect().top);
+  ok(b640.bottom <= bar640, 'at 375 × 640 the unit button is above the bottom bar too', b640.top + '–' + b640.bottom + ' vs bar ' + bar640);
+  f.style.height = '812px';
+  await sleep(150);
+  App.render();
+  await sleep(40);
+  var minusChip = strip.querySelector('.sw-unit-minus');
+  ok(minusChip && minusChip.getBoundingClientRect().height >= 44, 'the strip\'s −1 is a 44 px tap target');
+  // A long step: a few lines and "Show the whole step", never a tiny scroll box.
+  var more = d.querySelector('.sw-text-more'), stText = d.querySelector('.sw-step-text');
+  ok(visible(more) && /Show the whole step/.test(more.textContent), 'a long step offers "Show the whole step"');
+  ok(getComputedStyle(stText).overflowY === 'hidden', 'the text is not a scroll box');
+  more.click();
+  await sleep(30);
+  ok(stText.scrollHeight <= stText.clientHeight + 2 && more.getAttribute('aria-expanded') === 'true', 'tapping it shows the whole step', stText.scrollHeight + ' / ' + stText.clientHeight);
+  more.click();
+  await sleep(30);
+  eq(more.getAttribute('aria-expanded'), 'false', 'and Show less folds it again');
+  qbtn.click();
+  await sleep(40);
+  eq(T.state(quilt.id).unitBtn.done, 1, 'a tap counts one Unit 1');
+  T.unitBump(quilt.id, -1);
+  await sleep(30);
+  eq(T.state(quilt.id).unitBtn.done, 0, '−1 takes it back');
+  T.advance(quilt.id); T.advance(quilt.id);
+  await sleep(40);
+  qs = T.state(quilt.id);
+  ok(qs.unitBtn && qs.unitBtn.name === 'Unit 2', 'two made: the button moves on to Unit 2', JSON.stringify(qs.unitBtn));
+  T.advance(quilt.id);
+  await sleep(60);
+  qs = T.state(quilt.id);
+  eq(qs.where, 'Step 2 of 4', 'finishing the step\'s last unit does not tick the step by itself');
+  ok(qs.unitBtn === null, 'every unit of the step is made: the button is Step done again');
+  T.stepDone(quilt.id);
+  await sleep(40);
+  qs = T.state(quilt.id);
+  ok(qs.where === 'Step 3 of 4' && qs.unitBtn && qs.unitBtn.name === 'Unit 3', 'step 3: the button counts Unit 3');
+  // Working mode counts the unit too.
+  d.querySelector('.sw-work-open').click();
+  await sleep(100);
+  var cells = scr.querySelectorAll('.work-cell');
+  ok(cells.length === 2 && /UNIT 3/.test(cells[1].textContent), 'Sewing mode shows the unit beside the step');
+  ok(/Tap: one more Unit 3/.test((scr.querySelector('.work-tip') || {}).textContent || ''), 'the tip says what a tap does, in plain words');
+  var outside = Array.prototype.filter.call(scr.querySelectorAll('.work-btns .work-btn'), function (b) {
+    return visible(b) && b.getBoundingClientRect().right > 375.5;
+  }).map(function (b) { return b.getAttribute('aria-label'); });
+  eq(outside, [], 'with −1, Undo, Back and Next every button is inside the 375 px screen');
+  var hud4 = scr.querySelector('.work-hud.sw-work');
+  ok(hud4 && hud4.classList.contains('sw-work-four'), 'the HUD carries a class for four buttons (no reliance on :has())');
+  var word = scr.querySelector('.work-btns .work-btn-word');
+  ok(word && w.getComputedStyle(word).display === 'none', 'and at 375 px the button words are hidden, the labels kept', word && word.parentNode.getAttribute('aria-label'));
+  if (d.activeElement && d.activeElement.blur) d.activeElement.blur();
+  key('Enter');
+  await sleep(60);
+  eq(T.state(quilt.id).unitBtn.done, 1, 'Enter counts one unit in Sewing mode');
+  var minus = Array.prototype.filter.call(scr.querySelectorAll('.work-btns button'), function (b) { return /Take one off/.test((b.getAttribute('aria-label') || '') + b.title) || /−1/.test(b.textContent); })[0];
+  ok(minus && visible(minus), 'a −1 button is offered while a unit is counted',
+    Array.prototype.map.call(scr.querySelectorAll('.work-btns button'), function (b) { return (b.getAttribute('aria-label') || '') + '[' + b.textContent + ']' + (b.hidden ? ' hidden' : ''); }).join(' | '));
+  if (minus && visible(minus)) {
+    minus.click();
+    await sleep(60);
+    eq(T.state(quilt.id).unitBtn.done, 0, '−1 in Sewing mode takes the unit back');
+  }
+  key('Escape');
+  await sleep(60);
+
+  /* ============================================================ 8. kind-aware chrome and the ⋯ menu */
+  group('P14 + the ⋯ menu: extras listed, each sheet opens and closes');
+  var bag = mk('SAT bag', BAG_DATA);
+  show(bag);
+  await sleep(40);
+  ok(!visible(d.querySelector('.sw-mini-size')), 'a bag has no Size row');
+  ok(visible(d.querySelector('.sw-cuttable')), 'on a cutting step the cutting bar is shown');
+  T.stepDone(bag.id);
+  await sleep(40);
+  ok(!visible(d.querySelector('.sw-cuttable')), 'on any other step it is not (the step keeps the room)');
+  var bagMenu = T.menu(bag.id).map(function (m) { return m.label; });
+  ok(bagMenu.indexOf('Size & alterations') < 0, 'and no Size & alterations item', bagMenu.join(' | '));
+  show(quilt);
+  await sleep(40);
+  var mini = d.querySelector('.sw-mini-size');
+  ok(visible(mini) && /Finished 40" × 50"|Finished 40" x 50"/.test(mini.textContent), 'a quilt shows its finished size in that row', mini && mini.textContent);
+  var extras = w.SewingExtras.menuItems(Store.project(quilt.id));
+  var labels = await menuLabels();
+  ok(extras.length >= 5 && extras.every(function (it) { return labels.some(function (l) { return l.indexOf(it.label) >= 0; }); }), 'the ⋯ menu lists every extra for a quilt', labels.join(' | '));
+  await closeAll();
+  // Each extra: open from ⋯, focus inside, Escape closes, focus back on ⋯.
+  for (var xi = 0; xi < extras.length; xi++) {
+    var it = extras[xi];
+    var menuBtn = d.getElementById('c-menu');
+    menuBtn.focus();
+    menuBtn.click();
+    await sleep(120);
+    var item = byText(inSheet('.menu-item'), new RegExp(it.label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    if (!item) { log(false, it.label + ': in the menu'); await closeAll(); continue; }
+    item.click();
+    await sleep(160);
+    var sh = openSheet();
+    var inside = sh && sh.contains(d.activeElement);
+    ok(sh && /swx-sheet/.test(sh.className) && inside, it.label + ': opens in a sheet with focus inside', sh && sh.className);
+    var b2 = sh && sh.querySelector('.sheet-body');
+    var over = b2 ? Math.round(b2.scrollWidth - b2.clientWidth) : -1;
+    ok(over <= 1, it.label + ': no sideways scroll at 375 px', over + ' px');
+    key('Escape', d.activeElement || d.body);
+    await sleep(160);
+    ok(!openSheet(), it.label + ': Escape closes it');
+    var back = d.activeElement;
+    ok(back === menuBtn || (back && back.id === 'c-menu'), it.label + ': focus returns to ⋯', back && (back.id || back.className || back.tagName));
+  }
+
+  /* ============================================================ 8b. step.fig, nap notes, colours */
+  group('P1 / S4: the step\'s figure is read from step.fig (old imageRef still works)');
+  var figP = mk('SAT figures', {
+    steps: [
+      { n: 1, text: 'Sew the yoke.', page: 2, fig: { kind: 'crop', page: 2, blobKey: 'p:sat:fig:2:abc' } },
+      { n: 2, text: 'Sew the sleeve.', page: 3, fig: { kind: 'page', page: 3, rect: { x0: 0.1, y0: 0.2, x1: 0.9, y1: 0.5 } } },
+      { n: 3, text: 'Sew the hem.', imageRef: 'p:sat:fig:4:def' },
+      { n: 4, text: 'Press it.', imageRef: 'rect:5:0.1,0.1,0.5,0.4' },
+      { n: 5, text: 'Wear it.', fig: { kind: 'crop', blobKey: 'not-a-fig-key' } }]
+  });
+  var fsteps = data(figP.id).steps;
+  ok(fsteps[0].fig && fsteps[0].fig.kind === 'crop', 'normalize keeps step.fig', JSON.stringify(fsteps[0].fig));
+  eq(T.figureRef(fsteps[0]), { kind: 'crop', blobKey: 'p:sat:fig:2:abc', page: 2 }, 'a crop in step.fig is the step\'s drawing');
+  eq(T.figureRef(fsteps[1]), { kind: 'page', page: 3, rect: { x0: 0.1, y0: 0.2, x1: 0.9, y1: 0.5 } }, 'a page frame in step.fig opens the page outlined');
+  eq(T.figureRef(fsteps[2]), { kind: 'crop', blobKey: 'p:sat:fig:4:def' }, 'an old imageRef crop is still read');
+  eq(T.figureRef(fsteps[3]) && T.figureRef(fsteps[3]).kind, 'page', 'an old imageRef frame is still read');
+  eq(T.figureRef(fsteps[4]), null, 'anything else is no figure (never a guess)');
+  eq(T.state(figP.id).figure, 'crop', 'the step screen reports the crop');
+
+  group('Nap directions on the cutting and fabric sheets');
+  var napP = mk('SAT nap', {
+    cutting: [{ id: 'c1', piece: 'Robe Front', qty: 1, material: 'main' }],
+    fabric: [{ name: 'Main fleece', amounts: ['2 yd'] }],
+    steps: [{ n: 1, text: 'Cut the pieces with the nap running down.' }],
+    sourceText: '=== PAGE 2 ===\nCutting\nBefore you cut, make sure the nap of the fleece is running down on every piece.\n'
+  });
+  info('napNotes: ' + JSON.stringify(S.napNotes ? S.napNotes(data(napP.id).sourceText) : 'none'));
+  show(napP);
+  SA.openSheet('cutting', napP.id);
+  await sleep(120);
+  var napBox = inSheet('.sw-nap')[0];
+  ok(napBox && /running down/.test(napBox.textContent) && /page 2/.test(napBox.textContent), 'the cutting sheet quotes the booklet\'s nap direction with its page', napBox && napBox.textContent);
+  await closeAll();
+  SA.openSheet('fabric', napP.id);
+  await sleep(120);
+  ok(inSheet('.sw-nap').length === 1, 'and so does the fabric sheet');
+  ok(openSheet() && /swx-sheet/.test(openSheet().className) && /Fabric and shopping list/.test(sheetText()), 'the fabric sheet is the one "Fabric and shopping list" sheet');
+  var printed = inSheet('details.sw-fabric-printed')[0];
+  ok(printed && /As the pattern prints it/.test(printed.textContent) && /Main fleece/.test(printed.textContent), 'it keeps the rows as the pattern prints them (from the old sheet)');
+  var usedIn = inSheet('[data-focus-key="fabric-used"]')[0];
+  ok(usedIn, 'and "What I actually used"');
+  if (usedIn) {
+    usedIn.value = '2 m grey fleece';
+    usedIn.dispatchEvent(new w.Event('change', { bubbles: true }));
+    await sleep(40);
+    ok(/Fabric used: 2 m grey fleece/.test(Store.project(napP.id).notes || ''), 'which still saves into the project notes');
+  }
+  await closeAll();
+  SA.openSheet('fabric', dress.id);
+  await sleep(150);
+  ok(!/No fabric requirements were found/.test(sheetText()), 'a pattern with no fabric rows is said once, not twice');
+  await closeAll();
+  var fabricItems = T.menu(napP.id).filter(function (m) { return /fabric/i.test(m.label) && !/colours/i.test(m.label); }).map(function (m) { return m.label; });
+  eq(fabricItems, ['Fabric and shopping list'], 'the ⋯ menu has one fabric item');
+  await closeAll();
+
+  group('Fabric colours live in the project now (sew-core keeps swatchColours)');
+  w.SewingExtras.open('swatches', Store.project(quilt.id));
+  await sleep(120);
+  var colourIn = inSheet('[data-focus-key="colour-0"]')[0];
+  if (colourIn) { colourIn.value = '#3366cc'; colourIn.dispatchEvent(new w.Event('change', { bubbles: true })); await sleep(60); }
+  eq((data(quilt.id).swatchColours || {})[0], '#3366cc', 'the colour is kept in craftData.swatchColours');
+  var bagSet = Store.craftSettings('sewing').extrasSwatches;
+  ok(!(bagSet && bagSet[quilt.id]), 'and not in the craft-settings workaround');
+  await closeAll();
+
+  group('Units follow the pattern; names that are not names; review rows by kind');
+  eq(T.saLabel(dress.id), 'Seam allowance 1.5 cm', 'a metric booklet\'s seam allowance in cm');
+  var inchP = mk('SAT inch bag', { kind: 'bag', seamAllowance: { text: 'Sew with a 1/2" seam allowance.', mm: 13, inches: '1/2' }, steps: [{ n: 1, text: 'Sew it.' }] });
+  eq(T.saLabel(inchP.id), 'Seam allowance 1/2" (1.3 cm)', 'an inch pattern\'s seam allowance in inches first');
+  var cmBoth = mk('SAT both units', { seamAllowance: { text: 'Seam allowance 1cm / 3/8".', mm: 10, inches: '3/8' }, steps: [{ n: 1, text: 'Sew it.' }] });
+  eq(T.saLabel(cmBoth.id), 'Seam allowance 1 cm (3/8")', 'a cm-first booklet that prints both: cm first');
+  var savedName = S.projectName;
+  S.projectName = function () { return 'Binding 5/8 yard'; };
+  eq(T.patternName({}, 'x.pdf'), '', 'an amount is never taken as the pattern\'s name');
+  S.projectName = function () { return 'Fabric Requirements'; };
+  eq(T.patternName({}, 'x.pdf'), '', 'nor a requirements heading');
+  S.projectName = function () { return 'Harmony Quilt'; };
+  eq(T.patternName({}, 'x.pdf'), 'Harmony Quilt', 'a real name is kept');
+  S.projectName = savedName;
+  // The garment import review had no "Block counters" row; a bag's has no "Sizes" row.
+  var bagImp = mk('SAT bag import', {});
+  show(bagImp);
+  SA.openSheet('import', bagImp.id);
+  await sleep(120);
+  openSheet().querySelector('.sw-paste-area').value = '=== PAGE 1 ===\nTEST TOTE BAG\nThis tote bag has a zipper pocket and a lined interior.\nMATERIALS\n- 1/2 yard exterior fabric\n- 1/2 yard lining fabric\n- 14" zipper\n' +
+    'INSTRUCTIONS\n1. Fuse the interfacing to the exterior panels and the handles.\n2. Sew the zipper pocket to the lining with a 1/2" seam allowance.\n3. Sew the exterior panels together and box the corners of the bag.\n4. Turn the bag right side out and topstitch around the top edge.\n';
+  byText(inSheet('button'), /^Read this text$/).click();
+  await sleep(100);
+  var rlabels = inSheet('.sw-review-label').map(function (l) { return l.textContent; });
+  info('bag review rows: ' + rlabels.join(' | ') + ' · kind ' + S.parse(openSheet().querySelector('.sw-paste-area').value).kind);
+  if (S.parse(openSheet().querySelector('.sw-paste-area').value).kind === 'bag') {
+    ok(rlabels.indexOf('Sizes') < 0 && rlabels.indexOf('Block counters') < 0, 'a bag\'s review has no Sizes or Block counters row');
+  }
+  ok(!/style\)/.test(sheetText()), 'the review does not talk about numbering styles');
+  await closeAll();
+
+  /* ============================================================ 9. milestones */
+  group('P19: milestones');
+  var ms = T.milestones(S.normalize({ cutting: [{ piece: 'Front', qty: 1, cutCount: 0 }] }), S.normalize({ cutting: [{ piece: 'Front', qty: 1, cutCount: 1 }] }));
+  ok(ms.some(function (m) { return /Everything is cut/.test(m); }), 'cutting the last piece says "Everything is cut"', ms.join(' | '));
+
+  /* ============================================================ clean up */
+  group('Clean up');
+  await closeAll();
+  show(null);
+  made.forEach(function (id) { Store.deleteProject(id); });
+  ok(made.every(function (id) { return !Store.project(id); }), 'the test projects are deleted');
+}
+</script>
+</body>
+</html>

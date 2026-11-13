@@ -26,3 +26,9 @@
 *.webp binary
 *.woff binary
 *.ttf binary
+*.wasm binary
+*.gz binary
+*.traineddata binary
+
+# Vendored third-party builds: never re-encode line endings.
+js/vendor/** -text

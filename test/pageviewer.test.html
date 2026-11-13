@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Page viewer (PageViewer) tests</title>
+<link rel="stylesheet" href="../css/app.css">
+<link rel="stylesheet" href="../css/themes.css">
+<style>
+  .t-page { font: 14px/1.4 Menlo, Consolas, monospace; background:#111; color:#eee; padding:16px; }
+  .pass { color:#7bd389; } .fail { color:#ff6b6b; background:#2a1414; }
+  .group { margin-top:18px; font-weight:bold; color:#9cf; border-bottom:1px solid #333; padding-bottom:4px; }
+  #summary { margin-top:20px; font-size:18px; font-weight:bold; } #summary.ok { color:#7bd389; } #summary.bad { color:#ff6b6b; }
+  .note { color:#aaa; } #frame { width: 300px; height: 400px; }
+</style>
+</head>
+<body>
+<div class="t-page">
+<h1>PageViewer — one pinch / zoom / outline viewer (wave K)</h1>
+<p class="note"><code>js/pageviewer.js</code> alone: the pure maths, then a viewer mounted on two synthetic pages
+  (canvases drawn here, no PDF) driven with wheel, keys and pointer events. The frame below stays for a look.</p>
+<div id="frame"></div>
+<div id="out"></div>
+<div id="summary">running…</div>
+</div>
+<script src="../js/pageviewer.js"></script>
+<script>
+'use strict';
+var out = document.getElementById('out'), passed = 0, failed = 0;
+function log(ok, label, detail) {
+  if (ok) passed++; else failed++;
+  var d = document.createElement('div'); d.className = ok ? 'pass' : 'fail';
+  d.textContent = (ok ? 'PASS' : 'FAIL') + ' - ' + label + (detail ? '  (' + detail + ')' : '');
+  out.appendChild(d);
+}
+function group(t) { var d = document.createElement('div'); d.className = 'group'; d.textContent = t; out.appendChild(d); }
+function eq(a, b, label) { var ok = JSON.stringify(a) === JSON.stringify(b); log(ok, label, ok ? '' : 'expected ' + JSON.stringify(b) + ' got ' + JSON.stringify(a)); }
+function ok(c, label, d) { log(!!c, label, c ? '' : d); }
+function near(a, b, tol, label) { log(Math.abs(a - b) <= tol, label, a + ' vs ' + b); }
+function tick(ms) { return new Promise(function (r) { setTimeout(r, ms || 0); }); }
+function page(w, h, colour) {
+  var c = document.createElement('canvas'); c.width = w; c.height = h;
+  var g = c.getContext('2d'); g.fillStyle = colour; g.fillRect(0, 0, w, h);
+  g.fillStyle = '#000'; g.fillRect(w * 0.5, h * 0.5, 20, 20);
+  return c;
+}
+function ptr(node, type, x, y, id) {
+  var e;
+  try { e = new PointerEvent(type, { bubbles: true, cancelable: true, clientX: x, clientY: y, pointerId: id || 1 }); }
+  catch (err) { e = new MouseEvent(type, { bubbles: true, cancelable: true, clientX: x, clientY: y }); e.pointerId = id || 1; }
+  node.dispatchEvent(e);
+}
+var PV = window.PageViewer;
+
+(async function () {
+  group('pure maths');
+  eq(PV.fitScale(600, 800, 300, 400), 0.5, 'fitScale: the whole page in the frame');
+  eq(PV.fitScale(1000, 100, 300, 400), 0.3, 'fitScale: a wide page fits its width');
+  eq(PV.fitScale(0, 0, 300, 400), 1, 'fitScale: no image → 1');
+  var st = { s: 0.5, tx: 50, ty: 50, iw: 600, ih: 800, fitS: 0.5 };
+  PV.clampPan(st, 300, 400);
+  eq([st.tx, st.ty], [0, 0], 'clampPan: a fitted page is centred');
+  st = { s: 1, tx: 100, ty: -900, iw: 600, ih: 800, fitS: 0.5 };
+  PV.clampPan(st, 300, 400);
+  eq([st.tx, st.ty], [0, -400], 'clampPan: a zoomed page never leaves a gap');
+  st = { s: 0.5, tx: 0, ty: 0, iw: 600, ih: 800, fitS: 0.5 };
+  PV.zoomAt(st, 2, 150, 200, 12, 300, 400);
+  eq([st.s, st.tx, st.ty], [1, -150, -200], 'zoomAt: the point under the cursor stays put');
+  PV.zoomAt(st, 100, 0, 0, 12, 300, 400);
+  eq(st.s, 6, 'zoomAt: capped at 12 × fit');
+  PV.zoomAt(st, 0.001, 0, 0, 12, 300, 400);
+  eq(st.s, 0.5, 'zoomAt: never smaller than fit');
+  eq(PV.outlineBox({ fx: 0.5, fy: 0.25, fw: 0.1, fh: 0.1 }, 600, 800), { x: 300, y: 200, w: 60, h: 80 }, 'outlineBox: fractions → image px');
+  eq(PV.outlineBox({ x: 590, y: 10, w: 40, h: 20 }, 600, 800), { x: 590, y: 10, w: 10, h: 20 }, 'outlineBox: clipped to the page');
+  eq(PV.outlineBox({ x: 700, y: 10, w: 40, h: 20 }, 600, 800), null, 'outlineBox: off the page → none');
+  eq(PV.outlineBox({ fx: null }, 600, 800), null, 'outlineBox: an unknown region (rotated page) → none');
+
+  group('a viewer on two pages');
+  var frame = document.getElementById('frame');
+  var seen = [];
+  var v = PV.mount(frame, {
+    pages: [{ label: 'Page 1', canvas: page(600, 800, '#e8d9b0') }, { label: 'Page 2', canvas: page(800, 600, '#b0d0e8') }],
+    index: 0, label: 'Chart page',
+    outline: function (i) { return i === 1 ? { fx: 0.5, fy: 0.5, fw: 0.025, fh: 0.0333 } : null; },
+    onPage: function (i) { seen.push(i); }
+  });
+  await tick(30);
+  eq(frame.getAttribute('role'), 'img', 'the frame is an image to assistive tech');
+  eq(frame.tabIndex, 0, 'and focusable');
+  ok(/Chart page: Page 1 · 1 of 2/.test(frame.getAttribute('aria-label')), 'named by its page', frame.getAttribute('aria-label'));
+  var s0 = v.state();
+  eq([s0.iw, s0.ih, s0.fitS], [600, 800, 0.5], 'page 1 is fitted');
+  ok(!v.outlined(), 'no outline on page 1');
+  frame.dispatchEvent(new WheelEvent('wheel', { deltaY: -100, clientX: frame.getBoundingClientRect().left + 150, clientY: frame.getBoundingClientRect().top + 200, bubbles: true, cancelable: true }));
+  near(v.state().s, 0.575, 0.001, 'wheel up zooms in by 1.15');
+  var k = function (key) { frame.dispatchEvent(new KeyboardEvent('keydown', { key: key, bubbles: true, cancelable: true })); };
+  k('+');
+  near(v.state().s, 0.71875, 0.001, '+ zooms in');
+  var tx0 = v.state().tx;
+  k('ArrowRight');
+  ok(v.state().tx < tx0, 'ArrowRight pans');
+  k('Home');
+  eq(v.state().s, 0.5, 'Home fits');
+  k('-');
+  eq(v.state().s, 0.5, '− never goes below fit');
+  var r = frame.getBoundingClientRect();
+  ptr(frame, 'pointerdown', r.left + 100, r.top + 100); ptr(frame, 'pointerup', r.left + 100, r.top + 100);
+  await tick(20);
+  ptr(frame, 'pointerdown', r.left + 100, r.top + 100); ptr(frame, 'pointerup', r.left + 100, r.top + 100);
+  eq(v.state().s, 1.5, 'a double tap zooms 3×');
+  ptr(frame, 'pointerdown', r.left + 100, r.top + 100);
+  ptr(frame, 'pointermove', r.left + 60, r.top + 100);
+  ptr(frame, 'pointerup', r.left + 60, r.top + 100);
+  ok(v.state().s === 1.5, 'a drag pans without zooming');
+  k('PageDown');
+  await tick(30);
+  eq(v.index(), 1, 'PageDown turns the page');
+  eq(seen, [0, 1], 'onPage heard both pages');
+  var s1 = v.state();
+  eq([s1.iw, s1.ih], [800, 600], 'page 2 placed at its own size');
+  ok(v.outlined(), 'page 2 has the region outlined');
+  ok(s1.s > s1.fitS, 'and is zoomed in on it', s1.s + ' > ' + s1.fitS);
+  ok(/outlined/.test(frame.getAttribute('aria-label')), 'the label says the spot is outlined');
+  v.show(5);
+  await tick(20);
+  eq(v.index(), 1, 'show() clamps to the last page');
+
+  group('a missing page says so');
+  var f2 = document.createElement('div');
+  f2.style.cssText = 'width:200px;height:200px';
+  document.body.appendChild(f2);
+  var v2 = PV.mount(f2, { pages: [{ label: 'Gone', blobKey: 'p:none:chartpage:1' }], onEmpty: function () { return 'Re-import the PDF.'; } });
+  await tick(60);
+  eq(f2.querySelector('.pv-empty').textContent, 'Re-import the PDF.', 'onEmpty’s words (BlobStore absent or empty)');
+  v2.destroy();
+  f2.parentNode.removeChild(f2);
+
+  group('open(): the sheet');
+  var opts = null;
+  PV.open({ openSheet: function (o) { opts = o; return {}; }, title: 'Chart page', pages: [{ canvas: page(100, 100, '#fff') }, { canvas: page(100, 100, '#eee') }] });
+  var body = document.createElement('div');
+  body.style.cssText = 'width:300px';
+  document.body.appendChild(body);
+  opts.build(body);
+  eq(opts.title, 'Chart page', 'title');
+  ok(body.querySelector('.pv-sheet-frame.pv-frame'), 'a frame');
+  eq(body.querySelectorAll('.pv-nav').length, 2, '‹ › for two pages');
+  eq(Array.prototype.map.call(body.querySelectorAll('.pv-zoom .btn'), function (b) { return b.textContent; }), ['−', 'Fit', '+'], '− Fit +');
+  await tick(80);
+  ok(body.querySelector('.pv-nav').disabled, '‹ is disabled on the first page');
+  opts.onClose();
+  body.parentNode.removeChild(body);
+
+  var el = document.getElementById('summary');
+  el.textContent = passed + ' passed, ' + failed + ' failed';
+  el.className = failed ? 'bad' : 'ok';
+})().catch(function (e) { log(false, 'threw ' + (e && e.stack || e)); var el = document.getElementById('summary'); el.textContent = passed + ' passed, ' + failed + ' failed'; el.className = 'bad'; });
+</script>
+</body>
+</html>

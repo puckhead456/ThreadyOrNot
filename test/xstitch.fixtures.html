@@ -679,7 +679,34 @@ var TEXT_FIXTURES = [
   { name: 'xs-satsuma-summersflight-bw', label: 'Satsuma Street "Summer’s Flight" B&W — one JPEG' },
   { name: 'xs-satsuma-summersflight-color', label: 'Satsuma Street "Summer’s Flight" colour — one JPEG' },
   { name: 'xs-satsuma-sunshine', label: 'Satsuma Street "Sunshine" — one JPEG' },
-  { name: 'xs-tinymodernist-autumn', label: 'Tiny Modernist "Autumn" — one JPEG, unlike its siblings' }
+  { name: 'xs-tinymodernist-autumn', label: 'Tiny Modernist "Autumn" — one JPEG, unlike its siblings' },
+
+  /* Wave K audit (docs/wave-k/xs-audit.md), new fixtures 2026-11-12 */
+  { name: 'xs-wocs-robin', label: 'WOCS robin: DMC / Anchor / Madeira key, backstitch, knots',
+    check: function (n, k) {
+      eq(k.entries.filter(function (e) { return /\d/.test(e.name || ''); }).map(function (e) { return e.code; }), [],
+        n + ': no colour name holds a digit (the chart symbols are not names)');
+      eq(byKind(k, 'back').length, 2, n + ': two backstitch rows');
+      eq(byKind(k, 'knot').length, 1, n + ': one French-knot row');
+      eq(k.entries.length, 17, n + ': seventeen key rows');
+    } },
+  { name: 'xs-fqs-celebration-sampler', label: 'FQS sampler over 5 pages, AuriFloss key',
+    check: function (n, k) {
+      eq([k.design.w, k.design.h], [138, 172], n + ': the stated design size');
+      eq([k.fabric.count, k.fabric.over], [32, 2], n + ': 32-count linen over two');
+    } },
+  { name: 'xs-anchor-new-home', label: 'Anchor-only key (4-digit numbers in a column)',
+    check: function (n, k) {
+      eq([k.design.w, k.design.h], [72, 66], n + ': the stated design size');
+      eq(k.entries.filter(function (e) { return e.brand === 'DMC' && /^0/.test(e.code); }).length, 0,
+        n + ': no Anchor number with a leading zero is read as a DMC code');
+      /* KNOWN (audit): the key is a column of Anchor numbers with no symbols; none read today */
+      if (k.entries.length && k.entries.every(function (e) { return e.brand === 'Anchor' && /^\d{1,4}$/.test(e.code); })) {
+        log(true, n + ': Anchor rows read');
+      } else {
+        warn('KNOWN: ' + n + ' reads ' + k.entries.length + ' rows (' + k.warnings.join(' | ') + '); the Anchor column is not read yet');
+      }
+    } }
 ];
 
 /** The extracted text of each fixture, for "is this a parser bug?" notes. */
@@ -1036,18 +1063,46 @@ var GRID_FIXTURES = [
   },
   {
     name: 'xs-pacman', label: 'KG-Chart LE, small, no symbol glyphs in the text layer',
-    check: function (n, r, key) {
+    check: function (n, r, key, loaded) {
       /* The spec expected this one to fail, because it has no text glyphs at
          all. Reading the coloured squares instead, it succeeds. Two of its ten
          colours are drawn with the same RGB, so nine inks carry ten colours. */
       eq(r.ok, true, n + ': the grid reads even with no symbol glyphs anywhere');
       eq([r.w, r.h], [224, 288], n + ': 224 x 288 stitches');
       eq(r.filled, keySum(key), n + ': every stitch in the key is accounted for');
-      log(r.colors < key.entries.length,
-        n + ': two colours share one ink, so there are fewer inks than key rows',
-        r.colors + ' inks, ' + key.entries.length + ' rows');
-      log(r.matched >= 8, n + ': and at least eight of the ten still match', 'matched ' + r.matched);
+      eq(r.colors, 9, n + ': DMC 349 and DMC 3843 share one ink, so nine inks carry ten colours');
+      /* Wave K, the live bug: before, the shared ink went to neither colour
+         and 5,000 squares ended up blank while "Use it" was offered. */
+      eq(r.classes, 10, n + ': and the reader still finds ten colours');
+      eq(r.split, [{ ink: '5b5b5b', by: 'legend', into: [1, 3] }],
+        n + ': the shared ink is split by the symbol printed in each square (DMC 349 "E", DMC 3843 "-")');
+      eq([r.legend.rows, r.legend.used, r.legend.page], [10, true, 22],
+        n + ': using the key page\'s ten swatches and their symbols (page 22)');
+      eq(r.palette.slice(4, 7).map(function (p) { return p.code + ':' + p.stitchCount; }), ['3846:126', '3820:17', '728:126'],
+        n + ': DMC 3846 and DMC 728 both print 126: the swatch symbols say which ink is which');
+      eq(r.palette.every(function (p) { return p.glyph && p.glyph.clean && !!p.glyph.path; }), true,
+        n + ': every colour carries the designer\'s own symbol, captured cleanly (R5)');
+      eq(r.palette[3].glyph.path, 'M16 54 L83 54 L83 46 L16 46Z', n + ': DMC 3843\'s symbol is the bar the key page prints');
       regionChecks(n, r, 20);
+      return pacmanNoLegend(n, loaded, key);
+    }
+  },
+  {
+    name: 'xs-pokemon-bl', label: 'KG-Chart LE quadrant (bottom left)',
+    check: function (n, r, key) {
+      eq(r.ok, true, n + ': the grid reads');
+      eq([r.w, r.h], [500, 500], n + ': 500 x 500 stitches');
+      eq(r.filled, keySum(key), n + ': every stitch in the key is accounted for');
+      log(r.ms < KG_BUDGET_MS, n + ': under the ' + (KG_BUDGET_MS / 1000) + ' second budget', r.ms + ' ms');
+    }
+  },
+  {
+    name: 'xs-pokemon-br', label: 'KG-Chart LE quadrant (bottom right)',
+    check: function (n, r, key) {
+      eq(r.ok, true, n + ': the grid reads');
+      eq([r.w, r.h], [298, 500], n + ': 298 x 500 stitches');
+      eq(r.filled, keySum(key), n + ': every stitch in the key is accounted for');
+      log(r.ms < KG_BUDGET_MS, n + ': under the ' + (KG_BUDGET_MS / 1000) + ' second budget', r.ms + ' ms');
     }
   },
   {
@@ -1182,8 +1237,73 @@ function runGridFixture(fx) {
       r.warnings.forEach(function (w) { warn(w); });
       log(pageSeen > 0, fx.name + ': onProgress reported page numbers', 'last ' + pageSeen);
       log(r.cells instanceof Int16Array, fx.name + ': cells come back as an Int16Array');
-      try { fx.check(fx.name, r, key); }
+      var more = null;
+      try { more = fx.check(fx.name, r, key, loaded); }
       catch (e) { log(false, fx.name + ': grid assertions threw', String(e && e.message)); }
+      if (r.ok && !fx.noKey) cellTruth(fx.name, r, key);
+      if (r.check) info('check: ' + r.check.verdict + ' · ' + r.check.summary);
+      if (r.graphics) info('graphics: ' + r.graphics.segments.length + ' stroked segments, ' + r.graphics.circles.length +
+        ' vertex dots, ' + (r.mixedCells || 0) + ' squares with mixed quarters');
+      return Promise.resolve(more).then(function () { return printCheck(fx, r, key, loaded); });
+    }, function (e) {
+      log(false, fx.name + ': extractGrid rejected', String(e && e.message));
+      return null;
+    });
+  });
+}
+
+/**
+ * Wave K (parity gap 1): the colours the cells END UP as, for every vector
+ * chart that reads. A test on the raw fill alone let pacman's 5,000 blank
+ * squares pass; this one compares each key row's printed count with the
+ * squares that really carry that colour, and checks that no read square is
+ * left blank and that the Check the import screen shows agrees.
+ */
+function cellTruth(n, r, key) {
+  var per = {}, blank = 0, i;
+  for (i = 0; i < r.cells.length; i++) {
+    if (r.cells[i] < 0) blank++; else per[r.cells[i]] = (per[r.cells[i]] || 0) + 1;
+  }
+  eq(blank, r.w * r.h - r.filled, n + ': every square the reader found ends up as a colour (none left blank)');
+  var off = [];
+  key.entries.forEach(function (e, ei) {
+    if (e.kind && e.kind !== 'cross' && e.kind !== 'blend') return;
+    if ((per[ei] || 0) !== (e.stitchCount || 0)) off.push((e.brand || '') + ' ' + e.code + ' ' + (per[ei] || 0) + '/' + e.stitchCount);
+  });
+  eq(off, [], n + ': the squares of each colour on the chart add up to the key\'s printed count, row by row');
+  eq(r.palette.length, key.entries.length, n + ': no "could not tell apart" placeholder colours were needed');
+  eq(r.unresolved, [], n + ': nothing is left unresolved');
+  eq(r.check && r.check.verdict, 'exact', n + ': the check the import screen shows says exact');
+}
+
+/** pacman again, with the key's rows out of order so the swatch page cannot be trusted. */
+function pacmanNoLegend(n, loaded, key) {
+  var shuffled = JSON.parse(JSON.stringify(key));
+  var e = shuffled.entries, t = e[0]; e[0] = e[9]; e[9] = t; t = e[2]; e[2] = e[5]; e[5] = t;
+  return X.extractGrid(loaded.doc, null, { key: shuffled }).then(function (r) {
+    eq(r.legend.used, false, n + ' (key rows shuffled): the swatch order no longer matches the counts, so it is not used');
+    eq(r.split, [{ ink: '5b5b5b', by: 'glyph', into: [1, 3] }],
+      n + ' (key rows shuffled): the shared ink is still split, by the symbols in the squares and the key\'s counts');
+    eq(r.unresolved.map(function (u) { return [u.why, u.cells, u.candidates]; }), [['tie', 126, [4, 6]], ['tie', 126, [4, 6]]],
+      n + ' (key rows shuffled): DMC 3846 / DMC 728 (126 each, grey inks) are an explicit tie, not a coin toss');
+    eq(r.palette.length, 12, n + ' (key rows shuffled): as two placeholder colours after the ten key rows');
+    eq(r.palette[10].unresolved, [4, 6], n + ' (key rows shuffled): each placeholder names the two candidates');
+    var blank = 0;
+    for (var i = 0; i < r.cells.length; i++) if (r.cells[i] < 0) blank++;
+    eq(blank, r.w * r.h - r.filled, n + ' (key rows shuffled): and still no read square is blank');
+    eq(r.check.verdict, 'off', n + ' (key rows shuffled): the check says off, so the import must not offer "Use it" as the main button');
+    if (typeof X.resolveClass === 'function') {
+      var d = X.normalize({ palette: r.palette, chart: { w: r.w, h: r.h, cells: r.cells } }, null);
+      d = X.resolveClass(d, 10, 4);
+      d = X.resolveClass(d, 10, 6);   // the old 11 is now 10
+      var chk = X.checkCounts(d, shuffled.entries);
+      eq([d.palette.length, chk.verdict], [10, 'exact'], n + ' (key rows shuffled): assigning both placeholders (resolveClass) gives an exact chart');
+    }
+  });
+}
+
+function printCheck(fx, r, key, loaded) {
+  return Promise.resolve().then(function () {
       /* the printable export, on a chart we only just recovered */
       if (r.ok && r.palette) {
         var data = X.normalize({
@@ -1205,10 +1325,10 @@ function runGridFixture(fx) {
       }
       try { loaded.doc.destroy(); } catch (e) { /* ignore */ }
       return r;
-    }, function (e) {
-      log(false, fx.name + ': extractGrid rejected', String(e && e.message));
-      return null;
-    });
+  }, function (e) {
+    log(false, fx.name + ': grid follow-up threw', String(e && e.message));
+    try { loaded.doc.destroy(); } catch (e2) { /* ignore */ }
+    return null;
   });
 }
 
@@ -1321,6 +1441,42 @@ chain = chain.then(function () {
 GRID_FIXTURES.forEach(function (fx) {
   chain = chain.then(function () { return runGridFixture(fx); });
 });
+chain = chain.then(function () { h('h2', 'Symbol-font charts from the text layer (wave K #6)'); return runFoxyGlyphs(); });
+
+/**
+ * Wave K #6. Of the four Tiny Modernist PDFs only foxy sets its chart in
+ * symbol fonts (measured 2026-11-12: halloween draws 612 symbol images,
+ * homestitchhome 1,330, welcome is one picture). Its key prints no counts,
+ * so symbols are matched by the character the key prints; the five colours
+ * with no readable key symbol stay explicit placeholders.
+ */
+function runFoxyGlyphs() {
+  var n = 'xs-tinymodernist-foxy';
+  h('h3', n + ' - the chart read from its symbol fonts');
+  var key = keyResults[n];
+  if (!key) { skip(n + ' glyph chart (no key parsed)'); return Promise.resolve(); }
+  return loadChartDoc(n).then(function (loaded) {
+    if (!loaded || loaded.heavy) { skip(n + ' glyph chart'); return null; }
+    return loaded.doc.getPage(1).then(function (pg) { return pg.getTextContent(); }).then(function (tc) {
+      var cells = X.glyphCells(tc.items, { maxSize: 8 });
+      var ents = X.keySymbolCodes(tc.items, key.entries);
+      var r = X.gridFromGlyphs(cells, { entries: ents, design: key.design, strandsDefault: key.strandsDefault });
+      info(cells.length + ' chart symbols at a ' + (Math.round(cells.pitch * 100) / 100) + ' pt pitch; ' + r.warnings.join(' | '));
+      table(r.glyphs.map(function (g, i) { return [g.split('\u0001')[1], r.counts[i], r.how[i] || 'placeholder']; }),
+        ['symbol', 'squares', 'matched by']);
+      eq([r.ok, r.w, r.h], [true, 68, 68], n + ': the symbols sit on the printed 68 x 68 grid');
+      eq(r.classes, 9, n + ': nine symbols for the nine key colours');
+      eq([4, 5, 6, 8].map(function (i) { return r.palette[i].code + ':' + r.palette[i].stitchCount; }),
+        ['352:136', '666:200', '3347:605', '3799:203'],
+        n + ': the four colours whose key symbol is readable are matched by it (counts measured, the key prints none)');
+      eq(r.unresolved.length, 5, n + ': the other five symbols are explicit placeholders, not guesses');
+      eq(r.unresolved.every(function (u) { return u.candidates.join() === '0,1,2,3,7'; }), true,
+        n + ': each offering the five key colours with no readable symbol');
+      eq(r.check.verdict, 'unchecked', n + ': and the check says the key prints no counts');
+      try { loaded.doc.destroy(); } catch (e) { /* ignore */ }
+    });
+  });
+}
 chain
   .catch(function (e) { log(false, 'fixture run threw', String(e && e.message ? e.message : e)); })
   .then(finish);

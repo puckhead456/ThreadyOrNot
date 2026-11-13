@@ -12,6 +12,8 @@
  *   BlobStore.deletePrefix(prefix)                 -> Promise<number>
  *   BlobStore.entries(prefix)                      -> Promise<[{key, blob}]>
  *   BlobStore.putMany([{key, value}])              -> Promise<number>  (one transaction)
+ *   BlobStore.putManyResult([{key, value}])        -> Promise<{ok, count, error}>  (wave K: says why)
+ *   BlobStore.getText(key)                         -> Promise<string|null>          (wave K)
  *   BlobStore.deleteKeys([key])                    -> Promise<number>
  *   BlobStore.sweep(liveProjectIds, {prefix})      -> Promise<{count, bytes}>  (09 #10)
  *   BlobStore.available()                          -> boolean
@@ -297,6 +299,89 @@
     });
   }
 
+  /**
+   * Wave K (shell-data): putMany that says WHY it failed. One transaction,
+   * all or nothing. Resolves { ok, count, error } where error is the DOM
+   * exception's name ('QuotaExceededError', 'AbortError', 'UnknownError',
+   * 'unavailable', 'empty') or null. Never rejects. The store uses it for
+   * heavy craft data, whose failures must be as loud as a localStorage one.
+   */
+  function putManyResult(list) {
+    var items = [];
+    if (Array.isArray(list)) {
+      for (var i = 0; i < list.length; i++) {
+        var it = list[i];
+        if (!it) continue;
+        var k = keyOf(it.key);
+        var b = toBlob(it.value);
+        if (k && b) items.push({ key: k, blob: b });
+      }
+    }
+    if (!items.length) return Promise.resolve({ ok: false, count: 0, error: 'empty' });
+    if (testFail) {
+      var f = testFail;
+      if (f.once) testFail = null;
+      return Promise.resolve({ ok: false, count: 0, error: f.error || 'QuotaExceededError' });
+    }
+    return openDb().then(function (db) {
+      if (!db) return { ok: false, count: 0, error: 'unavailable' };
+      return new Promise(function (resolve) {
+        var t;
+        try {
+          t = db.transaction(STORE, 'readwrite');
+        } catch (e) {
+          resolve({ ok: false, count: 0, error: (e && e.name) || 'UnknownError' });
+          return;
+        }
+        var why = function (ev) {
+          var err = (t && t.error) || (ev && ev.target && ev.target.error) || null;
+          return (err && err.name) || 'AbortError';
+        };
+        var settled = false;
+        var finish = function (v) { if (!settled) { settled = true; resolve(v); } };
+        t.oncomplete = function () { finish({ ok: true, count: items.length, error: null }); };
+        t.onerror = function (ev) { finish({ ok: false, count: 0, error: why(ev) }); };
+        t.onabort = function (ev) { finish({ ok: false, count: 0, error: why(ev) }); };
+        try {
+          var store = t.objectStore(STORE);
+          for (var j = 0; j < items.length; j++) store.put(items[j].blob, items[j].key);
+        } catch (e) {
+          try { t.abort(); } catch (e2) { /* ignore */ }
+          finish({ ok: false, count: 0, error: (e && e.name) || 'UnknownError' });
+        }
+      });
+    }, function () {
+      return { ok: false, count: 0, error: 'unavailable' };
+    });
+  }
+
+  /** The value under `key` as text (a stored string round-trips), or null. */
+  function getText(key) {
+    return get(key).then(function (b) {
+      if (b === null || b === undefined) return null;
+      if (typeof b === 'string') return b;
+      try {
+        if (typeof b.text === 'function') return b.text();
+      } catch (e) { /* fall through */ }
+      return new Promise(function (resolve) {
+        try {
+          var fr = new FileReader();
+          fr.onload = function () { resolve(String(fr.result || '')); };
+          fr.onerror = function () { resolve(null); };
+          fr.readAsText(b);
+        } catch (e) {
+          resolve(null);
+        }
+      });
+    }).then(null, function () { return null; });
+  }
+
+  /** TEST ONLY: make the next putManyResult (or every one) fail with `error`. */
+  var testFail = null;
+  function failWritesForTests(spec) {
+    testFail = spec ? { error: spec.error || 'QuotaExceededError', once: spec.once !== false } : null;
+  }
+
   /** Delete exactly these keys, in one transaction; resolves with the count. */
   function deleteKeys(list) {
     if (!Array.isArray(list) || !list.length) return Promise.resolve(0);
@@ -386,12 +471,15 @@
     deletePrefix: deletePrefix,
     entries: entries,
     putMany: putMany,
+    putManyResult: putManyResult,
+    getText: getText,
     deleteKeys: deleteKeys,
     sweep: sweep,
     available: available,
     usage: usage,
     DB_NAME: DB_NAME,
     STORE: STORE,
-    _reset: reset
+    _reset: reset,
+    _failWritesForTests: failWritesForTests
   };
 })();

@@ -135,6 +135,12 @@
     }
   }
 
+  /** A JSON-safe copy of any value (undefined when it cannot be one). */
+  function jsonValue(v) {
+    if (v === null || typeof v !== 'object') return typeof v === 'function' ? undefined : v;
+    try { return JSON.parse(JSON.stringify(v)); } catch (e) { return undefined; }
+  }
+
   /**
    * A name that is safe to store and to render (13 #10): bidi overrides and
    * control characters stripped, trimmed, capped at 120 characters on a whole
@@ -265,11 +271,17 @@
     if (!def || typeof def !== 'object') return null;
     var id = str(def.id, '').trim();
     if (!id) return null;
+    var prevEntry = crafts[id] || null;
     var entry = {
       id: id,
       normalize: typeof def.normalize === 'function' ? def.normalize : null,
       summary: typeof def.summary === 'function' ? def.summary : null,
-      templates: []
+      templates: [],
+      // wave K: optional hooks (docs/wave-k/api/shell-data.md §1); a later
+      // registration that does not name one keeps the earlier one
+      template: 'template' in def ? hookObj(def.template) : (prevEntry ? prevEntry.template : null),
+      settingsHook: 'settings' in def ? hookObj(def.settings) : (prevEntry ? prevEntry.settingsHook : null),
+      heavy: 'heavy' in def ? normalizeHeavyDef(def.heavy) : (prevEntry ? prevEntry.heavy : null)
     };
     if (Array.isArray(def.templates)) {
       for (var i = 0; i < def.templates.length; i++) {
@@ -339,7 +351,12 @@
     for (var i = 0; i < state.projects.length; i++) {
       var p = state.projects[i];
       if (p.craft !== id) continue;
+      // wave K: half a craftData (heavy fields not loaded yet) is never normalised
+      if (!isHeavyReady(p)) continue;
       p.craftData = normalizeCraftData(id, p.craftData, p);
+    }
+    if (state.settings && state.settings.crafts && state.settings.crafts[id]) {
+      state.settings.crafts[id] = normalizeOneCraftSettings(id, state.settings.crafts[id]);
     }
   }
 
@@ -663,6 +680,8 @@
     var ok = validateTemplate(tpl);
     var list = templateList();
     var existing = tpl.id ? findTemplate(list, tpl.id) : null;
+    // wave K: templates live in localStorage; a whole chart does not belong there
+    if (tpl.craftData && typeof tpl.craftData === 'object') checkTemplateSize(tpl.craftData);
     var next = normalizeTemplate({
       id: existing ? existing.id : uid(),
       name: ok.name,
@@ -767,7 +786,8 @@
     // wave H: the pattern gauge (never the swatch: that is this knitter's)
     var tg = templateGauge(proj.gauge);
     if (tg) draft.gauge = tg;
-    return draft;
+    // wave K: any craft's own seed (progress dropped) through its template hook
+    return applyTemplateHook(draft, proj, opts);
   }
 
   /* ------------------------------------------------------------------ *
@@ -1000,12 +1020,15 @@
       for (var j = 0; j < p.history.length; j++) {
         var h = p.history[j];
         if (!h || typeof h !== 'object') continue;
-        history.push({
+        var hOut = {
           ts: clampInt(h.ts, 0, 1e15, 0),
           partId: str(h.partId, ''),
           partName: str(h.partName, ''),
           row: clampInt(h.row, 0, 999999, 0)
-        });
+        };
+        // wave K (knit-store, P1): "I'm at the length" is a history entry of its own kind
+        if (h.kind === 'stretchEnd') { hOut.kind = 'stretchEnd'; hOut.stretchRows = clampInt(h.stretchRows, 0, 9999, 0); }
+        history.push(hOut);
       }
       if (history.length > HISTORY_CAP) history = history.slice(history.length - HISTORY_CAP);
     }
@@ -1028,7 +1051,8 @@
     }
 
     // wave H (knit-counter): gauge, side, markers, links, short rows
-    return knitNormalizeProject({
+    // wave K: heavy side table, activity, goals, step overlay (when present)
+    return wkProjectOut(knitNormalizeProject({
       id: str(p.id, '') || uid(),
       name: safeName(p.name, 'Untitled project'),
       emoji: str(p.emoji, '') || '🧶',
@@ -1066,13 +1090,15 @@
       // Crafts: 'crochet' | 'crossstitch' | 'sewing' | anything a module registers.
       craft: craft,
       // Opaque to the shell — owned by the craft module, repaired by its normalize.
-      craftData: normalizeCraftData(craft, p.craftData, p),
+      // Wave K: a project whose heavy fields live in IndexedDB is normalised
+      // once they are loaded back (Store.whenReady), never half-way.
+      craftData: wkCraftDataIn(craft, p),
       // Wave G (size groups): [{name}] in document order ([] when the pattern
       // has one size), and the group whose tab is open (null without groups).
       // Additive with a default, so no backup migration is due.
       groups: groups,
       activeGroup: activeGroup
-    }, p);
+    }, p), p);
   }
 
   function defaultState() {
@@ -1127,7 +1153,8 @@
         if (!id) continue;
         var v = raw[keys[i]];
         if (!v || typeof v !== 'object' || Array.isArray(v)) continue;
-        out[id] = jsonObject(v);
+        // wave K: a craft that registered `settings.normalize` repairs its own bag
+        out[id] = normalizeOneCraftSettings(id, v);
       }
     }
     return out;
@@ -1205,6 +1232,10 @@
       projects: Array.isArray(raw.projects) ? raw.projects.map(normalizeProject) : [],
       activeProjectId: str(raw.activeProjectId, '') || null
     };
+    // Wave K: the maker's profile (measurements, units, stashes), present once used.
+    if (s.profile && typeof s.profile === 'object' && !Array.isArray(s.profile)) {
+      out.settings.profile = normalizeProfile(s.profile);
+    }
     // Only one timer may run at a time. A span banked here comes from the wall
     // clock (the monotonic one does not survive a reload) so it is capped.
     var running = false;
@@ -1414,6 +1445,9 @@
     } else if (!state || raw === null) {
       state = normalizeState(raw);
     }
+    // wave K: side tables into the runtime; nothing heavy is loaded yet
+    hv = Object.create(null);
+    heavyIngest(state.projects, null);
 
     lineCache = Object.create(null);
     diagramCache = Object.create(null);
@@ -1436,7 +1470,8 @@
 
     var text;
     try {
-      text = JSON.stringify(state);
+      // wave K: byte for byte JSON.stringify(state) unless heavy craft data is in play
+      text = serializeState();
     } catch (e) {
       reportStorageError('unknown', e);
       return { ok: false, kind: 'unknown', error: e, retried: false, blocked: null };
@@ -1447,6 +1482,7 @@
       saveFailedFlag = false;
       lastStorageError = null;
       dirty = false;
+      heavyAfterWrite(text);
       return { ok: true, kind: null, error: null, retried: false, blocked: null };
     } catch (e) {
       // One second chance with the in-memory undo stack gone: it frees heap,
@@ -1457,11 +1493,15 @@
         saveFailedFlag = false;
         lastStorageError = null;
         dirty = false;
+        heavyAfterWrite(text);
         return { ok: true, kind: null, error: null, retried: true, blocked: null };
       } catch (e2) {
         var kind = classifyStorageError(e2);
+        // wave K: a full localStorage first tries to move opted-in craft data
+        // to IndexedDB; the commit asks for another save when it lands
+        var rescuing = kind === 'quota' && heavyRescue();
         reportStorageError(kind, e2);
-        return { ok: false, kind: kind, error: e2, retried: true, blocked: null };
+        return { ok: false, kind: kind, error: e2, retried: true, blocked: null, rescuing: !!rescuing };
       }
     }
   }
@@ -1542,7 +1582,10 @@
   function onExternalChange(fn) { return subscribe(externalSubs, fn); }
 
   function adoptForeign(raw) {
+    var prevProjects = state && state.projects;
     state = normalizeState(raw);
+    // wave K: keep heavy values already loaded when their table did not move
+    heavyIngest(state.projects, prevProjects);
     lineCache = Object.create(null);
     diagramCache = Object.create(null);
     dirty = false;
@@ -1715,6 +1758,15 @@
     if (!s.crafts[id] || typeof s.crafts[id] !== 'object' || Array.isArray(s.crafts[id])) {
       s.crafts[id] = {};
     }
+    // wave K: the craft's registered defaults fill whatever the bag lacks
+    var dflt = craftDefaults(id);
+    if (dflt) {
+      for (var k in dflt) {
+        if (Object.prototype.hasOwnProperty.call(dflt, k) && !(k in s.crafts[id])) {
+          s.crafts[id][k] = jsonValue(dflt[k]);
+        }
+      }
+    }
     return s.crafts[id];
   }
 
@@ -1816,16 +1868,31 @@
   function snapshot(proj) {
     if (!proj) return;
     var list = projects();
-    var data = deepCopy(proj);
-    var bytes = 0;
-    try { bytes = JSON.stringify(data).length; } catch (e) { bytes = 0; }
-    undoStack.push({
+    // Wave K: one stringify serves as both the copy and its size (it used to
+    // be done twice), and an opted-in craft's heavy fields are shared or
+    // diffed instead of copied (docs/wave-k/api/shell-data.md §4).
+    var D = heavyDef(proj.craft);
+    var ready = isHeavyReady(proj);
+    var text, heavy = null;
+    if (D && ready) {
+      var hs = heavySnapshot(proj, D);
+      text = hs.text;
+      heavy = hs.heavy;
+    } else {
+      text = JSON.stringify(proj);
+    }
+    var data = JSON.parse(text);
+    var bytes = text.length;
+    var entry = {
       id: proj.id,
       index: list.indexOf(proj),
       data: data,
       bytes: bytes,
       activeProjectId: getState().activeProjectId
-    });
+    };
+    if (heavy) { entry.heavy = heavy; entry.heavyBytes = 0; }
+    if (!ready) entry.notReady = true;
+    undoStack.push(entry);
     undoBytesTotal += bytes;
     trimUndo();
   }
@@ -1847,6 +1914,20 @@
     var list = projects();
     var idx = -1;
     for (var i = 0; i < list.length; i++) if (list[i].id === entry.id) idx = i;
+    // wave K: heavy slots come back from the shared value or a checked diff;
+    // a diff that no longer fits what is live refuses rather than guessing
+    if (entry.heavy) {
+      var restored = heavyRestore(entry, idx >= 0 ? list[idx] : null);
+      if (!restored) {
+        dropUndoFor(entry.id);
+        return false;
+      }
+    }
+    if (entry.notReady && hv[entry.id] && hv[entry.id].table) {
+      // taken before its heavy fields were loaded: they load again from disk
+      hv[entry.id].state = 'unloaded';
+      hv[entry.id].durableText = null;
+    }
     if (idx >= 0) {
       list[idx] = entry.data;
     } else {
@@ -2062,7 +2143,9 @@
     if (cached && cached.craft === craft && cached.api === api && cached.apiVersion === apiVersion &&
         cached.size === size && cached.length === text.length && cached.text === text &&
         (typeof prt.sizeCount !== 'number' || cached.sizeCountAsked === (prt.sizeCount >= 2 ? Math.floor(prt.sizeCount) : 0))) {
-      return cached;
+      // wave K (knit-store, P1): a knitting part in stretch phases reads its
+      // rows renumbered from where each stretch ended (crochet: untouched)
+      return craft === 'knitting' ? knitPhased(prt, cached) : cached;
     }
     var lines = [];
     // Wave F: how many sizes the DOCUMENT names (`Project.sizes`), so a list
@@ -2108,7 +2191,7 @@
       index: null
     };
     lineCache[prt.id] = entry;
-    return entry;
+    return craft === 'knitting' ? knitPhased(prt, entry) : entry;   // wave K (P1)
   }
 
   function linesFor(prt) {
@@ -2318,6 +2401,8 @@
             // although it has no numbered rows (Sandnes' Back And Front)
             if (s && s.offer) sec.offer = true;
             if (s && s.continues) sec.continues = str(s.continues, '');
+            // wave K (knit-store, E13): the reader's word for a part worked in rounds
+            if (s && s.rowWord === 'rnd') sec.rowWord = 'rnd';
             // Wave G: the size group's name ("Keyring" / "Medium" / "Big"),
             // null when the document has one size
             sec.group = normalizeGroupName(s && s.group);
@@ -2785,6 +2870,10 @@
     if (typeof rowNumber === 'number' && rowNumber >= 1 && rowNumber <= ROW_INDEX_MAX) {
       var hit = rowIndexOf(prt).line[rowNumber];
       if (hit !== undefined) return hit;
+      // wave K (knit-store, P1): every row from an open stretch's start on is
+      // that stretch until the knitter says it ended
+      var openSt = knitOpenStretch(prt, rowNumber);
+      if (openSt) return openSt;
       // Wave E: no WRITTEN row covers this one. The index holds numbered rows
       // only, but `Patterns.lineFor` also answers past the last written row
       // with the repeat sentence that owns it ("Rep 3rd Rnd 3 times" is rounds
@@ -2813,6 +2902,10 @@
     if (!lines.length) return null;
     if (typeof rowNumber === 'number' && rowNumber >= 1 && rowNumber <= ROW_INDEX_MAX) {
       var idx = rowIndexOf(prt);
+      if (idx.line[rowNumber] === undefined) {
+        var openT = knitOpenStretch(prt, rowNumber);   // wave K (P1)
+        if (openT) return usableCount(openT.count);
+      }
       // A written row answers for itself, count or no count. Past the written
       // rows, the repeat that owns the row answers with the count of the row
       // it sends you back to (row 40 of the Premier throw is row 2's 94), the
@@ -3201,6 +3294,7 @@
     prt.stitch = 0;
     knitRowMoved(prt, 1);   // wave H: the side turns with the work
     pushHistory(proj, prt);
+    counterCounted(proj, prt, 1, 'row', prt.targetRows);   // wave K
 
     if (prt.targetRows && prt.row >= prt.targetRows) {
       if (prt.piecesDone + 1 < prt.makeCount) {
@@ -3238,6 +3332,7 @@
     var s = prt.stitch;
 
     var target = currentTarget(prt);
+    counterCounted(proj, prt, 1, 'stitch', target);   // wave K: sessions + count event
     if (target && s >= target && settings().autoAdvance) {
       var res = completeRow(proj, prt);
       // A finished part pins its stitch count at the target instead of
@@ -3273,12 +3368,70 @@
     return { event: 'stitch', stitch: s };
   }
 
+  /**
+   * wave K (knit-store, for shell-ui's "a tap counts a repeat"): `n`
+   * stitches as ONE action - one undo step, one count event - behaving as
+   * n single taps would: never past the row's count, the row completes (and
+   * auto-advances) when they reach it, a stitch alert inside the run is
+   * reported, a group boundary inside it buzzes. Additive: tapStitch itself
+   * is unchanged. -> the same shape as tapStitch, plus `n` (stitches added).
+   */
+  function tapStitches(projectId, partId, n) {
+    var proj = project(projectId);
+    var prt = part(proj, partId);
+    var want = Math.floor(Number(n));
+    if (!proj || !prt || !(want >= 1)) return { event: 'none', n: 0 };
+    if (want === 1) { var one = tapStitch(projectId, partId); one.n = 1; return one; }
+    var target = currentTarget(prt);
+    var from = prt.stitch;
+    if (target && from + want > target) want = Math.max(0, target - from);
+    if (!want) {
+      // already at the row's count: what a single tap does there
+      var at0 = tapStitch(projectId, partId);
+      at0.n = 1;
+      return at0;
+    }
+    snapshot(proj);
+    prt.stitch = from + want;
+    var s = prt.stitch;
+    counterCounted(proj, prt, want, 'stitch', target);
+    if (target && s >= target && settings().autoAdvance) {
+      var res = completeRow(proj, prt);
+      if (res.event === 'alreadyDone') prt.stitch = target;
+      knitAfterAutoRow(proj, prt, res);
+      touch(proj);
+      res.n = want;
+      if (res.event === 'row') return { event: 'rowAuto', row: prt.row, switchedTo: res.switchedTo, n: want };
+      return res;
+    }
+    touch(proj);
+    var k;
+    if (prt.alerts && prt.alerts.length) {
+      for (k = from + 1; k <= s; k++) if (prt.alerts.indexOf(k) !== -1) return { event: 'alert', stitch: k, n: want };
+    }
+    var g = proj.groupSize;
+    if (g > 0) {
+      var rg = rowGroups(prt);
+      if (rg) {
+        for (k = s; k > from; k--) {
+          var gat = groupAt(rg, k);
+          if (gat && gat.boundary) return { event: 'group', stitch: s, group: gat.group, n: want };
+        }
+        return { event: 'stitch', stitch: s, n: want };
+      }
+      if (Math.floor(s / g) > Math.floor(from / g)) return { event: 'group', stitch: s, group: Math.floor(s / g), n: want };
+    }
+    return { event: 'stitch', stitch: s, n: want };
+  }
+
   function untapStitch(projectId, partId) {
     var proj = project(projectId);
     var prt = part(proj, partId);
     if (!proj || !prt) return { event: 'none' };
     snapshot(proj);
+    var hadStitch = prt.stitch > 0;
     prt.stitch = Math.max(0, prt.stitch - 1);
+    if (hadStitch) counterCounted(proj, prt, -1, 'stitch', null);   // wave K
     touch(proj);
     return { event: 'stitch', stitch: prt.stitch };
   }
@@ -3354,6 +3507,7 @@
     }
     prt.stitch = 0;
     knitRowMoved(prt, -1);   // wave H
+    counterCounted(proj, prt, -1, 'row', prt.targetRows);   // wave K
     trimRowStitches(prt, prt.row);
     var last = proj.history[proj.history.length - 1];
     if (last && last.partId === prt.id) proj.history.pop();
@@ -3464,6 +3618,9 @@
     // wave H: the template's gauge, markers and two-at-a-time pairs (and a
     // gauge the New project sheet read off the PDF, `opts.gauge`)
     knitFromTemplate(proj, tpl, opts.gauge);
+    // wave K (knit-store, P1): a knitting project made from now on numbers
+    // its rows in stretch phases; older projects keep their numbering
+    if (isKnitProject(proj)) proj.rowPhases = true;
     projects().push(proj);
     save();
     return proj;
@@ -3485,6 +3642,15 @@
     // through the same save() as every other, so revision / writerId and the
     // multi-tab rules are unchanged.
     var silent = !!(opts && (opts.undo === false || opts.undoable === false));
+    // Wave K: a project whose heavy fields are still in IndexedDB is half a
+    // craftData; writing to it would save the half. Store.whenReady first.
+    if (!isHeavyReady(proj)) return null;
+    var D = silent ? heavyDef(proj.craft) : null;
+    var before = null;
+    if (D && proj.craftData && typeof proj.craftData === 'object') {
+      before = {};
+      for (var bi = 0; bi < D.fields.length; bi++) before[D.fields[bi]] = getPath(proj.craftData, D.fields[bi]);
+    }
     if (!silent) snapshot(proj);
     if (!proj.craftData || typeof proj.craftData !== 'object' || Array.isArray(proj.craftData)) {
       proj.craftData = {};
@@ -3500,6 +3666,8 @@
       var keys = Object.keys(patchOrFn);
       for (var i = 0; i < keys.length; i++) proj.craftData[keys[i]] = patchOrFn[keys[i]];
     }
+    // wave K: a heavy field moved without a snapshot: the top diff is re-anchored
+    if (before) heavyRebase(proj, before);
     if (silent) save();
     else touch(proj);
     return proj.craftData;
@@ -3518,6 +3686,12 @@
   /** Home-card summary line: the craft's own, else the crochet one. */
   function summaryFor(p) {
     if (!p) return '';
+    // wave K: not loaded yet - the line written the last time it was
+    var hrt = hv[p.id];
+    if (hrt && !rtReady(hrt)) {
+      if (hrt.table && hrt.table.summary) return hrt.table.summary;
+      return hrt.state === 'missing' ? 'Part of this project is missing on this device' : 'Loading…';
+    }
     var c = crafts[p.craft];
     if (c && c.summary) {
       try {
@@ -4187,6 +4361,7 @@
         existing.makeCount = makeCount;
         if (sec.makeCountInferred) existing.makeCountInferred = true;
         else delete existing.makeCountInferred;
+        if (knitImport) { if (sec.rowWord === 'rnd') existing.rowWord = 'rnd'; else delete existing.rowWord; }   // wave K (E13)
         if (sizeIdx !== null || proj.size) existing.sizeIndex = readSize;
         existing.importKey = key || existing.importKey;
         if (existing.piecesDone > existing.makeCount) existing.piecesDone = existing.makeCount;
@@ -4214,6 +4389,7 @@
         added.importKey = key;
         added.group = secGroup;
         if (sec.makeCountInferred) added.makeCountInferred = true;
+        if (knitImport && sec.rowWord === 'rnd') added.rowWord = 'rnd';   // wave K (E13): a part worked in rounds
         if (sizeIdx !== null || proj.size) added.sizeIndex = readSize;
         if (target) { added.targetRows = target; out.targeted++; }
         if (place) { added.placementNotes = place; out.placed++; }
@@ -4270,6 +4446,7 @@
       proj.activeGroup = apn && apn.group ? apn.group : (proj.groups.length ? proj.groups[0].name : null);
       out.groups = importedGroups.slice();
     }
+    knitAfterImport(proj, sections, fullText);   // wave K (knit-store, P1): no row target across an open stretch
     touch(proj);
     return out;
   }
@@ -4806,7 +4983,31 @@
     s.settings.lastBackupAt = now();
     s.settings.backupNagSnoozedUntil = 0;
     save();
-    return JSON.stringify(s, null, 2);
+    return JSON.stringify(exportView(s), null, 2);
+  }
+
+  /**
+   * Wave K: what a backup holds. In memory a ready project is whole, so it
+   * goes out inline exactly as before; a project whose heavy fields are not
+   * loaded keeps its side table (Store.hydrateAll first for a complete file;
+   * exportThready does).
+   */
+  function exportView(s) {
+    var any = false;
+    for (var i = 0; i < s.projects.length; i++) {
+      var rt = hv[s.projects[i].id];
+      if (rt && !rtReady(rt) && rt.table) { any = true; break; }
+    }
+    if (!any) return s;
+    var out = {};
+    for (var k in s) if (Object.prototype.hasOwnProperty.call(s, k)) out[k] = s[k];
+    out.projects = s.projects.map(exportProjectView);
+    return out;
+  }
+
+  function exportProjectView(p) {
+    var rt = hv[p.id];
+    return rt && !rtReady(rt) && rt.table ? withExtra(p, 'heavy', rt.table) : p;
   }
 
   var PREIMPORT_KEY_SUFFIX = '.preimport';
@@ -4962,6 +5163,8 @@
       counts: counts,
       projectCounts: projectCounts,
       templateCounts: templateCounts,
+      // wave K: what restoring the file's settings block would change
+      settings: previewSettings(raw),
       version: clampInt(raw.version, 0, 1e6, 0)
     };
   }
@@ -5010,7 +5213,10 @@
     preimportText = null;
     try {
       preimportText = JSON.stringify(s);
-      try { ls().setItem(KEY + PREIMPORT_KEY_SUFFIX, preimportText); } catch (e) { /* memory copy stands */ }
+      // wave K: the on-disk copy leaves heavy fields in IndexedDB (their
+      // blobs are kept while it exists) instead of doubling them here
+      var diskCopy = wkNeedsCustom() ? serializeState() : preimportText;
+      try { ls().setItem(KEY + PREIMPORT_KEY_SUFFIX, diskCopy); } catch (e) { /* memory copy stands */ }
     } catch (e) {
       preimportText = null;
     }
@@ -5070,18 +5276,28 @@
         incoming.name = fromBackupName(incoming.name);
         reidentify(incoming);
         incoming.craftData = rekeyBlobs(incoming.craftData, fileId, incoming.id);
+        // wave K: a side table points at the clone's own copies too
+        if (incoming.heavy) incoming.heavy = rekeyBlobs(incoming.heavy, fileId, incoming.id);
         plan.applied[fileId] = 'keepBoth';
         plan.idMap[fileId] = incoming.id;
         list.push(incoming);
+        heavyIngestOne(incoming);
         count++;
         continue;
       }
       plan.applied[incoming.id] = 'replace';
       if (existing) list[list.indexOf(existing)] = incoming;
       else list.push(incoming);
+      heavyIngestOne(incoming);
       count++;
     }
     lastImport = plan;
+    // wave K: the file's settings block comes back too (default 'merge'),
+    // inside the same pre-import snapshot, so Undo import takes it back out
+    var howSettings = str(choices.settings, '') || 'merge';
+    if (howSettings !== 'skip' && raw.settings && typeof raw.settings === 'object' && !Array.isArray(raw.settings)) {
+      applySettings(s.settings, raw.settings, howSettings === 'replace' ? 'replace' : 'merge', false);
+    }
     // A page snapshot from an earlier import must not be "undone" by this one.
     queuePageWork(clearPageSnapshot);
 
@@ -5115,7 +5331,9 @@
       return false;
     }
     var keepRevision = revision();
+    var prevProjects = state && state.projects;
     state = normalizeState(raw);
+    heavyIngest(state.projects, prevProjects);   // wave K
     state.revision = Math.max(clampInt(state.revision, 0, 1e12, 0), keepRevision);
     lineCache = Object.create(null);
     diagramCache = Object.create(null);
@@ -5275,7 +5493,7 @@
   function exportProjectJSON(projectId) {
     var p = findProject(projects(), projectId);
     if (!p) return null;
-    return JSON.stringify({ version: VERSION, projects: [deepCopy(p)], templates: [] }, null, 2);
+    return JSON.stringify({ version: VERSION, projects: [deepCopy(exportProjectView(p))], templates: [] }, null, 2);
   }
 
   function safeSeg(s) {
@@ -5304,6 +5522,15 @@
    *          images:number, bytes:number}>}
    */
   function exportThready(opts) {
+    // wave K: every heavy field is loaded first, so backup.json is whole
+    if (typeof Promise !== 'function') return exportThreadyNow(opts);
+    var scope = opts && opts.projectId ? [opts.projectId] : null;
+    return hydrateAll(scope).then(function () { return heavyIdle(); }).then(function () {
+      return exportThreadyNow(opts);
+    });
+  }
+
+  function exportThreadyNow(opts) {
     opts = opts || {};
     var Z = zipLib();
     if (!Z || typeof Promise !== 'function') {
@@ -5329,6 +5556,8 @@
         chain = chain.then(function () {
           return B.entries('p:' + pid + ':').then(function (list) {
             for (var i = 0; i < list.length; i++) {
+              // wave K: heavy fields are inline in backup.json already
+              if (list[i].key.indexOf('p:' + pid + ':heavy:') === 0 && rtReady(hv[pid])) continue;
               if (list[i].blob && typeof list[i].blob.size === 'number') {
                 images.push({ pid: pid, key: list[i].key, blob: list[i].blob });
               }
@@ -6838,6 +7067,19 @@
     if (current < 0) current = rounds.length ? rounds.length - 1 : 0;
 
     flagOutliers(mode, rounds);
+    // wave K (K3, knit-3d; glue by knit-store): stranded colour from a read
+    // chart, stitch by stitch. Knitting only; nothing changes without a read
+    // chart whose key gives colours.
+    var DG = window.DiagramGeo;
+    if (knit && DG && typeof DG.applyChart === 'function' && knitHasColourChart(proj)) {
+      for (var kci = 0; kci < rounds.length; kci++) {
+        var kcells = null;
+        try { kcells = knitChartCellsAt(prt, proj, rounds[kci].row); } catch (eK) { kcells = null; }
+        if (kcells) {
+          try { rounds[kci] = DG.applyChart(rounds[kci], kcells, { palette: yarnColorsOf(proj), main: mainYarn(proj) }); } catch (eK2) { /* keep the round */ }
+        }
+      }
+    }
     /* knit-3d-2: a short row worked flat inside a round piece is SUPPOSED to
        be a few stitches of the ring (the first German short row across a
        back neck is 5 of 56) — DiagramGeo closes it with its held stitches;
@@ -7181,7 +7423,9 @@
       '|' + yarnSerial(proj) +
       '|' + entry.length + '|v' + entry.version +
       // knit-3d-2: a part with no cast-on starts where the part before it ended
-      '|' + knitPrevKey(prt, proj)
+      '|' + knitPrevKey(prt, proj) +
+      // wave K (K3): the charts read for the project colour its rounds
+      '|' + knitChartKey(proj)
     );
   }
 
@@ -7453,7 +7697,10 @@
       var id = str(m.id, '') || uid();
       if (seen[id]) id = uid();
       seen[id] = true;
-      out.push({ id: id, name: name, at: at, _i: i });
+      var mk = { id: id, name: name, at: at, _i: i };
+      // wave K (P9): a marker around a stitch ("place marker around next st")
+      if (m.kind === 'stitch' || m.around === true) mk.kind = 'stitch';
+      out.push(mk);
     }
     out.sort(function (a, b) { return a.at - b.at || a._i - b._i; });
     for (var j = 0; j < out.length; j++) delete out[j]._i;
@@ -7520,6 +7767,15 @@
         prt.markerTotal = markers.length ? mt : null;
         prt.linked = linked;
         prt.shortRows = sr;
+        // wave K (knit-store): stretch ends, the pattern's own target, measurements
+        var sts = normalizeStretchEnds(rp.stretches);
+        if (sts) prt.stretches = sts;
+        if (typeof rp.phaseTarget === 'number' && rp.phaseTarget >= 1) prt.phaseTarget = clampInt(rp.phaseTarget, 1, 99999, 1);
+        var ms0 = normalizeMeasures(rp.measures);
+        if (ms0.length) prt.measures = ms0;
+        if (markers.length && typeof rp.markerRow === 'number' && rp.markerRow >= 0) prt.markerRow = clampInt(rp.markerRow, 0, 99999, 0);
+        if (rp.rowWord === 'rnd') prt.rowWord = 'rnd';
+        if (rp.phaseTargetAuto === true) prt.phaseTargetAuto = true;
       } else {
         if (side) prt.side = side;
         if (markers.length) { prt.markers = markers; if (mt) prt.markerTotal = mt; }
@@ -7529,6 +7785,9 @@
     }
     repairLinks(np.parts);
     if (!knit) np.parts.forEach(function (q) { if (q.linked === null) delete q.linked; });
+    // wave K (knit-store, P1): only a project that was made with stretch
+    // phases (or switched to them) has them; an older save keeps its numbering
+    if (knit && raw && raw.rowPhases === true) np.rowPhases = true;
     return np;
   }
 
@@ -7690,6 +7949,8 @@
   /** The written row a pattern row is: a repeat sentence sends you back. */
   function underlyingLine(prt, patternRow) {
     var l = lineForRow(prt, patternRow);
+    // wave K (audit): a stretch ("Cont in pat until …") is never one written row repeated
+    if (l && l.stretch && l.stretch.key) return l;
     var from = backRefFrom(l);
     if (from && patternRow >= from) {
       var u = l.repeatOf[(patternRow - from) % l.repeatOf.length];
@@ -7709,6 +7970,914 @@
     if (!l || !Array.isArray(l.repeatOf) || !l.repeatOf.length) return 0;
     if (l.repeatFrom >= 1) return l.repeatFrom;
     return l.row >= 1 ? l.row : 0;
+  }
+
+  /* ---- wave K (knit-store, P1): stretch phases ------------------------- *
+   * An open "work until" line (a length, "same length as Back", "until N
+   * sts rem") is a STRETCH: the knitter decides when it ends. The parser
+   * numbers the rows after it as if it took no rows (Boyfriend Front: the
+   * raglan cast-offs on rows 5-6, the "cont even" stretch after them, E1) or
+   * by its own gauge guess (Bernat sleeve: rounds 1-13). In a project with
+   * `rowPhases`, the store renumbers the part's lines instead:
+   *   - the stretch starts on the row after the rows written before it;
+   *   - while it is open it owns every row from there on, keeping the stitch
+   *     total (its own "on 216 sts", else the count before it), and nothing
+   *     after it has a row number;
+   *   - once ended (`Part.stretches[key].rows`, "I'm at the length", or the
+   *     gauge estimate after "Use") the lines after it are numbered from its
+   *     end.
+   * The renumbered lines are a derived parse (`knitPhased`), so every reader
+   * of `partLines` (row index, targets, sides, markers, charts, 3D) sees one
+   * numbering. Crochet never comes here; projects without `rowPhases` neither.
+   */
+
+  var KNIT_STRETCH_LEN_RE = /\buntil\b[^.]{0,160}?\b(?:measures?|same\s+length|desired\s+length|long\s+enough|reaches)\b|\bsame\s+length\s+as\b/i;
+  var KNIT_STRETCH_STS_RE = /\buntil\s+(?:there\s+are\s+)?\d+(?:\s*\([\d\s,\-–]+\))?\s*sts?\b/i;
+  var KNIT_ON_STS_RE = /\bon\s+(?:these\s+|the\s+)?(?:rem(?:aining)?\s+)?\d+(?:\s*\([^)]*\))?\s*sts?\b[^.]*?\buntil\b/i;
+  var KNIT_SHAPES_RE = /\b(?:inc(?:rease)?s?|dec(?:rease)?s?|k2tog|ssk|m1|cast\s+off|bind\s+off)\b/i;
+  var knitPhaseMemo = Object.create(null);
+
+  function knitHash(s) {
+    var h = 5381;
+    s = String(s || '');
+    for (var i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+    return (h >>> 0).toString(36);
+  }
+
+  /** `Part.stretches`: { key: { rows, planned, at } }, or null when empty. */
+  function normalizeStretchEnds(raw) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+    var out = {}, n = 0;
+    Object.keys(raw).forEach(function (k) {
+      if (n >= 64 || !/^s\d{1,4}:[a-z0-9]{1,8}$/.test(k)) return;
+      var v = raw[k];
+      if (!v || typeof v !== 'object') return;
+      var rows = typeof v.rows === 'number' && isFinite(v.rows) ? clampInt(v.rows, 0, 9999, 0) : null;
+      if (rows === null) return;
+      out[k] = { rows: rows, planned: !!v.planned, at: typeof v.at === 'number' && isFinite(v.at) ? v.at : 0 };
+      n++;
+    });
+    return n ? out : null;
+  }
+
+  /** `Part.measures` (P10): [{ row, value, unit, at }], newest last, ≤ 24. */
+  function normalizeMeasures(raw) {
+    var out = [];
+    if (!Array.isArray(raw)) return out;
+    raw.forEach(function (m) {
+      if (!m || typeof m !== 'object') return;
+      var v = knitNum(m.value, 9999);
+      var r = clampInt(m.row, 0, 99999, -1);
+      if (!v || r < 0) return;
+      out.push({ row: r, value: v, unit: knitUnit(m.unit), at: typeof m.at === 'number' && isFinite(m.at) ? m.at : 0 });
+    });
+    return out.slice(-24);
+  }
+
+  /** Is this part's project numbered in stretch phases? (memo on the part object, flag read live) */
+  function knitPhasesOn(prt) {
+    if (!prt || !prt.id) return false;
+    var m = knitPhaseMemo[prt.id];
+    if (!m || m.part !== prt) {
+      var proj = projectOfPart(prt);
+      if (!proj) return false;
+      m = knitPhaseMemo[prt.id] = { part: prt, proj: proj };
+    }
+    return !!(m.proj && m.proj.rowPhases && isKnitProject(m.proj));
+  }
+
+  /** A line the knitter ends by measuring (or by counting what is left). */
+  function knitIsStretch(l) {
+    if (!l || typeof l !== 'object' || l.shortRow) return false;
+    // "CO 124 sts … Work in rib for 3/4"": the cast-on first, then the stretch (knit-parse §9)
+    // (audit: a set-up line that IS the stretch, "Work 2½" in Twisted Ribbing …", is one too)
+    if (l.kind === 'setup' && l.stretch && typeof l.stretch === 'object' && !l.stretch.key && l.stretch.open !== false) return true;
+    if (l.kind === 'setup' || l.kind === 'header') return false;
+    // the knitting reader's own word, when it gives one (docs/wave-k/api/knit-parse.md §3)
+    if (l.stretch && typeof l.stretch === 'object' && !l.stretch.key) return l.stretch.open !== false && !l.stretch.within;
+    var u = untilOf(l);
+    // a note is a stretch only when the reader read a length into it
+    if (l.kind === 'note') return !!(u && u.kind === 'length' && !(l.row >= 1));
+    if (u && u.kind === 'rows') return false;
+    if (u && u.kind === 'length') return true;
+    var t = str(l.text, '');
+    var bounded = typeof l.repeatTo === 'number' && l.repeatTo >= 1 && !(l.row >= 1);
+    if (KNIT_STRETCH_LEN_RE.test(t)) return !bounded;
+    // "until 30 sts rem" ends a run of ROWS ("Rep last 2 rows until …", "dec
+    // every RS row until …"); inside a row ("*p1, k2; rep from * until 3 sts
+    // rem, k3") it is stitch-level and no stretch
+    var body = t.replace(/^\s*[^:]{0,40}:\s*/, '');
+    if (KNIT_STRETCH_STS_RE.test(t) && (l.kind === 'repeat' || /\b(?:rows?|rnds?|rounds?)\b[^.]*\buntil\b/i.test(body)) &&
+        !/\brep(?:eat)?\s+from\s+\*[^.]*\buntil\b/i.test(body)) {
+      return !bounded && !(typeof l.repeatTimes === 'number' && l.repeatTimes >= 1);
+    }
+    return false;
+  }
+
+  /**
+   * wave K (knit-store, P5): an UNNUMBERED line that still takes a known
+   * number of rows: "Work Rows 1-61 of Lace chart", "Work through Rnd 84 of
+   * Leg chart", "Work 5 rnds even". -> { rows, chart: {name, row, rowEnd}|null } or null.
+   */
+  function knitBlockOf(l) {
+    if (!l || typeof l !== 'object' || l.shortRow || l.kind === 'setup' || l.kind === 'header') return null;
+    if (l.kind === 'note' && !(l.chart && typeof l.chart === 'object')) return null;
+    if (knitLineStart(l) >= 1 || l.row === 0) return null;
+    var t = str(l.text, '');
+    var c = l.chart && typeof l.chart === 'object' ? knitChartPos(l) : null;
+    if (c && c.row >= 1 && c.rowEnd > c.row && c.rowEnd - c.row < 400 && !/\bfor\s+(?:rows?|rnds?|rounds?)\s+\d/i.test(t)) {
+      return { rows: Math.floor(c.rowEnd) - Math.floor(c.row) + 1, chart: { name: c.name, row: Math.floor(c.row), rowEnd: Math.floor(c.rowEnd) } };
+    }
+    if (c && c.row >= 2 && !(c.rowEnd >= 1) && c.row < 400 && /\bthrough\s+(?:rnd|row|round)s?\s+\d+/i.test(t)) {
+      return { rows: Math.floor(c.row), chart: { name: c.name, row: 1, rowEnd: Math.floor(c.row) } };
+    }
+    var u = untilOf(l);
+    if (u && u.kind === 'rows' && u.value >= 1 && u.value < 400 && !/^\s*(?:[^:]{0,30}:\s*)?rep/i.test(t)) {
+      return { rows: Math.round(u.value), chart: null };
+    }
+    return null;
+  }
+
+  /** The last row a line takes in the parser's numbering (0 = none). */
+  function knitLineEnd(l) {
+    if (!l) return 0;
+    if (l.row >= 1) return l.rowList && l.rowList.length ? l.rowList[l.rowList.length - 1] : (l.rowEnd >= l.row ? l.rowEnd : l.row);
+    if (typeof l.repeatTo === 'number' && l.repeatTo >= 1 && l.repeatFrom >= 1) return l.repeatTo;
+    return 0;
+  }
+
+  /** The first row a line takes in the parser's numbering (0 = none). */
+  function knitLineStart(l) {
+    if (!l) return 0;
+    if (l.row >= 1) return l.rowList && l.rowList.length ? l.rowList[0] : l.row;
+    if (typeof l.repeatTo === 'number' && l.repeatTo >= 1 && l.repeatFrom >= 1) return l.repeatFrom;
+    return 0;
+  }
+
+  /**
+   * The stretches of a parse, in pattern order (cached on the raw entry):
+   * [{ i, line, key, prevEnd, nextFirst, lead }] in the parser's numbering.
+   */
+  function knitScanStretches(lines) {
+    var out = [];
+    var maxEnd = 0;
+    for (var i = 0; i < lines.length; i++) {
+      var l = lines[i];
+      if (knitIsStretch(l)) {
+        var nextFirst = null;
+        for (var j = i + 1; j < lines.length && nextFirst === null; j++) {
+          var s0 = knitLineStart(lines[j]);
+          if (s0 >= 1) nextFirst = s0;
+        }
+        // "Rep last 2 rows Twisted Ribbing." then "Pat for 4" …": the open
+        // repeat just before the length names the rows the stretch works
+        var lead = null;
+        for (var b = i - 1; b >= 0; b--) {
+          var pl = lines[b];
+          if (!pl || pl.kind === 'note' || pl.kind === 'header') continue;
+          if (pl.kind === 'repeat' && Array.isArray(pl.repeatOf) && pl.repeatOf.length && pl.repeatFrom >= 1 &&
+              typeof pl.repeatTo !== 'number' && !knitIsStretch(pl)) lead = pl;
+          break;
+        }
+        out.push({ i: i, line: l, key: 's' + i + ':' + knitHash(l.text).slice(0, 8), prevEnd: maxEnd, nextFirst: nextFirst, lead: lead });
+      } else {
+        // wave K (P5): a block of known length with no row numbers of its own
+        var blk = knitBlockOf(l);
+        if (blk) {
+          var nf = null;
+          for (var j2 = i + 1; j2 < lines.length && nf === null; j2++) {
+            var s2 = knitLineStart(lines[j2]);
+            if (s2 >= 1) nf = s2;
+          }
+          out.push({ i: i, line: l, key: 'b' + i, prevEnd: maxEnd, nextFirst: nf, lead: null, block: blk });
+        }
+      }
+      var e = knitLineEnd(l);
+      if (e > maxEnd) maxEnd = e;
+    }
+    return out;
+  }
+
+  /** The derived parse of a knitting part in stretch phases (or the entry itself). */
+  function knitPhased(prt, entry) {
+    if (!entry || entry === EMPTY_ENTRY || !entry.lines || !entry.lines.length) return entry;
+    if (!knitPhasesOn(prt)) return entry;
+    if (!entry.stretchScan) {
+      try { entry.stretchScan = knitScanStretches(entry.lines); } catch (e) { entry.stretchScan = []; }
+    }
+    var list = entry.stretchScan;
+    if (!list.length) return entry;
+    var ends = prt.stretches && typeof prt.stretches === 'object' ? prt.stretches : null;
+    var sig = '';
+    for (var i = 0; i < list.length; i++) {
+      // a block of known length: only the read charts (its counts) can change it
+      if (list[i].block) { sig += list[i].key + (list[i].block.chart ? knitChartKey(knitPhaseMemo[prt.id] && knitPhaseMemo[prt.id].proj) : '') + ';'; continue; }
+      var rec = ends ? ends[list[i].key] : null;
+      if (rec && typeof rec.rows === 'number') { sig += list[i].key + '=' + rec.rows + (rec.planned ? 'p' : '') + ';'; continue; }
+      sig += list[i].key + '@' + ((prt.row || 0) + 1) + ';';
+      break;
+    }
+    if (entry.phased && entry.phased.sig === sig) return entry.phased.entry;
+    var derived;
+    try { derived = knitBuildPhased(prt, entry, list, ends); } catch (e2) { derived = null; }
+    if (!derived) return entry;
+    entry.phased = { sig: sig, entry: derived };
+    return derived;
+  }
+
+  function knitRawCountAt(entry, p) {
+    if (!(p >= 1)) {
+      for (var i = 0; i < entry.lines.length; i++) {
+        var s = entry.lines[i];
+        if (s && (s.kind === 'setup' || (s.row === 0 && s.kind !== 'header' && s.kind !== 'note'))) return usableCount(countOf(s));
+      }
+      return null;
+    }
+    if (!entry.rawIndex) entry.rawIndex = buildRowIndex(entry.lines, ROW_INDEX_MAX, true);
+    var c = entry.rawIndex.count[p];
+    if (c !== undefined) return usableCount(c);
+    var api = entry.api;
+    if (api && typeof api.targetFor === 'function' && hasRepeatLine(entry.lines)) {
+      try { return usableCount(api.targetFor(entry.lines, p)); } catch (e) { return null; }
+    }
+    return null;
+  }
+
+  /** The stitches a stretch keeps while it runs, or null when it shapes. */
+  function knitStretchCount(entry, s) {
+    var l = s.line;
+    var st = l.stretch && typeof l.stretch === 'object' ? l.stretch : null;
+    if (st && typeof st.count === 'number' && st.count > 0) return Math.floor(st.count);
+    if (st && st.shaping) return null;
+    var t = str(l.text, '');
+    var untilAt = t.search(/\buntil\b/i);
+    if (KNIT_ON_STS_RE.test(t) && usableCount(countOf(l))) return usableCount(countOf(l));
+    if (st && typeof st.onSts === 'number' && st.onSts > 0) return Math.floor(st.onSts);
+    // it shapes as it goes ("Rep last 2 rows until 30 sts rem"): no total to keep
+    if (KNIT_SHAPES_RE.test(untilAt > 0 ? t.slice(0, untilAt) : t) && !/\bevenly\s+across\s+last\b/i.test(t)) return null;
+    if (KNIT_STRETCH_STS_RE.test(t)) return null;
+    return knitRawCountAt(entry, s.prevEnd);
+  }
+
+  /** The stitch count the pattern stands on just before line `i` (the last count printed or worked out). */
+  function knitRunningCount(lines, i) {
+    for (var j = i - 1; j >= 0; j--) {
+      var c = usableCount(countOf(lines[j]));
+      if (c) return c;
+      // the reader's carried "Start with 84 sts." note for a piece split out of the one before
+      var m = /^\s*start\s+with\s+(\d{1,5})\s+sts?\b/i.exec(str(lines[j] && lines[j].text, ''));
+      if (m) return usableCount(+m[1]);
+    }
+    return null;
+  }
+
+  /**
+   * wave K (P5): per-row counts for chart rows `ref.row..ref.rowEnd` worked
+   * from `start` stitches, through `KnitChart.rowInfo` (what each chart row
+   * takes and makes, repeated round the work). A row with an unknown cell,
+   * or a width the chart does not divide, has no count, nor has any row
+   * after it. -> { counts } or null.
+   */
+  function knitChartCounts(prt, proj, ref, start) {
+    var KC = window.KnitChart;
+    if (!KC || typeof KC.rowInfo !== 'function' || !proj || !start) return null;
+    var page = knitChartPageNamed(chartPagesOf(proj), ref.name);
+    var chart = page && page.chart;
+    if (!chart || !chart.cells || chart.image) return null;
+    var counts = [], run = start, any = false;
+    for (var r = ref.row; r <= ref.rowEnd; r++) {
+      var info = null;
+      if (run !== null) { try { info = KC.rowInfo(chart, r); } catch (e) { info = null; } }
+      if (run === null || !info || info.unknown || !(info.consumes > 0) || run % info.consumes !== 0) {
+        run = null;
+        counts.push(null);
+        continue;
+      }
+      run = (run / info.consumes) * info.produces;
+      counts.push(run);
+      any = true;
+    }
+    return any ? { counts: counts } : null;
+  }
+
+  function knitBuildPhased(prt, entry, list, ends) {
+    var lines = entry.lines;
+    var W = (prt.row || 0) + 1;
+    var segs = [], stretchAt = {};
+    var eff = 0, pc = 0, open = null, i;
+    for (i = 0; i < list.length; i++) {
+      var s = list[i];
+      var plain = Math.max(0, s.prevEnd - pc);
+      if (plain) segs.push({ pFrom: pc + 1, pTo: s.prevEnd, off: eff - pc });
+      eff += plain;
+      pc = Math.max(pc, s.prevEnd);
+      var rec = ends ? ends[s.key] : null;
+      var start = eff + 1;
+      var rows = s.block ? s.block.rows : (rec && typeof rec.rows === 'number' ? rec.rows : null);
+      var info = { s: s, start: start, end: rows === null ? null : start + rows - 1, planned: !!(rec && rec.planned), block: s.block || null };
+      stretchAt[s.i] = info;
+      if (rows === null) { open = info; break; }
+      eff = info.end;
+      if (s.nextFirst !== null && s.nextFirst - 1 > pc) pc = s.nextFirst - 1;
+      // the rows the parser gave the stretch line itself are the stretch's
+      var ownEnd = knitLineEnd(s.line);
+      if (ownEnd > pc) pc = ownEnd;
+    }
+    var projP = knitPhaseMemo[prt.id] ? knitPhaseMemo[prt.id].proj : projectOfPart(prt);
+    if (!open) segs.push({ pFrom: pc + 1, pTo: null, off: eff - pc });
+    function map(p) {
+      if (typeof p !== 'number' || !(p >= 1)) return null;
+      for (var k = 0; k < segs.length; k++) {
+        var g = segs[k];
+        if (p >= g.pFrom && (g.pTo === null || p <= g.pTo)) return p + g.off;
+      }
+      return null;
+    }
+    var firstStretch = list[0].i;
+    var out = [];
+    var copies = {};
+    var posOf = {};   // line index -> its place in `out` (a set-up's stretch adds a line)
+    for (i = 0; i < lines.length; i++) {
+      var l = lines[i];
+      var c = {};
+      for (var key in l) if (Object.prototype.hasOwnProperty.call(l, key)) c[key] = l[key];
+      var st = stretchAt[i];
+      var isSt = !!st || list.some(function (x) { return x.i === i; });
+      if (st && st.block) {
+        // wave K (P5): a block of known length, numbered where it is worked
+        c.row = st.end < st.start ? null : st.start;
+        c.rowEnd = c.row === null ? null : st.end;
+        c.rowList = null;
+        c.prevCount = null;
+        delete c.approxRow;
+        c.repeatOf = null; c.repeatFrom = null; c.repeatTo = null; c.repeatRows = null;
+        var run0 = knitRunningCount(lines, i);
+        c.counts = null; c.countsFrom = null;
+        if (st.block.chart) {
+          c.chart = {};
+          for (var ck in l.chart) if (Object.prototype.hasOwnProperty.call(l.chart, ck)) c.chart[ck] = l.chart[ck];
+          c.chart.row = st.block.chart.row;
+          c.chart.rowEnd = st.block.chart.rowEnd;
+          var cc = knitChartCounts(prt, projP, st.block.chart, run0);
+          if (cc) {
+            // the line's own printed total ends the block when the chart could not get there
+            if (cc.counts[cc.counts.length - 1] === null && typeof l.count === 'number') cc.counts[cc.counts.length - 1] = l.count;
+            c.counts = cc.counts;
+            c.countsFrom = st.start;
+            // (a row the chart cannot count must not fall back to the line's total)
+            c.count = cc.counts.indexOf(null) >= 0 ? null : cc.counts[cc.counts.length - 1];
+            c.countSource = 'chart';
+            if (typeof l.count === 'number' && l.count !== c.count) c.chartPrinted = l.count;   // the line's own total disagrees: keep both
+          } else if (typeof l.count === 'number' && st.block.rows > 1) {
+            // a printed end total and no per-row counts: only the last row has it
+            c.counts = [];
+            for (var cr = 0; cr < st.block.rows - 1; cr++) c.counts.push(null);
+            c.counts.push(l.count);
+            c.countsFrom = st.start;
+            c.count = null;
+          }
+        } else if (!(typeof c.count === 'number')) {
+          c.count = run0;
+        }
+        c.block = { rows: st.block.rows, start: st.start, end: st.end };
+        copies[i] = c;
+      } else if (st) {
+        var n0 = st.end === null ? Math.max(st.start, W) : st.end;
+        var kept = knitStretchCount(entry, st.s);
+        c.row = st.end !== null && st.end < st.start ? null : st.start;
+        c.rowEnd = c.row === null ? null : n0;
+        c.rowList = null;
+        c.counts = null;
+        c.countsFrom = null;
+        c.prevCount = null;
+        c.count = kept;
+        c.countSource = kept ? 'kept' : null;
+        c.computed = null;
+        delete c.approxRow;
+        if (Array.isArray(l.repeatOf) && l.repeatOf.length) {
+          c.repeatOf = l.repeatOf.map(map);
+          c.repeatFrom = c.row === null ? null : st.start;
+          c.repeatTo = st.end === null ? null : st.end;
+        } else {
+          c.repeatOf = null; c.repeatFrom = null; c.repeatTo = null;
+        }
+        c.repeatRows = null;
+        c.stretch = { key: st.s.key, start: st.start, end: st.end, open: st.end === null, planned: st.planned,
+          count: kept, lead: null, parser: l.stretch && typeof l.stretch === 'object' ? l.stretch : null };
+        if (st.end === null) open.copy = c;
+        copies[i] = c;
+      } else if (isSt || i > firstStretch || knitLineEnd(l) > list[0].prevEnd) {
+        // after the first stretch (or numbered past it): renumber
+        if (isSt) {
+          c.row = null; c.rowEnd = null; c.repeatFrom = null; c.repeatTo = null; c.unnumbered = true;
+        } else if (c.row >= 1) {
+          var r1 = map(l.rowList && l.rowList.length ? l.rowList[0] : l.row);
+          if (r1 === null) {
+            c.row = null; c.rowEnd = null; c.rowList = null; c.unnumbered = true;
+          } else {
+            var d = r1 - (l.rowList && l.rowList.length ? l.rowList[0] : l.row);
+            c.row = l.row + d;
+            c.rowEnd = typeof l.rowEnd === 'number' ? l.rowEnd + d : l.rowEnd;
+            if (l.rowList) c.rowList = l.rowList.map(function (x) { return x + d; });
+          }
+        }
+        if (typeof l.repeatFrom === 'number' && l.repeatFrom >= 1 && !isSt) {
+          var f1 = map(l.repeatFrom);
+          if (f1 === null) { c.repeatFrom = null; c.repeatTo = null; }
+          else {
+            var dd = f1 - l.repeatFrom;
+            c.repeatFrom = f1;
+            if (typeof l.repeatTo === 'number') c.repeatTo = l.repeatTo + dd;
+            if (typeof l.countsFrom === 'number') c.countsFrom = l.countsFrom + dd;
+            if (typeof l.repeatRows === 'number') c.repeatRows = l.repeatRows + dd;
+            if (typeof l.repeatAfter === 'number') c.repeatAfter = l.repeatAfter + dd;
+          }
+        } else if (typeof l.countsFrom === 'number' && c.row >= 1 && l.row >= 1) {
+          c.countsFrom = l.countsFrom + (c.row - l.row);
+        }
+        if (Array.isArray(l.repeatOf)) c.repeatOf = l.repeatOf.map(map);
+        // a row numbered after an ended (or planned) stretch is a row, not ≈ one
+        if (i > firstStretch) delete c.approxRow;
+      }
+      if (st && !st.block && l.kind === 'setup') {
+        // within: the cast-on stays row 0 and the stretch it opens follows
+        // as its own line; otherwise the set-up line is the stretch itself
+        if (l.stretch && l.stretch.within) {
+          var su = {};
+          for (var sk in l) if (Object.prototype.hasOwnProperty.call(l, sk)) su[sk] = l[sk];
+          out.push(su);
+          if (l.stretch.text) c.text = String(l.stretch.text);
+        }
+        c.kind = 'row';
+      }
+      posOf[i] = out.length;
+      out.push(c);
+    }
+    list.forEach(function (s) {
+      var cp = copies[s.i];
+      if (cp && s.lead) {
+        var li0 = lines.indexOf(s.lead);
+        var li = li0 >= 0 ? posOf[li0] : -1;
+        if (li >= 0) {
+          // the open repeat works the stretch's rows: it starts where the stretch does
+          if (cp.row >= 1) { out[li].repeatFrom = cp.row; out[li].repeatTo = cp.stretch.end; }
+          cp.stretch.lead = out[li];
+        }
+      }
+    });
+    for (var pk in lines) {
+      if (Object.prototype.hasOwnProperty.call(lines, pk) && !/^\d+$/.test(pk)) out[pk] = lines[pk];
+    }
+    var derived = {};
+    for (var ek in entry) if (Object.prototype.hasOwnProperty.call(entry, ek)) derived[ek] = entry[ek];
+    derived.lines = out;
+    derived.version = ++lineVersion;
+    derived.index = null;
+    derived.groups = null;
+    derived.phased = null;
+    derived.stretchScan = null;
+    derived.rawIndex = null;
+    derived.raw = entry;
+    derived.phases = { segments: segs, stretches: list.map(function (s) { return stretchAt[s.i] || { s: s, start: null, end: null, planned: false }; }) };
+    derived.openStretch = open && open.copy ? open.copy : null;
+    return derived;
+  }
+
+  /** The open stretch that owns row `row` (past the rows the index holds), or null. */
+  function knitOpenStretch(prt, row) {
+    if (!prt || !(row >= 1)) return null;
+    var entry = partLines(prt);
+    var op = entry && entry.openStretch;
+    return op && op.row >= 1 && row >= op.row ? op : null;
+  }
+
+  /** The renumbering state of a part: { entry, phases } or null when it has none. */
+  function knitPhaseState(prt) {
+    if (!prt || !isKnitPart(prt)) return null;
+    var entry = partLines(prt);
+    return entry && entry.phases ? entry : null;
+  }
+
+  /**
+   * The stretch row `row` (default the row being worked) is in, or null.
+   * @returns {{key, line, start, end, state:'open'|'planned'|'ended', row, of, count, estimate}|null}
+   */
+  function stretchInfo(prt, row) {
+    if (!prt || !isKnitPart(prt)) return null;
+    var W = typeof row === 'number' ? row : repeatInfo(prt).patternRow;
+    var l = lineForRow(prt, W);
+    if (!l || !l.stretch || !l.stretch.key) return null;
+    var st = l.stretch;
+    if (st.end !== null && (W > st.end || W < st.start)) return null;
+    var out = {
+      key: st.key, line: l, start: st.start, end: st.end,
+      state: st.end === null ? 'open' : (st.planned ? 'planned' : 'ended'),
+      row: W - st.start + 1, of: st.end === null ? null : st.end - st.start + 1,
+      count: usableCount(st.count), estimate: null
+    };
+    var ui = null;
+    try { ui = untilInfo(prt, W); } catch (e) { ui = null; }
+    if (ui && ui.kind === 'length' && ui.targetRow) {
+      out.estimate = { rows: ui.targetRow - st.start + 1, end: ui.targetRow, value: ui.value, unit: ui.unit,
+        gaugeSource: ui.gaugeSource, fromRow: ui.fromRow, approx: true };
+    }
+    return out;
+  }
+
+  /** Every stretch of the part, in pattern order: [{ key, line, start, end, state }]. */
+  function stretchList(prt) {
+    var ps = knitPhaseState(prt);
+    if (!ps) return [];
+    return ps.phases.stretches.filter(function (x) { return !x.s.block; }).map(function (x) {
+      var copy = null;
+      if (x.start !== null) {
+        for (var i = 0; i < ps.lines.length; i++) if (ps.lines[i] && ps.lines[i].stretch && ps.lines[i].stretch.key === x.s.key) { copy = ps.lines[i]; break; }
+      }
+      return { key: x.s.key, line: copy || x.s.line, start: x.start, end: x.end,
+        state: x.start === null ? 'later' : x.end === null ? 'open' : (x.planned ? 'planned' : 'ended') };
+    });
+  }
+
+  /** `Part.targetRows` follows the stretches: none while one is open, the pattern's moved by their rows when all have ended. */
+  function knitSyncTarget(prt) {
+    if (!prt || !knitPhasesOn(prt)) return;
+    var raw = lineCache[prt.id];
+    var scan = raw && raw.stretchScan;
+    if (!raw || !scan) { partLines(prt); raw = lineCache[prt.id]; scan = raw && raw.stretchScan; }
+    if (!scan || !scan.length) return;
+    var auto = false;
+    if (prt.phaseTarget === undefined || prt.phaseTarget === null) {
+      // wave K (audit): a part the import gave no target (it had a "work
+      // until") gets one once its last stretch has ended: its last written row
+      if (!(prt.targetRows >= 1) || prt.phaseTargetAuto) auto = true;
+      else prt.phaseTarget = prt.targetRows;
+    }
+    var ps = knitPhaseState(prt);
+    if (!ps) return;
+    if (ps.openStretch || ps.phases.stretches.some(function (x) { return x.end === null; })) {
+      if (!auto || prt.phaseTargetAuto) prt.targetRows = null;
+      return;
+    }
+    if (auto) {
+      var lastEnd = 0, openAfter = false;
+      ps.lines.forEach(function (l) {
+        var e = knitLineEnd(l);
+        if (e > lastEnd) { lastEnd = e; openAfter = false; }
+        // an open repeat after the last numbered row ("Rep last 2 rows to end") has no end
+        if (l && l.kind === 'repeat' && l.repeatFrom >= 1 && typeof l.repeatTo !== 'number' && !(l.stretch && l.stretch.key)) openAfter = true;
+      });
+      if (lastEnd >= 1 && !openAfter) { prt.targetRows = lastEnd; prt.phaseTargetAuto = true; }
+      return;
+    }
+    var base = prt.phaseTarget, segs = ps.phases.segments, mapped = null;
+    for (var k = 0; k < segs.length; k++) {
+      var g = segs[k];
+      if (base >= g.pFrom && (g.pTo === null || base <= g.pTo)) { mapped = base + g.off; break; }
+    }
+    prt.targetRows = mapped;
+  }
+
+  /** importPatternSections' last step: parts with an open stretch get no row target. */
+  function knitAfterImport(proj, sections, fullText) {
+    if (!proj || !isKnitProject(proj)) return;
+    // wave K (knit-store, P7): a pattern out of a book remembers its own PDF
+    // pages, so only ITS charts attach (`setChartPages`), never the book's others
+    try { knitRememberPatternPages(proj, sections, fullText); } catch (e0) { /* no pages known */ }
+    if (!proj.rowPhases) return;
+    proj.parts.forEach(function (p) {
+      // a target the import (re)computed is the pattern's own numbering
+      if (p.targetRows >= 1) delete p.phaseTarget;
+      try { knitSyncTarget(p); } catch (e) { /* keep it */ }
+    });
+  }
+
+  /**
+   * `craftData.patternPages` [{name, from, to}]: the book patterns this import
+   * took (`Knits.bookPatterns`), by the sections' group names. Absent for a
+   * single pattern (every chart is its own).
+   */
+  function knitRememberPatternPages(proj, sections, fullText) {
+    var api = patternsApi(KNIT_CRAFT);
+    if (!fullText || !api || typeof api.bookPatterns !== 'function' || !Array.isArray(sections)) return;
+    var book = api.bookPatterns(String(fullText));
+    if (!Array.isArray(book) || book.length < 2) return;
+    var names = [];
+    sections.forEach(function (s) { var g = normalizeGroupName(s && s.group); if (g && names.indexOf(g) < 0) names.push(g); });
+    if (!names.length) return;
+    var key = function (n) { return str(n, '').toLowerCase().replace(/[^a-z0-9]+/g, ''); };
+    var keep = [];
+    book.forEach(function (b) {
+      if (!b || !b.pages || !(b.pages.from >= 1)) return;
+      if (!names.some(function (n) { return key(n) === key(b.name); })) return;
+      keep.push({ name: str(b.name, ''), from: Math.floor(b.pages.from), to: Math.floor(b.pages.to >= b.pages.from ? b.pages.to : b.pages.from) });
+    });
+    if (!keep.length) return;
+    if (!proj.craftData || typeof proj.craftData !== 'object') proj.craftData = {};
+    proj.craftData.patternPages = keep;
+  }
+
+  /** Is PDF page `page` one of the imported book patterns' own pages (true when none are known)? */
+  function knitPageInPattern(cd, page) {
+    var pp = cd && Array.isArray(cd.patternPages) ? cd.patternPages : null;
+    if (!pp || !pp.length) return true;
+    return pp.some(function (x) { return x && page >= x.from && page <= x.to; });
+  }
+
+  function knitSetStretch(projectId, partId, fn) {
+    var proj = project(projectId);
+    var prt = part(proj, partId);
+    if (!proj || !prt || !isKnitPart(prt)) return null;
+    return fn(proj, prt);
+  }
+
+  /**
+   * "I'm at the length": the rows done so far end the stretch being worked;
+   * the next row is the first instruction after it. One undo step, one
+   * history entry.
+   */
+  function endStretch(projectId, partId) {
+    return knitSetStretch(projectId, partId, function (proj, prt) {
+      var si = stretchInfo(prt);
+      if (!si) return { event: 'none' };
+      snapshot(proj);
+      var rows = Math.max(0, (prt.row || 0) - si.start + 1);
+      if (!prt.stretches || typeof prt.stretches !== 'object') prt.stretches = {};
+      prt.stretches[si.key] = { rows: rows, planned: false, at: now() };
+      prt.stitch = 0;
+      knitSyncTarget(prt);
+      pushHistory(proj, prt);
+      var h = proj.history[proj.history.length - 1];
+      if (h) { h.kind = 'stretchEnd'; h.stretchRows = rows; }
+      touch(proj);
+      var p2 = part(proj, partId);
+      return { event: 'stretchEnd', key: si.key, start: si.start, end: si.start + rows - 1, rows: rows,
+        next: lineForRow(p2, repeatInfo(p2).patternRow) };
+    });
+  }
+
+  /** "Use" on the ≈ estimate: the stretch is planned to end there (a target). One undo step. */
+  function useStretchEstimate(projectId, partId) {
+    return knitSetStretch(projectId, partId, function (proj, prt) {
+      var si = stretchInfo(prt);
+      if (!si || !si.estimate || !(si.estimate.end >= si.start - 1)) return null;
+      snapshot(proj);
+      if (!prt.stretches || typeof prt.stretches !== 'object') prt.stretches = {};
+      prt.stretches[si.key] = { rows: Math.max(0, si.estimate.end - si.start + 1), planned: true, at: now() };
+      knitSyncTarget(prt);
+      touch(proj);
+      return stretchInfo(part(proj, partId));
+    });
+  }
+
+  /** Take an end back off (the stretch being worked, else the last one ended before it). One undo step. */
+  function reopenStretch(projectId, partId, key) {
+    return knitSetStretch(projectId, partId, function (proj, prt) {
+      if (!prt.stretches) return false;
+      var k = key;
+      if (!k) {
+        var si = stretchInfo(prt);
+        if (si && si.state !== 'open') k = si.key;
+        if (!k) {
+          var W = repeatInfo(prt).patternRow;
+          stretchList(prt).forEach(function (x) { if (x.end !== null && x.start !== null && x.start <= W) k = x.key; });
+        }
+      }
+      if (!k || !prt.stretches[k]) return false;
+      snapshot(proj);
+      delete prt.stretches[k];
+      if (!Object.keys(prt.stretches).length) delete prt.stretches;
+      knitSyncTarget(prt);
+      touch(proj);
+      return true;
+    });
+  }
+
+  /* ---- wave K (knit-store, P10): "I measured" ------------------------- */
+
+  /**
+   * What the knitter's measurements say: rows per unit fitted through them
+   * (least squares through the start of what is measured), the rows left to
+   * the stretch's length, and a row-gauge offer (never applied here).
+   */
+  function measureInfo(prt) {
+    var out = { pairs: [], rowsPerUnit: null, unit: null, rowsLeft: null, endRow: null, fromRow: 0, gaugeOffer: null };
+    if (!prt || !isKnitPart(prt)) return out;
+    var proj = projectOfPart(prt);
+    var g = gaugeOf(proj);
+    var unit = g ? g.unit : knitDefaultUnit();
+    out.unit = unit;
+    out.pairs = normalizeMeasures(prt.measures);
+    var ui = null, si = null;
+    try {
+      // the stretch being worked, else the last one that started before this
+      // row (a planned end the knitter has passed is still what they measure)
+      si = stretchInfo(prt);
+      if (!si) {
+        var W0 = repeatInfo(prt).patternRow, lastSt = null;
+        stretchList(prt).forEach(function (x) { if (x.start !== null && x.start <= W0 && x.end !== null) lastSt = x; });
+        if (lastSt) si = stretchInfo(prt, lastSt.start);
+      }
+      ui = untilInfo(prt, si ? si.start : undefined);
+    } catch (e) { ui = null; }
+    out.stretch = si || null;
+    var from = ui && typeof ui.fromRow === 'number' ? ui.fromRow : 0;
+    out.fromRow = from;
+    var sxy = 0, sxx = 0, used = 0;
+    out.pairs.forEach(function (m) {
+      if (m.row <= from) return;
+      var x = lengthIn(m.value, m.unit, unit);
+      sxy += (m.row - from) * x;
+      sxx += x * x;
+      used++;
+    });
+    if (!used || !(sxx > 0)) return out;
+    out.rowsPerUnit = Math.round((sxy / sxx) * 1000) / 1000;
+    if (ui && ui.kind === 'length' && ui.value) {
+      var target = lengthIn(ui.value, ui.unit || unit, unit);
+      out.endRow = from + Math.round(target * out.rowsPerUnit);
+      out.rowsLeft = Math.max(0, out.endRow - (prt.row || 0));
+      out.stretchKey = si ? si.key : null;
+    }
+    // the row gauge these measurements make, against the one in use
+    var over = g && g.over ? g.over : (unit === 'in' ? 4 : 10);
+    var rowsOver = Math.round(out.rowsPerUnit * over * 10) / 10;
+    var was = g ? (g.swatch && g.swatch.rows) || g.rows : null;
+    var rowsSpan = out.pairs.reduce(function (a, m) { return Math.max(a, m.row - from); }, 0);
+    if ((used >= 2 || rowsSpan >= 10) && (!was || Math.abs(rowsOver - was) / was >= 0.02)) {
+      out.gaugeOffer = { rows: rowsOver, over: over, unit: unit, was: was || null };
+    }
+    return out;
+  }
+
+  /**
+   * "I measured: 14 in" on the row just finished. A stretch whose end was
+   * only planned from the gauge is re-planned from the measurements; an open
+   * one is left for the knitter ("I'm at the length"). One undo step.
+   */
+  function addMeasurement(projectId, partId, value, unit) {
+    return knitSetStretch(projectId, partId, function (proj, prt) {
+      var v = knitNum(value, 9999);
+      if (!v) return null;
+      snapshot(proj);
+      var list = normalizeMeasures(prt.measures);
+      list.push({ row: prt.row || 0, value: v, unit: knitUnit(unit || (gaugeOf(proj) || {}).unit), at: now() });
+      prt.measures = list.slice(-24);
+      var info = measureInfo(prt);
+      var si = info.stretch;
+      if (si && si.state === 'planned' && info.endRow !== null && info.stretchKey === si.key) {
+        prt.stretches[si.key] = { rows: Math.max(0, info.endRow - si.start + 1), planned: true, at: now() };
+        knitSyncTarget(prt);
+        info = measureInfo(prt);
+        info.replanned = true;
+      }
+      info.atLength = !!(si && info.endRow !== null && (prt.row || 0) >= info.endRow);
+      touch(proj);
+      return info;
+    });
+  }
+
+  /** Switch a knitting project to stretch phases (or back to the absolute numbering). One undo step. */
+  function setRowPhases(projectId, on) {
+    var proj = project(projectId);
+    if (!proj || !isKnitProject(proj)) return false;
+    if (!!proj.rowPhases === !!on) return true;
+    snapshot(proj);
+    if (on) proj.rowPhases = true;
+    else delete proj.rowPhases;
+    knitPhaseMemo = Object.create(null);
+    proj.parts.forEach(function (p) {
+      if (on) knitSyncTarget(p);
+      else if (p.phaseTarget >= 1) { p.targetRows = p.phaseTarget; delete p.phaseTarget; }
+      else if (p.phaseTargetAuto) { p.targetRows = null; delete p.phaseTargetAuto; }
+    });
+    touch(proj);
+    return true;
+  }
+
+  /* ---- wave K (knit-store, P2): "this row" resolves the repeat ---------- */
+
+  // a sentence that sends you back to rows already written ("Rep last 6
+  // rnds 8 times more", "Rows 93-100: Rep Rows 91-92", "3rd row: As 1st row")
+  var KNIT_REP_SENTENCE_RE = /\b(?:rep(?:eat)?|as)\b/i;
+
+  /** "Knit 5 rnds even" counts rows; the reader may still hang a repeatOf on it. */
+  function knitPlainSpan(l) {
+    if (l && l.plainRows) return true;   // knit-parse §9: so many plain rows, no back-reference
+    var u = untilOf(l);
+    return !!(u && u.kind === 'rows' && !/^\s*(?:[^:]{0,30}:\s*)?rep/i.test(str(l.text, '')));
+  }
+
+  var KNIT_NUM_WORDS = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, twelve: 12 };
+
+  /**
+   * Does the sentence itself name the rows `refs` (the rows it sends you
+   * back to)? "Rep last 6 rnds" (6 rows, the ones just above), "Rep Rows
+   * 91-92" / "Rows 63 and 64", "As 1st row" / "Rep Row 1". "Rep Inc rnd every
+   * other rnd" (a plain round the pattern never wrote, then the named one),
+   * "Cont in pat until … same length as Back" and anything else: no.
+   */
+  function knitRepProven(text, refs, from) {
+    var t = String(text || '');
+    var n = refs.length, i;
+    var ROWW = '(?:short[\\s-]*)?(?:rows?|rnds?|rounds?)';
+    var lastRe = new RegExp('\\brep(?:eat)?\\s+(?:the\\s+)?last\\s+(\\d+|[a-z]+)\\s*(\\([^)]*\\))?\\s*' + ROWW + '\\b', 'i');
+    var last = lastRe.exec(t);
+    // "every other row" / "alt rnds": the plain row between is not a written one
+    if (!last && /\bevery\s+(?:other|alternate|alt\.?|2nd|following\s+alt(?:ernate)?)\s+(?:rows?|rnds?|rounds?)\b|\bon\s+alt(?:ernate)?\.?\s+(?:rows?|rnds?)\b/i.test(t)) return false;
+    if (last) {
+      // "Rep last 6 (6-6-6-4-4) rnds": one of the sizes' numbers
+      var allowed = [/^\d+$/.test(last[1]) ? +last[1] : KNIT_NUM_WORDS[last[1].toLowerCase()]];
+      if (last[2]) (last[2].match(/\d+/g) || []).forEach(function (d) { allowed.push(+d); });
+      if (allowed.indexOf(n) < 0) return false;
+      for (i = 0; i < n; i++) if (refs[i] !== from - n + i) return false;
+      return true;
+    }
+    if (/\brep(?:eat)?\s+(?:the\s+)?last\s+(?:row|rnd|round)\b/i.test(t)) return n === 1 && refs[0] === from - 1;
+    var range = /\b(?:rows?|rnds?|rounds?)\s+(\d+)\s*(?:-|–|—|to|through)\s*(\d+)\b/i.exec(t);
+    if (range && /\brep(?:eat)?\b/i.test(t)) {
+      var a = +range[1], b = +range[2];
+      if (b - a + 1 !== n) return false;
+      for (i = 0; i < n; i++) if (refs[i] !== a + i) return false;
+      return true;
+    }
+    var pair = /\b(?:rows?|rnds?)\s+(\d+)\s+(?:and|&)\s+(\d+)\b/i.exec(t);
+    if (pair && /\brep(?:eat)?\b/i.test(t)) return n === 2 && refs[0] === +pair[1] && refs[1] === +pair[2];
+    var as = /\bas\s+(?:for\s+)?(?:(\d+)(?:st|nd|rd|th)\s+(?:row|rnd|round)|(?:row|rnd|round)\s+(\d+))\b/i.exec(t);
+    if (as) return n === 1 && refs[0] === +(as[1] || as[2]);
+    var one = /\brep(?:eat)?\s+(?:row|rnd|round)\s+(\d+)\b/i.exec(t);
+    if (one) return n === 1 && refs[0] === +one[1];
+    return false;
+  }
+
+  /**
+   * Row `row` of a back-referencing line: the written row it works and where
+   * it is in the cycle, or null when the store cannot tell.
+   * @returns {{shown:Object, k:number, n:number, cycle:number, of:(number|null), ref:number}|null}
+   */
+  function knitResolveRepeat(prt, l, row, depth) {
+    if (!l || (depth || 0) > 4 || knitPlainSpan(l)) return null;
+    var refs = l.repeatOf;
+    var from = backRefFrom(l);
+    if (!from || !(row >= from) || !Array.isArray(refs) || !refs.length) return null;
+    if (!KNIT_REP_SENTENCE_RE.test(str(l.text, ''))) return null;
+    for (var i = 0; i < refs.length; i++) {
+      if (typeof refs[i] !== 'number' || !isFinite(refs[i]) || refs[i] < 1 || refs[i] >= row || Math.floor(refs[i]) !== refs[i]) return null;
+    }
+    // wave K (audit): only a sentence that SAYS which rows it repeats, and
+    // says the same rows the reader found, is resolved
+    if (!knitRepProven(str(l.text, ''), refs, from)) return null;
+    var n = refs.length;
+    var k = ((row - from) % n) + 1;
+    var u = refs[k - 1];
+    var ul = lineForRow(prt, u);
+    if (!ul) return null;
+    var shown = ul;
+    if (backRefFrom(ul) && !knitPlainSpan(ul)) {
+      var deeper = knitResolveRepeat(prt, ul, u, (depth || 0) + 1);
+      if (!deeper) return null;
+      shown = deeper.shown;
+    }
+    // the rows repeated are the ones just above the sentence: they were the
+    // first working ("Rep last 6 rnds 8 times more" = workings 2 to 9)
+    var contiguous = true;
+    for (var j = 0; j < n; j++) if (refs[j] !== from - n + j) contiguous = false;
+    var cycle = Math.floor((row - from) / n) + (contiguous ? 2 : 1);
+    var of = null;
+    if (typeof l.repeatTo === 'number' && l.repeatTo >= from) {
+      var span = l.repeatTo - from + 1;
+      if (span % n === 0) of = span / n + (contiguous ? 1 : 0);
+    }
+    return { shown: shown, k: k, n: n, cycle: cycle, of: of, ref: u };
+  }
+
+  /**
+   * The pattern line for a row, with a repeat sentence resolved to the row
+   * it sends you back to. Knitting only; crochet (and anything the store
+   * cannot resolve) gets `shown === line`, `via === null`.
+   * @returns {{line:Object, shown:Object, via:(Object|null), k:(number|null),
+   *   n:(number|null), cycle:(number|null), of:(number|null)}|null}
+   */
+  function lineInfo(prt, rowNumber) {
+    var l = lineForRow(prt, rowNumber);
+    if (!l) return null;
+    var out = { line: l, shown: l, via: null, k: null, n: null, cycle: null, of: null, unsure: false };
+    if (!isKnitPart(prt)) return out;
+    var src = l.stretch && l.stretch.lead ? l.stretch.lead : l;
+    var res = null;
+    try { res = knitResolveRepeat(prt, src, rowNumber, 0); } catch (e) { res = null; }
+    if (!res) {
+      // wave K (audit): a back-reference the store could not prove: show the
+      // printed sentence, and say so
+      if (backRefFrom(src) && Array.isArray(src.repeatOf) && src.repeatOf.length && !knitPlainSpan(src) && rowNumber >= backRefFrom(src)) out.unsure = true;
+      return out;
+    }
+    out.shown = res.shown;
+    out.via = l;
+    out.k = res.k;
+    out.n = res.n;
+    out.cycle = res.cycle;
+    out.of = res.of;
+    return out;
   }
 
   /** A back-reference whose every re-worked row is a short row. */
@@ -8173,7 +9342,34 @@
     return !!(l && SIDE_STATED_RE.test(str(l.text, '').slice(0, 80)));
   }
 
+  /** wave K (audit): "With RS facing, … join yarn …" on a ROW states that row's side. */
+  function knitFacingSide(l) {
+    if (!l || !(l.row >= 1) || l.kind === 'setup') return null;
+    var m = /\bwith\s+(rs|ws|right\s+side|wrong\s+side)\s+(?:of\s+work\s+)?facing\b/i.exec(str(l.text, ''));
+    if (!m) return null;
+    return /^(?:rs|right)/i.test(m[1]) ? 'rs' : 'ws';
+  }
+
+  /**
+   * wave K (audit): "Join yarn to rem sts …" starts the second side of a
+   * divided piece on the side the first side began on (the row that said
+   * "Turn. Leave rem sts on a st holder").
+   */
+  function knitRejoinSide(lines, l) {
+    if (!l || !(l.row >= 1) || !/^\s*(?:next\s+row\s*:\s*)?(?:with\s+(?:rs|right\s+side)\s+facing,?\s*)?(?:re)?join\s+yarn\b/i.test(str(l.text, ''))) return null;
+    for (var i = 0; i < lines.length; i++) {
+      var s = lines[i];
+      if (s === l) break;
+      if (s && s.row >= 1 && /\bturn\b[^]*?\bleave\s+(?:the\s+)?rem(?:aining)?\s+sts\b|\bleave\s+(?:the\s+)?rem(?:aining)?\s+sts\s+on\s+a\s+(?:st(?:itch)?\s+)?holder/i.test(str(s.text, '')) && sideStated(s)) {
+        return normalizeKnitSide(s.side);
+      }
+    }
+    return null;
+  }
+
   function lineSideFor(l, row) {
+    var fs = knitFacingSide(l);
+    if (fs && l.row === row) return fs;
     if (!l || !l.side || !sideStated(l)) return null;
     var side = normalizeKnitSide(l.side);
     if (!side) return null;
@@ -8204,7 +9400,7 @@
     var ownLine = lines.length ? lineForRow(prt, patternRowOf(prt, row)) : null;
     var own = lineSideFor(ownLine, patternRowOf(prt, row));
     if (own) return { side: own, source: 'pattern' };
-    if (!(opts && opts.flat) && rowWorkMode(prt, Math.max(1, row), proj) === 'rounds' &&
+    if (!(opts && opts.flat) && (rowWorkMode(prt, Math.max(1, row), proj) === 'rounds' || prt.rowWord === 'rnd' || knitSpeaksRounds(prt)) &&
         !(normalizeWorkMode(prt.workMode, 'auto') === 'auto' && ownLine && /^\s*rows?\b/i.test(str(ownLine.text, '')))) {
       return { side: null, source: 'round' };
     }
@@ -8213,8 +9409,17 @@
     for (var i = 0; i < lines.length; i++) {
       var l = lines[i];
       var side = normalizeKnitSide(l && l.side);
-      if (!side || !sideStated(l)) continue;
-      var tagRows = enumRows(l) || (l.row >= 1 ? [l.row] : (l.kind === 'setup' ? [0] : []));
+      var tagRows;
+      // wave K (audit): an ended stretch "ending on a WS row" states its last row's side;
+      // "With RS facing … join yarn" states its own row's
+      var stSide = knitStretchEndSide(l);
+      var fSide = knitFacingSide(l) || knitRejoinSide(lines, l);
+      if (stSide) { side = stSide; tagRows = [l.stretch.end]; }
+      else if (fSide) { side = fSide; tagRows = [l.row]; }
+      else {
+        if (!side || !sideStated(l)) continue;
+        tagRows = enumRows(l) || (l.row >= 1 ? [l.row] : (l.kind === 'setup' ? [0] : []));
+      }
       for (var j = 0; j < tagRows.length; j++) {
         // ONLY the last tag at or before the row: patterns put RS on even
         // rows and swap mid-way, so a tag further on says nothing about here
@@ -8224,8 +9429,60 @@
         if (d < bestD) { bestD = d; best = { row: tagRows[j], side: side }; }
       }
     }
+    // wave K (audit): a part that carries on the one before it ("Front
+    // (continued)", "Start with 89 sts.") carries on its row parity
+    if (!best && isKnitPart(prt) && !(opts && opts.noCarry)) {
+      var carried = knitCarriedSide(prt, proj);
+      if (carried) best = { row: 0, side: carried };
+    }
     if (!best) return { side: null, source: null };
     return { side: (row - best.row) % 2 === 0 ? best.side : otherSide(best.side), source: 'parity' };
+  }
+
+  /** The side an ended stretch's last row is on, when its words say ("ending on a WS row"). */
+  function knitStretchEndSide(l) {
+    if (!l || !l.stretch || !l.stretch.key || !(l.stretch.end >= 1) || l.stretch.end < l.stretch.start) return null;
+    var u = untilOf(l);
+    var e = u && u.endOn ? normalizeKnitSide(u.endOn) : null;
+    if (!e && l.stretch.parser && l.stretch.parser.ends) e = normalizeKnitSide(l.stretch.parser.ends.endOn);
+    return e;
+  }
+
+  var knitSideCarryBusy = false;
+
+  /** The side of the last row of the part this one continues, as "row 0" of this one; null when not known. */
+  function knitCarriedSide(prt, proj) {
+    if (knitSideCarryBusy) return null;
+    proj = proj || projectOfPart(prt);
+    var su = setupLine(prt);
+    var cont = /\(continued/i.test(str(prt.name, '')) || (su && /^\s*start\s+with\s+\d/i.test(str(su.text, '')));
+    if (!cont) return null;
+    var pp = knitPrevPart(prt, proj);
+    if (!pp || !isKnitPart(pp)) return null;
+    var end = usableCount(pp.targetRows) || usableCount(patternSummary(pp).maxRow);
+    if (!end) return null;
+    knitSideCarryBusy = true;
+    try {
+      var s = patternSideAt(pp, end, proj, { flat: true });
+      return s && s.side ? s.side : null;
+    } finally { knitSideCarryBusy = false; }
+  }
+
+  /** Every numbered line of the part speaks of rounds ("Next rnd …", "Rnd 3: …"), none of rows. */
+  function knitSpeaksRounds(prt) {
+    var entry = partLines(prt);
+    if (!entry || !entry.lines || !entry.lines.length) return false;
+    if (entry.speaksRounds !== undefined) return entry.speaksRounds;
+    var rnd = 0, rows = 0;
+    entry.lines.forEach(function (l) {
+      if (!l || !(l.row >= 1)) return;
+      var t = str(l.text, '');
+      // the line's own label: "Next rnd …", "Rnd 3:", "2nd rnd:" / "Row 1", "Next row", "Short-row 2"
+      if (/^\s*(?:[A-Za-z ]{0,20}:\s*)?(?:next\s+|\d+(?:st|nd|rd|th)\s+)?(?:short[\s-]*)?rows?\b/i.test(t) || knitFacingSide(l)) rows++;
+      else if (/^\s*(?:[A-Za-z ]{0,20}:\s*)?(?:next\s+|\d+(?:st|nd|rd|th)\s+|set-?up\s+|inc\.?\s+|dec\.?\s+)?(?:rnds?|rounds?)\b/i.test(t)) rnd++;
+    });
+    entry.speaksRounds = rnd >= 1 && rows === 0;
+    return entry.speaksRounds;
   }
 
   /**
@@ -8293,25 +9550,49 @@
     if (!lines.length) return null;
     var row = repeatInfo(prt).patternRow;
     var best = null;
+    // wave K (knit-store, P9): in stretch phases a marker NOTE ("Insert
+    // markers around 4 sts …") is placed after the last numbered row before
+    // it (it used to count as row 0, so its positions were read against
+    // every later row); a note past an open stretch is not placed yet
+    var phases = knitPhasesOn(prt) && isKnitPart(prt);
+    var lastRow = 0, stopped = false, sameRow = [];
     for (var i = 0; i < lines.length; i++) {
       var l = lines[i];
-      if (!l || !Array.isArray(l.markers) || !l.markers.length) continue;
-      var lr = l.row >= 1 ? l.row : 0;
-      if (lr > row) continue;
-      if (!best || lr >= best.row) best = { row: lr, line: l };
+      if (!l) continue;
+      if (phases && l.stretch && l.stretch.open && l.row >= 1) { stopped = true; }
+      if (phases && l.row >= 1) lastRow = Math.max(lastRow, knitLineEnd(l));
+      if (!Array.isArray(l.markers) || !l.markers.length) continue;
+      // (wave K, P1: a line past an open stretch has no row yet, it is not row 0)
+      if (l.unnumbered) continue;
+      var lr = l.row >= 1 ? l.row : (phases && l.kind !== 'setup' ? (stopped ? -1 : lastRow) : 0);
+      if (lr < 0 || lr > row) continue;
+      if (!best || lr > best.row) { best = { row: lr, line: l }; sameRow = [l]; }
+      else if (lr === best.row) { best = { row: lr, line: l }; sameRow.push(l); }
     }
     if (!best) return null;
     var list = [];
-    best.line.markers.forEach(function (m, i) {
-      if (!m || typeof m !== 'object') return;
-      var at = knitAt(m.at);
-      if (at < 0) return;
-      var nm = str(m.name, '').trim();
-      list.push({ id: 'pattern:' + i, name: isBorName(nm) ? 'BOR' : nm, at: isBorName(nm) ? 0 : at });
+    var stitchWords = /\bmarkers?\s+around\b|\baround\s+(?:the\s+)?next\s+st\b/i;
+    (phases ? sameRow : [best.line]).forEach(function (ml) {
+      ml.markers.forEach(function (m, i) {
+        if (!m || typeof m !== 'object') return;
+        var at = knitAt(m.at);
+        if (at < 0) return;
+        var nm = str(m.name, '').trim();
+        var pmk = { id: 'pattern:' + (ml === best.line ? '' : lines.indexOf(ml) + ':') + i, name: isBorName(nm) ? 'BOR' : nm, at: isBorName(nm) ? 0 : at };
+        // wave K (P9): a marker around a stitch ("insert marker around next st")
+        if (m.kind === 'stitch' || m.around === true || (isKnitPart(prt) && !isBorName(nm) && stitchWords.test(str(ml.text, '')))) pmk.kind = 'stitch';
+        if (list.some(function (x) { return x.name === pmk.name && x.at === pmk.at; })) return;
+        if (pmk.name === 'BOR' && list.some(function (x) { return x.name === 'BOR'; })) return;
+        list.push(pmk);
+      });
     });
     list.sort(function (a, b) { return a.at - b.at; });
     var total = usableCount(best.line.count);
     if (!total && best.line.row >= 1) total = usableCount(targetFor(prt, best.line.row));
+    if (!total && phases && !(best.line.row >= 1)) {
+      total = best.row >= 1 ? usableCount(targetFor(prt, best.row)) : null;
+      if (!total && best.row === 0) { var su = setupLine(prt); total = su ? usableCount(countOf(su)) : null; }
+    }
     return list.length ? { markers: list, row: best.row, total: total || null, line: best.line } : null;
   }
 
@@ -8339,7 +9620,15 @@
         out.markers = pm.markers;
         out.source = 'pattern';
         out.basis = pm.total;
+        out.basisRow = pm.row;   // wave K (P9): the row the markers were placed on
       }
+    }
+    // wave K (knit-store, P9): the part before it in the same piece ends with
+    // markers in place (Bernat's neck rows → the yoke rounds)
+    if (!out.markers.length && isKnitPart(prt)) {
+      var car = null;
+      try { car = knitCarriedMarkers(prt); } catch (e3) { car = null; }
+      if (car) { out.markers = car.markers; out.source = 'carried'; out.basis = car.total; out.basisRow = 0; out.from = car.from; }
     }
     if (!out.markers.length) return out;
     var total = null;
@@ -8347,6 +9636,25 @@
     out.total = total;
     // markers set on a row of another size: the stitch counts to them are not this row's
     out.shifted = !!(out.basis && total && out.basis !== total);
+    // wave K (audit): a lone beginning-of-round marker sits at stitch 0 on
+    // every round: there is nothing to vouch for
+    if (out.shifted && out.markers.every(function (m) { return m.at === 0; })) out.shifted = false;
+    // wave K (P9): ...unless the rows since then can be walked stitch by
+    // stitch, moving each marker by the increases on its own side of it
+    if (out.shifted && isKnitPart(prt)) {
+      var basisRow = out.source === 'pattern' ? (out.basisRow !== undefined ? out.basisRow : null) :
+        out.source === 'carried' ? 0 : (prt.markerRow >= 0 ? prt.markerRow : null);
+      var mv = null;
+      if (basisRow !== null) { try { mv = knitMoveMarkers(prt, out.markers, out.basis, basisRow, repeatInfo(prt).patternRow); } catch (e4) { mv = null; } }
+      if (mv && mv.total === total) {
+        out.markers = mv.markers;
+        out.basis = mv.total;
+        out.shifted = false;
+        out.moved = true;
+      } else {
+        out.unplaced = true;
+      }
+    }
     var pos = out.markers.filter(function (m) { return m.at > 0; }).map(function (m) { return m.at; });
     var uniq = [];
     pos.forEach(function (a) { if (uniq.indexOf(a) < 0) uniq.push(a); });
@@ -8368,6 +9676,13 @@
         var idx = 0;
         for (var k = 0; k < uniq.length; k++) if (s >= uniq[k]) idx = k + 1;
         out.segIndex = idx;
+        // wave K (P9): marked stitches ("● raglan st"): the plain stitches
+        // between them, each marked stitch counted on its own
+        var kinds = uniq.map(function (a) { return out.markers.some(function (m) { return m.at === a && m.kind === 'stitch'; }); });
+        if (kinds.some(Boolean)) {
+          out.marked = true;
+          out.plain = segs.map(function (n, j) { return n === null ? null : n - (j > 0 && kinds[j - 1] ? 1 : 0); });
+        }
       }
     }
     return out;
@@ -8375,9 +9690,226 @@
 
   function writeMarkers(proj, prt, list, total) {
     prt.markers = normalizeMarkers(list);
-    if (!prt.markers.length) prt.markerTotal = null;
-    else if (total !== undefined) prt.markerTotal = usableCount(total);
+    if (!prt.markers.length) { prt.markerTotal = null; delete prt.markerRow; }
+    else if (total !== undefined) {
+      prt.markerTotal = usableCount(total);
+      // wave K (P9): the row the positions count in (the row being worked)
+      if (isKnitPart(prt)) prt.markerRow = repeatInfo(prt).patternRow;
+    }
   }
+
+  /* ---- wave K (knit-store, P9): markers that move ---------------------- *
+   * From the row the markers were placed on to the row being worked, each
+   * row's own expansion (`Knits.expand`) is walked stitch by stitch: what it
+   * takes from the row below and what it makes. A marker sits between two
+   * old stitches; an increase made right at it goes to the side the row's
+   * words put it ("M1. SM." → before the marker, "SM. M1." → after). When
+   * the words do not say (or do not match the expansion) the walk gives up
+   * and the strip keeps its honest "markers set on a 38-st row" (E5: wrong
+   * numbers are worse than none). */
+
+  var KNIT_SITES = { m1: [0, 1], m1l: [0, 1], m1r: [0, 1], m1p: [0, 1], yo: [0, 1], co: [0, 1],
+    kfb: [1, 2], pfb: [1, 2], k2tog: [2, 1], p2tog: [2, 1], ssk: [2, 1], ssp: [2, 1], skp: [2, 1],
+    k3tog: [3, 1], p3tog: [3, 1], sk2p: [3, 1], cdd: [3, 1], sssk: [3, 1], bo: [1, 0] };
+
+  function knitSiteOf(rec) {
+    var t = rec && rec.t ? String(rec.t).toLowerCase() : '';
+    return KNIT_SITES[t] || [1, 1];
+  }
+
+  /**
+   * The row's words as SM / INC tokens with the star blocks worked out:
+   * [{sm: [{before, after}]}] in the order the markers are met, or null.
+   */
+  function knitSmFlags(text) {
+    var t = str(text, '').replace(/^\s*[^:]{0,40}:\s*/, '');
+    t = t.replace(/\(\s*(?:rs|ws)\s*\)\.?/ig, ' ')
+      // the stars a "Rep from * to **" sentence names are words, not marks
+      .replace(/\bfrom\s*\*\s*to\s*\*\*/gi, 'from STAR to STARS').replace(/\bfrom\s*\*/gi, 'from STAR')
+      .replace(/\*\*/g, ' \u0002 ').replace(/\*/g, ' \u0001 ');
+    var raw = t.split(/[.,;]|(?=\u0001)|(?=\u0002)|(?:\u0001)|(?:\u0002)/);
+    // re-split keeping the star marks as their own tokens
+    var toks = [];
+    t.split(/(\u0001|\u0002)/).forEach(function (chunk) {
+      if (chunk === '\u0001') { toks.push('S'); return; }
+      if (chunk === '\u0002') { toks.push('E'); return; }
+      chunk.split(/[.,;]/).forEach(function (s) {
+        s = s.trim();
+        if (!s) return;
+        if (/^(?:sm|slip\s+marker)\b/i.test(s)) toks.push('M');
+        else if (/^(?:m1[lr]?p?|kfb|pfb|yo|inc(?:rease)?)\b/i.test(s)) toks.push('I');
+        else if (/\b(?:k2tog|ssk|p2tog|ssp|skp|k3tog|sk2p|cdd|sssk|dec(?:rease)?|cast\s+off|bind\s+off)\b/i.test(s)) toks.push('D');
+        else if (/^rep(?:eat)?\s+from\s+STAR\b/.test(s.replace(/^(rep(?:eat)?)/i, 'rep'))) toks.push('R:' + s);
+        else if (/^then\s+from\s+STAR\s+to\s+STARS\b/i.test(s)) toks.push('T:' + s);
+        else if (/^\d+\s*(?:\([^)]*\)\s*)?sts?\b/i.test(s) || /^\(?\d+\s*(?:\([^)]*\))?\s*sts?\)?$/i.test(s)) return;
+        else toks.push('O');
+      });
+    });
+    raw = null;
+    function times(w) {
+      w = String(w || '').toLowerCase().trim();
+      if (w === 'once') return 1;
+      if (w === 'twice') return 2;
+      if (w === 'three times' || w === 'thrice') return 3;
+      var m = /^(\d{1,2})\s+times?$/.exec(w);
+      return m ? +m[1] : null;
+    }
+    var seq = [], i = 0, A = null, B = null, inA = false, inB = false, lastA = null;
+    for (i = 0; i < toks.length; i++) {
+      var k = toks[i];
+      if (k.indexOf('T:') === 0) {
+        var mt = /to\s+STARS\s+(once|twice|three\s+times|\d{1,2}\s+times?)/i.exec(k);
+        var nt = mt ? times(mt[1]) : null;
+        if (!lastA || nt === null) return null;
+        for (var qt = 0; qt < nt; qt++) seq = seq.concat(lastA);
+        continue;
+      }
+      if (k.indexOf('R:') === 0 && A) lastA = A;
+      if (k === 'S') { if (A) return null; A = []; inA = true; continue; }
+      if (k === 'E') { if (!inA) return null; inA = false; inB = true; B = []; continue; }
+      if (k.indexOf('R:') === 0) {
+        var s2 = k.slice(2);
+        var m1 = /rep(?:eat)?\s+from\s+STAR\s+to\s+STARS\s+(once|twice|three\s+times|\d{1,2}\s+times?)(?:\s+more)?/i.exec(s2);
+        var m2 = /rep(?:eat)?\s+from\s+STAR\s+(once|twice|three\s+times|\d{1,2}\s+times?)\s+more(?:\s*,?\s*then\s+from\s+STAR\s+to\s+STARS\s+(once|twice|\d{1,2}\s+times?))?/i.exec(s2);
+        if (!A) return null;
+        var unit = A, n = null;
+        if (m1) { n = times(m1[1]); }
+        else if (m2) {
+          n = times(m2[1]);
+          unit = A.concat(B || []);
+          var then = m2[2] ? times(m2[2]) : 0;
+          if (n === null || then === null) return null;
+          for (var q = 0; q < n; q++) seq = seq.concat(unit);
+          for (q = 0; q < then; q++) seq = seq.concat(A);
+          A = null; B = null; inA = false; inB = false;
+          continue;
+        } else return null;
+        if (n === null) return null;
+        for (var q2 = 0; q2 < n; q2++) seq = seq.concat(unit);
+        A = null; B = null; inA = false; inB = false;
+        continue;
+      }
+      if (inA) { A.push(k); seq.push(k); }
+      else { if (inB && B) B.push(k); seq.push(k); }
+    }
+    // ", then from * to ** once" in its own sentence
+    if (inA) return null;
+    var flags = [];
+    flags.incs = 0;
+    flags.decs = 0;
+    flags.loose = 0;
+    for (i = 0; i < seq.length; i++) {
+      if (seq[i] === 'I') {
+        flags.incs++;
+        if (seq[i - 1] !== 'M' && seq[i + 1] !== 'M') flags.loose++;
+      }
+      if (seq[i] === 'D') flags.decs++;
+      if (seq[i] !== 'M') continue;
+      flags.push({ before: seq[i - 1] === 'I', after: seq[i + 1] === 'I' });
+    }
+    // "M1. SM. M1." cannot tell which marker an increase belongs to: one each side only
+    for (i = 1; i < seq.length - 1; i++) if (seq[i] === 'I' && seq[i - 1] === 'M' && seq[i + 1] === 'M') flags.loose++;
+    return flags;
+  }
+
+  /**
+   * Walk rows (basisRow, row] moving `markers` (positions on a `basis`-st row).
+   * @returns {{markers:Array, total:number}|null}
+   */
+  function knitMoveMarkers(prt, markers, basis, basisRow, row) {
+    var api = patternsApi(prt);
+    if (!(row > basisRow) || row - basisRow > 400) return null;
+    var entry = partLines(prt);
+    var sig = entry.version + '|' + basisRow + '|' + row + '|' + basis + '|' + markers.map(function (m) { return m.at; }).join(',');
+    var hit = knitMarkerCache[prt.id];
+    if (hit && hit.sig === sig) return hit.out;
+    var res = knitWalkMarkers(prt, api, entry.lines, markers, basis, basisRow, row);
+    knitMarkerCache[prt.id] = { sig: sig, out: res };
+    return res;
+  }
+  var knitMarkerCache = Object.create(null);
+
+  function knitWalkMarkers(prt, api, lines, markers, basis, basisRow, row) {
+    // The row's WORDS place each increase (the expansion cannot: "Knit to
+    // first marker" has no length until the markers are known); the row's
+    // printed total must agree with the increases the words name.
+    var pos = markers.map(function (m) { return m.at; });
+    var total = basis;
+    for (var r = basisRow + 1; r <= row; r++) {
+      var after = usableCount(targetFor(prt, r));
+      var info = lineInfo(prt, r);
+      var words = info ? info.shown : null;
+      var flags = knitSmFlags(words ? words.text : '');
+      if (after === null) {
+        // no total for the row: only a row whose words shape nothing keeps them
+        if (flags && !flags.incs && !flags.decs) continue;
+        return null;
+      }
+      var delta = after - total;
+      if (delta === 0 && !(flags && (flags.incs || flags.decs))) continue;
+      var inner = [];
+      pos.forEach(function (p, ix) { if (p > 0 && p < total) inner.push(ix); });
+      // marked raglan stitches: "inc 1 st at each side of marked sts" makes
+      // two per marked stitch, one before it and one after
+      var allMarked = inner.length && inner.every(function (ix) { return markers[ix].kind === 'stitch'; });
+      if (allMarked && delta === 2 * inner.length && flags && !flags.decs && !flags.length) {
+        var order0 = inner.slice().sort(function (a, b) { return pos[a] - pos[b]; });
+        var nx = pos.slice();
+        order0.forEach(function (ix, j) { nx[ix] = pos[ix] + 2 * j + 1; });
+        pos = nx;
+        total = after;
+        continue;
+      }
+      // every increase must sit beside a marker, and they must make the row's total
+      if (!flags || flags.decs || flags.loose || flags.incs !== delta || flags.length !== inner.length) return null;
+      var side = null;
+      try { side = patternSideAt(prt, r, projectOfPart(prt)); } catch (e2) { side = null; }
+      var ws = !!(side && side.side === 'ws');
+      var at = pos.map(function (p) { return ws ? total - p : p; });
+      // the markers in the order the row meets them
+      var meet = inner.slice().sort(function (a, b) { return at[a] - at[b]; });
+      var next = pos.slice(), cum = 0;
+      for (var i = 0; i < meet.length; i++) {
+        var f = flags[i];
+        if (f.before) cum++;
+        var na = at[meet[i]] + cum;
+        next[meet[i]] = ws ? after - na : na;
+        if (f.after) cum++;
+      }
+      pos = next;
+      total = after;
+    }
+    return {
+      markers: markers.map(function (m, i) { var o = {}; for (var k in m) o[k] = m[k]; o.at = m.at === 0 && isBorName(m.name) ? 0 : pos[i]; return o; }),
+      total: total
+    };
+  }
+
+  /** The markers the part before it (same piece) ends with, when this part starts on its stitches. */
+  function knitCarriedMarkers(prt) {
+    var proj = projectOfPart(prt);
+    var pp = knitPrevPart(prt, proj);
+    if (!pp || !isKnitPart(pp) || knitCarryBusy) return null;
+    var first = setupLine(prt);
+    var startCount = first ? usableCount(countOf(first)) : null;
+    if (!startCount) return null;
+    var end = usableCount(pp.targetRows) || usableCount(patternSummary(pp).maxRow);
+    if (!end) return null;
+    knitCarryBusy = true;
+    try {
+      var fake = {};
+      for (var k in pp) fake[k] = pp[k];
+      fake.row = end - 1;
+      fake.stitch = 0;
+      fake.shortRows = null;
+      var mi = markerInfo(fake);
+      if (!mi.markers.length || mi.shifted || mi.unplaced) return null;
+      var tot = mi.total || mi.basis;
+      if (tot !== startCount) return null;
+      return { markers: mi.markers.map(function (m) { return { id: 'carried:' + m.id, name: m.name, at: m.at, kind: m.kind }; }), total: tot, from: pp.name };
+    } finally { knitCarryBusy = false; }
+  }
+  var knitCarryBusy = false;
 
   /** The markers the strip shows, as a list the part can own (pattern ones copied). */
   function ownedMarkers(prt) {
@@ -8548,12 +10080,19 @@
   function panelCableRing(prt, lines, W) {
     var defs = lines && lines.panelDefs;
     if (!defs || typeof defs !== 'object') return null;
-    var ul = underlyingLine(prt, patternRowOf(prt, W));
+    var PWc = patternRowOf(prt, W);
+    var ul = underlyingLine(prt, PWc);
     var ch = ul && ul.chart;
-    if (!ch) return null;
+    var list = ch ? [ch].concat(Array.isArray(ch.also) ? ch.also : []) : null;
+    // wave K (P3): a "cont in pat" row works the panels placed before it
+    if (!list) {
+      var run = knitPanelsAt(prt, PWc, lineForRow(prt, PWc));
+      if (run) list = run.filter(function (p) { return p.row; }).map(function (p) { return { name: p.name, row: p.row }; });
+    }
+    if (!list || !list.length) return null;
     var api = patternsApi(prt);
     var best = null;
-    [ch].concat(Array.isArray(ch.also) ? ch.also : []).forEach(function (c) {
+    list.forEach(function (c) {
       if (!c || !(c.row >= 1)) return;
       var def = defs[str(c.name, '').toLowerCase().trim()];
       var pc = panelCrossRows(api, def);
@@ -8580,6 +10119,13 @@
     }
     if (!any && !stated) return lines.panelDefs ? panelCableRing(prt, lines, prt.row + 1) : null;
     var W = prt.row + 1;
+    // wave K (audit): rows working written panels cross where the PANELS do
+    // (inside a stretch the walk below re-read one placing row and rang
+    // "cable in 1" on every row)
+    if (lines.panelDefs) {
+      var pan0 = panelCableRing(prt, lines, W);
+      if (pan0) return pan0;
+    }
     var hits = [];
     if (any) {
       for (var d = 0; d < KNIT_LOOKAHEAD && hits.length < 2; d++) {
@@ -8888,6 +10434,135 @@
    * (`Line.chart`), the page it is printed on, and the row written out when
    * the chart was read (`KnitChart.rowText`).
    */
+  /* ---- wave K (knit-store, P3): panels and charts that keep running ----- *
+   * A line that places panels ("Work 1st row of Cable Panel C … Panel B …
+   * Panel A") sets each panel's ORIGIN: the part row its row 1 is worked on
+   * (line row − (panel row − 1)). Every later row of the part that carries
+   * the pattern on ("Cont in pat …", "Keeping cont of pat, cast off …", a
+   * stretch, a back-reference) works panel row ((row − origin) mod N) + 1,
+   * a pure function of the row, so undo and jumps need nothing. N is the
+   * panel's own length (its written definition, else a chart of that exact
+   * name); unknown N leaves the row unknown, never a number. */
+
+  var KNIT_CONTINUES_RE = /\b(?:pat(?:t|tern)?s?|panels?|charts?|as\s+(?:set|established|placed|before))\b/i;
+
+  function knitContinuesPattern(l) {
+    if (!l) return false;
+    if (l.stretch || backRefFrom(l) || untilOf(l)) return true;
+    return KNIT_CONTINUES_RE.test(str(l.text, ''));
+  }
+
+  /** A chart page of exactly this name (no single-page fallback: E3). */
+  function knitChartPageNamed(pages, rawName) {
+    var KC = window.KnitChart, i, page = null;
+    var name = str(rawName, '').trim();
+    var key = chartKey(/^[A-Z0-9]{1,3}$/i.test(name) ? 'Chart ' + name : name);
+    if (KC && typeof KC.find === 'function') {
+      try {
+        var hit = KC.find(pages.map(function (pg) { return pg.chart; }).filter(Boolean), name);
+        for (i = 0; hit && i < pages.length; i++) if (pages[i].chart === hit) { page = pages[i]; break; }
+      } catch (e0) { page = null; }
+    }
+    for (i = 0; !page && i < pages.length; i++) if (key && chartKey(pages[i].name) === key) page = pages[i];
+    for (i = 0; !page && i < pages.length; i++) if (key && pages[i].chart && chartKey(pages[i].chart.name) === key) page = pages[i];
+    return page;
+  }
+
+  /** How many rows a panel / chart has: its written definition, else its read chart; null = unknown. */
+  function knitPanelRows(prt, rawName, pages) {
+    var name = str(rawName, '').trim();
+    var pdefs = linesFor(prt).panelDefs;
+    var pdef = pdefs && typeof pdefs === 'object' ? pdefs[name.toLowerCase()] : null;
+    if (pdef) {
+      var pc = panelCrossRows(patternsApi(prt), pdef);
+      if (pc && pc.rows) return pc.rows;
+    }
+    var page = knitChartPageNamed(pages || chartPagesOf(projectOfPart(prt)), name);
+    var chart = page && page.chart ? page.chart : null;
+    if (chart) {
+      var nos = Array.isArray(chart.rowNos) ? chart.rowNos.filter(function (n) { return n > 0; }) : [];
+      if (nos.length) return Math.max.apply(null, nos);
+      if (chart.rows > 0) return Math.floor(chart.rows);
+    }
+    return null;
+  }
+
+  /**
+   * The panels running on part row `r` when its own line names none: from the
+   * last line at or before `r` that places them. [{name, row, of, origin,
+   * continued: true}] (row / of null when the panel's length is unknown), or
+   * null when `r`'s line speaks for itself or nothing was placed.
+   */
+  /**
+   * The chart position a line names, or null when its chart mention is no
+   * position: an end condition ("ending with chart Rnd 10") or a chart
+   * carried on from elsewhere ("Work even through Row 11 of Foot chart").
+   */
+  function knitChartPos(l) {
+    var c = l && l.chart && typeof l.chart === 'object' ? l.chart : null;
+    if (!c) return null;
+    var t = str(l.text, '');
+    if (/\bending\s+(?:with|on|after)\b[^.;]*\b(?:rnd|row|round)\s+\d+/i.test(t) && !(c.rowEnd > 0)) return null;
+    if (/\b(?:even|cont(?:inue|inuing)?|keeping)\b[^.;]*\bthrough\s+(?:row|rnd|round)\s+\d+/i.test(t)) return null;
+    return c;
+  }
+
+  function knitPanelsAt(prt, r, rowLine, pages) {
+    if (!(r >= 1) || !rowLine || knitChartPos(rowLine)) return null;
+    if (!knitContinuesPattern(rowLine)) return null;
+    var lines = linesFor(prt);
+    var best = null;
+    for (var i = 0; i < lines.length; i++) {
+      var l = lines[i];
+      if (!l || !l.chart || typeof l.chart !== 'object' || !(l.row >= 1) || l.row > r) continue;
+      if (!(l.chart.row >= 1) || l.stretch || !knitChartPos(l)) continue;
+      if (!best || l.row >= best.row) best = l;
+    }
+    if (!best) return null;
+    var list = [best.chart].concat(Array.isArray(best.chart.also) ? best.chart.also : []);
+    var out = [];
+    list.forEach(function (c) {
+      if (!c || !(c.row >= 1) || !str(c.name, '').trim()) return;
+      var origin = best.row - (Math.floor(c.row) - 1);
+      var n = knitPanelRows(prt, c.name, pages);
+      var row = n ? ((((r - origin) % n) + n) % n) + 1 : null;
+      out.push({ name: str(c.name, '').trim(), row: row, of: n || null, origin: origin, continued: true });
+    });
+    return out.length ? out : null;
+  }
+
+  /** Name, page, chart, length and the row written out, for one panel / chart at chart row `row`. */
+  function knitChartMeta(prt, proj, pages, rawName, row) {
+    var name = str(rawName, '').trim() || 'Chart';
+    if (/^[A-Z0-9]{1,3}$/i.test(name)) name = 'Chart ' + name;
+    var page = knitChartPageNamed(pages, rawName);
+    var chart = page && page.chart ? page.chart : null;
+    var of = null;
+    if (chart) {
+      var nos = Array.isArray(chart.rowNos) ? chart.rowNos.filter(function (n) { return n > 0; }) : [];
+      of = nos.length ? Math.max.apply(null, nos) : (chart.rows > 0 ? Math.floor(chart.rows) : null);
+    }
+    var pdefs = linesFor(prt).panelDefs;
+    var pdef = !chart && pdefs && typeof pdefs === 'object' ? pdefs[str(name, '').toLowerCase().trim()] : null;
+    var text = null, textSource = null;
+    if (pdef) {
+      var pc = panelCrossRows(patternsApi(prt), pdef);
+      if (pc && pc.rows) of = pc.rows;
+      if (row) { text = panelRowText(patternsApi(prt), pdef, row); if (text) textSource = 'pattern'; }
+    }
+    var KC = window.KnitChart;
+    if (chart && chart.cells && !chart.image && row && KC && typeof KC.rowText === 'function') {
+      try {
+        var side = sideInfo(prt, proj);
+        var sideArg = side.inRound ? null : (side.side || undefined);
+        var repeat = chartRepeatFor(chart, proj, prt);
+        var t = repeat === null ? KC.rowText(chart, row, sideArg) : KC.rowText(chart, row, sideArg, { repeat: repeat });
+        if (typeof t === 'string' && t.trim()) { text = t.trim(); textSource = 'chart'; }
+      } catch (e) { /* keep the panel's words */ }
+    }
+    return { name: name, page: page, chart: chart, of: of, panel: !!pdef, text: text, textSource: textSource };
+  }
+
   function chartInfo(prt) {
     if (!prt || !isKnitPart(prt)) return null;
     var proj = projectOfPart(prt);
@@ -8895,8 +10570,36 @@
     // the pattern row being worked, through a back-reference to the row it re-works
     var prow = sr ? (sr.numbered ? sr.patternRow : null) : repeatInfo(prt).patternRow;
     var line = sr ? sr.line : lineForRow(prt, prow);
+    // wave K (P3): the panels placed earlier keep running on this row
+    if (!sr && prow >= 1) {
+      var pagesK = chartPagesOf(proj);
+      var running = knitPanelsAt(prt, prow, line, pagesK);
+      if (running) {
+        var panels = running.map(function (p) {
+          var m = knitChartMeta(prt, proj, pagesK, p.name, p.row);
+          return { name: m.name, row: p.row, of: p.row ? (p.of || m.of) : (p.of || null), origin: p.origin,
+            page: m.page, chart: m.chart, text: p.row ? m.text : null, textSource: p.row ? m.textSource : null,
+            panel: m.panel, continued: true };
+        });
+        var p0 = panels[0];
+        return { name: p0.name, row: p0.row, of: p0.of, page: p0.page, chart: p0.chart, text: p0.text,
+          textSource: p0.textSource, panel: p0.panel, repeat: null, line: line, continued: true, panels: panels };
+      }
+    }
+    // wave K (audit): a chart named as an END ("ending with chart Rnd 10")
+    // or carried on from elsewhere ("Work even through Row 11 of Foot
+    // chart") names no position: the chart, its row unknown
+    if (line && line.chart && typeof line.chart === 'object' && !knitChartPos(line)) {
+      var pagesU = chartPagesOf(proj);
+      var nmU = str(line.chart.name, '').trim();
+      if (!nmU) return null;
+      var mU = knitChartMeta(prt, proj, pagesU, nmU, null);
+      return { name: mU.name, row: null, of: knitPanelRows(prt, nmU, pagesU) || mU.of || null, page: mU.page, chart: mU.chart,
+        text: null, textSource: null, panel: mU.panel, repeat: null, line: line, unknown: true };
+    }
     var from = backRefFrom(line);
-    if (from && prow >= from) {
+    // (only a back-reference whose sentence names the rows it repeats)
+    if (from && prow >= from && !(line.stretch && line.stretch.key) && knitRepProven(str(line.text, ''), line.repeatOf, from)) {
       var u = line.repeatOf[(prow - from) % line.repeatOf.length];
       var ul = typeof u === 'number' ? lineForRow(prt, u) : null;
       if (ul && !backRefFrom(ul)) { line = ul; prow = u; }
@@ -8915,6 +10618,14 @@
     // "Rows 3-16: work rows 3-16 of Chart A": row 7 is chart row 7
     var chEnd = clampInt(ch.rowEnd, 1, 9999, 0) || null;
     if (!gapRow && row && chEnd && chEnd > row && line.row >= 1 && prow > line.row) row = Math.min(chEnd, row + (prow - line.row));
+    // wave K (audit): a line covering several rows with ONE chart row named
+    // ("Row 15 and all following odd rows", "Rows 38 and 40"): the chart is
+    // numbered as the pattern's rows when it names the line's own first row,
+    // else the row is not known
+    else if (!gapRow && row && !chEnd && line.row >= 1 && prow > line.row &&
+             (enumRows(line) || (line.rowEnd > line.row))) {
+      row = Math.floor(ch.row) === line.row ? prow : null;
+    }
     var name = str(ch.name, '').trim() || 'Chart';
     if (/^[A-Z0-9]{1,3}$/i.test(name)) name = 'Chart ' + name;
     var pages = chartPagesOf(proj);
@@ -8930,7 +10641,8 @@
     for (i = 0; !page && i < pages.length; i++) if (chartKey(pages[i].name) === key) page = pages[i];
     // a chart of that name read off the page (the page entry may be unnamed)
     for (i = 0; !page && i < pages.length; i++) if (pages[i].chart && chartKey(pages[i].chart.name) === key) page = pages[i];
-    if (!page && pages.length === 1) page = pages[0];
+    // wave K (P3, E3): no "the only chart found" fallback - it bound every
+    // panel name to that chart and printed its length ("of 28" for a 12-row panel)
     var chart = page && page.chart ? page.chart : null;
     var of = null;
     if (chart) {
@@ -8950,14 +10662,21 @@
       if (pc && pc.rows) of = pc.rows;
       if (row) panelText = panelRowText(patternsApi(prt), pdef, row);
     }
-    if (!of) {
-      // the highest row of this chart any line names
+    if (!of && !/\bpanel\b/i.test(name)) {
+      // the highest row of this chart any line names (wave K: never for a
+      // panel - its placing rows say nothing about its length)
+      // (wave K, audit: only a RANGE says how far a chart goes - "Rows 3-16
+      // of Chart A", "Work Rows 1-61" - a single row named says nothing:
+      // "ending with chart Rnd 10" made "row 10 of 10")
       linesFor(prt).forEach(function (l) {
-        if (!l || !l.chart || chartKey(l.chart.name) !== key) return;
+        if (!l || !l.chart || chartKey(l.chart.name) !== key || !(l.chart.rowEnd > 0)) return;
         var top = Math.max(l.chart.row || 0, l.chart.rowEnd || 0);
         if (top > (of || 0)) of = Math.floor(top);
       });
     }
+    // never a chart row past the chart's last row: that position is unknown
+    if (row && of && row > of) row = null;
+    if (!row) panelText = null;
     var text = null, repeat = null;
     if (chart && chart.cells && !chart.image && row && KC && typeof KC.rowText === 'function') {
       try {
@@ -8971,8 +10690,22 @@
     }
     var textSource = text ? 'chart' : null;
     if (!text && panelText) { text = panelText; textSource = 'pattern'; }
-    return { name: name, row: row, of: of, page: page, chart: chart, text: text, textSource: textSource,
+    var outInfo = { name: name, row: row, of: of, page: page, chart: chart, text: text, textSource: textSource,
       panel: !!pdef, repeat: repeat, line: line };
+    // wave K (P3): a row that places several panels lists every one of them
+    if (Array.isArray(ch.also) && ch.also.length) {
+      var shift = row && ch.row >= 1 ? row - Math.floor(ch.row) : 0;
+      outInfo.panels = [{ name: name, row: row, of: of, page: page, chart: chart, text: text, textSource: textSource, panel: !!pdef }];
+      ch.also.forEach(function (c) {
+        if (!c || !str(c.name, '').trim()) return;
+        var r2 = c.row >= 1 && row ? Math.floor(c.row) + shift : null;
+        var n2 = knitPanelRows(prt, c.name, pages);
+        if (r2 && n2 && r2 > n2) r2 = null;
+        var m = knitChartMeta(prt, proj, pages, c.name, r2);
+        outInfo.panels.push({ name: m.name, row: r2, of: n2 || m.of, page: m.page, chart: m.chart, text: m.text, textSource: m.textSource, panel: m.panel });
+      });
+    }
+    return outInfo;
   }
 
   /**
@@ -9039,10 +10772,65 @@
     return null;
   }
 
+  /* ---- wave K (K3 glue): chart cells for the 3D's stranded colour ------ */
+
+  /** Does the project hold a read chart whose key gives colours? */
+  function knitHasColourChart(proj) {
+    if (!proj || !isKnitProject(proj)) return false;
+    return chartPagesOf(proj).some(function (pg) {
+      var c = pg.chart;
+      return !!(c && c.cells && !c.image && Array.isArray(c.legend) && c.legend.some(function (e) { return e && e.color; }));
+    });
+  }
+
+  var knitChartSerial = 0;
+
+  /** What the 3D cache key needs to know about the read charts ('' for crochet). */
+  function knitChartKey(proj) {
+    if (!proj || !isKnitProject(proj)) return '';
+    var cd = proj.craftData && typeof proj.craftData === 'object' ? proj.craftData : null;
+    var n = cd && Array.isArray(cd.charts) ? cd.charts.length : 0;
+    var p = cd && Array.isArray(cd.chartPages) ? cd.chartPages.length : 0;
+    if (!n && !p) return '';
+    // the charts array is replaced whenever charts are written: its identity is the version
+    var arr = cd.charts || cd.chartPages, id = arr.__kid;
+    if (!id) {
+      id = ++knitChartSerial;
+      try { Object.defineProperty(arr, '__kid', { value: id, enumerable: false }); } catch (e) { id = 0; }
+    }
+    return 'c' + n + 'p' + p + 'i' + id + (knitHasColourChart(proj) ? 'k' : '');
+  }
+
+  /**
+   * `KnitChart.rowCells` for actual row `row` of a part: chartInfo's chart
+   * and chart row for that row, the side in which it is worked (null in the
+   * round). null when the row works no read chart, or the chart gives no colour.
+   */
+  function knitChartCellsAt(prt, proj, row) {
+    var KC = window.KnitChart;
+    if (!KC || typeof KC.rowCells !== 'function' || !(row >= 1)) return null;
+    var probe = {};
+    for (var k in prt) if (Object.prototype.hasOwnProperty.call(prt, k)) probe[k] = prt[k];
+    probe.row = row - 1;
+    probe.stitch = 0;
+    probe.shortRows = null;
+    probe.side = null;
+    bindPartProject(probe, proj);
+    var ci = chartInfo(probe);
+    var chart = ci && ci.chart;
+    if (!chart || !chart.cells || chart.image || !(ci.row >= 1)) return null;
+    if (!(Array.isArray(chart.legend) && chart.legend.some(function (e) { return e && e.color; }))) return null;
+    var si = sideInfo(probe, proj);
+    var cells = KC.rowCells(chart, ci.row, si.inRound ? null : (si.side || undefined));
+    return Array.isArray(cells) && cells.some(function (c) { return c && c.color; }) ? cells : null;
+  }
+
   /** The importer's door for `craftData.chartPages` (one Undo with the rest of an import if `undo:false`). */
   function setChartPages(projectId, list, opts) {
     return updateCraftData(projectId, function (cd) {
       var good = (Array.isArray(list) ? list : []).filter(function (c) { return c && typeof c === 'object' && c.page >= 1; });
+      // wave K (P7, E12): one pattern out of a book keeps only the charts on its own pages
+      good = good.filter(function (c) { return knitPageInPattern(cd, Math.floor(c.page)); });
       cd.chartPages = good.filter(function (c) { return !c.noImage; }).map(function (c) {
         var o = { page: Math.floor(c.page), name: str(c.name, '').trim() };
         if (c.key) o.key = str(c.key, '');
@@ -9097,6 +10885,16 @@
     api.untilInfo = untilInfo;
     api.glossary = glossaryFor;
     api.chartInfo = chartInfo;
+    api.lineInfo = lineInfo;   // wave K (knit-store, P2)
+    // wave K (knit-store, P1): stretch phases
+    api.stretchInfo = stretchInfo;
+    api.stretchList = stretchList;
+    api.endStretch = endStretch;
+    api.useStretchEstimate = useStretchEstimate;
+    api.reopenStretch = reopenStretch;
+    api.setRowPhases = setRowPhases;
+    api.measureInfo = measureInfo;       // wave K (knit-store, P10)
+    api.addMeasurement = addMeasurement;
     api.chartPages = function (projOrId) {
       var pr = projOrId && typeof projOrId === 'object' ? projOrId : project(projOrId);
       return pr ? chartPagesOf(pr) : [];
@@ -9133,6 +10931,1927 @@
     }
     touch(proj);
     return res;
+  }
+
+  /* ------------------------------------------------------------------ *
+   * Wave K (shell-data; docs/wave-k/api/shell-data.md)
+   *
+   *  K1 craft hooks: template / settings / heavy
+   *  K2 heavy craft data off localStorage (IndexedDB) + diff undo
+   *  K3 count events, sessions, pace, goals, mark log
+   *  K4 step edits and notes (steps crafts)
+   *  K5 the user's profile and settings that survive a backup
+   *  K6 storage report
+   * ------------------------------------------------------------------ */
+
+  /* ---- K1: craft hooks ------------------------------------------------- */
+
+  var TEMPLATE_CRAFTDATA_MAX = 256 * 1024;
+  var HEAVY_MIN_BYTES = 32 * 1024;
+
+  function normalizeHeavyDef(h) {
+    if (!h || typeof h !== 'object' || !Array.isArray(h.fields)) return null;
+    var fields = [];
+    for (var i = 0; i < h.fields.length && fields.length < 16; i++) {
+      var f = str(h.fields[i], '').trim();
+      if (/^[A-Za-z0-9_$]+(\.[A-Za-z0-9_$]+){0,5}$/.test(f) && fields.indexOf(f) === -1) fields.push(f);
+    }
+    if (!fields.length) return null;
+    return { fields: fields, minBytes: clampInt(h.minBytes, 1, 64 * 1024 * 1024, HEAVY_MIN_BYTES) };
+  }
+
+  function hookObj(h) { return h && typeof h === 'object' ? h : null; }
+
+  /** The same hooks registerCraft takes, for a craft whose hooks live App-side. */
+  function setCraftHooks(id, hooks) {
+    var key = str(id, '').trim();
+    if (!key || !hooks || typeof hooks !== 'object') return null;
+    if (!crafts[key]) {
+      crafts[key] = { id: key, normalize: null, summary: null, templates: [], template: null, settingsHook: null, heavy: null };
+      craftOrder.push(key);
+    }
+    var c = crafts[key];
+    if ('template' in hooks) c.template = hookObj(hooks.template);
+    if ('settings' in hooks) {
+      c.settingsHook = hookObj(hooks.settings);
+      if (state && state.settings && state.settings.crafts && state.settings.crafts[key]) {
+        state.settings.crafts[key] = normalizeOneCraftSettings(key, state.settings.crafts[key]);
+      }
+    }
+    if ('heavy' in hooks) c.heavy = normalizeHeavyDef(hooks.heavy);
+    if (state) save();
+    return c;
+  }
+
+  function heavyDef(craftId) {
+    var c = crafts[str(craftId, '')];
+    return (c && c.heavy) || null;
+  }
+
+  /** "＋ New template" for any craft: an unsaved draft. */
+  function templateDraft(craftId) {
+    var craft = str(craftId, '').trim() || DEFAULT_CRAFT;
+    var c = crafts[craft];
+    var seed = null;
+    if (c && c.template && typeof c.template.blank === 'function') {
+      try {
+        var b = c.template.blank();
+        if (b && typeof b === 'object' && !Array.isArray(b)) seed = jsonObject(b);
+      } catch (e) { seed = null; }
+    }
+    return {
+      id: '', name: '', emoji: '', countMode: 'rows', groupSize: 10,
+      parts: [{ name: 'Main', makeCount: 1, patternText: '', placementNotes: '' }],
+      checklist: [], craft: craft, craftData: seed, builtIn: false
+    };
+  }
+
+  /** templateFromProject's craft step: the hook's seed, checklist and emoji. */
+  function applyTemplateHook(draft, proj, opts) {
+    var c = crafts[proj.craft];
+    var fn = opts && typeof opts.fromProject === 'function' ? opts.fromProject
+      : (c && c.template && typeof c.template.fromProject === 'function' ? c.template.fromProject : null);
+    if (!fn) return draft;
+    var res = null;
+    try { res = fn(deepCopy(proj)); } catch (e) { res = null; }
+    if (!res || typeof res !== 'object') return draft;
+    if (res.craftData && typeof res.craftData === 'object' && !Array.isArray(res.craftData)) {
+      draft.craftData = jsonObject(res.craftData);
+    }
+    if (Array.isArray(res.checklist)) {
+      draft.checklist = res.checklist.map(function (t) { return str(t, '').trim(); }).filter(Boolean);
+    }
+    if (typeof res.emoji === 'string' && res.emoji) draft.emoji = res.emoji;
+    return draft;
+  }
+
+  function checkTemplateSize(craftData) {
+    if (!craftData) return;
+    var n = 0;
+    try { n = JSON.stringify(craftData).length; } catch (e) { n = 0; }
+    if (n > TEMPLATE_CRAFTDATA_MAX) {
+      throw new Error('That chart is too big to keep as a template (' + Math.round(n / 1024) +
+        ' KB; the limit is ' + Math.round(TEMPLATE_CRAFTDATA_MAX / 1024) + ' KB). Send the project as a file instead.');
+    }
+  }
+
+  /* ---- K2: heavy craft data -------------------------------------------- */
+
+  /* id -> runtime record. Nothing here is persisted except `table`, which is
+   * written into the project's on-disk copy as `Project.heavy`. */
+  var hv = Object.create(null);
+  var heavySubs = [];
+  var heavyLastError = null;
+
+  function newRt(table) {
+    return {
+      state: 'none',          // 'none' | 'ready' | 'unloaded' | 'loading' | 'missing'
+      table: table || null,   // { v, fields: { path: { key, rev, bytes, t } }, summary }
+      committed: Object.create(null),  // path -> the ref that is on disk
+      prevKeys: Object.create(null),   // path -> the key one rev back (kept for a second tab)
+      memo: Object.create(null),       // path -> { ref, text } JSON of an object value
+      failed: Object.create(null),     // path -> true: the first move failed; stays inline
+      inflight: null, commitTimer: null, loading: null,
+      durableText: null, gcDue: false, force: false, missingKeys: null,
+      evict: [], scanned: false, summaryAt: 0,
+      stats: { commits: 0, lastCommitMs: 0, lastBytes: 0 }
+    };
+  }
+
+  function getPath(obj, path) {
+    var ps = path.split('.');
+    var o = obj;
+    for (var i = 0; i < ps.length; i++) {
+      if (!o || typeof o !== 'object') return undefined;
+      o = o[ps[i]];
+    }
+    return o;
+  }
+
+  function setPath(obj, path, v) {
+    var ps = path.split('.');
+    var o = obj;
+    for (var i = 0; i < ps.length - 1; i++) {
+      if (o[ps[i]] === undefined) o[ps[i]] = {};
+      o = o[ps[i]];
+      if (!o || typeof o !== 'object') return false;
+    }
+    o[ps[ps.length - 1]] = v;
+    return true;
+  }
+
+  function delPath(obj, path) {
+    var ps = path.split('.');
+    var o = obj;
+    for (var i = 0; i < ps.length - 1; i++) {
+      if (!o || typeof o !== 'object') return false;
+      o = o[ps[i]];
+    }
+    if (!o || typeof o !== 'object' || !(ps[ps.length - 1] in o)) return false;
+    delete o[ps[ps.length - 1]];
+    return true;
+  }
+
+  function normalizeHeavyTable(raw) {
+    if (!raw || typeof raw !== 'object' || !raw.fields || typeof raw.fields !== 'object') return null;
+    var out = { v: 1, fields: {}, summary: str(raw.summary, '').slice(0, 300) };
+    var keys = Object.keys(raw.fields);
+    var any = false;
+    for (var i = 0; i < keys.length && i < 16; i++) {
+      var f = raw.fields[keys[i]];
+      if (!f || typeof f !== 'object') continue;
+      var k = str(f.key, '');
+      if (!/^p:[^:]+:heavy:/.test(k) || k.length > 400) continue;
+      out.fields[keys[i]] = {
+        key: k,
+        rev: str(f.rev, ''),
+        bytes: clampInt(f.bytes, 0, 1e10, 0),
+        t: f.t === 'j' ? 'j' : 's'
+      };
+      any = true;
+    }
+    return any ? out : null;
+  }
+
+  function tablePaths(t) { return t && t.fields ? Object.keys(t.fields) : []; }
+
+  /** Does a raw (on-disk) craftData lack any field its side table holds? */
+  function heavyValuesMissing(cd, t) {
+    var paths = tablePaths(t);
+    for (var i = 0; i < paths.length; i++) {
+      if (getPath(cd, paths[i]) === undefined) return true;
+    }
+    return false;
+  }
+
+  /** normalizeProject's craftData step: never normalise half a craftData. */
+  function wkCraftDataIn(craft, p) {
+    var t = normalizeHeavyTable(p.heavy);
+    if (t && heavyValuesMissing(p.craftData, t)) {
+      var cd = p.craftData;
+      return cd && typeof cd === 'object' && !Array.isArray(cd) ? cd : {};
+    }
+    return normalizeCraftData(craft, p.craftData, p);
+  }
+
+  function rtReady(rt) {
+    return !rt || rt.state === 'none' || rt.state === 'ready';
+  }
+
+  function isHeavyReady(proj) {
+    return !proj || rtReady(hv[proj.id]);
+  }
+
+  function heavyState(id) {
+    var p = project(id);
+    if (!p) return 'none';
+    var rt = hv[p.id];
+    if (rt && rt.state !== 'none') return rt.state;
+    return heavyDef(p.craft) ? 'ready' : 'none';
+  }
+
+  function emitHeavy(id, type, extra) {
+    var ev = { projectId: id, type: type };
+    if (extra) for (var k in extra) if (Object.prototype.hasOwnProperty.call(extra, k)) ev[k] = extra[k];
+    emit(heavySubs, ev);
+  }
+
+  /**
+   * After a state was (re)built from text: move every `Project.heavy` side
+   * table into the runtime, and keep a project's already-loaded heavy values
+   * when the table did not change (a second tab saved something else).
+   */
+  function heavyIngest(list, prevList) {
+    var prevHv = hv;
+    var prevById = Object.create(null);
+    if (Array.isArray(prevList)) for (var j = 0; j < prevList.length; j++) prevById[prevList[j].id] = prevList[j];
+    var next = Object.create(null);
+    for (var i = 0; i < (list || []).length; i++) {
+      var p = list[i];
+      var t = p.heavy ? normalizeHeavyTable(p.heavy) : null;
+      if ('heavy' in p) delete p.heavy;
+      if (!t) {
+        // a project with no table: whatever is in memory is the whole thing
+        if (heavyDef(p.craft)) { next[p.id] = newRt(null); next[p.id].state = 'ready'; }
+        continue;
+      }
+      var rt = newRt(t);
+      next[p.id] = rt;
+      if (!heavyValuesMissing(p.craftData, t)) {
+        // values travelled inline (an import): they are the truth; the old
+        // blobs are rewritten on the next save and then swept
+        rt.state = 'ready';
+        continue;
+      }
+      var old = prevHv[p.id];
+      var oldP = prevById[p.id];
+      if (old && old.state === 'ready' && old.table && oldP && sameTableKeys(old.table, t)) {
+        var ok = true;
+        var paths = tablePaths(t);
+        for (var k = 0; k < paths.length; k++) {
+          var v = getPath(oldP.craftData, paths[k]);
+          if (v === undefined) { ok = false; break; }
+          setPath(p.craftData, paths[k], v);
+        }
+        if (ok) {
+          p.craftData = normalizeCraftData(p.craft, p.craftData, p);
+          for (k = 0; k < paths.length; k++) {
+            var nv = getPath(p.craftData, paths[k]);
+            if (nv === getPath(oldP.craftData, paths[k])) rt.committed[paths[k]] = nv;
+          }
+          rt.memo = old.memo;
+          rt.prevKeys = old.prevKeys;
+          rt.state = 'ready';
+          continue;
+        }
+      }
+      rt.state = 'unloaded';
+    }
+    hv = next;
+  }
+
+  /** One project that just arrived (an import): its own fresh runtime. */
+  function heavyIngestOne(p) {
+    var saved = hv;
+    var tmp = Object.create(null);
+    hv = tmp;
+    try {
+      heavyIngest([p], null);
+    } finally {
+      hv = saved;
+    }
+    if (tmp[p.id]) hv[p.id] = tmp[p.id];
+    else delete hv[p.id];
+  }
+
+  function sameTableKeys(a, b) {
+    var pa = tablePaths(a), pb = tablePaths(b);
+    if (pa.length !== pb.length) return false;
+    for (var i = 0; i < pa.length; i++) {
+      if (!b.fields[pa[i]] || b.fields[pa[i]].key !== a.fields[pa[i]].key) return false;
+    }
+    return true;
+  }
+
+  /** {text, t} of a heavy value; objects are stringified once per reference. */
+  function heavyText(rt, path, v) {
+    if (typeof v === 'string') return { text: v, t: 's' };
+    var m = rt.memo[path];
+    if (m && m.ref === v) return { text: m.text, t: 'j' };
+    var text;
+    try { text = JSON.stringify(v); } catch (e) { text = ''; }
+    rt.memo[path] = { ref: v, text: text };
+    return { text: text, t: 'j' };
+  }
+
+  function withExtra(p, key, value) {
+    var o = {};
+    var ks = Object.keys(p);
+    for (var i = 0; i < ks.length; i++) o[ks[i]] = p[ks[i]];
+    if (value) o[key] = value;
+    return o;
+  }
+
+  function wkNeedsCustom() {
+    var list = state && state.projects;
+    if (!Array.isArray(list)) return false;
+    for (var i = 0; i < list.length; i++) {
+      var p = list[i];
+      if (hv[p.id] && (hv[p.id].table || hv[p.id].state !== 'none')) return true;
+      if (heavyDef(p.craft)) return true;
+    }
+    return false;
+  }
+
+  /** What the heavy fields of a ready project need now. */
+  function heavyPlan(p, D, rt) {
+    var cd = p.craftData || {};
+    var out = { strip: [], need: false, dirtyTable: false };
+    var min = rt.force ? 1024 : D.minBytes;
+    var B = blobStore();
+    for (var i = 0; i < D.fields.length; i++) {
+      var path = D.fields[i];
+      var v = getPath(cd, path);
+      var inT = rt.table && rt.table.fields[path];
+      if (v === undefined || v === null) {
+        if (inT) { out.dirtyTable = true; out.need = true; }
+        continue;
+      }
+      if (inT) {
+        if (v === rt.committed[path]) out.strip.push(path);
+        else { out.dirtyTable = true; out.need = true; }
+        continue;
+      }
+      if (rt.failed[path] || !B || typeof B.putManyResult !== 'function') continue;
+      var size = typeof v === 'string' ? v.length : heavyText(rt, path, v).text.length;
+      if (size >= min) out.need = true;
+    }
+    // fields the craft no longer declares go back inline
+    var paths = tablePaths(rt.table);
+    for (var j = 0; j < paths.length; j++) {
+      if (D.fields.indexOf(paths[j]) === -1) { out.dirtyTable = true; out.need = true; }
+    }
+    return out;
+  }
+
+  /** One project's on-disk JSON text (writeNow). */
+  function projectText(p) {
+    var rt = hv[p.id];
+    if (rt && !rtReady(rt)) return JSON.stringify(withExtra(p, 'heavy', rt.table));
+    var D = heavyDef(p.craft);
+    if (!D) {
+      if (rt && rt.table) {
+        // the craft stopped opting in: everything goes back inline
+        rt.table = null;
+        rt.gcDue = true;
+        rt.committed = Object.create(null);
+      }
+      return JSON.stringify(p);
+    }
+    if (!rt) { rt = hv[p.id] = newRt(null); }
+    if (rt.state === 'none') rt.state = 'ready';
+    var plan = heavyPlan(p, D, rt);
+    if (plan.need) scheduleCommit(p.id);
+    if ((rt.inflight || plan.dirtyTable) && rt.durableText) return rt.durableText;
+    if (!plan.strip.length || !rt.table) {
+      if (!rt.inflight && !plan.dirtyTable) rt.durableText = null;
+      return JSON.stringify(p);
+    }
+    var cd = p.craftData;
+    var hold = [];
+    for (var i = 0; i < plan.strip.length; i++) {
+      hold.push([plan.strip[i], getPath(cd, plan.strip[i])]);
+      delPath(cd, plan.strip[i]);
+    }
+    var txt;
+    try {
+      txt = JSON.stringify(withExtra(p, 'heavy', rt.table));
+    } finally {
+      for (var h = 0; h < hold.length; h++) setPath(cd, hold[h][0], hold[h][1]);
+    }
+    if (!plan.dirtyTable) rt.durableText = txt;
+    return txt;
+  }
+
+  /** writeNow's serialiser: byte-identical to JSON.stringify(state) unless heavy data is in play. */
+  function serializeState() {
+    if (!wkNeedsCustom()) return JSON.stringify(state);
+    var parts = [];
+    for (var i = 0; i < state.projects.length; i++) parts.push(projectText(state.projects[i]));
+    var TOKEN = '__wk_projects_' + uid() + '__';
+    var saved = state.projects;
+    var head;
+    state.projects = TOKEN;
+    try { head = JSON.stringify(state); } finally { state.projects = saved; }
+    var at = head.indexOf('"' + TOKEN + '"');
+    return head.slice(0, at) + '[' + parts.join(',') + ']' + head.slice(at + TOKEN.length + 2);
+  }
+
+  function scheduleCommit(id) {
+    var rt = hv[id];
+    if (!rt || rt.inflight || rt.commitTimer) return;
+    rt.commitTimer = setTimeout(function () { rt.commitTimer = null; startCommit(id); }, 0);
+  }
+
+  function heavySummary(p) {
+    var c = crafts[p.craft];
+    if (!c || !c.summary) return '';
+    try { var s = c.summary(p); return typeof s === 'string' ? s.slice(0, 300) : ''; } catch (e) { return ''; }
+  }
+
+  /** Write a project's changed heavy fields to IndexedDB, then point localStorage at them. */
+  function startCommit(id) {
+    var rt = hv[id];
+    var p = project(id);
+    if (!rt || !p || !rtReady(rt) || rt.inflight) return null;
+    var D = heavyDef(p.craft);
+    if (!D) return null;
+    var B = blobStore();
+    if (!B || typeof B.putManyResult !== 'function') return null;
+    var cd = p.craftData || {};
+    var min = rt.force ? 1024 : D.minBytes;
+    var rev = uid();
+    var writes = [];
+    var plan = [];
+    var paths = tablePaths(rt.table);
+    for (var j = 0; j < paths.length; j++) {
+      if (D.fields.indexOf(paths[j]) === -1) plan.push({ path: paths[j], drop: true });
+    }
+    for (var i = 0; i < D.fields.length; i++) {
+      var path = D.fields[i];
+      var v = getPath(cd, path);
+      var inT = rt.table && rt.table.fields[path];
+      if (v === undefined || v === null) {
+        if (inT) plan.push({ path: path, drop: true });
+        continue;
+      }
+      if (inT && v === rt.committed[path]) continue;
+      var ht = heavyText(rt, path, v);
+      if (!inT && (rt.failed[path] || ht.text.length < min)) continue;
+      if (inT && ht.text.length < Math.floor(min / 4)) { plan.push({ path: path, drop: true }); continue; }
+      var key = 'p:' + id + ':heavy:' + path + ':' + rev;
+      writes.push({ key: key, value: ht.text });
+      plan.push({ path: path, key: key, ref: v, text: ht.text, bytes: ht.text.length, t: ht.t, migrate: !inT });
+    }
+    if (!plan.length) return null;
+    var t0 = mono();
+    rt.inflight = { rev: rev, keys: writes.map(function (w) { return w.key; }) };
+    var job = (writes.length ? B.putManyResult(writes) : Promise.resolve({ ok: true, count: 0, error: null }))
+      .then(function (res) {
+        if (!res || !res.ok) return res || { ok: false, error: 'UnknownError' };
+        // A field's FIRST move is read back before localStorage lets go of it.
+        var checks = plan.filter(function (x) { return x.migrate; });
+        if (!checks.length || typeof B.getText !== 'function') return res;
+        return Promise.all(checks.map(function (x) {
+          return B.getText(x.key).then(function (txt) { return txt === x.text; });
+        })).then(function (oks) {
+          for (var k = 0; k < oks.length; k++) if (!oks[k]) return { ok: false, error: 'ReadBackMismatch' };
+          return res;
+        });
+      })
+      .then(function (res) {
+        rt.inflight = null;
+        if (hv[id] !== rt || !project(id)) return;
+        var p2 = project(id);
+        if (res && res.ok) {
+          if (!rt.table) rt.table = { v: 1, fields: {}, summary: '' };
+          plan.forEach(function (x) {
+            var old = rt.table.fields[x.path];
+            if (old) {
+              // the revision two back falls out (the sweep after the next write deletes it)
+              if (rt.prevKeys[x.path] && rt.prevKeys[x.path] !== old.key) rt.evict.push(rt.prevKeys[x.path]);
+              rt.prevKeys[x.path] = old.key;
+            }
+            if (x.drop) {
+              delete rt.table.fields[x.path];
+              delete rt.committed[x.path];
+              return;
+            }
+            rt.table.fields[x.path] = { key: x.key, rev: rev, bytes: x.bytes, t: x.t };
+            rt.committed[x.path] = x.ref;
+          });
+          if (!tablePaths(rt.table).length) rt.table = null;
+          else if (!rt.table.summary || mono() - (rt.summaryAt || 0) > 5000) {
+            // the craft's summary can walk a whole chart: at most every 5 s
+            rt.table.summary = heavySummary(p2);
+            rt.summaryAt = mono();
+          }
+          rt.force = false;
+          rt.gcDue = true;
+          rt.durableText = null;
+          rt.stats.commits++;
+          rt.stats.lastCommitMs = mono() - t0;
+          rt.stats.lastBytes = writes.reduce(function (s, w) { return s + w.value.length; }, 0);
+          emitHeavy(id, 'committed', { ms: rt.stats.lastCommitMs, bytes: rt.stats.lastBytes });
+        } else {
+          var err = (res && res.error) || 'UnknownError';
+          heavyLastError = { projectId: id, error: err, at: now() };
+          var inlined = false;
+          plan.forEach(function (x) {
+            if (x.migrate) { rt.failed[x.path] = true; return; }
+            if (rt.table && rt.table.fields[x.path] && !x.drop) {
+              // the newer value cannot reach IndexedDB: bring the field back
+              // inline (localStorage then reports its own failure if it is full)
+              rt.prevKeys[x.path] = rt.table.fields[x.path].key;
+              delete rt.table.fields[x.path];
+              delete rt.committed[x.path];
+              rt.failed[x.path] = true;
+              inlined = true;
+            }
+          });
+          if (rt.table && !tablePaths(rt.table).length) rt.table = null;
+          rt.durableText = null;
+          rt.gcDue = true;
+          emitHeavy(id, inlined ? 'inlined' : 'failed', { error: err });
+        }
+        save();
+      }, function (e) {
+        rt.inflight = null;
+        heavyLastError = { projectId: id, error: (e && e.name) || 'UnknownError', at: now() };
+        emitHeavy(id, 'failed', { error: heavyLastError.error });
+      });
+    heavyJobs.push(job);
+    job.then(function () { heavyJobs.splice(heavyJobs.indexOf(job), 1); });
+    return job;
+  }
+
+  var heavyJobs = [];
+
+  /** Resolves once every pending heavy write has landed or failed. */
+  function heavyIdle() {
+    if (typeof Promise !== 'function') return null;
+    var pending = [];
+    var ids = Object.keys(hv);
+    for (var i = 0; i < ids.length; i++) {
+      var rt = hv[ids[i]];
+      if (rt.commitTimer) { clearTimeout(rt.commitTimer); rt.commitTimer = null; var j = startCommit(ids[i]); if (j) pending.push(j); }
+      if (rt.loading) pending.push(rt.loading);
+    }
+    pending = pending.concat(heavyJobs);
+    if (!pending.length) return Promise.resolve();
+    return Promise.all(pending).then(function () {
+      // a commit asks for a save; once that write is done the chain is quiet
+      if (saveTimer) flush();
+      var more = Object.keys(hv).some(function (id) { return hv[id].inflight || hv[id].commitTimer; });
+      return more ? heavyIdle() : undefined;
+    });
+  }
+
+  /** After a localStorage write that worked: drop heavy blobs nothing points at. */
+  function heavyAfterWrite(text) {
+    var B = blobStore();
+    if (!B) return;
+    var ids = Object.keys(hv);
+    for (var i = 0; i < ids.length; i++) {
+      var rt = hv[ids[i]];
+      if (!rt.gcDue || rt.inflight || rt.commitTimer || !rtReady(rt)) continue;
+      rt.gcDue = false;
+      (function (id, rt2) {
+        var pre = (preimportText || '') + (lsGet(KEY + PREIMPORT_KEY_SUFFIX) || '');
+        // the first sweep of a session lists every heavy key of the project;
+        // after that only the revisions that just fell out are candidates
+        var list = rt2.scanned ? Promise.resolve(rt2.evict.splice(0, rt2.evict.length))
+          : B.keys('p:' + id + ':heavy:');
+        rt2.scanned = true;
+        list.then(function (keys) {
+          var doomed = [];
+          for (var k = 0; k < keys.length; k++) {
+            var key = keys[k];
+            if (text.indexOf('"' + key + '"') >= 0 || pre.indexOf('"' + key + '"') >= 0) continue;
+            if (rt2.inflight && rt2.inflight.keys.indexOf(key) >= 0) continue;
+            var keep = false;
+            for (var pk in rt2.prevKeys) if (rt2.prevKeys[pk] === key) keep = true;
+            if (rt2.table) for (var tk in rt2.table.fields) if (rt2.table.fields[tk].key === key) keep = true;
+            if (!keep) doomed.push(key);
+          }
+          if (doomed.length) return B.deleteKeys(doomed);
+          return 0;
+        });
+      })(ids[i], rt);
+    }
+  }
+
+  /** localStorage is full: move opted-in inline fields out at a lower bar. */
+  function heavyRescue() {
+    var list = state && state.projects;
+    if (!Array.isArray(list)) return false;
+    var any = false;
+    for (var i = 0; i < list.length; i++) {
+      var p = list[i];
+      if (!heavyDef(p.craft) || !isHeavyReady(p)) continue;
+      var rt = hv[p.id] || (hv[p.id] = newRt(null));
+      if (rt.state === 'none') rt.state = 'ready';
+      rt.force = true;
+      rt.failed = Object.create(null);
+      scheduleCommit(p.id);
+      any = true;
+    }
+    return any;
+  }
+
+  /** Read the side table a project has on disk right now (another tab may have moved it on). */
+  function diskTable(id) {
+    var txt = lsGet(KEY);
+    if (!txt) return null;
+    try {
+      var raw = JSON.parse(txt);
+      var list = raw && Array.isArray(raw.projects) ? raw.projects : [];
+      for (var i = 0; i < list.length; i++) {
+        if (list[i] && list[i].id === id) return normalizeHeavyTable(list[i].heavy);
+      }
+    } catch (e) { /* unreadable: nothing to learn */ }
+    return null;
+  }
+
+  function loadHeavy(id, rt, retry) {
+    var B = blobStore();
+    var paths = tablePaths(rt.table);
+    if (!B || typeof B.getText !== 'function') {
+      rt.state = 'missing';
+      rt.missingKeys = paths.map(function (p) { return rt.table.fields[p].key; });
+      emitHeavy(id, 'missing', { keys: rt.missingKeys, reason: 'noIndexedDB' });
+      return Promise.resolve('missing');
+    }
+    return Promise.all(paths.map(function (path) { return B.getText(rt.table.fields[path].key); }))
+      .then(function (texts) {
+        if (hv[id] !== rt) return heavyState(id);
+        var p = project(id);
+        if (!p) return 'none';
+        var miss = [];
+        var vals = [];
+        for (var i = 0; i < paths.length; i++) {
+          var f = rt.table.fields[paths[i]];
+          if (texts[i] === null || texts[i] === undefined) { miss.push(f.key); continue; }
+          if (f.t === 'j') {
+            try { vals.push(JSON.parse(texts[i])); } catch (e) { miss.push(f.key); }
+          } else {
+            vals.push(texts[i]);
+          }
+        }
+        if (miss.length) {
+          var disk = retry ? diskTable(id) : null;
+          if (disk && !sameTableKeys(disk, rt.table)) {
+            rt.table = disk;
+            return loadHeavy(id, rt, false);
+          }
+          rt.state = 'missing';
+          rt.missingKeys = miss;
+          emitHeavy(id, 'missing', { keys: miss });
+          return 'missing';
+        }
+        var cd = p.craftData && typeof p.craftData === 'object' ? p.craftData : (p.craftData = {});
+        for (var k = 0; k < paths.length; k++) setPath(cd, paths[k], vals[k]);
+        p.craftData = normalizeCraftData(p.craft, cd, p);
+        for (k = 0; k < paths.length; k++) {
+          var nv = getPath(p.craftData, paths[k]);
+          if (nv === vals[k]) { rt.committed[paths[k]] = nv; continue; }
+          if (nv !== undefined && nv !== null && typeof nv === 'object') {
+            var ht = heavyText(rt, paths[k], nv);
+            if (ht.text === texts[k]) rt.committed[paths[k]] = nv;
+          } else if (typeof nv === 'string' && nv === texts[k]) {
+            rt.committed[paths[k]] = nv;
+          }
+        }
+        rt.state = 'ready';
+        rt.missingKeys = null;
+        rt.durableText = null;
+        try { projectText(p); } catch (e) { /* the next save tries again */ }
+        emitHeavy(id, 'ready');
+        return 'ready';
+      });
+  }
+
+  /** Load a project's heavy fields (on demand). Resolves with heavyState(id). */
+  function whenReady(id) {
+    if (typeof Promise !== 'function') return null;
+    var p = project(id);
+    if (!p) return Promise.resolve('none');
+    var rt = hv[p.id];
+    if (!rt || rtReady(rt)) return Promise.resolve(heavyState(p.id));
+    if (rt.loading) return rt.loading;
+    rt.state = 'loading';
+    rt.loading = pagesIdle().then(function () {
+      return loadHeavy(p.id, rt, true);
+    }).then(function (st) {
+      rt.loading = null;
+      return st;
+    }, function () {
+      rt.loading = null;
+      rt.state = 'missing';
+      emitHeavy(p.id, 'missing', { reason: 'error' });
+      return 'missing';
+    });
+    return rt.loading;
+  }
+
+  function hydrateAll(ids) {
+    var list = Array.isArray(ids) ? ids : projects().map(function (p) { return p.id; });
+    return Promise.all(list.map(function (id) { return whenReady(id); }));
+  }
+
+  function heavyInfo(id) {
+    var p = project(id);
+    var out = { state: heavyState(id), pending: false, fields: [] };
+    if (!p) return out;
+    var rt = hv[p.id];
+    var D = heavyDef(p.craft);
+    out.pending = !!(rt && (rt.inflight || rt.commitTimer || rt.loading));
+    var seen = Object.create(null);
+    var paths = (D ? D.fields : []).concat(tablePaths(rt && rt.table));
+    for (var i = 0; i < paths.length; i++) {
+      if (seen[paths[i]]) continue;
+      seen[paths[i]] = true;
+      var f = rt && rt.table && rt.table.fields[paths[i]];
+      if (f) { out.fields.push({ path: paths[i], where: 'idb', bytes: f.bytes, key: f.key }); continue; }
+      var v = getPath(p.craftData, paths[i]);
+      if (v === undefined || v === null) continue;
+      var n = typeof v === 'string' ? v.length : (rt ? heavyText(rt, paths[i], v).text.length : JSON.stringify(v).length);
+      out.fields.push({ path: paths[i], where: 'inline', bytes: n, key: null });
+    }
+    if (rt && rt.missingKeys) out.missing = rt.missingKeys.slice();
+    if (rt) out.stats = { commits: rt.stats.commits, lastCommitMs: rt.stats.lastCommitMs, lastBytes: rt.stats.lastBytes };
+    return out;
+  }
+
+  function onHeavy(fn) { return subscribe(heavySubs, fn); }
+
+  /** The user accepted that the heavy data is gone: keep what is left, whole. */
+  function discardMissingHeavy(id) {
+    var p = project(id);
+    var rt = p && hv[p.id];
+    if (!p || !rt || rt.state !== 'missing') return false;
+    snapshot(p);
+    rt.table = null;
+    rt.state = 'ready';
+    rt.missingKeys = null;
+    rt.gcDue = true;
+    p.craftData = normalizeCraftData(p.craft, p.craftData, p);
+    touch(p);
+    return true;
+  }
+
+  /* -- diff undo for heavy fields -- */
+
+  function strDiff(oldS, newS) {
+    var n = Math.min(oldS.length, newS.length);
+    var p = 0;
+    while (p < n && oldS.charCodeAt(p) === newS.charCodeAt(p)) p++;
+    var s = 0;
+    var lo = oldS.length - 1, ln = newS.length - 1;
+    while (s < n - p && oldS.charCodeAt(lo - s) === newS.charCodeAt(ln - s)) s++;
+    return { p: p, s: s, mid: oldS.slice(p, oldS.length - s) };
+  }
+
+  function strPatch(base, d) {
+    return base.slice(0, d.p) + d.mid + base.slice(base.length - d.s);
+  }
+
+  function lastEntryFor(id) {
+    for (var i = undoStack.length - 1; i >= 0; i--) if (undoStack[i].id === id) return undoStack[i];
+    return null;
+  }
+
+  function entryText(slot, rt, path) {
+    if (typeof slot.v === 'string') return slot.v;
+    try { return JSON.stringify(slot.v); } catch (e) { return ''; }
+  }
+
+  /** Turn a full slot into a diff against `cur` (the state after that entry's change). */
+  function compactSlot(entry, path, cur, rt) {
+    var slot = entry.heavy[path];
+    if (!slot || !('v' in slot)) return;
+    if (slot.v === cur) return;   // unchanged: the shared immutable value costs nothing
+    if (slot.v === undefined || slot.v === null || cur === undefined || cur === null) return;
+    var isStr = typeof slot.v === 'string' && typeof cur === 'string';
+    var oldText = isStr ? slot.v : entryText(slot, rt, path);
+    var curText = isStr ? cur : heavyText(rt, path, cur).text;
+    var d = strDiff(oldText, curText);
+    var before = entry.heavyBytes || 0;
+    entry.heavy[path] = { d: d, bl: curText.length, bh: hash32(curText), t: isStr ? 's' : 'j' };
+    var after = 0;
+    for (var k in entry.heavy) if (entry.heavy[k].d) after += entry.heavy[k].d.mid.length + 24;
+    entry.heavyBytes = after;
+    entry.bytes += after - before;
+    undoBytesTotal += after - before;
+  }
+
+  /** The value a slot stands for, given the live value it was diffed against; undefined = refuse. */
+  function slotValue(slot, live, rt, path) {
+    if ('v' in slot) return slot.v;
+    if (live === undefined || live === null) return undefined;
+    var liveText = slot.t === 's' ? (typeof live === 'string' ? live : null) : heavyText(rt, path, live).text;
+    if (liveText === null || liveText.length !== slot.bl || hash32(liveText) !== slot.bh) return undefined;
+    var txt = strPatch(liveText, slot.d);
+    if (slot.t === 's') return txt;
+    try { return JSON.parse(txt); } catch (e) { return undefined; }
+  }
+
+  /** snapshot()'s path for an opted-in project. */
+  function heavySnapshot(proj, D) {
+    var rt = hv[proj.id] || (hv[proj.id] = newRt(null));
+    if (rt.state === 'none') rt.state = 'ready';
+    var cd = proj.craftData && typeof proj.craftData === 'object' ? proj.craftData : null;
+    var held = [];
+    var heavy = {};
+    for (var i = 0; i < D.fields.length; i++) {
+      var v = cd ? getPath(cd, D.fields[i]) : undefined;
+      heavy[D.fields[i]] = { v: v };
+      if (v !== undefined && cd) { held.push([D.fields[i], v]); delPath(cd, D.fields[i]); }
+    }
+    var text;
+    try {
+      text = JSON.stringify(proj);
+    } finally {
+      for (var h = 0; h < held.length; h++) setPath(cd, held[h][0], held[h][1]);
+    }
+    // the previous entry of this project now gets diffed against what is live
+    var prev = lastEntryFor(proj.id);
+    if (prev && prev.heavy) {
+      for (var path in prev.heavy) compactSlot(prev, path, cd ? getPath(cd, path) : undefined, rt);
+    }
+    return { text: text, heavy: heavy };
+  }
+
+  /** After a write that took no snapshot moved a heavy field: re-anchor the top diff. */
+  function heavyRebase(proj, before) {
+    var e = lastEntryFor(proj.id);
+    if (!e || !e.heavy) return;
+    var rt = hv[proj.id];
+    for (var path in before) {
+      var now2 = getPath(proj.craftData, path);
+      if (now2 === before[path]) continue;
+      var slot = e.heavy[path];
+      if (!slot || 'v' in slot) continue;
+      var full = slotValue(slot, before[path], rt, path);
+      if (full === undefined) { dropUndoFor(proj.id); return; }
+      e.bytes -= slot.d.mid.length + 24;
+      undoBytesTotal -= slot.d.mid.length + 24;
+      e.heavy[path] = { v: full };
+    }
+  }
+
+  function dropUndoFor(id) {
+    for (var i = undoStack.length - 1; i >= 0; i--) {
+      if (undoStack[i].id !== id) continue;
+      undoBytesTotal -= undoStack[i].bytes || 0;
+      undoStack.splice(i, 1);
+    }
+    if (undoBytesTotal < 0) undoBytesTotal = 0;
+  }
+
+  /** undo()'s path for an entry with heavy slots: the restored project, or null to refuse. */
+  function heavyRestore(entry, live) {
+    var rt = hv[entry.id] || (hv[entry.id] = newRt(null));
+    var data = entry.data;
+    if (!data.craftData || typeof data.craftData !== 'object') data.craftData = {};
+    for (var path in entry.heavy) {
+      var slot = entry.heavy[path];
+      var liveV = live ? getPath(live.craftData, path) : undefined;
+      var v = slotValue(slot, liveV, rt, path);
+      if (v === undefined) {
+        if ('v' in slot) continue;   // the field was absent then
+        return null;
+      }
+      setPath(data.craftData, path, v);
+    }
+    return data;
+  }
+
+  /* ---- K3: count events, sessions, pace, goals, mark log ---------------- */
+
+  var SESSION_IDLE_MS = 10 * 60 * 1000;
+  var SESSIONS_MAX = 200;
+  var DAYS_MAX = 800;
+  var BY_MAX = 60;
+  var countSubs = [];
+
+  function unitName(u) {
+    var s = str(u, '').trim().toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 20);
+    return s || 'unit';
+  }
+
+  function bump(obj, key, n) {
+    var v = (obj[key] || 0) + n;
+    if (v <= 0) delete obj[key];
+    else obj[key] = v;
+  }
+
+  function normalizeCounts(raw, max) {
+    var out = {};
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
+    var ks = Object.keys(raw);
+    for (var i = 0, n = 0; i < ks.length && n < (max || 20); i++) {
+      var k = unitName(ks[i]);
+      var v = clampInt(raw[ks[i]], 0, 1e9, 0);
+      if (v > 0) { out[k] = v; n++; }
+    }
+    return out;
+  }
+
+  function normalizeActivity(raw) {
+    if (!raw || typeof raw !== 'object') return null;
+    var sessions = [];
+    if (Array.isArray(raw.sessions)) {
+      for (var i = Math.max(0, raw.sessions.length - SESSIONS_MAX); i < raw.sessions.length; i++) {
+        var s = raw.sessions[i];
+        if (!s || typeof s !== 'object') continue;
+        var st = clampInt(s.s, 0, 1e15, 0);
+        if (!st) continue;
+        var by = {};
+        if (s.by && typeof s.by === 'object' && !Array.isArray(s.by)) {
+          var bk = Object.keys(s.by);
+          for (var b = 0, nb = 0; b < bk.length && nb < BY_MAX; b++) {
+            var name = safeName(bk[b], '').slice(0, 60);
+            if (!name) continue;
+            var c = normalizeCounts(s.by[bk[b]]);
+            if (Object.keys(c).length) { by[name] = c; nb++; }
+          }
+        }
+        sessions.push({ s: st, e: Math.max(st, clampInt(s.e, 0, 1e15, st)), c: normalizeCounts(s.c), by: by });
+      }
+    }
+    var days = {};
+    if (raw.days && typeof raw.days === 'object' && !Array.isArray(raw.days)) {
+      var dk = Object.keys(raw.days).filter(function (d) { return /^\d{4}-\d{2}-\d{2}$/.test(d); }).sort();
+      if (dk.length > DAYS_MAX) dk = dk.slice(dk.length - DAYS_MAX);
+      for (var d = 0; d < dk.length; d++) {
+        var dc = normalizeCounts(raw.days[dk[d]]);
+        if (Object.keys(dc).length) days[dk[d]] = dc;
+      }
+    }
+    var out = { sessions: sessions, days: days, total: normalizeCounts(raw.total) };
+    if (!sessions.length && !Object.keys(days).length && !Object.keys(out.total).length) return null;
+    return out;
+  }
+
+  function normalizeGoals(raw) {
+    if (!Array.isArray(raw)) return null;
+    var out = [];
+    for (var i = 0; i < raw.length && out.length < 20; i++) {
+      var g = raw[i];
+      if (!g || typeof g !== 'object') continue;
+      var kind = g.kind === 'byDate' ? 'byDate' : (g.kind === 'perDay' ? 'perDay' : null);
+      if (!kind) continue;
+      var ng = {
+        id: str(g.id, '') || uid(),
+        kind: kind,
+        unit: unitName(g.unit),
+        label: safeName(g.label, '').slice(0, 80)
+      };
+      if (kind === 'perDay') {
+        var gn = typeof g.n === 'number' ? g.n : parseFloat(g.n);
+        if (!isFinite(gn) || gn < 1) continue;
+        ng.n = clampInt(gn, 1, 1e7, 1);
+      } else {
+        ng.until = clampInt(g.until, 0, 1e15, 0);
+        if (!ng.until) continue;
+        if (g.n !== undefined && g.n !== null) ng.n = clampInt(g.n, 0, 1e9, 0);
+      }
+      out.push(ng);
+    }
+    return out.length ? out : null;
+  }
+
+  var STEP_KEY_RE = /^s[0-9a-z]{1,9}(~\d{1,4})?$/;
+
+  function normalizeOverlay(raw) {
+    if (!raw || typeof raw !== 'object' || !raw.steps || typeof raw.steps !== 'object') return null;
+    var steps = {};
+    var ks = Object.keys(raw.steps);
+    var n = 0;
+    for (var i = 0; i < ks.length && n < 2000; i++) {
+      if (!STEP_KEY_RE.test(ks[i])) continue;
+      var e = raw.steps[ks[i]];
+      if (!e || typeof e !== 'object') continue;
+      var o = {};
+      if (typeof e.text === 'string' && e.text.trim()) o.text = e.text.replace(BIDI_RE, '').slice(0, 4000);
+      if (typeof e.note === 'string' && e.note.trim()) o.note = e.note.replace(BIDI_RE, '').slice(0, 2000);
+      if (!o.text && !o.note) continue;
+      o.at = clampInt(e.at, 0, 1e15, 0);
+      steps[ks[i]] = o;
+      n++;
+    }
+    return n ? { steps: steps } : null;
+  }
+
+  /** normalizeProject's last step: the wave K project fields, present only when used. */
+  function wkProjectOut(np, p) {
+    var t = normalizeHeavyTable(p.heavy);
+    if (t) np.heavy = t;
+    var a = normalizeActivity(p.activity);
+    if (a) np.activity = a;
+    var g = normalizeGoals(p.goals);
+    if (g) np.goals = g;
+    var o = normalizeOverlay(p.overlay);
+    if (o) np.overlay = o;
+    return np;
+  }
+
+  function sessionCopy(s) {
+    var c = {};
+    for (var k in s.c) c[k] = s.c[k];
+    return { s: s.s, e: s.e, c: c };
+  }
+
+  /** The heart of K3: cheap, bounded, no snapshot of its own. */
+  function recordCount(proj, n, unit, part, at) {
+    var a = proj.activity;
+    if (!a || typeof a !== 'object') a = proj.activity = { sessions: [], days: {}, total: {} };
+    var ss = a.sessions;
+    var last = ss.length ? ss[ss.length - 1] : null;
+    var opened = false;
+    if (!last || (n > 0 && (at - last.e > SESSION_IDLE_MS || at < last.s - 60000))) {
+      if (n <= 0 && !last) return null;
+      last = { s: at, e: at, c: {}, by: {} };
+      ss.push(last);
+      if (ss.length > SESSIONS_MAX) ss.splice(0, ss.length - SESSIONS_MAX);
+      opened = true;
+    }
+    if (at > last.e) last.e = at;
+    bump(last.c, unit, n);
+    if (part) {
+      var by = last.by[part];
+      if (!by) {
+        if (Object.keys(last.by).length < BY_MAX && n > 0) by = last.by[part] = {};
+      }
+      if (by) {
+        bump(by, unit, n);
+        if (!Object.keys(by).length) delete last.by[part];
+      }
+    }
+    var dk = Math.abs(at - now()) < 60000 ? dayKeyNow() : dayKey(at);
+    var day = a.days[dk];
+    if (!day) {
+      if (n <= 0) day = null;
+      else {
+        day = a.days[dk] = {};
+        var keys = Object.keys(a.days);
+        if (keys.length > DAYS_MAX) {
+          keys.sort();
+          for (var i = 0; i < keys.length - DAYS_MAX; i++) delete a.days[keys[i]];
+        }
+      }
+    }
+    if (day) {
+      bump(day, unit, n);
+      if (!Object.keys(day).length) delete a.days[dk];
+    }
+    bump(a.total, unit, n);
+    if (opened && ss.length > 1) {
+      // a new session is a natural chunk boundary for the mark log
+      if (markBuf[proj.id] && markBuf[proj.id].list.length) flushMarks(proj.id);
+    }
+    return last;
+  }
+
+  function counted(ev) {
+    if (!ev || typeof ev !== 'object') return null;
+    var proj = project(str(ev.projectId, ''));
+    if (!proj) return null;
+    var n = typeof ev.n === 'number' ? ev.n : parseFloat(ev.n);
+    if (!isFinite(n) || !n) return null;
+    n = Math.max(-1e7, Math.min(1e7, Math.round(n)));
+    if (!n) return null;
+    var unit = unitName(ev.unit);
+    var part = ev.part === undefined || ev.part === null ? '' : safeName(String(ev.part), '').slice(0, 60);
+    var at = typeof ev.at === 'number' && isFinite(ev.at) && ev.at > 0 ? ev.at : now();
+    var sess = recordCount(proj, n, unit, part, at);
+    save();
+    var out = {
+      projectId: proj.id, n: n,
+      total: typeof ev.total === 'number' && isFinite(ev.total) ? ev.total : null,
+      unit: unit, part: part || null, at: at,
+      origin: ev.origin === 'counter' ? 'counter' : 'craft',
+      session: sess ? sessionCopy(sess) : null
+    };
+    emit(countSubs, out);
+    return out;
+  }
+
+  /** The crochet / knitting counter's own work (tapStitch, tapRow …). */
+  function counterCounted(proj, prt, n, unit, total) {
+    if (!proj || !prt) return;
+    var sess = recordCount(proj, n, unit, prt.name, now());
+    if (!countSubs.length) return;
+    emit(countSubs, {
+      projectId: proj.id, n: n, total: typeof total === 'number' ? total : null, unit: unit,
+      part: prt.name, at: now(), origin: 'counter', session: sess ? sessionCopy(sess) : null
+    });
+  }
+
+  function onCount(fn) { return subscribe(countSubs, fn); }
+
+  function activityOf(id) {
+    var p = project(id);
+    var a = p && p.activity;
+    if (!a) return { sessions: [], days: {}, total: {} };
+    return a;
+  }
+
+  function mainUnit(a) {
+    var best = null, bv = -1;
+    for (var k in a.total) if (a.total[k] > bv) { bv = a.total[k]; best = k; }
+    return best || 'unit';
+  }
+
+  function trimmedMean(xs) {
+    if (!xs.length) return null;
+    var s = xs.slice().sort(function (a, b) { return a - b; });
+    var cut = s.length >= 5 ? Math.floor(s.length * 0.1) : 0;
+    var t = s.slice(cut, s.length - cut);
+    var sum = 0;
+    for (var i = 0; i < t.length; i++) sum += t[i];
+    return sum / t.length;
+  }
+
+  function quantile(sorted, q) {
+    if (!sorted.length) return null;
+    var pos = (sorted.length - 1) * q;
+    var lo = Math.floor(pos), hi = Math.ceil(pos);
+    return sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo);
+  }
+
+  /** Pace, streak and a ≈ finish range from the activity log. */
+  function pace(id, opts) {
+    opts = opts || {};
+    var a = activityOf(id);
+    var unit = opts.unit ? unitName(opts.unit) : mainUnit(a);
+    var t = now();
+    var out = {
+      unit: unit, sessions: a.sessions.length, perHour: null, perDay: null, today: 0,
+      streak: 0, lastAt: null, daysSinceLast: null, finish: null
+    };
+    var rates = [];
+    for (var i = a.sessions.length - 1; i >= 0 && rates.length < 20; i--) {
+      var s = a.sessions[i];
+      var dur = s.e - s.s;
+      var n = s.c[unit] || 0;
+      if (dur >= 120000 && n > 0) rates.push(n / (dur / 3600000));
+    }
+    out.perHour = rates.length ? Math.round(trimmedMean(rates) * 10) / 10 : null;
+    var today = dayKeyNow();
+    out.today = (a.days[today] && a.days[today][unit]) || 0;
+    var since = dayKey(t - 27 * 86400000);
+    var worked = [];
+    for (var d in a.days) if (d >= since && a.days[d][unit] > 0) worked.push(a.days[d][unit]);
+    if (worked.length) {
+      var sum = 0;
+      for (var w = 0; w < worked.length; w++) sum += worked[w];
+      out.perDay = Math.round(sum / worked.length * 10) / 10;
+    }
+    // streak: consecutive days with work, ending today (or yesterday)
+    var day = new Date(t);
+    day.setHours(12, 0, 0, 0);
+    if (!out.today) day = new Date(day.getTime() - 86400000);
+    for (var k = 0; k < 3650; k++) {
+      var key = dayKey(day.getTime());
+      if (!(a.days[key] && a.days[key][unit] > 0)) break;
+      out.streak++;
+      day = new Date(day.getTime() - 86400000);
+    }
+    var last = a.sessions[a.sessions.length - 1];
+    if (last) {
+      out.lastAt = last.e;
+      out.daysSinceLast = Math.max(0, Math.floor((t - last.e) / 86400000));
+    }
+    var remaining = typeof opts.remaining === 'number' && isFinite(opts.remaining) ? opts.remaining : 0;
+    if (remaining > 0 && a.sessions.length >= 5 && worked.length) {
+      var sorted = worked.slice().sort(function (x, y) { return x - y; });
+      // how many of the last 28 calendar days had work (at least one)
+      var frac = Math.max(1, worked.length) / 28;
+      var firstDay = Object.keys(a.days).sort()[0];
+      if (firstDay && firstDay > since) {
+        var span = Math.max(1, Math.round((t - new Date(firstDay + 'T12:00:00').getTime()) / 86400000) + 1);
+        frac = Math.min(1, worked.length / span);
+      }
+      var fast = quantile(sorted, 0.75) * frac, slow = quantile(sorted, 0.25) * frac;
+      if (fast > 0 && slow > 0) {
+        out.finish = {
+          low: t + Math.ceil(remaining / fast) * 86400000,
+          high: t + Math.ceil(remaining / slow) * 86400000,
+          approx: true
+        };
+      }
+    }
+    return out;
+  }
+
+  function setGoal(id, goal) {
+    var proj = project(id);
+    if (!proj || !goal || typeof goal !== 'object') return null;
+    var list = normalizeGoals([goal]);
+    if (!list) return null;
+    var g = list[0];
+    snapshot(proj);
+    var goals = Array.isArray(proj.goals) ? proj.goals : [];
+    var at = -1;
+    for (var i = 0; i < goals.length; i++) if (goals[i].id === g.id) at = i;
+    if (at >= 0) goals[at] = g;
+    else goals.push(g);
+    if (goals.length > 20) goals.splice(0, goals.length - 20);
+    proj.goals = goals;
+    touch(proj);
+    return g;
+  }
+
+  function removeGoal(id, goalId) {
+    var proj = project(id);
+    if (!proj || !Array.isArray(proj.goals)) return false;
+    var keep = proj.goals.filter(function (g) { return g.id !== goalId; });
+    if (keep.length === proj.goals.length) return false;
+    snapshot(proj);
+    if (keep.length) proj.goals = keep;
+    else delete proj.goals;
+    touch(proj);
+    return true;
+  }
+
+  function goalStatus(id, opts) {
+    var proj = project(id);
+    if (!proj || !Array.isArray(proj.goals)) return [];
+    var a = activityOf(id);
+    var t = now();
+    var today = dayKeyNow();
+    return proj.goals.map(function (g) {
+      if (g.kind === 'perDay') {
+        var done = (a.days[today] && a.days[today][g.unit]) || 0;
+        return { goal: g, done: done, target: g.n, met: done >= g.n };
+      }
+      var remaining = opts && typeof opts.remaining === 'number' ? opts.remaining
+        : (typeof g.n === 'number' ? Math.max(0, g.n - (a.total[g.unit] || 0)) : null);
+      var daysLeft = Math.max(1, Math.ceil((g.until - t) / 86400000));
+      var out = { goal: g, done: a.total[g.unit] || 0, target: g.n === undefined ? null : g.n,
+        remaining: remaining, daysLeft: g.until > t ? daysLeft : 0, met: remaining === 0 };
+      if (remaining !== null && remaining > 0) out.perDayNeeded = Math.ceil(remaining / daysLeft);
+      return out;
+    });
+  }
+
+  /* -- mark log (04 X3): varint deltas in BlobStore, never in localStorage -- */
+
+  var MARK_FLUSH_MS = 60000;
+  var markBuf = Object.create(null);   // id -> { list: [i, d, i, d …], at, timer, seq }
+
+  function logMarks(id, list) {
+    var p = project(id);
+    if (!p || !Array.isArray(list) || !list.length) return false;
+    var m = markBuf[p.id] || (markBuf[p.id] = { list: [], at: 0, timer: null, seq: null });
+    if (!m.list.length) m.at = now();
+    for (var i = 0; i < list.length && m.list.length < 400000; i++) {
+      var it = list[i];
+      var idx = Array.isArray(it) ? it[0] : it;
+      var d = Array.isArray(it) ? it[1] : 1;
+      if (typeof idx !== 'number' || idx < 0 || idx > 1e8 || idx !== Math.floor(idx)) continue;
+      m.list.push(idx, d ? 1 : 0);
+    }
+    if (!m.timer && m.list.length) {
+      m.timer = setTimeout(function () { m.timer = null; flushMarks(p.id); }, MARK_FLUSH_MS);
+    }
+    return true;
+  }
+
+  function pushVarint(out, v) {
+    while (v >= 128) { out.push((v % 128) + 128); v = Math.floor(v / 128); }
+    out.push(v);
+  }
+
+  function encodeMarks(at, list) {
+    var out = [1];
+    pushVarint(out, at);
+    pushVarint(out, list.length / 2);
+    var prev = 0;
+    for (var i = 0; i < list.length; i += 2) {
+      var delta = list[i] - prev;
+      prev = list[i];
+      var zz = delta >= 0 ? delta * 2 : -delta * 2 - 1;
+      pushVarint(out, zz * 2 + list[i + 1]);
+    }
+    var u8 = new Uint8Array(out.length);
+    for (var j = 0; j < out.length; j++) u8[j] = out[j];
+    return u8;
+  }
+
+  function decodeMarks(u8) {
+    var pos = 0;
+    function rd() {
+      var v = 0, mul = 1, b;
+      do {
+        if (pos >= u8.length) throw new Error('short');
+        b = u8[pos++];
+        v += (b & 127) * mul;
+        mul *= 128;
+      } while (b >= 128);
+      return v;
+    }
+    if (u8[pos++] !== 1) throw new Error('version');
+    var at = rd();
+    var n = rd();
+    var marks = [];
+    var prev = 0;
+    for (var i = 0; i < n; i++) {
+      var v = rd();
+      var d = v % 2;
+      var zz = (v - d) / 2;
+      var delta = zz % 2 === 0 ? zz / 2 : -(zz + 1) / 2;
+      prev += delta;
+      marks.push([prev, d]);
+    }
+    return { at: at, marks: marks };
+  }
+
+  function nextMarkSeq(B, id, m) {
+    if (m.seq !== null) return Promise.resolve(m.seq);
+    return B.keys('p:' + id + ':marks:').then(function (keys) {
+      var max = 0;
+      keys.forEach(function (k) { var n = parseInt(k.slice(k.lastIndexOf(':') + 1), 10); if (n > max) max = n; });
+      m.seq = max + 1;
+      return m.seq;
+    });
+  }
+
+  function flushMarks(id) {
+    var m = markBuf[id];
+    if (typeof Promise !== 'function') return null;
+    if (!m || !m.list.length) return Promise.resolve(0);
+    if (m.timer) { clearTimeout(m.timer); m.timer = null; }
+    var B = blobStore();
+    if (!B || typeof B.putManyResult !== 'function') return Promise.resolve(0);
+    var list = m.list;
+    var at = m.at;
+    m.list = [];
+    var job = (m.flushing || Promise.resolve()).then(function () {
+      return nextMarkSeq(B, id, m);
+    }).then(function (seq) {
+      m.seq = seq + 1;
+      return B.putManyResult([{ key: 'p:' + id + ':marks:' + seq, value: encodeMarks(at, list) }]);
+    }).then(function (res) {
+      if (res && res.ok) return list.length / 2;
+      // keep them for the next try, in order
+      m.list = list.concat(m.list);
+      m.at = at;
+      m.seq = null;
+      emitHeavy(id, 'failed', { error: (res && res.error) || 'UnknownError', what: 'marks' });
+      return 0;
+    }, function () { m.list = list.concat(m.list); m.seq = null; return 0; });
+    m.flushing = job;
+    return job;
+  }
+
+  function flushAllMarks() {
+    return Promise.all(Object.keys(markBuf).map(flushMarks));
+  }
+
+  function blobBytes(b) {
+    if (!b) return Promise.resolve(null);
+    if (typeof b.arrayBuffer === 'function') return b.arrayBuffer().then(function (ab) { return new Uint8Array(ab); });
+    return new Promise(function (resolve) {
+      var fr = new FileReader();
+      fr.onload = function () { resolve(new Uint8Array(fr.result)); };
+      fr.onerror = function () { resolve(null); };
+      fr.readAsArrayBuffer(b);
+    });
+  }
+
+  function readMarks(id) {
+    var B = blobStore();
+    if (!B || typeof Promise !== 'function') return Promise.resolve([]);
+    var pre = 'p:' + id + ':marks:';
+    return flushMarks(id).then(function () { return B.entries(pre); }).then(function (list) {
+      list.sort(function (a, b) {
+        return parseInt(a.key.slice(pre.length), 10) - parseInt(b.key.slice(pre.length), 10);
+      });
+      return Promise.all(list.map(function (e) { return blobBytes(e.blob); })).then(function (bufs) {
+        var out = [];
+        for (var i = 0; i < bufs.length; i++) {
+          if (!bufs[i]) continue;
+          try { out.push(decodeMarks(bufs[i])); } catch (e) { /* a damaged chunk is skipped */ }
+        }
+        return out;
+      });
+    });
+  }
+
+  try {
+    if (window.addEventListener) {
+      window.addEventListener('pagehide', function () { flushAllMarks(); }, false);
+      window.addEventListener('visibilitychange', function () {
+        if (document.visibilityState === 'hidden') flushAllMarks();
+      }, false);
+    }
+  } catch (e) { /* no window events */ }
+
+  /* ---- K4: step edits and notes ---------------------------------------- */
+
+  function stepNorm(text) {
+    return str(text, '').toLowerCase()
+      .replace(/[‘’]/g, "'")
+      .replace(/[^a-z0-9]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 4000);
+  }
+
+  function stepKey(text) { return 's' + hash32(stepNorm(text)); }
+
+  function stepKeys(texts) {
+    var seen = Object.create(null);
+    return (Array.isArray(texts) ? texts : []).map(function (t) {
+      var k = stepKey(t);
+      seen[k] = (seen[k] || 0) + 1;
+      return seen[k] > 1 ? k + '~' + seen[k] : k;
+    });
+  }
+
+  function setStepField(id, key, field, value, cap) {
+    var proj = project(id);
+    if (!proj || !STEP_KEY_RE.test(str(key, ''))) return null;
+    var v = typeof value === 'string' ? value.replace(BIDI_RE, '').slice(0, cap) : '';
+    var cur = proj.overlay && proj.overlay.steps && proj.overlay.steps[key];
+    if (!v.trim() && !(cur && cur[field])) return cur || null;
+    if (cur && cur[field] === v) return cur;
+    snapshot(proj);
+    if (!proj.overlay || !proj.overlay.steps) proj.overlay = { steps: {} };
+    var e = proj.overlay.steps[key] || {};
+    if (v.trim()) e[field] = v;
+    else delete e[field];
+    e.at = now();
+    if (!e.text && !e.note) delete proj.overlay.steps[key];
+    else proj.overlay.steps[key] = e;
+    if (!Object.keys(proj.overlay.steps).length) delete proj.overlay;
+    touch(proj);
+    return proj.overlay ? proj.overlay.steps[key] || null : null;
+  }
+
+  function setStepEdit(id, key, text) { return setStepField(id, key, 'text', text, 4000); }
+  function setStepNote(id, key, note) { return setStepField(id, key, 'note', note, 2000); }
+
+  function stepOverlay(id) {
+    var p = project(id);
+    return (p && p.overlay && p.overlay.steps) || {};
+  }
+
+  function applyStepOverlay(id, texts) {
+    var steps = stepOverlay(id);
+    var list = Array.isArray(texts) ? texts : [];
+    var keys = stepKeys(list);
+    var used = Object.create(null);
+    var rows = keys.map(function (k, i) {
+      var o = steps[k];
+      used[k] = true;
+      return {
+        key: k, printed: str(list[i], ''),
+        text: o && o.text ? o.text : str(list[i], ''),
+        edited: !!(o && o.text), note: o && o.note ? o.note : ''
+      };
+    });
+    var orphans = [];
+    Object.keys(steps).forEach(function (k) {
+      if (!used[k]) orphans.push({ key: k, text: steps[k].text || '', note: steps[k].note || '' });
+    });
+    return { rows: rows, orphans: orphans };
+  }
+
+  /* ---- K5: profile, craft settings, settings in a backup ---------------- */
+
+  function lengthUnit(u, dflt) {
+    var s = str(u, '').trim().toLowerCase();
+    if (s === 'cm' || s === 'in') return s;
+    if (s === 'inch' || s === 'inches' || s === '"') return 'in';
+    return dflt;
+  }
+
+  function localeUnit() {
+    try {
+      var lang = String((window.navigator && (window.navigator.language || '')) || '');
+      if (/^en-(US|LR|MM)$/i.test(lang)) return 'in';
+    } catch (e) { /* fall through */ }
+    return 'cm';
+  }
+
+  function convertLength(v, from, to) {
+    var n = typeof v === 'number' ? v : parseFloat(v);
+    if (!isFinite(n)) return null;
+    var f = str(from, '').toLowerCase(), t = str(to, '').toLowerCase();
+    var cm = f === 'in' ? n * 2.54 : (f === 'mm' ? n / 10 : n);
+    var out = t === 'in' ? cm / 2.54 : (t === 'mm' ? cm * 10 : cm);
+    return Math.round(out * 1000) / 1000;
+  }
+
+  function normalizeProfile(raw) {
+    raw = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+    var units = raw.units && typeof raw.units === 'object' ? raw.units : {};
+    var out = { units: { length: lengthUnit(units.length, localeUnit()) }, measurements: {}, floss: {}, fabric: [] };
+    var m = raw.measurements && typeof raw.measurements === 'object' && !Array.isArray(raw.measurements) ? raw.measurements : {};
+    var mk = Object.keys(m);
+    for (var i = 0, n = 0; i < mk.length && n < 100; i++) {
+      if (!/^[A-Za-z0-9_-]{1,40}$/.test(mk[i])) continue;
+      var e = m[mk[i]];
+      if (!e || typeof e !== 'object') continue;
+      var unit = str(e.unit, '').toLowerCase();
+      var val = typeof e.value === 'number' ? e.value : parseFloat(e.value);
+      if (unit === 'mm') { val = val / 10; unit = 'cm'; }
+      unit = lengthUnit(unit, null);
+      if (!unit || !isFinite(val) || val <= 0 || val > 10000) continue;
+      out.measurements[mk[i]] = { value: Math.round(val * 1000) / 1000, unit: unit, at: clampInt(e.at, 0, 1e15, 0) };
+      n++;
+    }
+    var fl = raw.floss && typeof raw.floss === 'object' && !Array.isArray(raw.floss) ? raw.floss : {};
+    var bk = Object.keys(fl);
+    for (var b = 0, nb = 0; b < bk.length && nb < 20; b++) {
+      var brand = bk[b].trim().toLowerCase();
+      if (!/^[a-z0-9 _-]{1,30}$/.test(brand) || !fl[bk[b]] || typeof fl[bk[b]] !== 'object') continue;
+      var rows = {};
+      var ck = Object.keys(fl[bk[b]]);
+      for (var c = 0, nc = 0; c < ck.length && nc < 3000; c++) {
+        var code = ck[c].trim();
+        if (!/^[A-Za-z0-9._ -]{1,20}$/.test(code)) continue;
+        var r = fl[bk[b]][ck[c]];
+        if (typeof r === 'number') r = { owned: r };
+        if (!r || typeof r !== 'object') continue;
+        var owned = typeof r.owned === 'number' ? r.owned : parseFloat(r.owned);
+        if (!isFinite(owned) || owned <= 0) continue;
+        var row = { owned: Math.min(9999, Math.round(owned * 4) / 4), at: clampInt(r.at, 0, 1e15, 0) };
+        if (typeof r.note === 'string' && r.note.trim()) row.note = r.note.replace(BIDI_RE, '').slice(0, 200);
+        rows[code] = row;
+        nc++;
+      }
+      if (Object.keys(rows).length) { out.floss[brand] = rows; nb++; }
+    }
+    if (Array.isArray(raw.fabric)) {
+      var seen = Object.create(null);
+      for (var f = 0; f < raw.fabric.length && out.fabric.length < 500; f++) {
+        var fb = normalizeFabric(raw.fabric[f]);
+        if (!fb || seen[fb.id]) continue;
+        seen[fb.id] = true;
+        out.fabric.push(fb);
+      }
+    }
+    return out;
+  }
+
+  function optNum(v, lo, hi) {
+    if (v === null || v === undefined || v === '') return null;
+    var n = typeof v === 'number' ? v : parseFloat(v);
+    if (!isFinite(n) || n < lo || n > hi) return null;
+    return Math.round(n * 1000) / 1000;
+  }
+
+  function normalizeFabric(raw) {
+    if (!raw || typeof raw !== 'object') return null;
+    var out = {
+      id: str(raw.id, '').slice(0, 60) || uid(),
+      kind: safeName(raw.kind, 'fabric').slice(0, 30),
+      unit: lengthUnit(raw.unit, 'cm'),
+      qty: clampInt(raw.qty, 0, 999, 1),
+      at: clampInt(raw.at, 0, 1e15, 0) || now()
+    };
+    var count = optNum(raw.count, 1, 60);
+    if (count !== null) out.count = count;
+    var color = safeName(raw.color, '').slice(0, 40);
+    if (color) out.color = color;
+    var w = optNum(raw.w, 0.1, 100000), h = optNum(raw.h, 0.1, 100000);
+    if (w !== null) out.w = w;
+    if (h !== null) out.h = h;
+    if (typeof raw.note === 'string' && raw.note.trim()) out.note = raw.note.replace(BIDI_RE, '').slice(0, 200);
+    return out;
+  }
+
+  function profile() {
+    var s = settings();
+    if (!s.profile || typeof s.profile !== 'object') s.profile = normalizeProfile(null);
+    return s.profile;
+  }
+
+  function setProfile(patch) {
+    if (!patch || typeof patch !== 'object') return profile();
+    var cur = profile();
+    var next = {
+      units: patch.units !== undefined ? patch.units : cur.units,
+      measurements: patch.measurements !== undefined ? patch.measurements : cur.measurements,
+      floss: patch.floss !== undefined ? patch.floss : cur.floss,
+      fabric: patch.fabric !== undefined ? patch.fabric : cur.fabric
+    };
+    settings().profile = normalizeProfile(next);
+    save();
+    return settings().profile;
+  }
+
+  function setMeasurement(key, value, unit) {
+    var k = str(key, '');
+    if (!/^[A-Za-z0-9_-]{1,40}$/.test(k)) return null;
+    var pr = profile();
+    var val = typeof value === 'number' ? value : parseFloat(value);
+    var u = str(unit, '').toLowerCase();
+    if (u === 'mm') { val = val / 10; u = 'cm'; }
+    u = lengthUnit(u, pr.units.length);
+    if (!isFinite(val) || val <= 0 || val > 10000) {
+      if (value === null || value === '' || value === undefined) { delete pr.measurements[k]; save(); }
+      return null;
+    }
+    pr.measurements[k] = { value: Math.round(val * 1000) / 1000, unit: u, at: now() };
+    save();
+    return pr.measurements[k];
+  }
+
+  function measurement(key, unit) {
+    var pr = profile();
+    var e = pr.measurements[str(key, '')];
+    if (!e) return null;
+    var u = str(unit, '').toLowerCase();
+    if (!u) return e.value;
+    return convertLength(e.value, e.unit, u);
+  }
+
+  function removeMeasurement(key) {
+    var pr = profile();
+    if (!pr.measurements[str(key, '')]) return false;
+    delete pr.measurements[str(key, '')];
+    save();
+    return true;
+  }
+
+  function flossBrand(b) { return str(b, '').trim().toLowerCase(); }
+
+  function flossOwned(brand, code) {
+    var fl = profile().floss[flossBrand(brand)];
+    var r = fl && fl[str(code, '').trim()];
+    return r ? r.owned : 0;
+  }
+
+  function setFlossOwned(brand, code, owned, note) {
+    var b = flossBrand(brand), c = str(code, '').trim();
+    if (!/^[a-z0-9 _-]{1,30}$/.test(b) || !/^[A-Za-z0-9._ -]{1,20}$/.test(c)) return null;
+    var pr = profile();
+    var n = typeof owned === 'number' ? owned : parseFloat(owned);
+    if (!isFinite(n) || n <= 0) {
+      if (pr.floss[b]) {
+        delete pr.floss[b][c];
+        if (!Object.keys(pr.floss[b]).length) delete pr.floss[b];
+      }
+      save();
+      return 0;
+    }
+    if (!pr.floss[b]) pr.floss[b] = {};
+    var row = { owned: Math.min(9999, Math.round(n * 4) / 4), at: now() };
+    var keep = note !== undefined ? note : (pr.floss[b][c] && pr.floss[b][c].note);
+    if (typeof keep === 'string' && keep.trim()) row.note = keep.replace(BIDI_RE, '').slice(0, 200);
+    pr.floss[b][c] = row;
+    save();
+    return row.owned;
+  }
+
+  function adjustFloss(brand, code, delta) {
+    var n = flossOwned(brand, code) + (Number(delta) || 0);
+    return setFlossOwned(brand, code, Math.max(0, n)) || 0;
+  }
+
+  function flossStash() {
+    var out = [];
+    var fl = profile().floss;
+    Object.keys(fl).sort().forEach(function (b) {
+      Object.keys(fl[b]).forEach(function (c) {
+        var r = fl[b][c];
+        out.push({ brand: b, code: c, owned: r.owned, note: r.note || '', at: r.at });
+      });
+    });
+    return out;
+  }
+
+  /** Who gets the floss: projects in priority order take what they need. Computed, never stored. */
+  function flossAllocation(list) {
+    var left = Object.create(null);
+    var fl = profile().floss;
+    var out = {};
+    (Array.isArray(list) ? list : []).forEach(function (item) {
+      if (!item || !item.projectId || !item.needs || typeof item.needs !== 'object') return;
+      var mine = out[item.projectId] = out[item.projectId] || {};
+      Object.keys(item.needs).forEach(function (brand) {
+        var b = flossBrand(brand);
+        var needs = item.needs[brand];
+        if (!needs || typeof needs !== 'object') return;
+        Object.keys(needs).forEach(function (code) {
+          var need = Math.max(0, Number(needs[code]) || 0);
+          var k = b + '\u0000' + code;
+          if (!(k in left)) left[k] = fl[b] && fl[b][code] ? fl[b][code].owned : 0;
+          var give = Math.min(need, left[k]);
+          left[k] -= give;
+          if (!mine[b]) mine[b] = {};
+          mine[b][code] = { need: need, allocated: give, short: Math.max(0, need - give) };
+        });
+      });
+    });
+    return out;
+  }
+
+  function addFabric(piece) {
+    var f = normalizeFabric(piece);
+    if (!f) return null;
+    var pr = profile();
+    pr.fabric = pr.fabric.filter(function (x) { return x.id !== f.id; });
+    pr.fabric.push(f);
+    save();
+    return f;
+  }
+
+  function updateFabric(id, patch) {
+    var pr = profile();
+    for (var i = 0; i < pr.fabric.length; i++) {
+      if (pr.fabric[i].id !== id) continue;
+      var merged = {};
+      for (var k in pr.fabric[i]) merged[k] = pr.fabric[i][k];
+      for (var k2 in (patch || {})) merged[k2] = patch[k2];
+      merged.id = id;
+      merged.at = now();
+      var f = normalizeFabric(merged);
+      if (!f) return null;
+      pr.fabric[i] = f;
+      save();
+      return f;
+    }
+    return null;
+  }
+
+  function removeFabric(id) {
+    var pr = profile();
+    var n = pr.fabric.length;
+    pr.fabric = pr.fabric.filter(function (x) { return x.id !== id; });
+    if (pr.fabric.length !== n) save();
+    return pr.fabric.length !== n;
+  }
+
+  function fabricStash() { return profile().fabric.slice(); }
+
+  function normalizeOneCraftSettings(id, bag) {
+    var c = crafts[id];
+    var out = jsonObject(bag);
+    var hook = c && c.settingsHook;
+    if (hook && typeof hook.normalize === 'function') {
+      try {
+        var r = hook.normalize(out);
+        if (r && typeof r === 'object' && !Array.isArray(r)) out = jsonObject(r);
+      } catch (e) { /* keep the plain copy */ }
+    }
+    return out;
+  }
+
+  function craftDefaults(id) {
+    var c = crafts[str(id, '')];
+    var d = c && c.settingsHook && c.settingsHook.defaults;
+    return d && typeof d === 'object' && !Array.isArray(d) ? d : null;
+  }
+
+  function setCraftSettings(id, obj) {
+    var key = str(id, '').trim();
+    if (!key) return {};
+    var s = settings();
+    if (!s.crafts || typeof s.crafts !== 'object') s.crafts = {};
+    s.crafts[key] = normalizeOneCraftSettings(key, obj);
+    save();
+    return craftSettings(key);
+  }
+
+  /* Settings a backup may bring back, and the words the preview uses. */
+  var RESTORE_SETTINGS = [
+    ['theme', 'Theme'], ['haptics', 'Vibration'], ['sounds', 'Sounds'], ['keepAwake', 'Keep the screen awake'],
+    ['autoAdvance', 'Move on at the row total'], ['liveDiagram', 'The 3D piece in the button']
+  ];
+
+  function mergeProfiles(local, incoming, how) {
+    if (how === 'replace') return normalizeProfile(incoming);
+    var a = normalizeProfile(local), b = normalizeProfile(incoming);
+    var out = normalizeProfile(local);
+    out.units = b.units;
+    Object.keys(b.measurements).forEach(function (k) {
+      var x = a.measurements[k], y = b.measurements[k];
+      if (!x || (y.at || 0) >= (x.at || 0)) out.measurements[k] = y;
+    });
+    Object.keys(b.floss).forEach(function (br) {
+      if (!out.floss[br]) out.floss[br] = {};
+      Object.keys(b.floss[br]).forEach(function (code) {
+        var x = out.floss[br][code], y = b.floss[br][code];
+        if (!x || (y.at || 0) >= (x.at || 0)) out.floss[br][code] = y;
+      });
+    });
+    var byId = Object.create(null);
+    out.fabric.forEach(function (f, i) { byId[f.id] = i; });
+    b.fabric.forEach(function (f) {
+      if (f.id in byId) {
+        if ((f.at || 0) >= (out.fabric[byId[f.id]].at || 0)) out.fabric[byId[f.id]] = f;
+      } else {
+        out.fabric.push(f);
+      }
+    });
+    return out;
+  }
+
+  function describeProfile(p) {
+    if (!p) return 'none';
+    var pr = normalizeProfile(p);
+    var bits = [];
+    var m = Object.keys(pr.measurements).length;
+    var f = flossCount(pr);
+    if (m) bits.push(m + ' measurement' + (m === 1 ? '' : 's'));
+    if (f) bits.push(f + ' floss colour' + (f === 1 ? '' : 's'));
+    if (pr.fabric.length) bits.push(pr.fabric.length + ' fabric piece' + (pr.fabric.length === 1 ? '' : 's'));
+    return bits.join(', ') || 'empty';
+  }
+
+  function flossCount(pr) {
+    var n = 0;
+    for (var b in pr.floss) n += Object.keys(pr.floss[b]).length;
+    return n;
+  }
+
+  /** Apply a backup's settings block to `s` (a live settings object). Returns the change list. */
+  function applySettings(s, raw, how, dryRun) {
+    var changes = [];
+    if (!raw || typeof raw !== 'object' || how === 'skip') return changes;
+    var target = dryRun ? JSON.parse(JSON.stringify(s)) : s;
+    var inc = normalizeState({ settings: raw }).settings;
+    RESTORE_SETTINGS.forEach(function (pair) {
+      var k = pair[0];
+      if (!(k in raw)) return;
+      if (!sameJson(target[k], inc[k])) {
+        changes.push({ key: k, label: pair[1], from: target[k], to: inc[k] });
+        target[k] = inc[k];
+      }
+    });
+    if (raw.crafts && typeof raw.crafts === 'object') {
+      var ids = Object.keys(inc.crafts);
+      for (var i = 0; i < ids.length; i++) {
+        var id = ids[i];
+        var cur = target.crafts && target.crafts[id] ? target.crafts[id] : {};
+        var next;
+        if (how === 'replace') next = inc.crafts[id];
+        else {
+          next = jsonObject(cur);
+          for (var k2 in inc.crafts[id]) next[k2] = inc.crafts[id][k2];
+        }
+        next = normalizeOneCraftSettings(id, next);
+        if (!sameJson(cur, next)) {
+          changes.push({ key: 'crafts.' + id, label: 'Settings for ' + id, from: cur, to: next });
+          if (!target.crafts) target.crafts = {};
+          target.crafts[id] = next;
+        }
+      }
+    }
+    if (raw.profile && typeof raw.profile === 'object') {
+      var merged = mergeProfiles(target.profile, raw.profile, how);
+      if (!sameJson(target.profile ? normalizeProfile(target.profile) : null, merged)) {
+        changes.push({ key: 'profile', label: 'Your profile', from: describeProfile(target.profile), to: describeProfile(merged) });
+        target.profile = merged;
+      }
+    }
+    // tours and the welcome: what either side has seen stays seen
+    var seen = (target.toursSeen || []).slice();
+    (inc.toursSeen || []).forEach(function (t) { if (seen.indexOf(t) === -1) seen.push(t); });
+    if (seen.length !== (target.toursSeen || []).length) {
+      changes.push({ key: 'toursSeen', label: 'Guided tours already seen', from: (target.toursSeen || []).length, to: seen.length });
+      target.toursSeen = seen;
+    }
+    if (inc.welcomed && !target.welcomed) target.welcomed = true;
+    target.lastBackupAt = Math.max(clampInt(target.lastBackupAt, 0, 1e15, 0), inc.lastBackupAt || 0);
+    target.touchDays = normalizeTouchDays((target.touchDays || []).concat(inc.touchDays || []));
+    return changes;
+  }
+
+  function previewSettings(raw) {
+    var present = !!(raw && raw.settings && typeof raw.settings === 'object' && !Array.isArray(raw.settings));
+    if (!present) return { present: false, changes: [], count: 0 };
+    var changes = applySettings(settings(), raw.settings, 'merge', true);
+    return { present: true, changes: changes, count: changes.length };
+  }
+
+  /* ---- K6: storage report ---------------------------------------------- */
+
+  function storageUsage() {
+    var health = storageHealth();
+    var out = {
+      localBytes: health.bytesUsed, blobCount: null, blobBytes: null, heavyBytes: 0,
+      quota: null, usage: null, persisted: null
+    };
+    Object.keys(hv).forEach(function (id) {
+      var t = hv[id].table;
+      tablePaths(t).forEach(function (p) { out.heavyBytes += t.fields[p].bytes || 0; });
+    });
+    if (typeof Promise !== 'function') return null;
+    var B = window.BlobStore;
+    var jobs = [];
+    if (B && typeof B.usage === 'function') {
+      jobs.push(B.usage().then(function (u) { if (u) { out.blobCount = u.count; out.blobBytes = u.bytes; } }, noop));
+    }
+    try {
+      var st = window.navigator && window.navigator.storage;
+      if (st && typeof st.estimate === 'function') {
+        jobs.push(Promise.resolve(st.estimate()).then(function (e) {
+          if (e) { out.quota = typeof e.quota === 'number' ? e.quota : null; out.usage = typeof e.usage === 'number' ? e.usage : null; }
+        }, noop));
+      }
+      if (st && typeof st.persisted === 'function') {
+        jobs.push(Promise.resolve(st.persisted()).then(function (p) { out.persisted = !!p; }, noop));
+      }
+    } catch (e) { /* the numbers stay null */ }
+    return Promise.all(jobs).then(function () { return out; });
   }
 
   /* ------------------------------------------------------------------ *
@@ -9249,6 +12968,7 @@
 
     // counting
     tapStitch: tapStitch,
+    tapStitches: tapStitches,   // wave K (knit-store): n stitches as one action
     untapStitch: untapStitch,
     resetStitches: resetStitches,
     tapRow: tapRow,
@@ -9333,6 +13053,61 @@
     BACKUP_FILE_MAX_BYTES: BACKUP_FILE_MAX_BYTES,
     THREADY_FORMAT_VERSION: THREADY_FORMAT_VERSION,
 
+    // wave K (shell-data; docs/wave-k/api/shell-data.md)
+    setCraftHooks: setCraftHooks,
+    templateDraft: templateDraft,
+    TEMPLATE_CRAFTDATA_MAX: TEMPLATE_CRAFTDATA_MAX,
+    setCraftSettings: setCraftSettings,
+    profile: profile,
+    setProfile: setProfile,
+    setMeasurement: setMeasurement,
+    measurement: measurement,
+    removeMeasurement: removeMeasurement,
+    convertLength: convertLength,
+    flossOwned: flossOwned,
+    setFlossOwned: setFlossOwned,
+    adjustFloss: adjustFloss,
+    flossStash: flossStash,
+    flossAllocation: flossAllocation,
+    addFabric: addFabric,
+    updateFabric: updateFabric,
+    removeFabric: removeFabric,
+    fabricStash: fabricStash,
+    heavyState: heavyState,
+    whenReady: whenReady,
+    hydrateAll: hydrateAll,
+    heavyIdle: heavyIdle,
+    heavyInfo: heavyInfo,
+    onHeavy: onHeavy,
+    discardMissingHeavy: discardMissingHeavy,
+    heavyLastError: function () { return heavyLastError; },
+    counted: counted,
+    onCount: onCount,
+    activity: activityOf,
+    pace: pace,
+    SESSION_IDLE_MS: SESSION_IDLE_MS,
+    setGoal: setGoal,
+    removeGoal: removeGoal,
+    goalStatus: goalStatus,
+    logMarks: logMarks,
+    flushMarks: flushMarks,
+    readMarks: readMarks,
+    stepKey: stepKey,
+    stepKeys: stepKeys,
+    setStepEdit: setStepEdit,
+    setStepNote: setStepNote,
+    stepOverlay: stepOverlay,
+    applyStepOverlay: applyStepOverlay,
+    storageUsage: storageUsage,
+    /** TEST ONLY: the heavy runtime and the diff helpers. */
+    __heavy: {
+      rt: function (id) { return hv[id] || null; },
+      strDiff: strDiff, strPatch: strPatch,
+      encodeMarks: encodeMarks, decodeMarks: decodeMarks,
+      serializeState: function () { return serializeState(); },
+      undoEntries: function () { return undoStack; }
+    },
+
     // misc
     uid: uid,
 
@@ -9351,6 +13126,7 @@
       undoBytesTotal = 0;
       preimportText = null;
       if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+      Object.keys(hv).forEach(function (id) { if (hv[id].commitTimer) clearTimeout(hv[id].commitTimer); });
       load();
       return KEY;
     }

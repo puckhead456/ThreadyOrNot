@@ -217,6 +217,9 @@ function run() {
       return batchTests();
     })
     .then(function () {
+      return waveKTests();
+    })
+    .then(function () {
       return unavailablePath();
     })
     .then(finish, function (err) {
@@ -288,6 +291,48 @@ function batchTests() {
 }
 
 /* ---------------------------------------------------------------------- *
+ * Wave K (shell-data): putManyResult says why, getText reads text back.
+ * ---------------------------------------------------------------------- */
+function waveKTests() {
+  group('wave K: putManyResult / getText (heavy craft data)');
+  var big = new Array(200001).join('x');
+  return B.putManyResult([
+    { key: PRE + 'k:a', value: 'alpha' },
+    { key: PRE + 'k:big', value: big },
+    { key: '', value: 'dropped' }
+  ]).then(function (r) {
+    assertEqual(r.ok, true, 'putManyResult resolves ok for a good batch');
+    assertEqual(r.count, 2, 'counting the items it wrote');
+    assertEqual(r.error, null, 'with no error');
+    return B.getText(PRE + 'k:big');
+  }).then(function (t) {
+    assertEqual(t && t.length, 200000, 'getText reads a 200,000-character string back whole');
+    return B.getText(PRE + 'k:none');
+  }).then(function (t) {
+    assertEqual(t, null, 'getText of a missing key is null');
+    return B.putManyResult([]);
+  }).then(function (r) {
+    assertEqual(r.ok, false, 'an empty batch is not ok');
+    assertEqual(r.error, 'empty', 'and says why');
+    B._failWritesForTests({ error: 'QuotaExceededError' });
+    return B.putManyResult([{ key: PRE + 'k:q', value: 'never' }]);
+  }).then(function (r) {
+    assertEqual(r.ok, false, 'a refused batch resolves ok: false (never rejects)');
+    assertEqual(r.error, 'QuotaExceededError', 'with the reason, so the store can be loud about a full disk');
+    return B.getText(PRE + 'k:q');
+  }).then(function (t) {
+    assertEqual(t, null, 'nothing of a refused batch was written');
+    return B.putManyResult([{ key: PRE + 'k:q', value: 'now' }]);
+  }).then(function (r) {
+    assertEqual(r.ok, true, 'the test hook fails once, then writes work again');
+    return B.getText(PRE + 'k:a');
+  }).then(function (t) {
+    assertEqual(t, 'alpha', 'getText of a stored string');
+    return B.deletePrefix(PRE);
+  });
+}
+
+/* ---------------------------------------------------------------------- *
  * No IndexedDB: nothing rejects, every call gives the empty answer.
  * ---------------------------------------------------------------------- */
 function unavailablePath() {
@@ -345,6 +390,12 @@ function unavailablePath() {
     })
     .then(function (n) {
       assertEqual(n, wasHidden ? 0 : 1, 'deleteKeys resolves 0 instead of rejecting');
+      return B.putManyResult([{ key: 'x:2', value: 'v' }]);
+    })
+    .then(function (r) {
+      assertEqual(r.ok ? 'ok' : r.error, wasHidden ? 'unavailable' : 'ok',
+        'wave K: putManyResult says "unavailable" instead of rejecting');
+      return B.deleteKeys(['x:2']);
     })
     .then(function () {
       // Put the browser back the way we found it.

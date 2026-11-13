@@ -26,6 +26,11 @@ js/celebrate.js             # window.Celebrate = themed finish animations
 js/audio.js                 # window.Feedback = haptics + synthesized tap sounds
 js/store.js                 # window.Store = state, persistence (localStorage), undo, export/import
 js/app.js                   # window.App = rendering + event handling (the UI)
+js/workmode.js, js/checksheet.js, js/sharecard.js, js/pageviewer.js
+                            # wave K shared surfaces: window.WorkMode / CheckSheet / ShareCard / PageViewer
+js/ocr.js                   # wave K: window.Ocr, loader for the opt-in text reader (engine in
+                            #   js/vendor/tesseract/, never precached, downloaded on the maker's tap)
+                            # the craft files (cross-stitch, sewing and their wave K additions) are listed in docs/CRAFTS.md
 icons/icon-192.png, icons/icon-512.png, icons/apple-touch-icon.png, icons/icon.svg
 ```
 
@@ -621,6 +626,10 @@ puts a **Free up space** button on the quota banner while that craft's project i
 in the New project sheet. The shell's `ctx` also gains `preserveFocus(fn)` (see UX rules).
 Wave F gives the node `ctx.pdfDropZone` returns `wrap.cancel()` and `wrap.signal()` (see "PDF
 import"), and the cross-stitch and sewing enhancements are listed in `docs/CRAFTS.md`.
+Wave K adds optional registration fields (`workMode`, `template`, `settings`, `copy`,
+`sharePicture`, `counterPaint`, and on the store side `heavy`) and the shared surfaces every craft
+uses; the contract is `docs/CRAFTS.md` → "Wave K: shared surfaces", the behaviour is "Wave K:
+every craft as rich as crochet" below.
 
 ### Counter crafts and the parser slot (wave H)
 
@@ -829,6 +838,144 @@ Chart = { name, cols, rows, cells: [[sym|null]] | null, legend, noStitch, readRS
   its own stitches ("*…; rep from * around"), plain cables are `C4F` / `C4B`, complex ones the
   key's own words in brackets. `opts.repeat: false` ignores the boxes, `n` uses `repeats[n]`.
 - Half charts (the Icelandic shawl's B / D / F) are written for the half that is printed.
+
+## Wave K: every craft as rich as crochet
+
+The owner's request (2026-11-12) was to make knitting, cross-stitch and sewing as rich as
+crochet. Proposals: `docs/wave-k/brainstorm/00..04` (all signed off); shared brief and the
+coordinator's decisions: `docs/wave-k/BUILD.md`; per-worker reports `docs/wave-k/<worker>.md`
+and contracts `docs/wave-k/api/<worker>.md`. Crochet did not change: every crochet suite kept its
+count. The binding product rules of the wave:
+
+- Everything runs on the device; no server, no LLM, no telemetry, nothing gated as Pro.
+- **An "off" check demotes "Use it"** to a secondary button behind "Use it anyway?"; it never
+  blocks and never hides the disagreement. "Unchecked" (nothing printed to compare) does not demote.
+- **Estimates** (gauge rows, finish dates, computed sizes, quilt maths) are marked ≈ or "worked
+  out by the app" and become a target only when the maker taps "Use".
+- **Units** follow the pattern, with a per-project switch; inputs accept both.
+- **The pattern's own symbols, swatches and drawings** are shown only when captured cleanly, else
+  the app's own; never a half-read one.
+- **Text read from a picture** is opt-in, marked "Read from a picture — check it" and never
+  accepted without a tap.
+
+### Shared (every craft)
+
+- **Working mode.** Any craft can open a full-screen working mode (crochet's wave I screen):
+  big numbers, the big line, hints, the next step, big corner buttons, Options with Keep awake,
+  portrait and landscape, remembered per project. Space / Enter is the main action; arrows and
+  **PageDown / PageUp (a page-turner pedal)** move forward and back; Escape closes.
+- **One check.** A "✓ ≈ ≠ ?" badge and a "See the check" sheet (printed against read, rows that
+  disagree first, with the reason) wherever the app compares what it read with what the pattern
+  prints: crochet and knitting section imports, cross-stitch grid / picture / key reads, sewing
+  booklet imports, text read from a picture.
+- **⋯ → 🖼️ Share a picture.** A 1080 px card in the current theme (name, craft, dates, hours,
+  progress, parts) with the craft's own picture: a 3D still for crochet and knitting, the stitched
+  piece in a hoop for cross-stitch, the latest step drawing for sewing. Shared with the share
+  sheet where the browser can, else saved as a PNG.
+- **Templates for every craft** (⋯ → Save as template; "＋ New template" asks which craft).
+- **Work sessions.** Every craft's counted work is recorded in sessions (a new one after 10 idle
+  minutes) with day totals and a streak; a ≈ finish range appears only after 5 sessions.
+- **Settings → Your profile**: units, body measurements, floss and fabric stash, shared by every
+  project. **Backups now restore settings** (theme, per-craft settings, profile; merged by
+  default; a ticked "Settings" row in the import preview).
+- **Big projects stay fast.** A cross-stitch chart's cells and progress live in IndexedDB rather
+  than localStorage (a 250,000-stitch chart: 2.8 → 0.47 ms of store work per tap, 7,322 characters
+  left in localStorage; shell-data report). A project that is still loading says "Opening …"; one
+  whose data is gone says so and offers to keep what is left.
+- **Settings → Read scanned pages**: the opt-in text reader (about 5 MB, downloaded once on the
+  maker's tap, offline after, Remove with a confirm).
+- **Craft-aware wording** on the home screen, drop zones and empty lists.
+
+### Knitting
+
+- **"Work until" stretches are their own rows.** A line like "work even until it measures 4 in"
+  is a stretch: "Stretch · row 10 of ≈ 28", no row target until the knitter taps **I'm at the
+  length** (one Undo), with **Use ≈ 28** (from the gauge) and **I measured** (moves the planned
+  end; offers a new row gauge, applied only on "Use it"). The rows after it are numbered from where
+  the knitter ended. New knitting projects only; older ones get an opt-in "Number 'work until'
+  stretches as their own rows" in ⋯.
+- **The row the repeat lands on** is shown, not the repeat sentence ("Rnd 19 · repeat 4 of 9 ·
+  rnd 1 of 6", the resolved row's words as the main line, "from: Rep last 6 rnds 8 times more" in
+  small type).
+- **Panels keep running** through "Cont in pat" ("▦ A 7/22 · B 3/4 · C row ?"); rows from a read
+  chart count ("Work Rows 1-61 of Lace chart" is 61 rounds with counts); markers move with a row's
+  increases and marked stitches read "12 ◉ 9 ◉ 45".
+- **Shaping schedules** from "AT THE SAME TIME" / "every 4th row 6 times" sentences ("Neck dec ✓ ·
+  4 of 4 / Raglan · 2 of 6 · dec next row"), worked out by the app and checked against the
+  printed totals (a disagreement gives no schedule).
+- **Mirrored fronts.** "Work as for Right Front, reversing shaping" offers the rows written out,
+  each badged "worked out by the app" or "mirror this yourself".
+- **Calculators**: "inc N evenly" spelled out; a pick-up helper ("about 3 sts for every 4 rows").
+- **Pairs by default** (sleeves, socks, mittens ×2) with "Knit both at once" at import; RND / ROW
+  follows the part.
+- **On long rows a tap counts a repeat** (≥ 40 sts, when the row's real repeat groups add up), a
+  long press one stitch; one Undo; switchable per project.
+- **Pattern books** import the one pattern whose tab is open, with its own sizes, gauge, checklist
+  and charts; every pattern of the contents is listed ("· not read" when its rows are not).
+- **Chart sheet** with the row band, read direction, repeat box and stitches done; a picture
+  chart can be calibrated with two taps and a row count; colourwork runs ("MC 1 · CC1 4 · ×17 ·
+  longest float 4") and "Use the chart's colours" for the yarn colours.
+- ⋯ → **Materials** (yarn for your size, needles, still to get), **Schematic** (each part drawn
+  from its counts at the pattern's gauge), **Note on this row**, **Stretches**; a 📖 chip for the
+  row's abbreviations; Settings → Knitting → **Clicker** (teach a Bluetooth clicker's key).
+- **3D**: on a bent sock the foot turns to face you; a stranded round shows its chart stitch by
+  stitch; ⤢ viewer **This part / Whole piece** (a sock's sections chained into one sock, a
+  pullover's flat pieces sewn into a sweater, else every piece side by side with the reason);
+  finished pieces keep their cables and rib (baked fabric).
+
+### Cross-stitch
+
+- **One honest total.** A grid read never leaves a square blank: colours the reader cannot tell
+  apart become "?" key rows ("Which colour are these?", with the key's counts as candidates), the
+  band above the chart says how many stitches have no colour yet, and an "off" read demotes "Use
+  it". Pac-Man, which lost 5,000 stitches before, reads all 10 colours exactly (xs-core report).
+  One total everywhere; skeins as a range with a "buy N".
+- **⤢ Stitch mode**: the chart under the floating HUD (the whole screen; Fit and the current
+  stitch keep to the free rectangle, ≈ 75 % of 375 × 812), +1 / Space / pedal = next stitch block
+  by block, five corner buttons (‹ › ↶ −1 +1), 🎯 in Options and on N, island and page readouts.
+- **The tap button shows stitched fabric** (WebGL): the 10 × 10 block being worked at about 12 px
+  a stitch, the next stitch marked, a corner thumbnail; a flat picture while the 3D compiles or
+  where there is no WebGL.
+- **Parking** (corner markers, "next block in your direction"), **pages** (outlines, "Mark page
+  done"), **Row by row** scoped to a page or 10 wide, **Find my place** (col / row / page / block).
+- **Read a key from a picture** (crop box, rows exact / check / blank, one-tap candidates, codes
+  checked against the DMC list, a partial code never saved); the chart-picture reader finds the
+  chart on a busy page and says when the size looks wrong; charts split over several picture
+  pages can be joined (tried on made-up charts only).
+- **The designer's own symbols** on the chart and key when captured cleanly (Settings switch);
+  "Re-letter symbols" offered when colours share a symbol family; a photo never replaces an
+  imported key without "Replace this project's colours?".
+- **What are you making?** Cross-stitch, diamond painting, needlepoint, filet crochet, fuse beads
+  (units and materials follow).
+- ⋯ extras: **Stitching time and goals**, **Fabric, hoop and frame** calculator, **Floss stash and
+  kit list**, **Other brands and substitutes** (DMC only, said plainly; suggestions never swap a
+  colour), **Watch it grow** (time-lapse from the mark log, else labelled "not your real order"),
+  **Framed picture**, **Print what's left**, **Join with other files**.
+
+### Sewing
+
+- **⤢ Sewing mode**: the step full screen with its set-up chips (seam allowance in the pattern's
+  own unit first, foot, press / fuse), size numbers, note, next step and figure; a tap on the
+  coloured space (not the step text, which scrolls) or Space = Step done, pedal = done and on.
+- **The step's own drawing** beside each step when the app is sure which drawing it is, else the
+  page with the step outlined (never a half crop).
+- **Size advisor**: "My measurements" from the profile, a suggestion ("Size 42, with 44 at the
+  hip") with the designer's own between-sizes sentence quoted, **Use 42** (never automatic), then
+  every per-size number at that size; dual-unit and transposed charts read.
+- **What was missed**: the import review lists printed steps the app did not find, sentences no
+  step took, picture pages and failed sums; "off" demotes Import. Picture pages offer the text
+  reader, whose text goes into steps only through the paragraph picker, by hand.
+- **Units in their step** take the big button ("UNIT 1A · 0 / 2"); **milestones** (everything cut,
+  interfacing fused, top finished, binding on, hemmed); steps can be edited and given notes; bags
+  get no size row; projects take the pattern's name.
+- **Pattern sheets**: ⋯ → Add the pattern sheets reads the pieces, the tape-up map (tap to tick
+  taped), the size layers to print and the test square.
+- ⋯ extras: **Cutting board** (by fabric and by interfacing product, strips apart from pieces, strip
+  sums checked, to scale), **Quilt top**, **Quilt calculators** (binding, backing, batting, HST /
+  QST, flying geese, resize; every result ≈ with its formula and compared with what is printed),
+  **Fabric and shopping list** (your width, shrinkage, nap; across all projects), **Fabric
+  colours**, **Timer** (the sewist's own seconds, no default), **Glossary**, **Fitting log** (with
+  photos, carried to a second make).
 
 ## Guided help (tours)
 

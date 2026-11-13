@@ -1,0 +1,868 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>PdfText page structure tests</title>
+<style>
+  body { font: 13px/1.4 Menlo, Consolas, monospace; background:#111; color:#eee; padding:16px; }
+  .pass { color:#7bd389; }
+  .fail { color:#ff6b6b; background:#2a1414; }
+  .skip { color:#888; }
+  .note { color:#c9b27a; }
+  .group { margin-top:18px; font-weight:bold; color:#9cf; border-bottom:1px solid #333; padding-bottom:4px; }
+  #summary { margin-top:20px; font-size:18px; font-weight:bold; }
+  #summary.ok { color:#7bd389; }
+  #summary.bad { color:#ff6b6b; }
+  canvas.shot { border:1px solid #444; margin:4px; vertical-align:top; background:#fff; }
+</style>
+</head>
+<body>
+<h1>PdfText page structure tests <span class="skip">(wave K: positions, pictures, drawings, captions,
+layers, glyphs, region rendering, page kinds)</span></h1>
+<p class="skip">The first half builds small PDFs in code (no fixture needed). The second half reads
+../tmp-pdf at runtime and skips what is not there; nothing copyrighted is committed. Add
+<code>?heavy=1</code> for files over 17 MB, <code>?measure=1</code> for the per-page time and memory
+table over the biggest booklets, <code>?shots=1</code> to see the rendered crops.</p>
+<div id="out"></div>
+<div id="shots"></div>
+<div id="summary">running…</div>
+
+<script src="../js/vendor/pdf.min.js"></script>
+<script src="../js/pdftext.js"></script>
+<script>
+'use strict';
+
+(function () {
+  if (!window.pdfjsLib || !window.pdfjsLib.GlobalWorkerOptions) return;
+  var src = '../js/vendor/pdf.worker.min.js';
+  try {
+    Object.defineProperty(window.pdfjsLib.GlobalWorkerOptions, 'workerSrc', {
+      get: function () { return src; }, set: function () {}
+    });
+  } catch (e) { window.pdfjsLib.GlobalWorkerOptions.workerSrc = src; }
+})();
+
+var out = document.getElementById('out');
+var passed = 0, failed = 0, skipped = 0;
+var HEAVY = /(?:^|[?&])heavy=1(?:&|$)/.test(location.search);
+var MEASURE = /(?:^|[?&])measure=1(?:&|$)/.test(location.search);
+var SHOTS = /(?:^|[?&])shots=1(?:&|$)/.test(location.search);
+var PT = window.PdfText;
+
+function line(cls, text) {
+  var div = document.createElement('div');
+  div.className = cls;
+  div.textContent = text;
+  out.appendChild(div);
+}
+function log(ok, label, detail) {
+  if (ok) passed++; else failed++;
+  line(ok ? 'pass' : 'fail', (ok ? 'PASS' : 'FAIL') + ' - ' + label + (detail ? '  (' + detail + ')' : ''));
+}
+function skip(label, why) { skipped++; line('skip', 'SKIP - ' + label + ' (' + why + ')'); }
+function note(text) { line('note', 'NOTE - ' + text); }
+function group(title) { line('group', title); }
+function eq(actual, expected, label) {
+  var a = JSON.stringify(actual), e = JSON.stringify(expected);
+  log(a === e, label, a === e ? '' : 'expected ' + e + ' got ' + a);
+}
+function ok(cond, label, detail) { log(!!cond, label, cond ? '' : detail); }
+function near(a, b, tol, label) { log(Math.abs(a - b) <= tol, label, Math.abs(a - b) <= tol ? '' : 'expected ' + b + ' ± ' + tol + ' got ' + a); }
+function shot(canvas, label) {
+  if (!SHOTS || !canvas || !canvas.width) return;
+  var c = document.createElement('canvas');
+  var k = Math.min(1, 320 / canvas.width);
+  c.width = Math.max(1, Math.round(canvas.width * k)); c.height = Math.max(1, Math.round(canvas.height * k));
+  c.getContext('2d').drawImage(canvas, 0, 0, c.width, c.height);
+  c.className = 'shot'; c.title = label;
+  document.getElementById('shots').appendChild(c);
+}
+/** Share of pixels darker than 128 in a canvas region (all of it by default). */
+function inkShare(canvas, x, y, w, h) {
+  var g = canvas.getContext('2d');
+  x = x || 0; y = y || 0; w = w || canvas.width; h = h || canvas.height;
+  var d = g.getImageData(x, y, w, h).data, dark = 0;
+  for (var i = 0; i < d.length; i += 4) if (d[i + 3] > 128 && (d[i] + d[i + 1] + d[i + 2]) / 3 < 128) dark++;
+  return dark / (w * h);
+}
+
+var chain = Promise.resolve();
+function step(fn) { chain = chain.then(fn).catch(function (e) { log(false, 'threw', String(e && e.stack || e)); }); }
+
+/* ---- a tiny PDF writer (synthetic fixtures, generated here) ---------------- */
+function makePdf(objs) {
+  // objs: array of strings (object bodies); object n is objs[n-1]; 1 is the catalog
+  var s = '%PDF-1.5\n%âãÏÓ\n', offs = [];
+  objs.forEach(function (body, i) {
+    offs.push(s.length);
+    s += (i + 1) + ' 0 obj\n' + body + '\nendobj\n';
+  });
+  var xref = s.length;
+  s += 'xref\n0 ' + (objs.length + 1) + '\n0000000000 65535 f \n';
+  offs.forEach(function (o) { s += ('0000000000' + o).slice(-10) + ' 00000 n \n'; });
+  s += 'trailer\n<< /Size ' + (objs.length + 1) + ' /Root 1 0 R >>\nstartxref\n' + xref + '\n%%EOF\n';
+  var bytes = new Uint8Array(s.length);
+  for (var i = 0; i < s.length; i++) bytes[i] = s.charCodeAt(i) & 255;
+  return new Blob([bytes], { type: 'application/pdf' });
+}
+function stream(dict, data) { return '<< ' + dict + ' /Length ' + data.length + ' >>\nstream\n' + data + '\nendstream'; }
+function tj(font, size, x, y, text) {
+  return 'BT /' + font + ' ' + size + ' Tf ' + x + ' ' + y + ' Td (' + text.replace(/([()\\])/g, '\\$1') + ') Tj ET\n';
+}
+
+/* The synthetic booklet:
+ *  p1  a step line, a figure (lines and a curve) captioned "Figure 3" below it,
+ *      a 10 x 10 ruled grid with a ZapfDingbats symbol in every cell, a red
+ *      swatch, and a 4 x 4 picture
+ *  p2  two filled squares in the layers "12M" and "6"
+ *  p3  /Rotate 90 with one line of text
+ *  p4  one picture over the whole page
+  *  p5  twenty lines of running text
+ *  p6  a picture and no text (for setPageText) */
+function syntheticPdf() {
+  var c1 = '';
+  c1 += tj('F1', 12, 72, 720, 'Step 4 Sew the side seam');
+  c1 += '0 0 1 RG 2 w 72 590 m 150 680 l 230 590 l S 80 600 m 120 650 160 650 200 600 c S\n';
+  c1 += tj('F1', 10, 120, 570, 'Figure 3');
+  var g = '0 G 0.5 w ';
+  for (var i = 0; i <= 10; i++) {
+    g += (300 + 10 * i) + ' 400 m ' + (300 + 10 * i) + ' 500 l ';
+    g += '300 ' + (400 + 10 * i) + ' m 400 ' + (400 + 10 * i) + ' l ';
+  }
+  c1 += g + 'S\n';
+  for (var r = 0; r < 10; r++) {
+    for (var c = 0; c < 10; c++) c1 += tj('F2', 8, (301.84 + 10 * c).toFixed(2), (402.2 + 10 * r).toFixed(2), 'l');
+  }
+  c1 += '1 0 0 rg 450 600 60 60 re f\n';
+  c1 += 'q 80 0 0 60 300 600 cm /Im1 Do Q\n';
+  var img = '';
+  for (var p = 0; p < 16; p++) img += String.fromCharCode(p * 16, 255 - p * 16, 128);
+  var c2 = '/OC /oc1 BDC 0 g 100 100 200 200 re f ' + tj('F1', 12, 120, 320, '12M') + 'EMC\n' +
+           '/OC /oc2 BDC 0 g 350 100 100 100 re f EMC\n';
+  var c3 = tj('F1', 12, 72, 720, 'Rotated line');
+  var c4 = 'q 612 0 0 792 0 0 cm /Im1 Do Q\n' + tj('F1', 9, 40, 30, 'Figure 1 The finished bag');
+  var c5 = '';
+  for (var k = 0; k < 20; k++) c5 += tj('F1', 10, 72, 720 - 14 * k, 'Sew the lining to the outer bag along the top edge with right sides together.');
+  var res = '/Resources << /Font << /F1 6 0 R /F2 7 0 R >> /XObject << /Im1 8 0 R >> /Properties << /oc1 9 0 R /oc2 10 0 R >> >>';
+  return makePdf([
+    '<< /Type /Catalog /Pages 2 0 R /OCProperties << /OCGs [9 0 R 10 0 R] /D << /Order [9 0 R 10 0 R] /ON [9 0 R 10 0 R] /OFF [] >> >> >>',
+    '<< /Type /Pages /Kids [3 0 R 11 0 R 13 0 R 15 0 R 17 0 R 19 0 R] /Count 6 >>',
+    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] ' + res + ' /Contents 4 0 R >>',
+    stream('', c1),
+    '<< >>',
+    '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
+    '<< /Type /Font /Subtype /Type1 /BaseFont /ZapfDingbats >>',
+    stream('/Type /XObject /Subtype /Image /Width 4 /Height 4 /ColorSpace /DeviceRGB /BitsPerComponent 8', img),
+    '<< /Type /OCG /Name (12M) >>',
+    '<< /Type /OCG /Name (6) >>',
+    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] ' + res + ' /Contents 12 0 R >>',
+    stream('', c2),
+    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Rotate 90 ' + res + ' /Contents 14 0 R >>',
+    stream('', c3),
+    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] ' + res + ' /Contents 16 0 R >>',
+    stream('', c4),
+    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] ' + res + ' /Contents 18 0 R >>',
+    stream('', c5),
+    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] ' + res + ' /Contents 20 0 R >>',
+    stream('', 'q 400 0 0 500 100 150 cm /Im1 Do Q')
+  ]);
+}
+
+/* ---- fixtures --------------------------------------------------------- */
+var handles = {};
+function blobOf(name) {
+  return fetch('../tmp-pdf/' + name, { cache: 'no-store' }).then(function (r) {
+    return r.ok ? r.blob() : null;
+  }, function () { return null; });
+}
+/** Open a fixture once; checks(handle) runs when it is readable, else a skip. */
+function withHandle(name, label, checks) {
+  var p = handles[name] || (handles[name] = blobOf(name).then(function (blob) {
+    if (!blob) return { missing: true };
+    if (blob.size > 17 * 1048576 && !HEAVY) return { heavy: true };
+    return PT.open(blob).then(function (h) { return { h: h, size: blob.size }; }, function (e) { return { error: String(e && e.message || e) }; });
+  }));
+  return p.then(function (f) {
+    if (f.missing) return skip(label, name + ' not in tmp-pdf');
+    if (f.heavy) return skip(label, name + ' is over 17 MB, add ?heavy=1');
+    if (f.error) return log(false, label, 'could not open: ' + f.error);
+    return checks(f.h);
+  });
+}
+function closeAll() {
+  Object.keys(handles).forEach(function (k) {
+    handles[k].then(function (f) { if (f && f.h) f.h.destroy(); });
+  });
+  handles = {};
+}
+var PAINTS = null;
+/* console helpers for looking at a fixture by hand: await op('x.pdf'), sum(await h.layout(n)) */
+window.op = function (n) {
+  window.H = window.H || {};
+  return window.H[n] || (window.H[n] = blobOf(n).then(function (b) { return PT.open(b); }));
+};
+window.sum = function (lay) {
+  return { p: lay.page, wh: [lay.width, lay.height], kind: lay.kind.guess + ' ' + lay.kind.confidence + ' ' + lay.kind.reasons.join('; '),
+    lines: lay.lines.length, imgs: lay.images.length,
+    dr: lay.drawings.map(function (d) { return d.kind + (d.grid ? '[' + d.grid.cols + 'x' + d.grid.rows + '@' + d.grid.pitchX + ' ' + d.grid.drawn + ']' : '') + ':' + d.paths; }).join(' '),
+    caps: lay.captions.map(function (c) { return c.ref + '->' + (c.target ? c.target.type + c.target.index : 'none') + '@' + c.gap; }).join(' | '),
+    chart: lay.chart, layers: lay.layers, ms: lay.stats.ms, ops: lay.stats.ops };
+};
+
+/* ===================================================================== */
+step(function () {
+  group('Painting');
+  return PT.canPaint().then(function (yes) {
+    PAINTS = yes;
+    note(yes ? 'this tab paints frames: display-intent renders are checked too'
+      : 'this tab is not painting frames (hidden pane): renders go through the print intent');
+    ok(typeof yes === 'boolean', 'canPaint() answers yes or no', String(yes));
+  });
+});
+
+var SYN = null;
+step(function () {
+  group('Synthetic PDF: positions (layout lines, textIn, find)');
+  return PT.open(syntheticPdf()).then(function (h) {
+    SYN = h;
+    ok(typeof h.layout === 'function' && typeof h.renderRegion === 'function', 'the handle has the wave K calls');
+    eq(PT.LAYOUT_VERSION, 1, 'LAYOUT_VERSION is 1');
+    return h.layout(1);
+  }).then(function (lay) {
+    eq([lay.width, lay.height], [612, 792], 'page size in page units');
+    var st = lay.lines.filter(function (l) { return l.text === 'Step 4 Sew the side seam'; })[0];
+    ok(st, 'the step line is a layout line', JSON.stringify(lay.lines.map(function (l) { return l.text; })));
+    if (st) {
+      near(st.box.x0, 72, 0.5, 'its box starts at x 72');
+      // baseline 720 in PDF space is y 72 from the top; the box runs a fifth below it
+      near(st.box.y1, 792 - 720 + 0.22 * 12, 0.5, 'its box bottom sits just under the baseline (y down)');
+      near(st.box.y0, 792 - 720 - 0.78 * 12, 0.5, 'its box top sits a cap height above');
+      ok(st.box.x1 > 200 && st.box.x1 < 240, 'its box ends where the text ends', String(st.box.x1));
+      near(st.nbox.x0, 72 / 612, 0.001, 'nbox is the box over the page width');
+      eq(st.font, 'Helvetica', 'font name');
+      near(st.size, 12, 0.01, 'font size');
+      eq(st.i, 0, 'reading order index 0 (the first line)');
+    }
+    eq(lay.lines.map(function (l) { return l.i; }), lay.lines.map(function (l, i) { return i; }), 'reading order indexes run 0..n-1');
+    return SYN.textOf(1).then(function (t) {
+      eq(lay.lines.map(function (l) { return l.text; }).join('\n'), t, 'layout lines say exactly what textOf says, in its order');
+      return SYN.textIn(1, st.box);
+    }).then(function (r) {
+      eq(r.text, 'Step 4 Sew the side seam', 'textIn(the line box) gives the line back');
+      return SYN.textIn(1, { x0: 0, y0: 0, x1: 0.5, y1: 0.12, norm: true });
+    }).then(function (r) {
+      eq(r.text, 'Step 4 Sew the side seam', 'textIn takes a normalised rect');
+      return SYN.textIn(1, { x0: 0, y0: 500, x1: 50, y1: 600 });
+    }).then(function (r) {
+      eq(r.text, '', 'textIn of an empty rect is empty');
+      return SYN.find(1, /^Step 4\b/);
+    }).then(function (hits) {
+      eq(hits.length, 1, 'find(/^Step 4/) finds the step');
+      return SYN.find(1, 'figure 3');
+    }).then(function (hits) {
+      eq(hits.map(function (l) { return l.text; }), ['Figure 3'], 'find("figure 3") is case-insensitive');
+    });
+  });
+});
+
+step(function () {
+  group('Synthetic PDF: pictures, drawings, captions');
+  return SYN.layout(1).then(function (lay) {
+    eq(lay.images.length, 1, 'one picture');
+    var im = lay.images[0];
+    if (im) {
+      eq(im.px, { w: 4, h: 4 }, 'its pixel size');
+      eq([im.box.x0, im.box.y0, im.box.x1, im.box.y1], [300, 132, 380, 192], 'its box (y down)');
+      eq(im.layer, null, 'no layer');
+    }
+    var kinds = lay.drawings.map(function (d) { return d.kind; }).sort();
+    eq(kinds, ['figure', 'grid', 'swatch'], 'three drawings: a figure, a grid and a swatch');
+    var grid = lay.drawings.filter(function (d) { return d.kind === 'grid'; })[0];
+    if (grid) {
+      eq([grid.grid.cols, grid.grid.rows], [10, 10], 'the grid is 10 x 10');
+      near(grid.grid.pitchX, 10, 0.05, 'grid pitch x');
+      near(grid.grid.pitchY, 10, 0.05, 'grid pitch y');
+      eq(grid.strokeColours[0].hex, '#000000', 'grid stroke colour');
+    }
+    var sw = lay.drawings.filter(function (d) { return d.kind === 'swatch'; })[0];
+    if (sw) {
+      eq(sw.fillColours[0].hex, '#ff0000', 'the swatch is red');
+      eq([sw.box.x0, sw.box.y0, sw.box.x1, sw.box.y1], [450, 132, 510, 192], 'swatch box');
+    }
+    var fig = lay.drawings.filter(function (d) { return d.kind === 'figure'; })[0];
+    if (fig) {
+      eq(fig.strokeColours[0].hex, '#0000ff', 'the figure is drawn in blue');
+      ok(fig.box.x0 < 75 && fig.box.x1 > 228 && fig.box.y0 < 115 && fig.box.y1 > 200, 'the figure box holds the drawing', JSON.stringify(fig.box));
+    }
+    eq(lay.captions.length, 1, 'one caption');
+    var cap = lay.captions[0];
+    if (cap) {
+      eq([cap.ref, cap.label], ['Figure 3', '3'], 'caption ref and label');
+      eq(cap.target && cap.target.type, 'drawing', 'the caption names a drawing');
+      eq(cap.target && lay.drawings[cap.target.index].kind, 'figure', '...the figure above it, not the grid or the swatch');
+      ok(cap.gap >= 0 && cap.gap < 20, 'caption gap is small', String(cap.gap));
+    }
+    var z = PT.chartFonts(SYN && lay.glyphs || []);
+    ok(lay.chart && lay.chart.cols === 10 && lay.chart.rows === 10 && lay.chart.cells === 100,
+      'the ZapfDingbats symbols read as a 10 x 10 lattice', JSON.stringify(lay.chart));
+  });
+});
+
+step(function () {
+  group('Synthetic PDF: glyphs');
+  return SYN.glyphs(1).then(function (g) {
+    var z = g.glyphs.filter(function (x) { return x.base === 'ZapfDingbats'; });
+    eq(z.length, 100, '100 ZapfDingbats glyphs');
+    eq(z[0] && z[0].code, 108, 'each one is code 108 ("l")');
+    ok(z[0] && z[0].unicode.length === 1, '...with its unicode as pdf.js maps it', z[0] && JSON.stringify(z[0].unicode));
+    if (z[0]) {
+      near(z[0].size, 8, 0.01, 'glyph size');
+      near(z[0].advance, 0.791 * 8, 0.05, 'glyph advance (ZapfDingbats "l" is 791 units)');
+      near(z[0].box.x0, 301.84, 0.05, 'glyph box x');
+    }
+    eq(g.chartFonts.length, 1, 'exactly one font is set one symbol to a cell');
+    var fi = g.fonts[z[0] && z[0].font];
+    eq(fi && fi.base, 'ZapfDingbats', 'font info names it');
+    ok(fi && fi.symbolic, 'and calls it symbolic');
+    return SYN.chart(1);
+  }).then(function (ch) {
+    ok(ch, 'chart(1) reads a lattice');
+    if (!ch) return;
+    eq([ch.cols, ch.rows, ch.cells, ch.symbols.length], [10, 10, 100, 1], '10 x 10, 100 cells, one symbol');
+    near(ch.pitchX, 10, 0.05, 'symbol pitch x');
+    eq(ch.grid[0][0], 0, 'top-left cell holds symbol 0');
+    eq(ch.fit, 1, 'every symbol sits on the lattice');
+    return SYN.glyphs(1, { rect: { x0: 300, y0: 292, x1: 330, y1: 312 } });
+  }).then(function (g) {
+    if (!g) return;
+    eq(g.glyphs.length, 6, 'glyphs(rect) keeps only the glyphs inside (2 rows x 3)');
+  });
+});
+
+step(function () {
+  group('Synthetic PDF: layers');
+  return SYN.layers().then(function (L) {
+    eq(L.none, false, 'the PDF has layers');
+    eq(L.layers.map(function (l) { return l.name; }), ['12M', '6'], 'layer names');
+    eq(L.layers.map(function (l) { return l.visible; }), [true, true], 'both on by default');
+    return SYN.layout(2).then(function (lay) {
+      eq(lay.layers.length, 2, 'page 2 uses both layers');
+      var byLayer = lay.drawings.map(function (d) { return d.layer; });
+      ok(byLayer.indexOf(L.layers[0].id) >= 0 && byLayer.indexOf(L.layers[1].id) >= 0, 'each square knows its layer', JSON.stringify(byLayer));
+      var rect6 = { x0: 350, y0: 592, x1: 450, y1: 692 };     // the "6" square, y down
+      var rect12 = { x0: 100, y0: 492, x1: 300, y1: 692 };
+      return SYN.renderRegion(2, rect6, { scale: 1 }).then(function (cv) {
+        ok(inkShare(cv) > 0.95, 'all layers: the "6" square is drawn', String(inkShare(cv)));
+        return SYN.renderRegion(2, rect6, { scale: 1, layers: { only: ['12M'] } });
+      }).then(function (cv) {
+        ok(inkShare(cv) < 0.01, 'only 12M: the "6" square is gone', String(inkShare(cv)));
+        return SYN.renderRegion(2, rect12, { scale: 1, layers: { only: ['12m'] } });
+      }).then(function (cv) {
+        ok(inkShare(cv) > 0.9, 'only 12m (any case): the 12M square stays', String(inkShare(cv)));
+        return SYN.renderRegion(2, rect12, { scale: 1, layers: { off: ['12M'] } });
+      }).then(function (cv) {
+        ok(inkShare(cv) < 0.01, 'off 12M: its square is gone', String(inkShare(cv)));
+        return SYN.renderRegion(2, rect12, { scale: 1, layers: { only: ['XS'] } });
+      }).then(function (cv) {
+        eq(cv.region.layersUnknown, ['XS'], 'an unknown layer name is reported');
+        return SYN.renderPage(2, { maxWidth: 306, layers: { only: ['6'] } });
+      }).then(function (cv) {
+        eq([cv.width, cv.height], [306, 396], 'renderPage takes layers too, same size as before');
+        shot(cv, 'synthetic p2, layer 6 only');
+        // left square gone, right square there (scale 0.5)
+        ok(inkShare(cv, 60, 260, 80, 80) < 0.01 && inkShare(cv, 180, 300, 40, 40) > 0.9, 'renderPage(layers) draws only that layer');
+      });
+    });
+  });
+});
+
+step(function () {
+  group('Synthetic PDF: a turned page, a photo page, a text page');
+  return SYN.layout(3).then(function (lay) {
+    eq([lay.width, lay.height, lay.rotate], [792, 612, 90], 'a /Rotate 90 page is 792 x 612 as shown');
+    var l = lay.lines[0];
+    ok(l && l.text === 'Rotated line', 'its line is read');
+    // PDF (72, 720) on a page turned 90 degrees clockwise is (720, 72) from the top-left as shown
+    if (l) ok(l.box.x0 > 700 && l.box.x1 < 740 && l.box.y0 >= 70 && l.box.y1 < 150, 'its box is on the turned page (text runs down)', JSON.stringify(l.box));
+    return SYN.layout(4);
+  }).then(function (lay) {
+    eq(lay.kind.guess, 'photo', 'one picture over the page: photo');
+    ok(lay.kind.reasons.length > 0 && lay.kind.confidence > 0.3, 'with reasons and a confidence', JSON.stringify(lay.kind));
+    eq(lay.captions.length, 1, '"Figure 1 …" is a caption');
+    eq(lay.captions[0] && lay.captions[0].target, null, '...of nothing: a full-page picture is the ground, not a target');
+    return SYN.layout(5);
+  }).then(function (lay) {
+    eq(lay.kind.guess, 'instructions', 'twenty lines of prose: instructions');
+    return SYN.pageKinds();
+  }).then(function (k) {
+    eq(k.length, 6, 'pageKinds covers every page');
+    ok(k.every(function (x) { return typeof x.ms === 'number' && x.reasons; }), 'each with a time and reasons');
+  });
+});
+
+step(function () {
+  group('Synthetic PDF: OCR lines on a picture page (setPageText)');
+  // the shape Ocr.toTextItems builds (docs/wave-k/api/ocr.md)
+  var ocrItems = [
+    { i: 0, text: 'Rnd 1: 6 sc in a ring (6)', box: { x0: 110, y0: 200, x1: 300, y1: 214 }, nbox: null, font: 'ocr', fontId: null, size: 14, margin: false, ocr: true, conf: 91 },
+    { i: 1, text: 'Rnd 2: inc in each st (12)', box: { x0: 110, y0: 220, x1: 310, y1: 234 }, nbox: null, font: 'ocr', fontId: null, size: 14, margin: false, ocr: true, conf: 88 }
+  ];
+  return SYN.extract({ allowEmpty: true }).then(function (before) {
+    eq(before.ocrPages, [], 'extract() reports no OCR pages before any are given');
+    return SYN.setPageText(1, ocrItems).then(function (r) {
+      eq(r.ok, false, 'a page with real text is never overwritten');
+      ok(/already has its own text/.test(r.reason || ''), '...and says why', r.reason);
+      return SYN.setPageText(6, ocrItems);
+    }).then(function (r) {
+      eq([r.ok, r.lines], [true, 2], 'the picture page takes the two OCR lines');
+      eq(SYN.ocrPages(), [6], 'handle.ocrPages() lists it');
+      return SYN.textOf(6);
+    }).then(function (t) {
+      eq(t, 'Rnd 1: 6 sc in a ring (6)\nRnd 2: inc in each st (12)', 'textOf(6) is the OCR text');
+      return SYN.layout(6);
+    }).then(function (lay) {
+      ok(lay.lines.length === 2 && lay.lines.every(function (l) { return l.ocr === true && l.font === 'ocr'; }), 'layout(6) lines carry ocr: true');
+      near(lay.lines[0].nbox.x0, 110 / 612, 0.001, '...with their boxes over the page');
+      eq(lay.images.length, 1, '...and the picture is still there');
+      return SYN.textIn(6, { x0: 100, y0: 215, x1: 400, y1: 240 });
+    }).then(function (r) {
+      eq(r.text, 'Rnd 2: inc in each st (12)', 'textIn on an OCR page reads the OCR lines inside');
+      return SYN.extract({ allowEmpty: true });
+    }).then(function (after) {
+      eq(after.ocrPages, [6], 'extract() reports ocrPages: [6]');
+      ok(after.text.indexOf('=== PAGE 6 ===\nRnd 1: 6 sc in a ring (6)\nRnd 2: inc in each st (12)') >= 0, '...and carries the OCR lines on page 6');
+      eq(after.text.replace(/\n*=== PAGE 6 ===[\s\S]*$/, ''), before.text.replace(/\n*=== PAGE 6 ===[\s\S]*$/, ''), 'every other page reads as before');
+      ok(after.emptyPages.indexOf(6) < 0 && before.emptyPages.indexOf(6) >= 0, 'page 6 is no longer an empty page');
+      return SYN.setPageText(6, null);
+    }).then(function (r) {
+      eq([r.ok, r.cleared], [true, true], 'setPageText(6, null) takes the lines off');
+      return SYN.extract({ allowEmpty: true });
+    }).then(function (again) {
+      eq(again.text, before.text, 'and the text is byte for byte what it was');
+      eq(again.ocrPages, [], 'with no OCR pages');
+    });
+  });
+});
+
+step(function () {
+  group('Synthetic PDF: region rendering');
+  var r = { x0: 100, y0: 492, x1: 300, y1: 692 };
+  return SYN.renderRegion(2, r, { scale: 2 }).then(function (cv) {
+    eq([cv.width, cv.height], [400, 400], 'scale 2 doubles the rect');
+    eq(cv.region.box, r, 'region box echoed');
+    eq(cv.region.clamped, false, 'not clamped');
+    ok(inkShare(cv) > 0.95, 'the square fills it');
+    ok(cv.region.intent === 'display' || cv.region.intent === 'print', 'the region says which pdf.js intent drew it', cv.region.intent);
+    return SYN.renderRegion(2, r, { dpi: 36 });
+  }).then(function (cv) {
+    eq([cv.width, cv.height], [100, 100], 'dpi 36 halves it');
+    return SYN.renderRegion(2, { x0: 100, y0: 492, x1: 300, y1: 592 }, { width: 123 });
+  }).then(function (cv) {
+    eq([cv.width, cv.height], [123, 62], 'width: 123 gives exactly 123 px across (height follows)');
+    return SYN.renderRegion(2, r, { height: 77 });
+  }).then(function (cv) {
+    eq(cv.height, 77, 'height: 77 gives exactly 77 px down');
+    return SYN.renderRegion(2, null, { scale: 20 });
+  }).then(function (cv) {
+    ok(cv.region.clamped, 'a 12240 x 15840 ask is clamped');
+    ok(cv.width * cv.height <= PT.MAX_RENDER_PIXELS && Math.max(cv.width, cv.height) <= PT.MAX_RENDER_SIDE,
+      'to the pixel cap', cv.width + ' x ' + cv.height);
+    cv.width = 0;
+    return SYN.renderRegion(2, r, { scale: 0.5, imageData: true });
+  }).then(function (d) {
+    ok(d instanceof ImageData && d.width === 100, 'imageData: true gives ImageData');
+    eq(d.region && d.region.page, 2, '...with its region');
+    return SYN.renderRegion(2, r, { scale: 1, intent: 'print' });
+  }).then(function (cv) {
+    eq(cv.region.intent, 'print', 'the print intent can be asked for');
+    ok(inkShare(cv) > 0.95, 'and draws the same square');
+    return SYN.renderRegion(2, r, { scale: 1, signal: { cancelled: true } }).then(function () {
+      log(false, 'a cancelled render rejects');
+    }, function (e) { eq(e.name, 'AbortError', 'a cancelled render rejects with AbortError'); });
+  }).then(function () {
+    return SYN.renderRegion(2, { x0: 700, y0: 900, x1: 800, y1: 1000 }, {}).then(function () {
+      log(false, 'a rect off the page rejects');
+    }, function (e) { ok(/outside the page/.test(e.message), 'a rect off the page rejects plainly', e.message); });
+  }).then(function () {
+    var tiles = [];
+    return SYN.renderTiles(1, null, { scale: 4, maxPixels: 1000000 }, function (cv, t) {
+      tiles.push([cv.width, cv.height]);
+      ok(cv.width * cv.height <= 1000000, 'tile ' + t.i + ' within its cap');
+    }).then(function (res) {
+      eq([res.cols, res.rows], [3, 4], '612 x 792 at scale 4 under 1 Mpx is 3 x 4 tiles');
+      eq(tiles.length, 12, 'twelve tiles delivered one at a time');
+    });
+  }).then(function () {
+    return SYN.renderImage(1, 0).then(function (cv) {
+      eq([cv.width, cv.height], [4, 4], 'renderImage gives the picture at its own 4 x 4 pixels');
+      var d = cv.getContext('2d').getImageData(0, 0, 1, 1).data;
+      ok(Math.abs(d[0] - 0) < 50 && Math.abs(d[1] - 255) < 50 && Math.abs(d[2] - 128) < 30,
+        'its first pixel is about (0, 255, 128)', [d[0], d[1], d[2]].join(','));
+      ok(cv.image && cv.image.w === 4, 'and it says which picture it stands for', JSON.stringify(cv.image));
+    });
+  }).then(function () {
+    return PT.canPaint().then(function (yes) {
+      if (yes) return skip('whenHidden: "fail"', 'this tab is painting');
+      return SYN.renderRegion(2, r, { whenHidden: 'fail' }).then(function () {
+        log(false, 'whenHidden: "fail" rejects while hidden');
+      }, function (e) {
+        eq(e.name, 'HiddenError', 'whenHidden: "fail" rejects with HiddenError while hidden');
+        ok(/hidden/.test(e.message), 'and says so plainly', e.message);
+      });
+    });
+  }).then(function () {
+    SYN.destroy();
+    return SYN.layout(1).then(function () { log(false, 'a closed handle refuses'); },
+      function (e) { ok(/closed/.test(e.message), 'a closed handle refuses layout', e.message); });
+  });
+});
+
+step(function () {
+  group('Pure helpers');
+  var p = PT._periodOf([0, 10, 20, 30, 40, 50, 60, 80, 90], 1);
+  ok(p && Math.abs(p.pitch - 10) < 0.01, 'periodOf: an empty cell (a gap of 20) still fits pitch 10', JSON.stringify(p));
+  eq(PT._periodOf([0, 3, 11, 12, 30, 47, 52], 1), null, 'periodOf: scattered positions are no lattice');
+  var b = PT._itemBox({ str: 'x', transform: [0, 10, -10, 0, 100, 200], width: 50 }, 50);
+  ok(b && Math.abs(b[1] - 200) < 0.01 && Math.abs(b[3] - 250) < 0.01, 'itemBox follows a turned item along +y', JSON.stringify(b));
+  var k = PT._pageKind({ page: 3, width: 612, height: 792, lines: [], images: [], drawings: [] });
+  eq(k.guess, 'blank', 'pageKind: nothing on a page is blank');
+});
+
+/* ===================================================================== *
+ * Real fixtures (tmp-pdf, read at runtime)
+ * ===================================================================== */
+step(function () {
+  group('Fixtures: extract output unchanged by the layout pass');
+  return withHandle('sew-sundress.pdf', 'sundress extract vs layout', function (h) {
+    return h.extract().then(function (a) {
+      return h.layout(6).then(function () { return h.extract(); }).then(function (b) {
+        eq(b.text, a.text, 'handle.extract() is the same before and after layout()');
+      });
+    });
+  });
+});
+
+/* Mask helpers for comparing a glyph sprite with the page's own drawing */
+function maskOf(cv, x, y, w, h, thr) {
+  var d = cv.getContext('2d').getImageData(x, y, w, h).data, m = [];
+  for (var i = 0; i < w * h; i++) {
+    var l = (d[i * 4] + d[i * 4 + 1] + d[i * 4 + 2]) / 3;
+    m.push(d[i * 4 + 3] > 128 && l < thr ? 1 : 0);
+  }
+  return { m: m, w: w, h: h };
+}
+function fitMask(mk, px) {
+  var x0 = mk.w, y0 = mk.h, x1 = -1, y1 = -1, x, y;
+  for (y = 0; y < mk.h; y++) for (x = 0; x < mk.w; x++) if (mk.m[y * mk.w + x]) { x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y); }
+  if (x1 < 0) return null;
+  var c = document.createElement('canvas'); c.width = mk.w; c.height = mk.h;
+  var g = c.getContext('2d'), id = g.createImageData(mk.w, mk.h);
+  mk.m.forEach(function (v, i) { id.data[i * 4 + 3] = v ? 255 : 0; });
+  g.putImageData(id, 0, 0);
+  var o = document.createElement('canvas'); o.width = px; o.height = px;
+  var iw = x1 - x0 + 1, ih = y1 - y0 + 1, k = Math.min((px - 4) / iw, (px - 4) / ih);
+  o.getContext('2d').drawImage(c, x0, y0, iw, ih, (px - iw * k) / 2, (px - ih * k) / 2, iw * k, ih * k);
+  return maskOf(o, 0, 0, px, px, 256);
+}
+function iou(a, b) {
+  var i = 0, u = 0;
+  for (var k = 0; k < a.m.length; k++) { if (a.m[k] && b.m[k]) i++; if (a.m[k] || b.m[k]) u++; }
+  return u ? i / u : 0;
+}
+
+step(function () {
+  group('Fixtures: symbol-font charts read cell by cell (02 #6, #9; 04 R5)');
+  return withHandle('xs-tinymodernist-foxy.pdf', 'foxy symbol chart', function (h) {
+    return h.chart(1).then(function (ch) {
+      ok(ch, 'foxy p1 has a symbol lattice');
+      if (!ch) return;
+      eq([ch.cols, ch.rows], [68, 68], 'it is the printed 68w x 68h');
+      eq(ch.cells, 2507, '2507 symbol cells');
+      eq(ch.symbols.length, 9, 'nine symbols, each keyed by font and code');
+      eq(ch.fit, 1, 'every symbol glyph sits on the lattice');
+      eq(ch.clashes, 0, 'no cell claimed twice');
+      ok(ch.symbols.every(function (s) { return /^[A-Za-z0-9-]+:\d+$/.test(s.key); }), 'symbol keys are base font name : code (subset tag dropped)',
+        ch.symbols.map(function (s) { return s.key; }).join(' '));
+      return h.layout(1).then(function (lay) {
+        var G = lay.drawings.filter(function (d) { return d.kind === 'grid'; })[0];
+        ok(G && G.grid.cols === 68 && G.grid.rows === 68, 'the ruled grid under it is 68 x 68 too', G && JSON.stringify(G.grid));
+        eq(lay.kind.guess, 'chart', 'page kind: chart');
+        if (!G) return;
+        // each symbol's sprite against three of its cells cut from the page,
+        // and it must match its own cells better than any other symbol does
+        var sprites = [], chain2 = Promise.resolve(), worst = 1, confusions = 0;
+        ch.symbols.forEach(function (s) {
+          chain2 = chain2.then(function () {
+            return h.renderGlyph(s.font, s.code, { px: 48 }).then(function (cv) { sprites.push(cv ? maskOf(cv, 0, 0, 48, 48, 256) : null); });
+          });
+        });
+        return chain2.then(function () {
+          ok(sprites.every(Boolean), 'renderGlyph draws all nine symbols from the embedded fonts');
+          var c3 = Promise.resolve();
+          ch.symbols.forEach(function (s, si) {
+            var n = 0;
+            for (var r = 0; r < ch.rows && n < 3; r++) {
+              for (var c = 0; c < ch.cols && n < 3; c++) {
+                if (ch.grid[r][c] !== si) continue;
+                n++;
+                (function (r, c) {
+                  c3 = c3.then(function () {
+                    var gx = ch.x0 + c * ch.pitchX, gy = ch.y0 + r * ch.pitchY;
+                    var col = Math.floor((gx - G.grid.x0) / G.grid.pitchX), row = Math.floor((gy - G.grid.y0) / G.grid.pitchY);
+                    var x0 = G.grid.x0 + col * G.grid.pitchX, y0 = G.grid.y0 + row * G.grid.pitchY;
+                    return h.renderRegion(1, { x0: x0, y0: y0, x1: x0 + G.grid.pitchX, y1: y0 + G.grid.pitchY }, { scale: 64 / G.grid.pitchX }).then(function (cv) {
+                      var ins = Math.round(cv.width * 0.1);
+                      var a = fitMask(maskOf(cv, ins, ins, cv.width - 2 * ins, cv.height - 2 * ins, 110), 48);
+                      if (!a) { worst = 0; return; }
+                      var own = iou(a, sprites[si]);
+                      worst = Math.min(worst, own);
+                      sprites.forEach(function (sp, k) { if (k !== si && sp && iou(a, sp) >= own) confusions++; });
+                    });
+                  });
+                })(r, c);
+              }
+            }
+          });
+          return c3.then(function () {
+            ok(worst >= 0.6, 'each sprite matches its cells on the page (worst IoU ' + worst.toFixed(2) + ')');
+            eq(confusions, 0, 'no cell looks more like another symbol than its own');
+          });
+        });
+      });
+    });
+  });
+});
+
+step(function () {
+  return withHandle('xs-pokemon-tl.pdf', 'pokemon symbol chart', function (h) {
+    return h.chart(3).then(function (ch) {
+      ok(ch && ch.cols === 53 && ch.rows === 72 && ch.fit === 1, 'Pokémon TL p3: symbols on a 53 x 72 lattice', ch && [ch.cols, ch.rows, ch.fit].join(' '));
+      ok(ch && ch.symbols.length >= 8, 'with its symbols named by font and code', ch && ch.symbols.length);
+      return h.layout(3);
+    }).then(function (lay) {
+      var G = lay.drawings.filter(function (d) { return d.kind === 'grid'; })[0];
+      ok(G && Math.abs(G.grid.pitchX - 7.37) < 0.05, 'and a ruled grid at the same 7.37 pt pitch', G && JSON.stringify(G.grid));
+      eq(lay.kind.guess, 'chart', 'page kind: chart');
+    });
+  });
+});
+
+step(function () {
+  return withHandle('xs-dmc-2168.pdf', 'dmc 2168 symbol chart', function (h) {
+    return h.chart(2).then(function (ch) {
+      ok(ch && ch.cols === 83 && ch.rows === 116, 'DMC 2168 p2: an 83 x 116 symbol lattice', ch && [ch.cols, ch.rows].join(' x '));
+      ok(ch && ch.symbols.length === 11, 'eleven symbols', ch && ch.symbols.length);
+    });
+  });
+});
+
+step(function () {
+  group('Fixtures: ruled chart grids (02 #8, 04 R2)');
+  var want = [['xs-tinymodernist-halloween.pdf', 1, [49, 35]], ['xs-tinymodernist-homestitchhome.pdf', 1, [54, 76]]];
+  var c = Promise.resolve();
+  want.forEach(function (w) {
+    c = c.then(function () {
+      return withHandle(w[0], w[0] + ' grid', function (h) {
+        return h.layout(w[1]).then(function (lay) {
+          var G = lay.drawings.filter(function (d) { return d.kind === 'grid'; })[0];
+          eq(G && [G.grid.cols, G.grid.rows], w[2], w[0].replace('.pdf', '') + ': the ruled grid is the printed ' + w[2].join(' x '));
+          eq(lay.kind.guess, 'chart', '...and the page is a chart');
+        });
+      });
+    });
+  });
+  return c;
+});
+
+step(function () {
+  group('Fixtures: layers (03 P5)');
+  return withHandle('sew-tianas-jogger-12m-6y.pdf', 'jogger 12m-6y layers', function (h) {
+    return h.layers().then(function (L) {
+      eq(L.layers.map(function (l) { return l.name; }).sort(), ['12M', '18M', '24M', '3T', '4T', '5T', '6', 'Print for all sizes'].sort(), 'jogger 12M-6: seven size layers and "Print for all sizes"');
+      ok(L.layers.every(function (l) { return l.visible; }), 'all on by default');
+      return h.layout(5).then(function (lay) {
+        eq(lay.layers.length, 8, 'p5 draws in all eight');
+        eq(lay.kind.guess, 'sheet', 'p5 is a pattern sheet');
+        return h.renderRegion(5, null, { maxSide: 400 });
+      }).then(function (all) {
+        return h.renderRegion(5, null, { maxSide: 400, layers: { only: ['12M', 'Print for all sizes'] } }).then(function (one) {
+          var a = inkShare(all), b = inkShare(one);
+          shot(all, 'jogger p5 all sizes'); shot(one, 'jogger p5 12M only');
+          ok(b < a * 0.8 && b > 0, 'one size draws less ink than all sizes', (b * 100).toFixed(2) + '% vs ' + (a * 100).toFixed(2) + '%');
+        });
+      });
+    });
+  }).then(function () {
+    return withHandle('sew-tianas-jogger-7-12.pdf', 'jogger 7-12 layers', function (h) {
+      return h.layers().then(function (L) {
+        eq(L.layers.length, 7, 'jogger 7-12: six size layers and "Print for all sizes"');
+      });
+    });
+  }).then(function () {
+    return withHandle('sew-sundress-pattern.pdf', 'sundress sheet without layers', function (h) {
+      return h.layers().then(function (L) {
+        eq([L.none, L.layers.length], [true, 0], 'the sundress sheet says plainly it has no layers');
+      });
+    });
+  }).then(function () {
+    return withHandle('sew-peppermint-apron-A0.pdf', 'A0 apron', function (h) {
+      return h.layout(1).then(function (lay) {
+        eq(lay.kind.guess, 'sheet', 'the A0 apron page is a pattern sheet');
+        ok(lay.kind.reasons.some(function (r) { return /841 x 1189 mm/.test(r); }), '...and says it is A0 sized', lay.kind.reasons.join('; '));
+      });
+    });
+  });
+});
+
+step(function () {
+  group('Fixtures: pictures, swatches and captions (03 P1, P11, P12; 04 S1, S2, S4)');
+  return withHandle('sew-freespirit-harmony-quilt.pdf', 'harmony', function (h) {
+    return h.layout(2).then(function (lay) {
+      var sq = lay.images.filter(function (i) { var w = i.box.x1 - i.box.x0, hh = i.box.y1 - i.box.y0; return w > 30 && w < 220 && w / hh > 0.6 && w / hh < 1.6; });
+      eq(sq.length, 18, 'Harmony p2: 18 square fabric pictures');
+      eq(lay.kind.guess, 'key', '...a swatch (key) page');
+      return h.layout(9);
+    }).then(function (lay) {
+      var refs = lay.captions.map(function (c) { return c.ref; }).sort();
+      eq(refs, ['Figure 3', 'Figure 4', 'Figure 5', 'Figure 6'], 'Harmony p9: "Fig. 3" to "Fig. 6"');
+      ok(lay.captions.every(function (c) { return c.target && c.target.type === 'image' && c.gap < 20; }), 'each joined to the picture right under it',
+        lay.captions.map(function (c) { return c.ref + '@' + c.gap; }).join(' '));
+      ok(lay.captions.every(function (c) { var t = lay.images[c.target.index].box; return t.y0 > c.box.y0; }), '...below its caption');
+      return h.layout(10);
+    }).then(function (lay) {
+      eq(lay.captions.length, 6, 'Harmony p10: Fig. 7 to Fig. 12, each once (the double-printed ones too)');
+      return h.layout(12);
+    }).then(function (lay) {
+      eq(lay.kind.guess, 'layout', 'Harmony p12 is the quilt layout');
+      ok(lay.images.filter(function (i) { return i.clipped; }).length >= 16, 'drawn from clipped fabric pictures', String(lay.images.filter(function (i) { return i.clipped; }).length));
+    });
+  }).then(function () {
+    return withHandle('sew-agf-joyous-picnic-quilt.pdf', 'joyous picnic', function (h) {
+      return h.layout(7).then(function (lay) {
+        eq(lay.captions.map(function (c) { return c.ref; }), ['Diagram B1', 'Diagram B2', 'Diagram B3'], 'Joyous p7: DIAGRAM B1-B3 (and not the "(DIAGRAM B 1)" in a step)');
+        ok(lay.captions.every(function (c) { return c.target && c.target.type === 'drawing'; }), 'each on its drawing');
+        return h.layout(6);
+      }).then(function (lay) {
+        var c = lay.captions[0];
+        ok(c && c.ref === 'Diagram 3' && c.target && c.target.type === 'image', 'Joyous p6: "DIAGRAM 3" names the layout picture');
+      });
+    });
+  }).then(function () {
+    return withHandle('sew-agf-catwalk-quilt.pdf', 'catwalk swatches', function (h) {
+      return h.layout(2).then(function (lay) {
+        var sw = lay.drawings.filter(function (d) { return d.kind === 'swatch'; });
+        eq(sw.length, 12, 'Catwalk p2: 12 vector swatches');
+        ok(sw.every(function (d) { return d.fillColours.length === 1; }), 'each one flat colour');
+      });
+    });
+  });
+});
+
+step(function () {
+  group('Fixtures: OCR lines only on picture pages');
+  var line = [{ text: 'DMC 310', box: { x0: 50, y0: 50, x1: 120, y1: 62 }, ocr: true, conf: 90 }];
+  return withHandle('xs-satsuma-sunshine.pdf', 'satsuma setPageText', function (h) {
+    return h.setPageText(1, line).then(function (r) {
+      eq(r.ok, true, 'Satsuma sunshine p1 (a picture, no text layer) takes OCR lines');
+      return h.extract({ allowEmpty: true });
+    }).then(function (res) {
+      eq(res.ocrPages, [1], '...and extract() says page 1 was read from a picture');
+      return h.setPageText(1, null);
+    });
+  }).then(function () {
+    return withHandle('sew-sundress.pdf', 'sundress setPageText', function (h) {
+      return h.setPageText(6, line).then(function (r) {
+        eq(r.ok, false, 'sundress p6 (real text) refuses OCR lines');
+        return h.extract();
+      }).then(function (res) {
+        eq(res.ocrPages, [], '...and its extract() has no OCR pages');
+      });
+    });
+  });
+});
+
+step(function () {
+  group('Fixtures: positions map steps to the page (03 P1)');
+  return withHandle('sew-sundress.pdf', 'sundress positions', function (h) {
+    return h.find(6, /^1. Sewing the Bodice/i).then(function (hits) {
+      ok(hits.length >= 1, 'sundress p6: "Sewing the Bodice" is found with a box', hits.length);
+      if (!hits.length) return;
+      var l = hits[0];
+      ok(l.nbox.x1 < 0.55, '...in the left column', JSON.stringify(l.nbox));
+      return h.textIn(6, l.box).then(function (r) {
+        ok(r.text.indexOf('Sewing the Bodice') >= 0, 'textIn(its box) reads it back', r.text);
+      });
+    });
+  }).then(function () {
+    return withHandle('sew-peppermint-samford-pants.pdf', 'samford table', function (h) {
+      return h.layout(6).then(function (lay) {
+        ok(lay.kind.guess !== 'chart', 'Samford p6: a ruled size table is not taken for a chart', lay.kind.guess);
+      });
+    });
+  });
+});
+
+step(function () {
+  group('Fixtures: page kinds over whole booklets (00 shell 6/7, 04 R2)');
+  var want = [
+    ['xs-satsuma-sunshine.pdf', { 1: 'photo' }],
+    ['knit-interweave-lace.pdf', { 3: 'instructions' }],
+    ['sew-agf-catwalk-quilt.pdf', { 2: 'key' }]
+  ];
+  var c = Promise.resolve();
+  want.forEach(function (w) {
+    c = c.then(function () {
+      return withHandle(w[0], w[0] + ' kinds', function (h) {
+        return h.pageKinds({ maxPages: 12 }).then(function (ks) {
+          Object.keys(w[1]).forEach(function (p) {
+            var k = ks[p - 1];
+            eq(k && k.guess, w[1][p], w[0].replace('.pdf', '') + ' p' + p + ': ' + w[1][p] + ' (' + (k ? k.reasons.join('; ') : '') + ')');
+          });
+          ok(ks.every(function (k) { return k.confidence >= 0 && k.confidence <= 1 && k.reasons.length; }), '...every page with a confidence and a reason');
+        });
+      });
+    });
+  });
+  return c;
+});
+
+step(function () {
+  if (!MEASURE) return;
+  group('Measure: time and memory per page, biggest booklets');
+  var files = ['knit-interweave-8-socks.pdf', 'crochet-allfree-stitches-ebook.pdf', 'sew-freespirit-harmony-quilt.pdf', 'xs-pokemon-tl.pdf', 'crochet-stylecraft-guide.pdf', 'xs-apl-orr-book14.pdf'];
+  var c = Promise.resolve();
+  files.forEach(function (f) {
+    c = c.then(function () {
+      return withHandle(f, f + ' measure', function (h) {
+        var t0 = performance.now();
+        return h.pageKinds({}).then(function (ks) {
+          var ms = ks.map(function (k) { return k.ms; }), heap = ks.map(function (k) { return k.heap || 0; });
+          var main = ks.map(function (k) { return k.mainMs || 0; });
+          var max = Math.max.apply(null, ms), sum = ms.reduce(function (a, b) { return a + b; }, 0);
+          var kinds = {};
+          ks.forEach(function (k) { kinds[k.guess] = (kinds[k.guess] || 0) + 1; });
+          note(f + ': ' + ks.length + ' pages in ' + Math.round(performance.now() - t0) + ' ms; per page median ' + ms.slice().sort(function (a, b) { return a - b; })[ms.length >> 1] +
+            ' ms, max ' + max + ' ms, main thread max ' + Math.max.apply(null, main) + ' ms; heap change max ' + Math.round(Math.max.apply(null, heap) / 1048576) + ' MB; kinds ' + JSON.stringify(kinds));
+          window.MEASURED = window.MEASURED || {};
+          window.MEASURED[f] = ks;
+          ok(ks.length === h.numPages, f + ': every page read');
+        });
+      });
+    }).then(function () {
+      var f2 = handles[f];
+      if (f2) f2.then(function (x) { if (x && x.h) x.h.destroy(); });
+      delete handles[f];
+    });
+  });
+  return c;
+});
+
+step(function () {
+  closeAll();
+  var s = document.getElementById('summary');
+  s.textContent = passed + ' passed, ' + failed + ' failed' + (skipped ? ', ' + skipped + ' skipped' : '');
+  s.className = failed ? 'bad' : 'ok';
+});
+</script>
+</body>
+</html>

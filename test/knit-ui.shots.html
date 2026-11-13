@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Knitting UI screenshots (wave K, knit-ui)</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #111; }
+  iframe { position: fixed; inset: 0; width: 100%; height: 100%; border: 0; }
+</style>
+</head>
+<body>
+<!--
+  For looking, not testing: index.html full-window on a private store key, with one synthetic
+  knitting project open on a scene. Use with headless Chrome's --screenshot, e.g.
+  knit-ui.shots.html?scene=stretch&theme=stardew-night  (scenes: stretch, chart, chartsheet,
+  shaping, work, materials, schematic, mirror). The key is removed after 60 s and on unload.
+-->
+<iframe id="f" src="../index.html"></iframe>
+<script>
+'use strict';
+var KEY = 'stitchkeeper-wavek-knitui-shots';
+var qs = {};
+location.search.replace(/^\?/, '').split('&').forEach(function (kv) { var p = kv.split('='); if (p[0]) qs[p[0]] = decodeURIComponent(p[1] || ''); });
+var f = document.getElementById('f');
+function clean() { try { localStorage.removeItem(KEY); } catch (e) { /* ignore */ } }
+window.addEventListener('unload', clean);
+setTimeout(clean, 60000);
+f.onload = function () {
+  var w = f.contentWindow;
+  (function wait() {
+    if (!(w.App && w.Store && w.AppKnitting && w.document.getElementById('row-label'))) return setTimeout(wait, 100);
+    var S = w.Store, App = w.App, AK = w.AppKnitting;
+    S.__setKeyForTests(KEY);
+    S.load();
+    if (qs.theme) App.applyTheme(qs.theme, false);
+    function proj(name, part, text) {
+      var p = S.createProject({ name: name, craft: 'knitting' });
+      S.updatePart(p.id, p.parts[0].id, { name: part, patternText: text });
+      S.setActiveProject(p.id);
+      return S.project(p.id);
+    }
+    var scene = qs.scene || 'stretch';
+    var STRETCH = ['Back', 'Cast on 40 sts.', 'Row 1 (RS): K2, *p2, k2; rep from * to end.', 'Row 2 (WS): P2, *k2, p2; rep from * to end.',
+      'Rep last 2 rows until work measures 10 cm from beg, ending with a WS row.', 'Shape armholes: Cast off 3 sts at beg of next 2 rows. 34 sts.'].join('\n');
+    var SHAPE = ['Left Front', 'Cast on 30 sts.', 'Row 1 (RS): Knit.', 'Row 2 (WS): Purl.',
+      'Rows 3-13: Dec 1 st at neck edge on next 4 rows, AND AT THE SAME TIME dec 1 st at raglan edge on next and every alt row 6 times. 20 sts.', 'Bind off.'].join('\n');
+    var chart = { name: 'Chart A', source: 'vector', cols: 6, rows: 4, startRow: 1, rowStep: 1, rowNos: [1, 2, 3, 4],
+      labelSide: { 1: 'right', 3: 'right', 2: 'left', 4: 'left' }, bbox: { x0: 100, y0: 200, x1: 160, y1: 240 }, pitch: { x: 10, y: 10 },
+      cells: [['a', 'a', 'b', 'b', 'a', 'a'], ['a', 'b', 'b', 'b', 'b', 'a'], ['a', 'a', 'c', 'c', 'a', 'a'], ['a', 'a', 'b', 'q', 'a', 'a']],
+      legend: [{ sym: 'a', meaning: 'MC', kind: 'stitch', stitch: 'k', text: 'k', run: 'k', consumes: 1, produces: 1, color: 'MC', fill: '#2b3a67' },
+        { sym: 'b', meaning: 'CC1', kind: 'stitch', stitch: 'k', text: 'k', run: 'k', consumes: 1, produces: 1, color: 'CC1', fill: '#e8c547' },
+        { sym: 'c', meaning: 'With CC1, k2tog', kind: 'stitch', stitch: 'k2tog', text: 'k2tog', consumes: 2, produces: 1, color: 'CC1' },
+        { sym: 'q', meaning: null, kind: 'unknown' }],
+      repeatBox: { c0: 0, c1: 5, r0: 0, r1: 3 } };
+    var p;
+    if (scene === 'stretch' || scene === 'work') {
+      p = proj('Shots stretch', 'Back', STRETCH);
+      S.setGauge(p.id, { sts: 20, rows: 30, over: 10, unit: 'cm' });
+      S.jumpToRow(p.id, p.parts[0].id, 12);
+      App.render();
+      if (scene === 'work') App.workMode.open();
+    } else if (scene === 'chart' || scene === 'chartsheet' || scene === 'chartwork') {
+      p = proj('Shots chart', 'Hat', ['Hat', 'Cast on 60 sts. Join to work in the rnd.', 'Rnds 1-4: Work rnds 1-4 of Chart A.', 'Bind off.'].join('\n'));
+      S.setChartPages(p.id, [{ page: 1, name: 'Chart A', noImage: true, chart: chart }], { undo: false });
+      S.jumpToRow(p.id, p.parts[0].id, 2);
+      App.render();
+      if (scene === 'chartsheet') AK.openChartSheet(p.id, p.parts[0].id);
+      if (scene === 'chartwork') App.workMode.open();
+    } else if (scene === 'shaping') {
+      p = proj('Shots shaping', 'Left Front', SHAPE);
+      S.jumpToRow(p.id, p.parts[0].id, 6);
+      App.render();
+    } else if (scene === 'schematic') {
+      p = proj('Shots schematic', 'Left Front', SHAPE);
+      S.setGauge(p.id, { sts: 20, rows: 30, over: 10, unit: 'cm', swatch: { sts: 18 } });
+      App.render();
+      AK.openSchematicSheet(p.id);
+    } else if (scene === 'materials') {
+      p = proj('Shots materials', 'Hat', ['Hat', 'Needles: US 7 (4.5 mm) 16" circular needle.', 'Cast on 88 sts.', 'Rnd 1: Knit.'].join('\n'));
+      App.render();
+      AK.openMaterialsSheet(p.id);
+    } else if (scene === 'mirror') {
+      p = proj('Shots mirror', 'Right Front', ['Right Front', 'Cast on 30 sts.', 'Row 1 (RS): K1, ssk, knit to end. 29 sts.', 'Row 2 (WS): Purl.', 'Row 3: Sk2p, knit to end.'].join('\n'));
+      var lf = S.addPart(p.id, { name: 'Left Front' });
+      S.updatePart(p.id, lf.id, { patternText: 'Left Front\nWork as for Right Front, reversing shaping.' });
+      App.render();
+      AK.openMirrorSheet(p.id, lf.id, p.parts[0].id);
+    }
+  })();
+};
+</script>
+</body>
+</html>

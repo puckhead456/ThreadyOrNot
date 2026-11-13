@@ -2153,6 +2153,8 @@
         le.count = n[e.sym] || 0;
         if (e.mark) le.markColor = hex(e.color);
         if (e.desc && !e.mark) le._desc = e.desc;
+        // wave K (knit-ui, P11): the key sample's own fill, for the yarn colours
+        if (e.desc && e.desc.bg && !e.mark) le.fill = hex(e.desc.bg);
         if (e.borrowed) le.borrowed = true;
         legend.push(le);
       });
@@ -2372,7 +2374,21 @@
       });
       return again.then(function () {
         results.forEach(function (r) { settle(r.charts, opts); });
-        return results;
+        if (!opts.pictures || !pictureAvailable(handle)) return results;
+        // wave K (knit-charts): picture charts; an `image` chart a candidate covers is replaced
+        return pictures(handle, { pages: opts.pages, maxPages: opts.maxPages, signal: opts.signal, charts: results, onProgress: opts.onProgress })
+          .then(function (pics) {
+            pics.forEach(function (pr) {
+              if (!pr.charts.length) return;
+              var r = null;
+              for (var k = 0; k < results.length; k++) if (results[k].page === pr.page) r = results[k];
+              if (!r) return;
+              r.charts = r.charts.filter(function (c) {
+                return c.source !== 'image' || !pr.charts.some(function (p) { return p.imageBox && c.bbox && boxesTouch(p.imageBox, c.bbox, -4); });
+              }).concat(pr.charts);
+            });
+            return results;
+          });
       });
     });
   }
@@ -2609,8 +2625,1163 @@
     return hit;
   }
 
+  /* ================================================================== *
+   * wave K (knit-ui, P4 / P11): where a row is on the picture, which cells
+   * are done, the colour runs of a row. Pure; never throws; null when the
+   * chart does not say (an honest "could not tell", never a guess).
+   * docs/wave-k/api/knit-ui.md §3.
+   * ================================================================== */
+
+  /** The grid's own box and cell size in PDF points, or null. */
+  function gridFrame(chart) {
+    var b = chart && chart.bbox;
+    var rows = chart && Array.isArray(chart.cells) ? chart.cells.length : 0;
+    var cols = chart ? (chart.cols || (rows && chart.cells[0] ? chart.cells[0].length : 0)) : 0;
+    if (!b || !(b.x1 > b.x0) || !(b.y1 > b.y0) || !(rows > 0) || !(cols > 0)) return null;
+    return { x0: b.x0, y0: b.y0, x1: b.x1, y1: b.y1, rows: rows, cols: cols,
+      cw: (b.x1 - b.x0) / cols, ch: (b.y1 - b.y0) / rows };
+  }
+
+  /** A cell's box in PDF points (y up); r counts from the bottom drawn row. */
+  function cellBox(chart, r, c) {
+    var g = gridFrame(chart);
+    if (!g || !(r >= 0 && r < g.rows && c >= 0 && c < g.cols)) return null;
+    return { x0: g.x0 + c * g.cw, y0: g.y0 + r * g.ch, x1: g.x0 + (c + 1) * g.cw, y1: g.y0 + (r + 1) * g.ch };
+  }
+
+  /** Normalise a stored two-handle calibration (fractions of the page image, y down). */
+  function calib(raw) {
+    if (!raw || typeof raw !== 'object') return null;
+    var top = +raw.top, bottom = +raw.bottom, rows = Math.round(+raw.rows);
+    if (!(top >= 0 && top <= 1 && bottom >= 0 && bottom <= 1) || !(rows >= 1 && rows <= 999)) return null;
+    if (rows > 1 && !(bottom > top)) return null;
+    var x0 = raw.x0 >= 0 && raw.x0 < 1 ? +raw.x0 : 0, x1 = raw.x1 > 0 && raw.x1 <= 1 ? +raw.x1 : 1;
+    if (!(x1 > x0)) { x0 = 0; x1 = 1; }
+    var first = Math.round(+raw.first);
+    var step = Math.round(+raw.step) === 2 ? 2 : 1;
+    return { top: top, bottom: bottom, rows: rows, x0: x0, x1: x1, first: first >= 0 ? first : 1, step: step };
+  }
+
+  /** The band of row `rowNo` on a calibrated picture, in fractions (y down). */
+  function calibBand(raw, rowNo) {
+    var k = calib(raw);
+    if (!k || typeof rowNo !== 'number') return null;
+    var d = rowNo - k.first;
+    if (d < 0 || d % k.step) return null;
+    var i = d / k.step;                       // 0 = the bottom row
+    if (i >= k.rows) return null;
+    var h = k.rows > 1 ? (k.bottom - k.top) / (k.rows - 1) : Math.max(0.01, k.bottom - k.top || 0.03);
+    var cy = k.bottom - i * h;
+    return { x0: k.x0, x1: k.x1, y0: Math.max(0, cy - h / 2), y1: Math.min(1, cy + h / 2), unit: 'frac', r: i };
+  }
+
+  /**
+   * The row's rectangle. A read grid: PDF points in the chart.bbox frame (y
+   * up), narrowed to the cells drawn on that row. With a calibration (given,
+   * or chart.calib): fractions of the page image (y down).
+   */
+  function rowBand(chart, rowNo, cal) {
+    if (!chart) return null;
+    var g = gridFrame(chart);
+    if (g && chart.cells && !cal) {
+      var r = bandOf(chart, rowNo);
+      if (r < 0) return null;
+      var row = chart.cells[r] || [], lo = -1, hi = -1;
+      for (var c = 0; c < row.length; c++) if (row[c] != null) { if (lo < 0) lo = c; hi = c; }
+      if (lo < 0) { lo = 0; hi = g.cols - 1; }
+      return { x0: g.x0 + lo * g.cw, x1: g.x0 + (hi + 1) * g.cw, y0: g.y0 + r * g.ch, y1: g.y0 + (r + 1) * g.ch, unit: 'pt', r: r };
+    }
+    var k = cal || chart.calib;
+    return k ? calibBand(k, rowNo) : null;
+  }
+
+  /** The cell under (x, y) in PDF points: { r, c, rowNo, sym, entry } or null. */
+  function cellAt(chart, x, y) {
+    var g = gridFrame(chart);
+    if (!g || !chart.cells || !(x >= g.x0 && x < g.x1 && y >= g.y0 && y < g.y1)) return null;
+    var c = Math.floor((x - g.x0) / g.cw), r = Math.floor((y - g.y0) / g.ch);
+    var row = chart.cells[r];
+    if (!row) return null;
+    // a cable drawn across cells answers for every cell it covers
+    var sym = row[c], spans = chart.spans || [];
+    for (var i = 0; i < spans.length; i++) {
+      if (spans[i].r === r && c >= spans[i].c0 && c <= spans[i].c1) { sym = spans[i].sym; break; }
+    }
+    if (sym == null) return null;
+    var rowNo = chart.startRow != null ? chart.startRow + r * (chart.rowStep || 1) : r + 1;
+    return { r: r, c: c, rowNo: rowNo, sym: sym, entry: entryOf(chart, sym) };
+  }
+
+  /**
+   * The columns already worked after `stitches` stitches of the row (each
+   * cell uses its key's `consumes`, 1 when the key does not say). On a row
+   * worked as a repeat wider than the chart, the stitches past the drawn
+   * width count round the repeat box: { cols: [c…], repeat: n | null }.
+   */
+  function doneCols(chart, rowNo, side, stitches) {
+    var toks = rowCells(chart, rowNo, side);
+    var n = Math.max(0, Math.floor(+stitches || 0));
+    if (!toks) return null;
+    function use(t) { return t.skip ? 0 : (t.consumes > 0 ? t.consumes : 1); }
+    var total = 0;
+    toks.forEach(function (t) { total += use(t); });
+    var cols = [], left = n, i, t, c;
+    function take(list) {
+      for (i = 0; i < list.length && left > 0; i++) {
+        t = list[i];
+        var u = use(t);
+        if (!u) continue;
+        if (left < u) break;
+        left -= u;
+        for (c = t.c0; c <= t.c1; c++) cols.push(c);
+      }
+    }
+    if (n <= total) { take(toks); return { cols: cols, repeat: null }; }
+    var rep = repeatFor(chart, bandOf(chart, rowNo), {});
+    if (!rep) { take(toks); return { cols: cols, repeat: null, past: n - total }; }
+    var inside = toks.filter(function (x) { return x.c0 >= rep.c0 && x.c1 <= rep.c1; });
+    var before = [], after = [], seen = false;
+    toks.forEach(function (x) {
+      if (x.c0 >= rep.c0 && x.c1 <= rep.c1) { seen = true; return; }
+      (seen ? after : before).push(x);
+    });
+    var pre = 0, body = 0;
+    before.forEach(function (x) { pre += use(x); });
+    inside.forEach(function (x) { body += use(x); });
+    if (!(body > 0) || n < pre) { take(toks); return { cols: cols, repeat: null }; }
+    var k = Math.floor((n - pre) / body);
+    left = (n - pre) - k * body;
+    take(inside);
+    return { cols: cols, repeat: k + 1 };
+  }
+
+  /** The colour label a key entry stands for ("MC", "CC1", "A"), or null. */
+  function colourOf(entry) {
+    if (!entry) return null;
+    if (entry.color) return String(entry.color);
+    var m = /^(?:with\s+)?(mc|cc\d*|ac\d*|colou?r\s+[a-z0-9]+|[a-f])\b/i.exec(String(entry.meaning || ''));
+    return m ? m[1].toUpperCase().replace(/^COLOU?R\s+/, '') : null;
+  }
+
+  /**
+   * A row's colour runs in knitting order, the repeat, the longest float and
+   * the blocks an intarsia knitter would wind bobbins for. null when the row
+   * is not on the chart or no cell of the chart has a colour.
+   */
+  function colourRuns(chart, rowNo, side) {
+    if (!chart || !chart.cells || !Array.isArray(chart.legend)) return null;
+    if (!chart.legend.some(function (e) { return !!colourOf(e); })) return null;
+    var r = bandOf(chart, rowNo);
+    if (r < 0) return null;
+    if (side === undefined) side = inferSide(chart, rowNo);
+    var row = chart.cells[r];
+    var cols = [];
+    for (var c = 0; c < row.length; c++) if (row[c] != null) cols.push(c);
+    if (side !== 'ws') cols.reverse();
+    var unknown = 0;
+    function lab(c) {
+      var e = entryOf(chart, row[c]);
+      if (!e || e.kind === 'unknown' || e.kind === 'blank') { unknown++; return '?'; }
+      if (e.kind === 'nostitch') return null;
+      return colourOf(e) || '?';
+    }
+    function runsOf(list) {
+      var out = [];
+      list.forEach(function (c) {
+        var l = lab(c);
+        if (l === null) return;
+        var last = out[out.length - 1];
+        if (last && last.label === l) last.n++;
+        else out.push({ label: l, n: 1 });
+      });
+      return out;
+    }
+    var runs = runsOf(cols);
+    var rep = repeatFor(chart, r, {});
+    var repeat = null;
+    if (rep) {
+      var inBox = cols.filter(function (c) { return c >= rep.c0 && c <= rep.c1; });
+      unknown = 0;
+      var body = runsOf(inBox);
+      runs = runsOf(cols);
+      if (body.length) repeat = { runs: body, width: inBox.length };
+    }
+    var colours = [];
+    runs.forEach(function (x) { if (x.label !== '?' && colours.indexOf(x.label) < 0) colours.push(x.label); });
+    // a float is the yarn carried behind a run of the other colour; worked
+    // round and round a repeat, the last run joins the first
+    var longest = null;
+    if (colours.length >= 2) {
+      var seq = repeat ? repeat.runs.slice() : runs.slice();
+      if (repeat && seq.length > 1 && seq[0].label === seq[seq.length - 1].label) {
+        seq = [{ label: seq[0].label, n: seq[0].n + seq[seq.length - 1].n }].concat(seq.slice(1, -1));
+      }
+      seq.forEach(function (x) { if (x.label !== '?' && (!longest || x.n > longest.n)) longest = { label: x.label, n: x.n }; });
+    }
+    return {
+      runs: runs, repeat: repeat, unknown: unknown, longestFloat: longest, colours: colours,
+      bobbins: runs.map(function (x) { return x.label; })
+    };
+  }
+
+  /**
+   * The key's colours with the fill each sample is printed in:
+   * [{ label: 'MC', hex: '#1f2a44' | null }] (null = the key names the colour
+   * but its sample is white or was not read). One per label, key order.
+   */
+  function keyColours(chart) {
+    var out = [], seen = {};
+    (chart && Array.isArray(chart.legend) ? chart.legend : []).forEach(function (e) {
+      var label = colourOf(e);
+      if (!label || seen[label]) return;
+      seen[label] = true;
+      var h = typeof e.fill === 'string' && /^#[0-9a-f]{6}$/i.test(e.fill) ? e.fill.toLowerCase() : null;
+      if (!h && e._desc && Array.isArray(e._desc.bg)) h = hex(e._desc.bg);
+      out.push({ label: label, hex: h });
+    });
+    return out;
+  }
+
+  /* ================================================================== *
+   * 16. Picture charts (wave K, knit-charts). docs/wave-k/api/knit-charts.md
+   *
+   * A chart printed as a picture is offered only on positive evidence: an
+   * even lattice of ruled lines in both directions measured in the pixels
+   * (kind 'picture-grid': rows, columns and pitch are known), or words and
+   * numbers that name it (kind 'picture': the rows are NOT known and the
+   * knitter marks them). Photos (no long straight ruled lines, continuous
+   * tone) and schematics (a few outline strokes, no lattice) give neither.
+   * ================================================================== */
+
+  /**
+   * The pixel half. Self-contained (no outer names) so that its source can
+   * be put in a Worker. measure(img, opts) with img = { w, h, data: RGBA }.
+   */
+  function PicCore() {
+    function abs(v) { return v < 0 ? -v : v; }
+
+    /** Thin ruled lines: a pixel that differs, the same way, from both pixels k away. */
+    function ridges(g, W, H, T) {
+      var hr = new Uint8Array(W * H), vr = new Uint8Array(W * H);
+      var x, y, i, v, a, b, k;
+      for (y = 3; y < H - 3; y++) {
+        for (x = 0; x < W; x++) {
+          i = y * W + x; v = g[i];
+          for (k = 2; k <= 3; k++) {
+            a = g[i - k * W]; b = g[i + k * W];
+            if ((a - v > T && b - v > T) || (v - a > T && v - b > T)) { hr[i] = 1; break; }
+          }
+        }
+      }
+      for (y = 0; y < H; y++) {
+        for (x = 3; x < W - 3; x++) {
+          i = y * W + x; v = g[i];
+          for (k = 2; k <= 3; k++) {
+            a = g[i - k]; b = g[i + k];
+            if ((a - v > T && b - v > T) || (v - a > T && v - b > T)) { vr[i] = 1; break; }
+          }
+        }
+      }
+      return { hr: hr, vr: vr };
+    }
+
+    /**
+     * Long runs of ridge pixels, joined across neighbouring scan lines into
+     * lines: [{ p (centre across), a0, a1 (extent along), len, thick }].
+     * horizontal: scan rows (p = y); else columns (p = x).
+     */
+    function lineSet(map, W, H, horizontal, minRun) {
+      var outer = horizontal ? H : W, inner = horizontal ? W : H;
+      var done = [], active = [];
+      for (var o = 0; o < outer; o++) {
+        // runs of ridge pixels; a crossing line breaks a ridge for its own width, so gaps of a few px are bridged
+        var segs = [], start = -1, last = -1, cnt = 0;
+        for (var q = 0; q <= inner; q++) {
+          var on = q < inner && (horizontal ? map[o * W + q] : map[q * W + o]);
+          if (on) { if (start < 0) { start = q; cnt = 0; } last = q; cnt++; }
+          else if (start >= 0 && (q - last > 6 || q === inner)) {
+            if (last - start + 1 >= minRun && cnt >= 0.6 * (last - start + 1)) segs.push([start, last, cnt]);
+            start = -1;
+          }
+        }
+        var next = [];
+        segs.forEach(function (s) {
+          var hit = null;
+          for (var j = 0; j < next.length && !hit; j++) {
+            if (next[j].lastO === o && s[0] - next[j].a1 <= 6 * 4) hit = next[j];
+          }
+          for (j = 0; j < active.length && !hit; j++) {
+            var L = active[j];
+            if (L.used) continue;
+            var ov = Math.min(L.a1, s[1]) - Math.max(L.a0, s[0]);
+            if (ov >= 0.5 * Math.min(L.a1 - L.a0, s[1] - s[0])) hit = L;
+          }
+          var len = s[2];
+          if (hit) {
+            var fresh = !hit.used;
+            hit.used = true;
+            hit.sw += len; hit.sp += o * len; hit.lastO = o;
+            if (s[0] < hit.a0) hit.a0 = s[0];
+            if (s[1] > hit.a1) hit.a1 = s[1];
+            if (s[1] - s[0] + 1 > hit.len) hit.len = s[1] - s[0] + 1;
+            if (fresh) next.push(hit);
+          } else {
+            next.push({ a0: s[0], a1: s[1], len: s[1] - s[0] + 1, sw: len, sp: o * len, firstO: o, lastO: o, used: true });
+          }
+        });
+        active.forEach(function (L) {
+          if (!L.used && o - L.lastO > 1) done.push(L);
+          else if (!L.used) next.push(L);
+        });
+        next.forEach(function (L) { L.used = false; });
+        active = next;
+      }
+      active.forEach(function (L) { done.push(L); });
+      return done.map(function (L) {
+        return { p: L.sp / L.sw, a0: L.a0, a1: L.a1, len: L.len, thick: L.lastO - L.firstO + 1 };
+      }).filter(function (L) { return L.thick <= 9; });
+    }
+
+    function modePitch(diffs) {
+      var best = 0, bestN = 0;
+      diffs.forEach(function (d) {
+        var n = 0;
+        diffs.forEach(function (e) { if (abs(e - d) <= 0.08 * d + 0.6) n++; });
+        if (n > bestN || (n === bestN && d < best)) { best = d; bestN = n; }
+      });
+      var sum = 0, cnt = 0;
+      diffs.forEach(function (e) { if (abs(e - best) <= 0.08 * best + 0.6) { sum += e; cnt++; } });
+      return cnt ? sum / cnt : best;
+    }
+
+    /** Positions merged within 2 px, then the longest evenly spaced run (gaps of up to 2 pitches filled). */
+    function regular(pos, minPitch, tolFrac) {
+      pos = pos.slice().sort(function (a, b) { return a - b; });
+      var m = [];
+      pos.forEach(function (p) {
+        var l = m[m.length - 1];
+        if (l && p - l.last <= 2) { l.s += p; l.n++; l.last = p; } else m.push({ s: p, n: 1, last: p });
+      });
+      pos = m.map(function (o) { return o.s / o.n; });
+      if (pos.length < 3) return null;
+      var diffs = [];
+      for (var i = 1; i < pos.length; i++) if (pos[i] - pos[i - 1] >= minPitch) diffs.push(pos[i] - pos[i - 1]);
+      if (diffs.length < 2) return null;
+      var pitch = modePitch(diffs);
+      if (!(pitch >= minPitch)) return null;
+      var tol = tolFrac * pitch + 1;
+      var runs = [], run = [pos[0]], real = 1, reals = [];
+      for (var j = 1; j < pos.length; j++) {
+        var q = pos[j], lastP = run[run.length - 1], d = q - lastP;
+        if (d < pitch - tol) continue;               // a stroke inside a cell
+        var k = Math.round(d / pitch);
+        if (k >= 1 && k <= 3 && abs(d - k * pitch) <= tol * (k === 1 ? 1 : 1.5)) {
+          for (var t = 1; t < k; t++) run.push(lastP + d * t / k);
+          run.push(q); real++;
+        } else { runs.push(run); reals.push(real); run = [q]; real = 1; }
+      }
+      runs.push(run); reals.push(real);
+      var bi = 0;
+      for (var r = 1; r < runs.length; r++) if (reals[r] > reals[bi]) bi = r;
+      var best = runs[bi];
+      if (best.length < 3) return null;
+      return { pos: best, pitch: (best[best.length - 1] - best[0]) / (best.length - 1), real: reals[bi], all: pos.length };
+    }
+
+    function lab(r, g, b) {
+      function f(c) { c /= 255; return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); }
+      var R = f(r), G = f(g), B = f(b);
+      var X = (R * 0.4124 + G * 0.3576 + B * 0.1805) / 0.95047, Y = R * 0.2126 + G * 0.7152 + B * 0.0722, Z = (R * 0.0193 + G * 0.1192 + B * 0.9505) / 1.08883;
+      function h(t) { return t > 0.008856 ? Math.pow(t, 1 / 3) : 7.787 * t + 16 / 116; }
+      var fx = h(X), fy = h(Y), fz = h(Z);
+      return [116 * fy - 16, 500 * (fx - fy), 200 * (fy - fz)];
+    }
+    function dE(a, b) { var x = a[0] - b[0], y = a[1] - b[1], z = a[2] - b[2]; return Math.sqrt(x * x + y * y + z * z); }
+
+    /** Each cell's colour (the dominant colour of its middle), how flat it is, how much ink it holds. */
+    function sampleCells(img, g, xs, ys) {
+      var W = img.w, d = img.data, out = [];
+      var hist = new Int32Array(4096), touched = [];
+      for (var r = 0; r < ys.length - 1; r++) {
+        for (var c = 0; c < xs.length - 1; c++) {
+          var cw = xs[c + 1] - xs[c], ch = ys[r + 1] - ys[r];
+          var x0 = Math.round(xs[c] + cw * 0.25), x1 = Math.round(xs[c + 1] - cw * 0.25);
+          var y0 = Math.round(ys[r] + ch * 0.25), y1 = Math.round(ys[r + 1] - ch * 0.25);
+          if (x1 <= x0) x1 = x0 + 1;
+          if (y1 <= y0) y1 = y0 + 1;
+          var n = 0, x, y, i, bin, best = -1, bestN = 0;
+          touched.length = 0;
+          for (y = y0; y < y1; y++) for (x = x0; x < x1; x++) {
+            i = (y * W + x) * 4;
+            bin = ((d[i] >> 4) << 8) | ((d[i + 1] >> 4) << 4) | (d[i + 2] >> 4);
+            if (!hist[bin]) touched.push(bin);
+            hist[bin]++; n++;
+            if (hist[bin] > bestN) { bestN = hist[bin]; best = bin; }
+          }
+          var br = ((best >> 8) & 15) * 16 + 8, bg = ((best >> 4) & 15) * 16 + 8, bb = (best & 15) * 16 + 8;
+          // the second colour of the cell (a symbol's ink, or the paper round a big dot)
+          var sec = -1, secN = 0;
+          touched.forEach(function (b) {
+            var cr = ((b >> 8) & 15) * 16 + 8, cg = ((b >> 4) & 15) * 16 + 8, cb = (b & 15) * 16 + 8;
+            if (abs(cr - br) + abs(cg - bg) + abs(cb - bb) > 64 && hist[b] > secN) { secN = hist[b]; sec = b; }
+          });
+          touched.forEach(function (b) { hist[b] = 0; });
+          var s2r = ((sec >> 8) & 15) * 16 + 8, s2g = ((sec >> 4) & 15) * 16 + 8, s2b = (sec & 15) * 16 + 8;
+          var sr = 0, sg = 0, sb = 0, sn = 0, tr = 0, tg = 0, tb = 0, tn = 0, sl = 0, sl2 = 0;
+          for (y = y0; y < y1; y++) for (x = x0; x < x1; x++) {
+            i = (y * W + x) * 4;
+            var l = g[y * W + x];
+            if (abs(d[i] - br) + abs(d[i + 1] - bg) + abs(d[i + 2] - bb) <= 48) { sr += d[i]; sg += d[i + 1]; sb += d[i + 2]; sn++; sl += l; sl2 += l * l; }
+            else if (sec >= 0 && abs(d[i] - s2r) + abs(d[i + 1] - s2g) + abs(d[i + 2] - s2b) <= 48) { tr += d[i]; tg += d[i + 1]; tb += d[i + 2]; tn++; }
+          }
+          var c1 = sn ? [sr / sn, sg / sn, sb / sn] : [br, bg, bb], c2 = tn ? [tr / tn, tg / tn, tb / tn] : null;
+          var l1 = 0.299 * c1[0] + 0.587 * c1[1] + 0.114 * c1[2], l2 = c2 ? 0.299 * c2[0] + 0.587 * c2[1] + 0.114 * c2[2] : l1;
+          // a symbol: two clearly different tones, the second covering a fair part of the middle
+          var sym = c2 && tn >= 0.06 * n && abs(l1 - l2) >= 60;
+          var ground = sym && l2 > l1 ? c2 : c1;
+          var mean = sn ? sl / sn : 0;
+          out.push({
+            rgb: [Math.round(ground[0]), Math.round(ground[1]), Math.round(ground[2])],
+            share: n ? (sym ? (sn + tn) / n : sn / n) : 0,
+            ink: sym ? (l2 < l1 ? tn : sn) / n : 0,
+            std: sn ? Math.sqrt(Math.max(0, sl2 / sn - mean * mean)) : 0
+          });
+        }
+      }
+      return out;
+    }
+
+    /** Colour classes of the cells: greedy in Lab, then each cell to its nearest class (or -1). */
+    function classify(cells) {
+      var cls = [], labs = cells.map(function (c) { return lab(c.rgb[0], c.rgb[1], c.rgb[2]); });
+      labs.forEach(function (L) {
+        var bi = -1, bd = 1e9;
+        cls.forEach(function (k, j) { var e = dE(L, k.lab); if (e < bd) { bd = e; bi = j; } });
+        if (bi >= 0 && bd < 11) {
+          var k = cls[bi]; k.n++;
+          k.lab = [k.lab[0] + (L[0] - k.lab[0]) / k.n, k.lab[1] + (L[1] - k.lab[1]) / k.n, k.lab[2] + (L[2] - k.lab[2]) / k.n];
+        } else cls.push({ lab: L.slice(), n: 1 });
+      });
+      var of = new Int16Array(cells.length), cnt = cls.map(function () { return 0; }), sum = cls.map(function () { return [0, 0, 0]; });
+      labs.forEach(function (L, i) {
+        var bi = -1, bd = 1e9;
+        cls.forEach(function (k, j) { var e = dE(L, k.lab); if (e < bd) { bd = e; bi = j; } });
+        if (bd > 16 || cells[i].share < 0.35) { of[i] = -1; return; }
+        of[i] = bi; cnt[bi]++;
+        sum[bi][0] += cells[i].rgb[0]; sum[bi][1] += cells[i].rgb[1]; sum[bi][2] += cells[i].rgb[2];
+      });
+      // drop empty classes, biggest first
+      var order = cls.map(function (k, j) { return j; }).filter(function (j) { return cnt[j] > 0; })
+        .sort(function (a, b) { return cnt[b] - cnt[a] || a - b; });
+      var remap = {};
+      order.forEach(function (j, nj) { remap[j] = nj; });
+      for (var i = 0; i < of.length; i++) if (of[i] >= 0) of[i] = remap[of[i]];
+      return {
+        classes: order.map(function (j) { return { n: cnt[j], rgb: [Math.round(sum[j][0] / cnt[j]), Math.round(sum[j][1] / cnt[j]), Math.round(sum[j][2] / cnt[j])] }; }),
+        of: of
+      };
+    }
+
+    /** Ink beside each row (row numbers printed in the picture): per row { n, box } on one side. */
+    function sideInk(g, W, H, xs, ys, side) {
+      var px = (xs[xs.length - 1] - xs[0]) / (xs.length - 1);
+      var a = side === 'right' ? Math.round(xs[xs.length - 1] + 0.25 * px) : Math.round(xs[0] - 3.5 * px);
+      var b = side === 'right' ? Math.round(xs[xs.length - 1] + 3.5 * px) : Math.round(xs[0] - 0.25 * px);
+      a = Math.max(0, a); b = Math.min(W - 1, b);
+      if (b - a < 0.6 * px) return null;
+      var rows = [];
+      for (var r = 0; r < ys.length - 1; r++) {
+        var y0 = Math.round(ys[r] + 0.12 * (ys[r + 1] - ys[r])), y1 = Math.round(ys[r + 1] - 0.12 * (ys[r + 1] - ys[r]));
+        var n = 0, bx0 = 1e9, bx1 = -1, by0 = 1e9, by1 = -1;
+        for (var y = Math.max(0, y0); y <= Math.min(H - 1, y1); y++) for (var x = a; x <= b; x++) {
+          if (g[y * W + x] < 140) { n++; if (x < bx0) bx0 = x; if (x > bx1) bx1 = x; if (y < by0) by0 = y; if (y > by1) by1 = y; }
+        }
+        rows.push({ n: n, box: n ? { x: bx0, y: by0, w: bx1 - bx0 + 1, h: by1 - by0 + 1 } : null });
+      }
+      return rows;
+    }
+
+    /** Find the lattices (and rows-only rulings) in one picture. */
+    function measure(img, opts) {
+      opts = opts || {};
+      var t0 = Date.now();
+      var W = img.w, H = img.h, d = img.data, N = W * H;
+      if (!(W >= 24 && H >= 24) || !d || d.length < N * 4) return { ok: false, reason: 'too-small', lattices: [], rowsOnly: null, ms: 0 };
+      var g = new Uint8Array(N), white = 0, levels = new Int32Array(4096);
+      for (var i = 0, j = 0; i < N; i++, j += 4) {
+        var l = (77 * d[j] + 150 * d[j + 1] + 29 * d[j + 2]) >> 8;
+        g[i] = l;
+        if (l >= 232) white++;
+        levels[((d[j] >> 4) << 8) | ((d[j + 1] >> 4) << 4) | (d[j + 2] >> 4)]++;
+      }
+      var nLevels = 0, cut = N * 0.001;
+      for (i = 0; i < 4096; i++) if (levels[i] > cut) nLevels++;
+      var R = ridges(g, W, H, opts.ridge || 10);
+      var minRun = Math.max(18, Math.round(Math.min(W, H) * 0.025));
+      var HL = lineSet(R.hr, W, H, true, minRun), VL = lineSet(R.vr, W, H, false, minRun);
+      // lines that cross belong to one lattice
+      var all = HL.concat(VL), parent = all.map(function (x, k) { return k; });
+      function find(x) { while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; }
+      var tol = 5;
+      for (var h = 0; h < HL.length; h++) for (var v = 0; v < VL.length; v++) {
+        var A = HL[h], B = VL[v];
+        if (B.p >= A.a0 - tol && B.p <= A.a1 + tol && A.p >= B.a0 - tol && A.p <= B.a1 + tol) {
+          var ra = find(h), rb = find(HL.length + v);
+          if (ra !== rb) parent[ra] = rb;
+        }
+      }
+      var comps = {};
+      all.forEach(function (x, k) {
+        var r = find(k);
+        (comps[r] = comps[r] || { H: [], V: [] })[k < HL.length ? 'H' : 'V'].push(x);
+      });
+      function pOf(x) { return x.p; }
+      // the lattice of a set of lines; strokes shorter than about a square and a half are
+      // glyphs (row numbers, purl dashes), not rules
+      function fit(Hs, Vs) {
+        var ry = regular(Hs.map(pOf), 5, 0.12), rx = regular(Vs.map(pOf), 5, 0.12);
+        if (!ry || !rx) return null;
+        // first the long rules only, then every piece that runs from rule to rule (a cell's
+        // edge where its neighbours differ); a glyph stroke does neither
+        var H1 = Hs.filter(function (x) { return x.a1 - x.a0 >= 1.4 * rx.pitch; });
+        var V1 = Vs.filter(function (x) { return x.a1 - x.a0 >= 1.4 * ry.pitch; });
+        var ry1 = regular(H1.map(pOf), 5, 0.12), rx1 = regular(V1.map(pOf), 5, 0.12);
+        if (ry1 && rx1) { ry = ry1; rx = rx1; }
+        function onGrid(v, r) { return phaseDist(v, r.pos[0], r.pitch) <= 0.25 * r.pitch + 2; }
+        function keep(x, other) {
+          var e = x.a1 - x.a0;
+          return e >= 1.4 * other.pitch || (e >= 0.6 * other.pitch && onGrid(x.a0, other) && onGrid(x.a1, other));
+        }
+        var H2 = Hs.filter(function (x) { return keep(x, rx); }), V2 = Vs.filter(function (x) { return keep(x, ry); });
+        var ry2 = regular(H2.map(pOf), 5, 0.12), rx2 = regular(V2.map(pOf), 5, 0.12);
+        if (!ry2 || !rx2) return null;
+        return { rx: rx2, ry: ry2, H: H2, V: V2 };
+      }
+      function boxOf(c) {
+        var b = { x0: 1e9, y0: 1e9, x1: -1e9, y1: -1e9 };
+        c.H.forEach(function (x) { b.x0 = Math.min(b.x0, x.a0); b.x1 = Math.max(b.x1, x.a1); b.y0 = Math.min(b.y0, x.p); b.y1 = Math.max(b.y1, x.p); });
+        c.V.forEach(function (x) { b.y0 = Math.min(b.y0, x.a0); b.y1 = Math.max(b.y1, x.a1); b.x0 = Math.min(b.x0, x.p); b.x1 = Math.max(b.x1, x.p); });
+        return b;
+      }
+      function phaseDist(p, p0, pitch) { var q = ((p - p0) % pitch + pitch) % pitch; return Math.min(q, pitch - q); }
+      // one chart whose grid is broken (a missing line, a faint one) comes as several pieces on
+      // one lattice: join the pieces whose lines sit on the biggest piece's lattice
+      var cl = Object.keys(comps).map(function (key) { return comps[key]; })
+        .sort(function (a, b) { return (b.H.length + b.V.length) - (a.H.length + a.V.length); });
+      cl.forEach(function (A) {
+        if (A.dead || A.H.length < 3 || A.V.length < 2) return;
+        var f = fit(A.H, A.V);
+        if (!f) return;
+        for (var loop = 0, changed = true; changed && loop < 4; loop++) {
+          changed = false;
+          var box = boxOf(A), px = f.rx.pitch, py = f.ry.pitch;
+          cl.forEach(function (B) {
+            if (B === A || B.dead) return;
+            var bb = boxOf(B);
+            if (bb.x0 > box.x1 + 2 * px || bb.x1 < box.x0 - 2 * px || bb.y0 > box.y1 + 2 * py || bb.y1 < box.y0 - 2 * py) return;
+            var on = 0;
+            B.H.forEach(function (x) { if (phaseDist(x.p, f.ry.pos[0], py) <= 0.15 * py + 1.5) on++; });
+            B.V.forEach(function (x) { if (phaseDist(x.p, f.rx.pos[0], px) <= 0.15 * px + 1.5) on++; });
+            if (on < 0.7 * (B.H.length + B.V.length)) return;
+            A.H = A.H.concat(B.H); A.V = A.V.concat(B.V); B.dead = true; changed = true;
+          });
+          if (changed) f = fit(A.H, A.V) || f;
+        }
+        A.fit = f;
+      });
+      var lattices = [];
+      cl.forEach(function (c) {
+        if (c.dead || !c.fit) return;
+        var ry = c.fit.ry, rx = c.fit.rx;
+        c = { H: c.fit.H, V: c.fit.V };
+        if (c.H.length < 3 || c.V.length < 2) return;
+        var ys = ry.pos.slice(), xs = rx.pos.slice();
+        // a chart with no frame: its outer edge is colour against paper, not a rule. The rules
+        // across it run on past the last rule found: that is one more row (column)
+        var py0 = ry.pitch, px0 = rx.pitch;
+        function inside(x, lo, hi) { return x.p >= lo - 2 && x.p <= hi + 2; }
+        for (var e = 0; e < 2; e++) {
+          var yl = ys[ys.length - 1], yf = ys[0], xl = xs[xs.length - 1], xf = xs[0], grew = false;
+          var vIn = c.V.filter(function (x) { return inside(x, xf, xl); }), hIn = c.H.filter(function (x) { return inside(x, yf, yl); });
+          if (yl + py0 < H && vIn.filter(function (x) { return x.a1 >= yl + 0.75 * py0; }).length >= 0.5 * xs.length) { ys.push(yl + py0); grew = true; }
+          if (yf - py0 >= 0 && vIn.filter(function (x) { return x.a0 <= yf - 0.75 * py0; }).length >= 0.5 * xs.length) { ys.unshift(yf - py0); grew = true; }
+          if (xl + px0 < W && hIn.filter(function (x) { return x.a1 >= xl + 0.75 * px0; }).length >= 0.5 * ys.length) { xs.push(xl + px0); grew = true; }
+          if (xf - px0 >= 0 && hIn.filter(function (x) { return x.a0 <= xf - 0.75 * px0; }).length >= 0.5 * ys.length) { xs.unshift(xf - px0); grew = true; }
+          if (!grew) break;
+        }
+        var rows = ys.length - 1, cols = xs.length - 1;
+        if (rows < 3 || cols < 2 || rows * cols < 12) return;
+        var asp = rx.pitch / ry.pitch;
+        if (!(asp >= 0.4 && asp <= 2.5)) return;
+        // how many of the lattice's lines are really drawn, and across how much of it
+        function realFrac(list, posArr, lo, hi) {
+          var got = 0;
+          posArr.forEach(function (p) {
+            var cover = 0;
+            list.forEach(function (x) {
+              if (abs(x.p - p) <= 2.5) cover += Math.max(0, (Math.min(x.a1, hi) - Math.max(x.a0, lo)) / (hi - lo));
+            });
+            if (cover >= 0.3) got++;
+          });
+          return got / posArr.length;
+        }
+        var fH = realFrac(c.H, ys, xs[0], xs[cols]), fV = realFrac(c.V, xs, ys[0], ys[rows]);
+        // lines of this component that sit off the lattice (a ruled table, a drawing)
+        function offFrac(list, posArr, lo, hi, pitch) {
+          var off = 0, tot = 0;
+          list.forEach(function (x) {
+            if (x.p < posArr[0] - 2 || x.p > posArr[posArr.length - 1] + 2) return;
+            if ((Math.min(x.a1, hi) - Math.max(x.a0, lo)) < 2 * pitch) return;
+            tot++;
+            var near = false;
+            for (var q = 0; q < posArr.length; q++) if (abs(posArr[q] - x.p) <= 0.2 * pitch + 1.5) { near = true; break; }
+            if (!near) off++;
+          });
+          return tot ? off / tot : 0;
+        }
+        var oH = offFrac(c.H, ys, xs[0], xs[cols], rx.pitch), oV = offFrac(c.V, xs, ys[0], ys[rows], ry.pitch);
+        var cells = sampleCells(img, g, xs, ys);
+        var stds = cells.map(function (x) { return x.ink > 0.06 ? 0 : x.std; }).sort(function (a, b) { return a - b; });
+        var medStd = stds[stds.length >> 1];
+        // a chart's square is one flat colour, or paper with a symbol: two tones fill it
+        var flatFrac = cells.filter(function (x) { return x.share >= 0.75 || (x.share >= 0.55 && x.std < 10); }).length / cells.length;
+        var symFrac = cells.filter(function (x) { return x.ink > 0.06; }).length / cells.length;
+        var k = classify(cells);
+        lattices.push({
+          x0: xs[0], y0: ys[0], x1: xs[cols], y1: ys[rows], xs: xs, ys: ys, rows: rows, cols: cols,
+          pitchX: rx.pitch, pitchY: ry.pitch, realH: fH, realV: fV, offH: oH, offV: oV,
+          medStd: medStd, flatFrac: flatFrac, symFrac: symFrac,
+          classes: k.classes, cellClass: Array.prototype.slice.call(k.of),
+          cellInk: cells.map(function (x) { return Math.round(x.ink * 100) / 100; }),
+          sides: { right: sideInk(g, W, H, xs, ys, 'right'), left: sideInk(g, W, H, xs, ys, 'left') }
+        });
+      });
+      lattices.sort(function (a, b) { return b.rows * b.cols - a.rows * a.cols; });
+      // rulings across most of the picture with no columns (hand-ruled rows)
+      var longH = HL.filter(function (x) { return x.len >= 0.3 * W; });
+      var ro = regular(longH.map(function (x) { return x.p; }), 8, 0.2);
+      var rowsOnly = ro && ro.real >= 5 && ro.real / ro.pos.length >= 0.7 ? { ys: ro.pos, pitch: ro.pitch, real: ro.real } : null;
+      return {
+        ok: true, w: W, h: H, lattices: lattices, rowsOnly: rowsOnly,
+        tone: { white: white / N, levels: nLevels },
+        lines: opts.debugLines ? { h: HL, v: VL } : { h: HL.length, v: VL.length }, ms: Date.now() - t0
+      };
+    }
+
+    return { measure: measure, regular: regular, lab: lab };
+  }
+
+  var picCore = null, picWorker = null, picWorkerBroken = false, picJobs = {}, picSeq = 0;
+
+  function picWorkerSrc() {
+    return "'use strict';\nvar core = (" + String(PicCore) + ")();\n" +
+      'self.onmessage = function (e) { var m = e.data, res;' +
+      ' try { res = core.measure(m.img, m.opts); } catch (err) { res = { ok: false, reason: "error", message: String(err && err.message || err), lattices: [] }; }' +
+      ' self.postMessage({ id: m.id, res: res }); };';
+  }
+
+  function getPicWorker() {
+    if (picWorker || picWorkerBroken) return picWorker;
+    var W = typeof window !== 'undefined' ? window : null;
+    try {
+      if (!W || typeof W.Worker !== 'function' || typeof W.Blob !== 'function' || !W.URL || !W.URL.createObjectURL) { picWorkerBroken = true; return null; }
+      var url = W.URL.createObjectURL(new W.Blob([picWorkerSrc()], { type: 'text/javascript' }));
+      picWorker = new W.Worker(url);
+      picWorker.onmessage = function (e) {
+        var job = picJobs[e.data && e.data.id];
+        if (!job) return;
+        delete picJobs[e.data.id];
+        job.resolve(e.data.res);
+      };
+      picWorker.onerror = function () {
+        // the worker is gone: finish every waiting job on the main thread
+        picWorkerBroken = true;
+        try { picWorker.terminate(); } catch (e2) { /* ignore */ }
+        picWorker = null;
+        Object.keys(picJobs).forEach(function (id) { var j = picJobs[id]; delete picJobs[id]; j.resolve(measureHere(j.img, j.opts)); });
+      };
+    } catch (e) { picWorkerBroken = true; picWorker = null; }
+    return picWorker;
+  }
+
+  function measureHere(img, opts) {
+    try {
+      if (!picCore) picCore = PicCore();
+      return picCore.measure(img, opts);
+    } catch (e) { return { ok: false, reason: 'error', message: String(e && e.message || e), lattices: [] }; }
+  }
+
+  /** The lattice(s) in a picture: { ok, lattices, rowsOnly, tone, ms } (pixels). */
+  function measurePicture(img, opts) {
+    opts = opts || {};
+    if (!img || !(img.width || img.w)) return Promise.resolve(null);
+    var plain = { w: img.w || img.width, h: img.h || img.height, data: img.data };
+    var wk = opts.noWorker ? null : getPicWorker();
+    if (!wk) return Promise.resolve(measureHere(plain, opts));
+    return new Promise(function (resolve) {
+      var id = ++picSeq;
+      // a copy goes to the worker: the caller keeps its pixels
+      var data = new Uint8ClampedArray(plain.data);
+      var o = { ridge: opts.ridge, debugLines: !!opts.debugLines };
+      picJobs[id] = { resolve: resolve, img: plain, opts: o };
+      try { wk.postMessage({ id: id, img: { w: plain.w, h: plain.h, data: data }, opts: o }, [data.buffer]); }
+      catch (e) { delete picJobs[id]; resolve(measureHere(plain, opts)); }
+    });
+  }
+
+  function pictureAvailable(handle) {
+    return !!(handle && typeof handle.layout === 'function' && typeof handle.renderRegion === 'function');
+  }
+
+  /* ---- the words: names, row numbers, key labels ---- */
+
+  var CHART_WORD = /\b(charts?|diagrams?|diagramm|m[øo]nster|graph|colou?r\s+key)\b/i;
+  // "size chart", "measurement chart", "yarn chart": not a knitting chart
+  var NOT_CHART = /\b(size|sizing|measurements?|yarn|needle|conversion)\s+charts?\b/i;
+  function chartWordIn(text) {
+    var t = String(text || '').replace(new RegExp(NOT_CHART.source, 'gi'), ' ');
+    var m = CHART_WORD.exec(t);
+    return m ? m[1].toLowerCase() : null;
+  }
+
+  function boxYUp(b, pageH) {
+    return { x0: round1(b.x0), y0: round1(pageH - b.y1), x1: round1(b.x1), y1: round1(pageH - b.y0) };
+  }
+
+  /** A short title above (or the caption of) the picture that names a chart. */
+  function pictureName(L, imIndex, grid, pitchY) {
+    var best = null, bestD = Infinity;
+    (L.captions || []).forEach(function (c) {
+      if (c.target && c.target.type === 'image' && c.target.index === imIndex && CHART_WORD.test(c.text)) { best = c.text; bestD = -1; }
+    });
+    if (best) return best;
+    var reach = Math.max(40, 6 * (pitchY || 8));
+    (L.lines || []).forEach(function (ln) {
+      var b = ln.box, t = String(ln.text || '').trim();
+      if (!t || t.length > 60 || ln.margin && !CHART_WORD.test(t)) return;
+      var dy = grid.y0 - b.y1;
+      if (dy < -2 || dy > reach) return;
+      if (b.x1 < grid.x0 - 40 || b.x0 > grid.x1 + 40) return;
+      if (!CHART_WORD.test(t) && !/:\s*$/.test(t)) return;
+      // two titles on one line ("Lower Body Chart: Lower Yoke Chart:"): the piece above this grid
+      var parts = t.split(/:\s+(?=[A-Z])/);
+      for (var pi = 0; pi < parts.length - 1; pi++) parts[pi] += ':';
+      if (parts.length > 1) {
+        var share = (b.x1 - b.x0) / t.length, at = b.x0, pick = null;
+        parts.forEach(function (p) {
+          var x0 = at, x1 = at + p.length * share;
+          at = x1 + share;
+          if (pick == null && x1 >= grid.x0 - 20 && x0 <= grid.x1 + 20) pick = p;
+        });
+        if (pick) t = pick;
+      }
+      if (dy < bestD) { bestD = dy; best = t; }
+    });
+    return best ? best.replace(/\s*:\s*$/, '').replace(/\s+/g, ' ') : null;
+  }
+
+  /** Row numbers in the text layer beside the grid: { first, step, n, side, sides:{rowNo:side} } | null. */
+  function textRowNumbers(L, grid, rows, pitchX, pitchY) {
+    var hits = [];
+    (L.lines || []).forEach(function (ln) {
+      var m = /^(?:(?:row|rnd|round|r)\s*)?(\d{1,3})(?:\s*\(?\s*(?:rs|ws)\s*\)?)?$/i.exec(String(ln.text || '').trim());
+      if (!m) return;
+      var b = ln.box, cy = (b.y0 + b.y1) / 2;
+      if (cy < grid.y0 || cy > grid.y1) return;
+      var side = null;
+      if (b.x0 >= grid.x1 - 2 && b.x0 <= grid.x1 + 4 * pitchX) side = 'right';
+      else if (b.x1 <= grid.x0 + 2 && b.x1 >= grid.x0 - 4 * pitchX) side = 'left';
+      if (!side) return;
+      var fromTop = Math.floor((cy - grid.y0) / pitchY);
+      if (fromTop < 0 || fromTop >= rows) return;
+      hits.push({ rb: rows - 1 - fromTop, v: +m[1], side: side });
+    });
+    if (hits.length < 2) return null;
+    var best = null;
+    [1, 2].forEach(function (step) {
+      var votes = {};
+      hits.forEach(function (h) { var f = h.v - h.rb * step; votes[f] = (votes[f] || 0) + 1; });
+      Object.keys(votes).forEach(function (f) {
+        if (!best || votes[f] > best.n) best = { first: +f, step: step, n: votes[f] };
+      });
+    });
+    if (!best || best.n < 2 || best.n < 0.6 * hits.length || best.first < 0 || best.first > 999) return null;
+    best.sides = {};
+    hits.forEach(function (h) { if (h.v - h.rb * best.step === best.first) best.sides[h.v] = h.side; });
+    return best;
+  }
+
+  /** Ink beside the rows in the picture: { side, rows: n, alternate } | null. */
+  function inkRowNumbers(lat) {
+    var out = null;
+    ['right', 'left'].forEach(function (side) {
+      var s = lat.sides && lat.sides[side];
+      if (!s || !s.length) return;
+      var on = s.map(function (x) { return x.n >= 4; });
+      var n = on.filter(Boolean).length;
+      if (n < Math.max(2, 0.35 * s.length)) return;
+      if (!out || n > out.rows) out = { side: side, rows: n, on: on };
+    });
+    return out;
+  }
+
+  /** "= A", "MC", "CC1", "Color A", "A = …": a colour label in a key. */
+  function keyLabel(text) {
+    var t = String(text || '').trim();
+    var m = /^(?:=\s*)?(MC|CC\s?\d{1,2}|AC\s?\d|[A-L])\s*$/.exec(t) ||
+      /^(?:colou?r|col\.?)\s+([A-L]|\d{1,2})\b/i.exec(t) ||
+      /^(MC|CC\s?\d{1,2})\b/.exec(t);
+    return m ? m[1].replace(/\s+/g, '').toUpperCase() : null;
+  }
+
+  function hex2rgb(h) { return [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)]; }
+
+  /** A plain colour name for a key-less class ("brown", "light grey"). */
+  function colourName(rgb) {
+    var r = rgb[0] / 255, g = rgb[1] / 255, b = rgb[2] / 255;
+    var mx = Math.max(r, g, b), mn = Math.min(r, g, b), l = (mx + mn) / 2, dd = mx - mn;
+    var s = dd === 0 ? 0 : dd / (1 - abs(2 * l - 1));
+    if (dd < 0.1 || s < 0.12) {
+      var y = 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2];
+      return y >= 228 ? 'white' : y >= 175 ? 'light grey' : y >= 105 ? 'grey' : y >= 50 ? 'dark grey' : 'black';
+    }
+    var hue = 0;
+    if (mx === r) hue = 60 * (((g - b) / dd) % 6);
+    else if (mx === g) hue = 60 * ((b - r) / dd + 2);
+    else hue = 60 * ((r - g) / dd + 4);
+    if (hue < 0) hue += 360;
+    if (hue >= 12 && hue < 50 && l < 0.45) return 'brown';
+    if (hue >= 15 && hue < 55 && l >= 0.6 && s < 0.6) return 'beige';
+    if (hue < 12 || hue >= 345) return 'red';
+    if (hue < 40) return 'orange';
+    if (hue < 68) return l < 0.4 ? 'olive' : 'yellow';
+    if (hue < 165) return 'green';
+    if (hue < 200) return 'teal';
+    if (hue < 255) return 'blue';
+    if (hue < 290) return 'purple';
+    return 'pink';
+  }
+
+  function nameClasses(classes) {
+    var names = classes.map(function (k) { return colourName(k.rgb); });
+    var groups = {};
+    names.forEach(function (n, i) { (groups[n] = groups[n] || []).push(i); });
+    Object.keys(groups).forEach(function (n) {
+      var ix = groups[n];
+      if (ix.length < 2) return;
+      ix.sort(function (a, b) { return lum(classes[b].rgb) - lum(classes[a].rgb); });
+      ix.forEach(function (i, k) {
+        names[i] = (ix.length === 2 ? (k === 0 ? 'light ' : 'dark ') : '') + n + (ix.length > 2 ? ' ' + (k + 1) : '');
+      });
+    });
+    return names;
+  }
+
+  /**
+   * The key's swatches on this page: each colour label in the text layer with
+   * the colour printed just left of it. [{ label, rgb }]
+   */
+  function keySwatches(handle, n, L, scale) {
+    var labels = [];
+    (L.lines || []).forEach(function (ln) {
+      var t = String(ln.text || '');
+      // "Color Key ■ = A" carries a label at its end
+      var lab = keyLabel(t) || keyLabel((/=\s*(\S+)\s*$/.exec(t) || [])[1] ? '= ' + /=\s*(\S+)\s*$/.exec(t)[1] : '');
+      if (!lab) return;
+      if (labels.some(function (x) { return x.label === lab; })) return;
+      labels.push({ label: lab, box: ln.box, text: t });
+    });
+    if (labels.length < 2 || labels.length > 16) return Promise.resolve([]);
+    var out = [], chain = Promise.resolve();
+    labels.forEach(function (x) {
+      chain = chain.then(function () {
+        var b = x.box, h = b.y1 - b.y0;
+        // the "=" sits at the label's left: look left of it
+        var eq = /=/.test(x.text) ? b.x0 + (b.x1 - b.x0) * (x.text.lastIndexOf('=') / Math.max(1, x.text.length)) : b.x0;
+        var rect = { x0: Math.max(0, eq - 2.4 * h), y0: b.y0 - 0.2 * h, x1: eq - 0.15 * h, y1: b.y1 + 0.2 * h };
+        if (!(rect.x1 > rect.x0 + 2)) return;
+        return handle.renderRegion(n, rect, { scale: scale || 3 }).then(function (cv) {
+          var px = imageDataOf(cv);
+          if (!px) return;
+          var rgb = swatchColour(px);
+          if (rgb) out.push({ label: x.label, rgb: rgb });
+        }, function () { /* no swatch read */ });
+      });
+    });
+    return chain.then(function () { return out; });
+  }
+
+  function imageDataOf(cv) {
+    if (!cv) return null;
+    if (cv.data && cv.width) return { w: cv.width, h: cv.height, data: cv.data };
+    try { var ctx = cv.getContext('2d'); var id = ctx.getImageData(0, 0, cv.width, cv.height); return { w: id.width, h: id.height, data: id.data }; }
+    catch (e) { return null; }
+  }
+
+  /** The swatch's colour: the commonest colour that is not paper; white only for an outlined white box. */
+  function swatchColour(px) {
+    var d = px.data, n = px.w * px.h, hist = {}, best = null, bestN = 0, paper = 0, dark = 0;
+    for (var i = 0; i < n; i++) {
+      var o = i * 4, l = 0.299 * d[o] + 0.587 * d[o + 1] + 0.114 * d[o + 2];
+      if (l >= 240) { paper++; continue; }
+      if (l < 70) dark++;
+      var key = (d[o] >> 4) + ',' + (d[o + 1] >> 4) + ',' + (d[o + 2] >> 4);
+      var e = hist[key] || (hist[key] = { n: 0, r: 0, g: 0, b: 0 });
+      e.n++; e.r += d[o]; e.g += d[o + 1]; e.b += d[o + 2];
+      if (e.n > bestN) { bestN = e.n; best = e; }
+    }
+    if (best && bestN >= 0.12 * n) return [Math.round(best.r / best.n), Math.round(best.g / best.n), Math.round(best.b / best.n)];
+    // a white swatch: paper inside a drawn outline
+    if (paper > 0.5 * n && dark > 0.04 * n) return [255, 255, 255];
+    return null;
+  }
+
+  /** Each colour class to a key label, one to one, nearest colours first (ΔE under 22). */
+  function matchKey(classes, swatches) {
+    var lab = (picCore || (picCore = PicCore())).lab;
+    var pairs = [];
+    classes.forEach(function (k, i) {
+      var a = lab(k.rgb[0], k.rgb[1], k.rgb[2]);
+      swatches.forEach(function (s, j) {
+        var b = lab(s.rgb[0], s.rgb[1], s.rgb[2]);
+        var e = Math.sqrt((a[0] - b[0]) * (a[0] - b[0]) + (a[1] - b[1]) * (a[1] - b[1]) + (a[2] - b[2]) * (a[2] - b[2]));
+        pairs.push({ i: i, j: j, e: e });
+      });
+    });
+    pairs.sort(function (p, q) { return p.e - q.e; });
+    var ci = {}, sj = {}, out = {};
+    pairs.forEach(function (p) {
+      if (ci[p.i] || sj[p.j] || p.e > 22) return;
+      ci[p.i] = sj[p.j] = true;
+      out[p.i] = swatches[p.j].label;
+    });
+    return out;
+  }
+
+  /* ---- one picture -> candidates ---- */
+
+  function emptyPictureChart(page, name) {
+    return { name: name, page: page, source: 'picture', kind: 'picture', image: true, confidence: 0, reasons: [],
+      cells: null, cols: null, rows: null, spans: [], legend: [], noStitch: null, readRS: 'rtl', startRow: null,
+      rowStep: null, rowNos: null, labelSide: {}, repeatBox: null, repeats: [], marks: [], unknown: [] };
+  }
+
+  function gridCandidate(n, L, im, imIndex, s, lat, ctx) {
+    var box = im.box, W = L.width, H = L.height;
+    function X(px) { return box.x0 + px / s; }
+    function Y(py) { return box.y0 + py / s; }
+    var grid = { x0: X(lat.x0), y0: Y(lat.y0), x1: X(lat.x1), y1: Y(lat.y1) };
+    var pitchX = lat.pitchX / s, pitchY = lat.pitchY / s;
+    if (pitchX < 2.5 || pitchY < 2.5 || pitchX > 72 || pitchY > 72) return null;
+    var rows = lat.rows, cols = lat.cols;
+    var reasons = ['an even grid of ' + cols + ' × ' + rows + ' squares'];
+    var quality = Math.min(lat.realH, lat.realV);
+    if (quality < 0.7 || lat.offH > 0.25 || lat.offV > 0.25) return null;
+    // a photo through a lattice-like texture: cells must be flat colour or paper with a symbol
+    if (lat.flatFrac < 0.75) return null;
+    var conf = 0.42 + 0.3 * (quality - 0.75) / 0.25;
+    var tn = textRowNumbers(L, grid, rows, pitchX, pitchY);
+    var ink = tn ? null : inkRowNumbers(lat);
+    var name = pictureName(L, imIndex, grid, pitchY);
+    var first = 1, step = 1, read = false, labelSide = {};
+    if (tn) {
+      first = tn.first; step = tn.step; read = true;
+      labelSide = tn.sides;
+      reasons.push('row numbers ' + first + ' to ' + (first + (rows - 1) * step) + ' printed beside it');
+      conf += 0.2;
+    } else if (ink) {
+      reasons.push('numbers printed down the ' + ink.side + ' of the rows');
+      conf += 0.12;
+      // which rows carry a number: all on one side (in the round, RS rows) or alternate
+      for (var r = 0; r < rows; r++) if (ink.on[r]) labelSide[rows - r] = ink.side;
+    }
+    if (name && CHART_WORD.test(name)) { reasons.push('it is called "' + name + '"'); conf += 0.15; }
+    else if (name) { reasons.push('its title "' + name + '"'); conf += 0.05; }
+    if (ctx.docWord) { reasons.push('the pattern says "' + ctx.docWord + '"'); conf += 0.05; }
+    if (!tn && !ink && !name && !ctx.docWord) conf = Math.min(conf, 0.45);
+    conf = Math.max(0.05, Math.min(0.97, conf));
+    var c = emptyPictureChart(n, name);
+    c.source = c.kind = 'picture-grid';
+    c.confidence = Math.round(conf * 100) / 100;
+    c.reasons = reasons;
+    c.cols = cols; c.rows = rows;
+    c.pitch = { x: round1(pitchX), y: round1(pitchY) };
+    c.startRow = first; c.rowStep = step;
+    c.rowNos = [];
+    for (var k = 0; k < rows; k++) c.rowNos.push(first + k * step);
+    c.rowNosRead = read;
+    if (!read) reasons.push('row numbers not read: rows counted 1 to ' + rows + ' from the bottom');
+    c.labelSide = labelSide;
+    c.bbox = boxYUp(grid, H);
+    c.imageBox = boxYUp(box, H);
+    c.calib = {
+      top: Math.round(((grid.y0 + pitchY / 2) / H) * 1e4) / 1e4,
+      bottom: Math.round(((grid.y1 - pitchY / 2) / H) * 1e4) / 1e4,
+      rows: rows, x0: Math.round((grid.x0 / W) * 1e4) / 1e4, x1: Math.round((grid.x1 / W) * 1e4) / 1e4,
+      first: first, step: step
+    };
+    // a colour chart: flat cells, few symbols, more than one colour
+    var colour = lat.symFrac < 0.2 && lat.classes.length >= 2 && lat.classes.length <= 16;
+    c.colour = colour;
+    if (colour) {
+      var known = lat.cellClass.filter(function (x) { return x >= 0; }).length / lat.cellClass.length;
+      if (known < 0.8) c.colour = colour = false;
+    }
+    if (colour) {
+      var names = nameClasses(lat.classes);
+      var keyMap = ctx.keyMap || {};
+      c.legend = lat.classes.map(function (k, i) {
+        var label = keyMap[i] || names[i];
+        return { sym: 'c' + (i + 1), meaning: label, color: label, fill: hex(k.rgb), kind: 'colour', count: k.n, fromKey: !!keyMap[i] };
+      });
+      c.cells = [];
+      for (var rb = 0; rb < rows; rb++) {
+        var top = rows - 1 - rb, row = [];
+        for (var cc = 0; cc < cols; cc++) {
+          var v = lat.cellClass[top * cols + cc];
+          row.push(v >= 0 ? 'c' + (v + 1) : '?');
+        }
+        c.cells.push(row);
+      }
+      reasons.push(lat.classes.length + ' colours' + (Object.keys(keyMap).length ? ', matched to the key' : ''));
+      var unk = 0;
+      c.cells.forEach(function (row) { row.forEach(function (x) { if (x === '?') unk++; }); });
+      if (unk) c.unknown = [{ sym: '?', count: unk, at: null }];
+    }
+    return c;
+  }
+
+  /** One page's pictures -> candidates. raw: [{ im, i, s, res, canvas }] */
+  function pageCandidates(n, L, raw, ctx) {
+    var out = [];
+    raw.forEach(function (p) {
+      var res = p.res;
+      if (!res || !res.ok) return;
+      var got = [];
+      (res.lattices || []).forEach(function (lat) {
+        var c = gridCandidate(n, L, p.im, p.i, p.s, lat, { docWord: ctx.docWord, keyMap: p.keyMaps ? p.keyMaps[res.lattices.indexOf(lat)] : null });
+        if (!c) return;
+        if (got.some(function (o) { return boxesTouch(o.bbox, c.bbox, -1); })) return;
+        got.push(c);
+      });
+      if (got.length) { out = out.concat(got); return; }
+      // no lattice: a picture the words name as a chart, or ruled rows in a pattern that says "chart"
+      var photo = res.tone && (res.tone.levels > 160 || res.tone.white < 0.25);
+      if (photo) return;
+      var gbox = { x0: p.im.box.x0, y0: p.im.box.y0, x1: p.im.box.x1, y1: p.im.box.y1 };
+      var name = pictureName(L, p.i, gbox, 8);
+      var named = name && CHART_WORD.test(name);
+      var ruled = res.rowsOnly && ctx.docWord && !ctx.otherCharts;
+      if (!named && !ruled) return;
+      var c = emptyPictureChart(n, named ? name.replace(/\s*:\s*$/, '') : null);
+      c.reasons = [];
+      var conf = 0.25;
+      if (named) { c.reasons.push('it is called "' + name + '"'); conf += 0.25; }
+      if (res.rowsOnly) { c.reasons.push('about ' + res.rowsOnly.real + ' ruled rows, but no even columns to measure'); conf += 0.1; }
+      if (ctx.docWord) { c.reasons.push('the pattern says "' + ctx.docWord + '"'); conf += 0.05; }
+      c.reasons.push('the rows could not be measured: mark the top and bottom rows once');
+      c.confidence = Math.round(Math.min(0.7, conf) * 100) / 100;
+      c.bbox = boxYUp(gbox, L.height);
+      c.imageBox = c.bbox;
+      out.push(c);
+    });
+    return out;
+  }
+
+  /**
+   * Picture charts on every page (or opts.pages). opts.charts: the vector
+   * scan's [{page, charts}] (their boxes are not looked at again).
+   */
+  function pictures(handle, opts) {
+    opts = opts || {};
+    if (!pictureAvailable(handle)) return Promise.resolve([]);
+    var total = handle.numPages || (handle.doc && handle.doc.numPages) || 0;
+    var pages = (opts.pages || []).slice();
+    if (!pages.length) for (var i = 1; i <= Math.min(total, opts.maxPages || 400); i++) pages.push(i);
+    var known = {};
+    var otherCharts = false;
+    (opts.charts || []).forEach(function (r) {
+      known[r.page] = (r.charts || []).filter(function (c) { return c.source !== 'image' && c.bbox; });
+      if (known[r.page].length) otherCharts = true;
+    });
+    var perPage = [], docWord = null, picturesLeft = opts.maxPictures || 60;
+    var chain = Promise.resolve();
+    pages.forEach(function (n, pi) {
+      chain = chain.then(function () {
+        if (isCancelled(opts.signal)) { var e = new Error('Cancelled'); e.name = 'AbortError'; throw e; }
+        var t0 = Date.now();
+        return handle.layout(n, { signal: opts.signal }).then(function (L) {
+          if (!docWord) (L.lines || []).some(function (ln) { docWord = chartWordIn(ln.text); return !!docWord; });
+          var raw = [], work = Promise.resolve();
+          var mine = known[n] || [];
+          (L.images || []).forEach(function (im, idx) {
+            var b = im.box, w = b.x1 - b.x0, h = b.y1 - b.y0;
+            if (w < 72 || h < 54 || im.mask) return;
+            if (im.px && (im.px.w < 60 || im.px.h < 60)) return;
+            var ybox = boxYUp(b, L.height);
+            if (mine.some(function (c) { return boxesTouch(c.pageBox || c.bbox, ybox, -4); })) return;
+            if (picturesLeft <= 0) return;
+            picturesLeft--;
+            work = work.then(function () {
+              var s = Math.max(1.5, Math.min(4, 1800 / Math.max(w, h)));
+              return handle.renderRegion(n, b, { scale: s, signal: opts.signal }).then(function (cv) {
+                var px = imageDataOf(cv);
+                if (!px) return;
+                return measurePicture(px).then(function (res) { raw.push({ im: im, i: idx, s: s, res: res }); });
+              }, function (err) { if (err && err.name === 'AbortError') throw err; });
+            });
+          });
+          return work.then(function () {
+            // colour charts: the key's swatches on the same page
+            var colourLat = raw.some(function (p) { return p.res && (p.res.lattices || []).some(function (l) { return l.symFrac < 0.2 && l.classes.length >= 2; }); });
+            if (!colourLat) return;
+            return keySwatches(handle, n, L, 3).then(function (sw) {
+              if (sw.length < 2) return;
+              raw.forEach(function (p) {
+                if (!p.res || !p.res.lattices) return;
+                p.keyMaps = p.res.lattices.map(function (l) { return matchKey(l.classes, sw); });
+              });
+            });
+          }).then(function () {
+            perPage.push({ page: n, L: L, raw: raw, ms: Date.now() - t0 });
+            if (typeof opts.onProgress === 'function') { try { opts.onProgress({ page: n, of: pages.length, index: pi }); } catch (e) { /* ignore */ } }
+          });
+        });
+      });
+    });
+    return chain.then(function () {
+      var ctx = { docWord: docWord, otherCharts: otherCharts };
+      var res = perPage.map(function (p) {
+        var o = { page: p.page, charts: pageCandidates(p.page, p.L, p.raw, ctx), ms: p.ms };
+        if (opts.debug) o.debug = p.raw.map(function (q) { return { image: q.i, scale: q.s, res: q.res, keyMaps: q.keyMaps || null }; });
+        return o;
+      });
+      // ruled-rows-only pictures are offered only when nothing better was found anywhere
+      var anyGrid = res.some(function (r) { return r.charts.some(function (c) { return c.kind === 'picture-grid'; }); });
+      if (anyGrid) res.forEach(function (r) { r.charts = r.charts.filter(function (c) { return c.kind !== 'picture' || /called/.test(c.reasons.join(' ')); }); });
+      return res;
+    });
+  }
+
   var api = {
     version: VERSION,
+    // wave K (knit-charts): picture charts
+    pictures: pictures,
+    measurePicture: measurePicture,
+    pictureAvailable: pictureAvailable,
+    _picCore: PicCore,
+    _colourName: colourName,
+    _keyLabel: keyLabel,
+    // wave K (knit-ui)
+    keyColours: keyColours,
+    rowBand: rowBand,
+    cellBox: cellBox,
+    cellAt: cellAt,
+    doneCols: doneCols,
+    colourRuns: colourRuns,
+    colourOf: colourOf,
+    calib: calib,
+    calibBand: calibBand,
     fromHandle: fromHandle,
     scan: scan,
     fromPageData: fromPageData,

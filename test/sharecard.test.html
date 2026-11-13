@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Share card (ShareCard) tests</title>
+<link rel="stylesheet" href="../css/app.css">
+<link rel="stylesheet" href="../css/themes.css">
+<style>
+  .t-page { font: 14px/1.4 Menlo, Consolas, monospace; background:#111; color:#eee; padding:16px; }
+  .pass { color:#7bd389; } .fail { color:#ff6b6b; background:#2a1414; }
+  .group { margin-top:18px; font-weight:bold; color:#9cf; border-bottom:1px solid #333; padding-bottom:4px; }
+  #summary { margin-top:20px; font-size:18px; font-weight:bold; } #summary.ok { color:#7bd389; } #summary.bad { color:#ff6b6b; }
+  .note { color:#aaa; } #cards canvas { width: 240px; height: 240px; margin: 4px; }
+</style>
+</head>
+<body>
+<div class="t-page">
+<h1>ShareCard — a picture card of a project (wave K)</h1>
+<p class="note"><code>js/sharecard.js</code> alone: the words, the drawing (size, theme colours probed on the
+  canvas), the PNG and the share / download fallback. The cards below are drawn in three themes.</p>
+<div id="cards"></div>
+<div id="out"></div>
+<div id="summary">running…</div>
+</div>
+<script src="../js/sharecard.js"></script>
+<script>
+'use strict';
+var out = document.getElementById('out'), passed = 0, failed = 0;
+function log(ok, label, detail) {
+  if (ok) passed++; else failed++;
+  var d = document.createElement('div'); d.className = ok ? 'pass' : 'fail';
+  d.textContent = (ok ? 'PASS' : 'FAIL') + ' - ' + label + (detail ? '  (' + detail + ')' : '');
+  out.appendChild(d);
+}
+function group(t) { var d = document.createElement('div'); d.className = 'group'; d.textContent = t; out.appendChild(d); }
+function eq(a, b, label) { var ok = JSON.stringify(a) === JSON.stringify(b); log(ok, label, ok ? '' : 'expected ' + JSON.stringify(b) + ' got ' + JSON.stringify(a)); }
+function ok(c, label, d) { log(!!c, label, c ? '' : d); }
+function hexRgb(h) { var m = /^#?([0-9a-f]{6})$/i.exec(String(h).trim()); if (!m) return null; var n = parseInt(m[1], 16); return [n >> 16 & 255, n >> 8 & 255, n & 255]; }
+function px(c, x, y) { var d = c.getContext('2d').getImageData(x, y, 1, 1).data; return [d[0], d[1], d[2]]; }
+function close(a, b, tol) { return a && b && Math.abs(a[0] - b[0]) <= tol && Math.abs(a[1] - b[1]) <= tol && Math.abs(a[2] - b[2]) <= tol; }
+var S = window.ShareCard;
+var DAY = 86400000;
+var start = Date.UTC(2026, 8, 14, 12), end = Date.UTC(2026, 10, 2, 12);
+
+(async function () {
+  group('words');
+  eq(S.hoursText(0), '', 'no time: nothing said');
+  eq(S.hoursText(45 * 60000), '45 min', 'minutes');
+  eq(S.hoursText((12 * 60 + 5) * 60000), '12 h 5 min', 'hours and minutes');
+  eq(S.hoursText(3 * 3600000), '3 h', 'whole hours');
+  eq(S.dateText(start), '14 Sep 2026', 'a date');
+  eq(S.fileName({ name: 'Bee 2.0 (Medium)!' }), 'thready-or-not-bee-2-0-medium.png', 'a safe file name');
+  eq(S.fileName({}), 'thready-or-not-project.png', 'no name');
+  eq(S.textLines({ craft: { name: 'Crochet' }, status: 'finished', startedAt: start, finishedAt: end, elapsedMs: 9 * 3600000,
+    progress: { text: 'Finished' } }),
+    ['Crochet · Finished', '14 Sep 2026 – 2 Nov 2026', '9 h of making', 'Finished'], 'a finished project’s lines');
+  eq(S.textLines({ craft: { name: 'Cross-stitch' }, status: 'active', startedAt: start, progress: { text: '41% · 12 of 34 colours' } }),
+    ['Cross-stitch · In progress', 'Started 14 Sep 2026', '41% · 12 of 34 colours'], 'an in-progress project’s lines');
+
+  group('theme');
+  var th = S.theme({ getPropertyValue: function (n) { return { '--bg': ' #101820 ', '--primary': '#c8553d' }[n] || ''; } });
+  eq([th.bg, th.primary, th.text], ['#101820', '#c8553d', '#2b2118'], 'CSS variables read, fallbacks for the rest');
+  eq(S.theme({}).bg, '#fff8ee', 'no variables: the warm default');
+
+  group('drawing');
+  var theme = { bg: '#102030', surface: '#f0f0f0', text: '#ffffff', muted: '#cccccc', primary: '#c8553d',
+    primaryText: '#ffffff', accent: '#00aa66', font: 'sans-serif', display: 'sans-serif' };
+  var pic = document.createElement('canvas'); pic.width = 200; pic.height = 100;
+  var pg = pic.getContext('2d'); pg.fillStyle = '#ff00ff'; pg.fillRect(0, 0, 200, 100);
+  var c = S.draw(document.createElement('canvas'), { name: 'Sampler', craft: { id: 'crossstitch', name: 'Cross-stitch', emoji: '🧵' },
+    status: 'active', startedAt: start, elapsedMs: 3 * 3600000, progress: { text: '50%', pct: 0.5 }, picture: pic }, { size: 1080, theme: theme });
+  eq([c.width, c.height], [1080, 1080], 'a 1080 × 1080 card');
+  ok(close(px(c, 5, 1075), hexRgb(theme.bg), 40) || close(px(c, 540, 1075), hexRgb(theme.bg), 4), 'the background is the theme’s --bg', String(px(c, 540, 1075)));
+  ok(close(px(c, 540, 364), [255, 0, 255], 4), 'the craft’s picture is drawn, centred in the frame', String(px(c, 540, 364)));
+  ok(close(px(c, 76, 364), hexRgb(theme.surface), 4), 'contained, not cropped: the frame shows beside a wide picture', String(px(c, 76, 364)));
+  ok(close(px(c, 300, 712), hexRgb(theme.accent), 4), 'the progress bar is filled to half in --accent', String(px(c, 300, 712)));
+  ok(close(px(c, 800, 712), hexRgb(theme.surface), 4), '… and empty past half', String(px(c, 800, 712)));
+  var small = S.draw(document.createElement('canvas'), { name: 'x' }, { size: 100, theme: theme });
+  eq(small.width, 320, 'a size below 320 is raised to 320');
+  var big = S.draw(document.createElement('canvas'), { name: 'x' }, { size: 9000, theme: theme });
+  eq(big.width, 2048, 'capped at 2048');
+  var noPic = S.draw(document.createElement('canvas'), { name: 'A very long project name that will not fit on one line at all, really', emoji: '🐑', status: 'finished' }, { size: 540, theme: theme });
+  ok(close(px(noPic, 150, 356), hexRgb(theme.accent), 4), 'finished: the bar is full', String(px(noPic, 150, 356)));
+
+  group('export');
+  var blob = await S.toBlob(c);
+  ok(blob && blob.type === 'image/png' && blob.size > 1000, 'toBlob gives a PNG', blob && blob.type + ' ' + blob.size);
+  var sig = new Uint8Array(await blob.slice(0, 8).arrayBuffer());
+  eq(Array.prototype.slice.call(sig, 0, 4), [137, 80, 78, 71], 'with the PNG signature');
+  var clicked = null;
+  var oc = HTMLAnchorElement.prototype.click;
+  HTMLAnchorElement.prototype.click = function () { clicked = this.download; };
+  var res = await S.share(blob, { filename: 'thready-or-not-sampler.png', download: true });
+  HTMLAnchorElement.prototype.click = oc;
+  eq([res, clicked], ['downloaded', 'thready-or-not-sampler.png'], 'download fallback (no Web Share with files)');
+  eq(await S.share(null), 'failed', 'no blob: failed, never a throw');
+
+  group('the 3D still: handle.snapshot (knit-3d), else the old path');
+  var order = [], gotOpts = null;
+  var still = document.createElement('canvas');
+  var fake = { finishBake: function () { order.push('bake'); },
+    snapshot: function (o) { order.push('snap'); gotOpts = o; return still; } };
+  eq(S.snapshot(fake, { size: 900 }) === still, true, 'the handle’s snapshot is the picture');
+  eq(order, ['bake', 'snap'], 'a pending bake is finished first');
+  eq([gotOpts.size, gotOpts.crop, gotOpts.pad, gotOpts.background], [900, true, 0.06, null], 'cropped to the piece, transparent');
+  eq(S.snapshot({}), null, 'an older renderer with no snapshot: null (the caller falls back)');
+  eq(S.snapshot({ snapshot: function () { return null; } }), null, 'nothing drawn: null');
+  eq(S.snapshot({ snapshot: function () { throw new Error('lost'); } }), null, 'a lost context never throws out');
+  eq(S.snapshot(null), null, 'no handle: null');
+  if (window.Diagram && typeof window.Diagram.mount === 'function') {
+    var gl = document.createElement('canvas');
+    gl.style.cssText = 'width:300px;height:300px;position:absolute;left:-9999px';
+    document.body.appendChild(gl);
+    var h = null;
+    try { h = window.Diagram.mount(gl, { interactive: false, reducedMotion: true }); } catch (e) { h = null; }
+    if (h && typeof h.snapshot === 'function' && window.DiagramGeo) {
+      log(true, 'the real renderer has handle.snapshot');
+    } else {
+      log(true, 'the real renderer here has no snapshot (or no WebGL): the old frame copy is used');
+    }
+    try { if (h) h.destroy({ release: true }); } catch (e) { /* ignore */ }
+    gl.parentNode.removeChild(gl);
+  }
+
+  ['stardew-spring', 'stardew-night', 'dragon-pixel'].forEach(function (t) {
+    document.documentElement.setAttribute('data-theme', t);
+    var cc = S.draw(document.createElement('canvas'), { name: 'Bee 2.0', craft: { name: 'Crochet' }, emoji: '🐝', status: 'active',
+      startedAt: start, elapsedMs: 5 * 3600000, progress: { text: 'Body · Rnd 6 of 17', pct: 0.35 } }, { size: 540 });
+    cc.title = t;
+    document.getElementById('cards').appendChild(cc);
+  });
+  document.documentElement.removeAttribute('data-theme');
+
+  var el = document.getElementById('summary');
+  el.textContent = passed + ' passed, ' + failed + ' failed';
+  el.className = failed ? 'bad' : 'ok';
+})().catch(function (e) { log(false, 'threw ' + (e && e.stack || e)); var el = document.getElementById('summary'); el.textContent = passed + ' passed, ' + failed + ' failed'; el.className = 'bad'; });
+</script>
+</body>
+</html>

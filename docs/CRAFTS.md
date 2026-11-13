@@ -1,7 +1,11 @@
 # Crafts: the plugin contract
 
 Thready or Not started as a crochet counter. From September 2026 it also serves
-**cross-stitch** and **sewing**, and from October 2026 (wave H) **knitting**. Each
+**cross-stitch** and **sewing**, and from October 2026 (wave H) **knitting**. Wave K
+(November 2026) gave every craft the shell's shared surfaces — working mode, the check
+sheet, the share card, the page viewer, templates, count events and work sessions, heavy
+data in IndexedDB, the opt-in text reader — through new optional registration fields;
+they are collected in **"Wave K: shared surfaces"** at the end of this document. Each
 craft is a module in its own files that plugs into the existing shell (home
 screen, project header, sheets, themes, export/import, service worker). The
 crochet code paths stay exactly as they are; a project with `craft: 'crochet'`
@@ -47,6 +51,21 @@ js/app-knitting.js      # window.AppKnitting – registers knitting as a counter
                         #   file: its counter widgets live in css/app.css "Wave H — knitting on the counter")
 test/xstitch.test.html, test/sewing.test.html, test/blobstore.test.html
 test/knits.test.html, test/knits.fixtures.html, test/knit-counter.test.html, test/knit-chart.test.html
+
+# wave K (contracts in docs/wave-k/api/<worker>.md)
+js/workmode.js          # window.WorkMode   – working mode for any craft (shell; crochet and knitting run on it too)
+js/checksheet.js        # window.CheckSheet – the one Check shape, sheet and ✓ ≈ ≠ ? badge
+js/sharecard.js         # window.ShareCard  – the 1080 px "Share a picture" card, on the device
+js/pageviewer.js        # window.PageViewer – one pinch / zoom / pan / outline viewer for page images
+js/ocr.js               # window.Ocr        – loader for the opt-in text reader (engine in js/vendor/tesseract/,
+                        #   never precached; downloaded only on the maker's tap)
+js/xstitch-render.js    # window.XSRender   – stitched-fabric WebGL renderer, loupe, time-lapse, framed picture
+js/xstitch-keyread.js   # window.XSKeyRead  – a colour key read from a picture (digits solved as a cipher)
+js/app-xstitch-extras.js# window.XStitchExtras – self-contained cross-stitch sheets (⋯ menu), css/xstitch-extras.css
+js/sew-figures.js       # window.SewFigures – a step's own figure, swatches, tape-up map (pure + small widgets)
+js/sew-quilt.js         # window.SewQuilt   – quilt-top model, cutting board to scale, unit picture
+js/app-sewing-extras.js # window.SewingExtras – self-contained sewing sheets (⋯ menu), css/sewing-extras.css
+css/knitting.css        # knitting's own widgets (app-knitting.js paints through def.counterPaint)
 ```
 
 Script order in `index.html` (after the existing tags, in this order):
@@ -61,6 +80,12 @@ them, so registration order never matters. Every new file is precached in
 `sw.js` and `CACHE_VERSION` is bumped on release. `css/xstitch.css` and
 `css/sewing.css` are linked after `css/themes.css` and use ONLY the theme
 variables listed in SPEC.md ("Themes contract") plus their own layout numbers.
+**The script and stylesheet order as wired since wave K** is `docs/wave-k/api/shell-ui.md` §8
+(the shared surfaces load before `app.js`; `xstitch-read`, `xstitch-render` and
+`xstitch-keyread` after `xstitch.js`; `sew-figures` and `sew-quilt` after `sewing.js`; the
+extras files after their craft's app file); `test/sw.test.html` asserts that order, that every
+script and stylesheet is precached, and that nothing under `js/vendor/tesseract/` is.
+`CACHE_VERSION` is generated (`tools/sw-version.sh`), never hand-bumped.
 
 A module that fails to load, or a browser that cannot run it, must never break
 crochet: every shell entry point checks `crafts[id]` exists before calling it
@@ -141,8 +166,8 @@ Template.craftData: object|null                        // seed craftData for pro
   clone's new id, with the craftData blob keys rewritten. Only an older `.json`
   backup leaves the images out. Cross-stitch's copy says so ("saved with the
   project; Back up now includes them"); sewing's page-image copy in
-  `js/app-sewing.js` (`STORED_HERE` and the "Keep the pages" hint) still says the
-  pages are not in the backup and needs the same change. A craft that stores page images must
+  `js/app-sewing.js` (`STORED_HERE`) says the same since wave K ("go into a .thready backup";
+  a plain .json backup leaves them out). A craft that stores page images must
   keep to the `p:<projectId>:<kind>:<n>` key convention so the backup, the
   Keep-both rekey and the boot-time orphan sweep can find them; the rekey
   rewrites any craftData **string value** that starts with `p:<oldId>:`, so keep
@@ -217,7 +242,15 @@ def = {
   settingsFields(body, ctx),         // the craft's own section in Settings → Crafts (any craft)
   faq: [{ q, a }],                   // Settings → Help entries (same as ctx.addFaq in onInit)
   tourId: string,                    // counter craft: the tour "Show me around" starts
-  label: string                      // alias of `name`
+  label: string,                     // alias of `name`
+  // --- wave K (see "Wave K: shared surfaces"); every one optional and feature-detected ---
+  workMode: spec,                    // working mode on the shell's engine (js/workmode.js)
+  template: { fromProject(p), fields?(body, draft, ctx), describe?(tpl) },  // forwarded to Store.setCraftHooks
+  settings: { defaults?, normalize? },   // the craft's settings bag (forwarded likewise)
+  copy: { dropLabel, homeEmpty?, allDone?, importEmpty?, newProjectHint? },
+  sharePicture(project, { size }) → canvas | Promise<canvas> | null,   // the craft's picture on the share card
+  shareProgress(project),            // the card's progress line (optional)
+  counterPaint(p, prt, nodes)        // counter craft only: paint own widgets after each counter paint
 }
 ctx = {
   // the shell's helpers, so craft UIs look identical to the rest of the app
@@ -231,14 +264,22 @@ ctx = {
   prefersReducedMotion, cssVar,                              // cssVar(getComputedStyle(root), '--primary', fallback)
   isPdfFile, firstFile, pdfDropZone(zoneOpts) → node        // the existing PDF drop zone, reusable: see below
                                                              // (`readPdfInto` is the same builder under its old name)
+  // wave K
+  workMode: { open, close, isOn, refresh, button(label?) },  // for the craft's def.workMode
+  counted(ev),                                               // the one announcement / haptic policy
+  check: { badge, line, open, guard, demote, fromCountReport, fromXStitch },
+  pageViewer(opts), sharePicture(projectId),
+  ocr: { available, sizeLabel, offerButton, ensure, mark, check, LABEL },   // the opt-in text reader
+  fillSizeMarked(node, text, part, project)                  // pattern text with the chosen size marked
 }
 ```
 
 - **Announcements** (`ctx.announce`) follow one policy in every craft: milestones only —
   a row/round, group, piece, part or project done, a colour done, a step done, a block or
   cut count moved, and every 50th stitch only where there is no grouping — never a single
-  stitch. Calls landing together are spoken together. (Cross-stitch still announces every
-  100th stitch.)
+  stitch. Calls landing together are spoken together. Since wave K the policy is one function,
+  `ctx.counted(ev)` (below); cross-stitch moved to it (every 50th, from every 100th) and keeps
+  its old cadence only as a fallback for an older shell.
 - **Focus**: a craft that rebuilds a list by clearing it (steps, cutting chips, page
   thumbnails) wraps the rebuild in `ctx.preserveFocus(fn)`; give controls a
   `data-focus-key` so the replacement can be found.
@@ -272,7 +313,10 @@ ctx = {
 - The **home card** shows `Store.summaryFor(p)` and a small craft emoji badge
   when more than one craft is registered.
 - The **⋯ menu** for a chart or steps craft's project: `Import pattern` → `def.openImportSheet`;
-  `Parts`, `Yarn colours` and `Save as template` are hidden (v1); `def.menuItems`
+  `Parts` and `Yarn colours` are hidden (`Save as template` shows for every craft since wave K,
+  seeded by `def.template.fromProject`, else name, emoji and checklist only); `def.menuItems`
+  (and, from wave K, the craft's extras module items, below) and the shell's
+  `⤢ <workMode label>` and `🖼️ Share a picture`
   are inserted above `Notes`; `Checklist`, `Notes`, `History`, `Status`,
   `Export backup`, `Show me around` stay. A counter craft's project keeps
   crochet's whole menu (Parts, Import pattern, Yarn colours, Save as template …)
@@ -654,6 +698,9 @@ Knitting"); this section is the craft's shape.
   (gitignored, copyrighted, never committed); skips gracefully when absent. It
   extracts through `PdfText` and caches the text in sessionStorage, so after a
   change to `js/pdftext.js` run it in a fresh tab.
+- Run suites headless since wave K: `bash tools/headless-suite.sh <page> …` or `--all`
+  (real time by default; see `HANDOFF.md` "How to work on it" and `docs/wave-k/suites.md`).
+  The Browser pane is for looking.
 - Browser check at 375×812 in the Browser pane (on localhost the service worker
   is network-first, so a reload is enough; see `HANDOFF.md`), exercise create →
   import → count → undo → export/import round-trip → delete, then confirm a
@@ -663,14 +710,112 @@ Knitting"); this section is the craft's shape.
   `HANDOFF.md`).
 - A counter craft built on `Patterns.createParser` shares the crochet engine:
   a change to either `js/patterns.js` or the craft's profile re-runs both
-  crafts' parser suites (crochet's patterns 1037 / patterns.fixtures 829 are
-  the gate that nothing crochet moved), plus `test/store-safety.test.html`,
+  crafts' parser suites (crochet's patterns 1112 / patterns.fixtures 905 since wave H are
+  the gate that nothing crochet moved; they were 1037 / 829 when this rule was written), plus `test/store-safety.test.html`,
   `test/templates.test.html`, `test/crafts.test.html` and
   `test/diagram-model.test.html`. Fixture assertions are named after the
   research file's hard-line IDs, and a line the parser is known to miss is
   listed as KNOWN with its cause rather than loosened.
 - Performance: a stitch tap or "mark done" must update the DOM in < 5 ms; chart
   pan/zoom must hold 60 fps on a 200×250 chart (canvas, not DOM cells).
+
+## Wave K: shared surfaces
+
+What each worker built, measured and left: `docs/wave-k/<worker>.md`; the exact signatures are
+`docs/wave-k/api/<worker>.md` (the store side `shell-data.md`, the app side `shell-ui.md`). This
+section is the shape of the contract and the rules a craft must keep; it does not repeat the
+signatures. Every field and function is optional and **feature-detected on both sides**: a craft
+checks the global / the `ctx` key before calling it, the shell checks the `def` field, and a
+missing one gives today's behaviour.
+
+**Registration fields added.** On `App.registerCraft(def)`: `workMode`, `template`, `settings`,
+`copy`, `sharePicture`, `shareProgress`, `counterPaint` (listed in the `def` block above). On
+`Store.registerCraft`: `template: { fromProject, blank? }`, `settings: { defaults, normalize }`,
+`heavy: { fields, minBytes }`. The shell forwards `def.template` / `def.settings` with
+`Store.setCraftHooks(id, …)`, so a craft may declare them on either side. As built: cross-stitch
+registers `heavy` and `template` from `js/xstitch.js` and `workMode`, `sharePicture`, `copy` from
+`js/app-xstitch.js`; sewing registers `workMode`, `sharePicture`, `copy` (no `template` hook yet,
+so a sewing template keeps name, emoji and checklist only); knitting registers `counterPaint`.
+
+- **Working mode** (`def.workMode`, `docs/wave-k/api/shell-ui.md` §1). The craft supplies a
+  surface and actions (`primary`, `forward`, `back`, `undo`, `secondary`, `readout`, `panel`,
+  `keys`); the shell owns the full-screen layout in both orientations, the header, the corner
+  buttons, Options with ☀ Keep awake, ✕ / Escape, the keys (Space / Enter primary, arrows,
+  **PageDown / PageUp for a page-turner pedal**), the remembered state (`settings.focusProjects`,
+  no undo), announcements and reduced motion. `surfaceUnderHud: true` lets the surface fill the
+  whole screen under the HUD (cross-stitch's chart); `api.insets()` still reports the free
+  rectangle. Crochet and knitting run through the same engine (`adopt: true`) with no visible
+  change. `test/workmode.test.html` has a demo craft to copy.
+- **Check sheet** (`window.CheckSheet`, §2). One shape for "what the pattern prints against what
+  the app read": `{ verdict: 'exact'|'close'|'off'|'unchecked', summary, rows: [{ label, printed,
+  read, verdict, why, page }] }`, one sheet, one badge (✓ ≈ ≠ ?). **The rule: an `off` check
+  demotes the primary button behind a plain "Use it anyway?" confirm (`ctx.check.demote` /
+  `guard`); it never blocks and never hides the disagreement.** `unchecked` (nothing printed to
+  check against) does not demote. Producers: crochet / knitting `countReport` (`fromCountReport`;
+  `off` when a fifth of the counted rows disagree), the cross-stitch grid and picture readers
+  (`fromXStitch`), `Sewing.importCheck`, `ctx.ocr.check` (every OCR line a `?` row, never ✓).
+- **Share card** (`window.ShareCard`, §3): ⋯ → 🖼️ Share a picture on every project; the craft's
+  `sharePicture(project, { size })` gives the picture (crochet and knitting get a 3D still from
+  `handle.snapshot()`).
+- **Templates for every craft** (§4, shell-data §2): `template.fromProject(project)` returns the
+  seed with progress dropped; a template whose craftData is over 256 KB of JSON is refused with a
+  plain sentence (templates live in localStorage). "＋ New template" asks for the craft first.
+- **Count events and sessions** (shell-data §5, shell-ui §5). After each user action's own
+  `updateCraftData`, a craft calls **`Store.counted({ projectId, n, unit, part? })`** once, with
+  the units that action really moved (a whole-colour mark of 1,204 stitches is one event, n 1204;
+  an unmark is negative). That records `Project.activity` (sessions split after 10 idle minutes,
+  day rollups, totals) and feeds `Store.pace` (≈ finish only after 5 sessions) and goals
+  (`Store.setGoal` / `goalStatus`). It does not speak: the craft speaks through **`ctx.counted`**,
+  which applies the one announcement policy and haptics. The crochet / knitting counter records
+  its own taps (`origin: 'counter'`, never announced twice).
+- **Mark log** (`Store.logMarks(id, [[cellIndex, 1|0], …])`, shell-data §5): a chart craft logs
+  every mark and unmark (bulk marks via `XStitch.markDiff`); chunks go to BlobStore as
+  `p:<id>:marks:<seq>` and travel in `.thready` files. It is the only source of a real
+  time-lapse; without it the replay is labelled "not your real order".
+- **Heavy data off localStorage** (shell-data §4). Opt in with `heavy: { fields, minBytes }`
+  (dotted paths to **string leaves** in craftData; cross-stitch: `chart.cells.data`,
+  `progress.done`, 32 KB). Treat heavy values as immutable (assign a new string, never mutate).
+  After a reload such a project is not ready until **`Store.whenReady(id)`** has read the
+  IndexedDB blobs back; the shell calls it before `renderProject` and shows "Opening …" or an
+  honest "Part of this project is missing" card (`Store.discardMissingHeavy` behind a confirm).
+  `updateCraftData` on a project that is not ready returns `null` and changes nothing; backups
+  hydrate first and write heavy values inline.
+- **Profile and settings** (shell-data §3): `Store.profile()` (units, measurements, floss and
+  fabric stash; `Store.setMeasurement` / `measurement(key, unit)`, `flossOwned` /
+  `adjustFloss` / `flossAllocation`) is shared by every craft and shown in Settings → Your
+  profile. Backups now restore settings (merge by default; device-only keys never).
+- **Step edits and notes** (shell-data §6): `Store.stepKey` / `setStepEdit` / `setStepNote` /
+  `applyStepOverlay`, keyed by a hash of the printed text so a re-import finds them. Sewing keeps
+  its edits in its own craftData instead (`Sewing.editStep` / `setStepNote`); knitting uses the
+  overlay for row notes.
+- **Page viewer** (`window.PageViewer`, `ctx.pageViewer`, §7) and **the opt-in text reader**
+  (`ctx.ocr`, §9). The reader is downloaded only on the maker's tap (about 5 MB once, into a
+  `thready-ocr-*` cache `sw.js` never deletes); anything it reads is marked "Read from a picture
+  — check it" (`ctx.ocr.mark`) and never accepted without a tap. A craft that runs it calls
+  `Ocr.terminate()` after a batch. Use it only for the two jobs the spike proved
+  (`docs/wave-k/ocr.md`): a **cropped** colour key checked against the DMC list, and scanned
+  single-column prose. Never for size tables or whole chart pages.
+
+**Extras modules** (cross-stitch `window.XStitchExtras`, sewing `window.SewingExtras`). A craft's
+self-contained sheets live in their own file so two workers never share one. The contract is fixed
+and tiny: **`Extras.menuItems(project) → [{ id, label, icon, hint }]`** (only what applies to this
+project; an item whose engine function is missing is simply not listed) and **`Extras.open(id,
+project, opts) → boolean`** (false for an unknown id; `opts = { ctx, app }`). The craft's app file
+lists the items in ⋯ and may deep-link with `open`; the extras file never edits the app file and
+reaches back only through feature-detected hooks (`XStitchApp.repaint / dataOf / picture`,
+`SewingApp.repaint / quiltModel / captureSwatches`, the `sewingextras:change` event). Item lists
+as built: `docs/wave-k/api/xs-extras.md`, `docs/wave-k/api/sew-extras.md`.
+
+**Counter crafts** gain `def.counterPaint(p, prt, nodes)`, called at the end of every counter
+paint (`nodes = { extra, patternLine, patternTag, patternText, … }`); the working-mode HUD mirrors
+those nodes, so a widget painted there shows in working mode too. The knitting store additions
+(stretch phases `Project.rowPhases`, `lineInfo`, `stretchInfo` / `endStretch`, `tapStitches`,
+markers that move) are knitting-only regions of `js/store.js`: `docs/wave-k/api/knit-store.md`.
+
+**Rules that carry over unchanged**: crochet never moves (every crochet suite keeps its count);
+every writer is one undo snapshot; estimates are marked ≈ and become a target only when the maker
+taps "Use"; units follow the pattern with a per-project switch; the pattern's own symbols and
+swatches are shown only when captured cleanly; nothing runs on a server.
 
 ## Build order
 

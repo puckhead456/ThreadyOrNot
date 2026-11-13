@@ -1,0 +1,917 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sewing visuals tests</title>
+<style>
+  body { font: 14px/1.4 Menlo, Consolas, monospace; background:#111; color:#eee; padding:16px; }
+  .pass { color:#7bd389; }
+  .fail { color:#ff6b6b; background:#2a1414; }
+  .skip { color:#c9a227; }
+  .info { color:#7fb8ff; white-space: pre-wrap; }
+  .group { margin-top:18px; font-weight:bold; color:#9cf; border-bottom:1px solid #333; padding-bottom:4px; }
+  #summary { margin-top:20px; font-size:18px; font-weight:bold; }
+  #summary.ok { color:#7bd389; }
+  #summary.bad { color:#ff6b6b; }
+  .note { color:#888; }
+</style>
+</head>
+<body>
+<h1>Sewing visuals (SewFigures, SewQuilt)</h1>
+<p class="note">Synthetic layouts (committed) always run. <code>?real=1</code> adds the real <code>tmp-pdf/sew-*.pdf</code>
+fixtures (read at runtime, skipped when absent, nothing from them committed); <code>?only=harmony</code> runs one fixture.
+Reviewer views: <code>?view=gallery&amp;f=sew-sundress</code> (every step beside its crop), <code>?view=quilt&amp;f=sew-freespirit-harmony-quilt&amp;page=12</code>.
+The fixture pass reads PDFs in real time, so run it in a real tab or a CDP-driven headless browser, not with <code>--dump-dom</code>.</p>
+<div id="out"></div>
+<div id="summary"></div>
+<script src="../js/pdftext.js"></script>
+<script src="../js/blobstore.js"></script>
+<script src="../js/sewing.js"></script>
+<script src="../js/sew-figures.js"></script>
+<script src="../js/sew-quilt.js"></script>
+<script>
+'use strict';
+var out = document.getElementById('out');
+var passed = 0, failed = 0, skipped = 0;
+function line(cls, text) { var d = document.createElement('div'); d.className = cls; d.textContent = text; out.appendChild(d); return d; }
+function log(ok, label, detail) {
+  if (ok) passed++; else failed++;
+  var t = (ok ? 'PASS' : 'FAIL') + ' - ' + label + (detail ? '  (' + detail + ')' : '');
+  line(ok ? 'pass' : 'fail', t);
+  if (!ok) console.error(t);
+}
+function eq(a, b, label) { log(a === b, label, a === b ? '' : 'got ' + JSON.stringify(a) + ', want ' + JSON.stringify(b)); }
+function near(a, b, tol, label) { log(Math.abs(a - b) <= tol, label, 'got ' + a + ', want ' + b + ' ± ' + tol); }
+function group(t) { line('group', t); }
+function skip(t) { skipped++; line('skip', 'SKIP - ' + t); }
+function info(t) { line('info', t); }
+var Q = (function () { var o = {}; location.search.replace(/^\?/, '').split('&').forEach(function (kv) { var p = kv.split('='); if (p[0]) o[p[0]] = decodeURIComponent(p[1] || ''); }); return o; })();
+
+// ---- probe helpers (dev only: open a fixture, read its pages) ----
+window.SVProbe = {
+  open: function (name) {
+    return fetch('../tmp-pdf/' + name + '.pdf').then(function (r) { return r.ok ? r.blob() : null; }).then(function (b) {
+      if (!b) return null;
+      return PdfText.open(new File([b], name + '.pdf', { type: 'application/pdf' }));
+    });
+  }
+};
+</script>
+<script>
+// =====================================================================
+// Synthetic layouts (committed; no fixture content)
+// =====================================================================
+function L(text, x0, y0, x1, y1) { return { text: text, box: { x0: x0, y0: y0, x1: x1, y1: y1 } }; }
+function B(x0, y0, x1, y1) { return { box: { x0: x0, y0: y0, x1: x1, y1: y1 } }; }
+var F = window.SewFigures, SQ = window.SewQuilt;
+
+function syntheticTests() {
+  group('geometry');
+  var G = F._geo;
+  var u = G.union({ x0: 0, y0: 0, x1: 10, y1: 10 }, { x0: 5, y0: -5, x1: 20, y1: 8 });
+  eq(JSON.stringify(u), '{"x0":0,"y0":-5,"x1":20,"y1":10}', 'union');
+  eq(G.gap({ x0: 0, y0: 0, x1: 10, y1: 10 }, { x0: 13, y0: 14, x1: 20, y1: 20 }), 5, 'gap is the distance between boxes');
+  eq(G.gap({ x0: 0, y0: 0, x1: 10, y1: 10 }, { x0: 5, y0: 5, x1: 20, y1: 20 }), 0, 'overlapping boxes have no gap');
+  eq(JSON.stringify(G.norm({ x0: 60, y0: 80, x1: 300, y1: 400 }, 600, 800)), '{"x0":0.1,"y0":0.1,"x1":0.5,"y1":0.5}', 'normalised to the page');
+  eq(G.cluster([B(0, 0, 10, 10), B(12, 0, 20, 10), B(100, 100, 110, 110)], 3).length, 2, 'touching boxes cluster, far ones do not');
+  eq(SQ._inPoly({ x: 5, y: 5 }, [[0, 0], [10, 0], [10, 10], [0, 10]]), true, 'point in polygon');
+  eq(SQ._inPoly({ x: 15, y: 5 }, [[0, 0], [10, 0], [10, 10], [0, 10]]), false, 'point outside polygon');
+  eq(SQ._inPoly({ x: 8, y: 2 }, [[0, 0], [10, 0], [0, 10]]), false, 'point outside a triangle but inside its box');
+
+  group('figure references and captions');
+  var r = F.refsIn('Fold the edges in (Figure 3). Then press, see Fig. 4 and Figure 3 again.');
+  eq(r.map(function (x) { return x.key; }).join('|'), 'figure 3|figure 4', 'refs found once each, in order');
+  eq(F.refsIn('Stitch as in DIAGRAM B 1, then (Diagram B2).').map(function (x) { return x.key; }).join('|'), 'diagram b1|diagram b2', '"DIAGRAM B 1" and "Diagram B2" both read');
+  eq(F.refsIn('Sew the figure-eight knot.').length, 0, '"figure-eight" is not a figure reference');
+  eq(F.captionKey('Figure 3'), 'figure 3', 'caption "Figure 3"');
+  eq(F.captionKey('(Fig. 12)'), 'figure 12', 'caption "(Fig. 12)"');
+  eq(F.captionKey('DIAGRAM B1'), 'diagram b1', 'caption "DIAGRAM B1"');
+  eq(F.captionKey('Figure 3 shows the pocket sewn to the front, right sides together, all round'), null, 'a sentence that starts with "Figure 3" is not a caption');
+  eq(F.captionKey('Fold the pocket'), null, 'ordinary text is not a caption');
+  eq(F.captionKey('Illustrations below show the lining'), null, '"Illustrations below" is not a caption (bathers p13)');
+  eq(F.refsIn('Follow the diagram of the pocket and the figure below.').length, 0, '"diagram of", "figure below" are not references');
+
+  group('step → figure: drawings in the step\'s own column space');
+  var W = 600, H = 800;
+  var s1 = 'Sew the bodice. With right sides together align the side front bodice to the centre front bodice and stitch a seam.';
+  var s2 = 'Join the lining. Place the lining over the shell, match the seams and stitch each neckline from shoulder to centre.';
+  var s3 = 'Shoulder seams. Working with the inside out, align the shoulder seams of the shell and stitch them together.';
+  var page6 = { page: 6, width: W, height: H, lines: [
+    L('1. Sew the bodice.', 40, 80, 200, 92),
+    L('With right sides together align the side front', 40, 96, 280, 108),
+    L('bodice to the centre front bodice and stitch a seam.', 40, 112, 285, 124),
+    L('Bodice Shell', 70, 300, 140, 310),
+    L('2. Join the lining.', 40, 330, 200, 342),
+    L('Place the lining over the shell, match the seams', 40, 346, 285, 358),
+    L('and stitch each neckline from shoulder to centre.', 40, 362, 285, 374),
+    L('3. Shoulder seams.', 320, 80, 480, 92),
+    L('Working with the inside out, align the shoulder', 320, 96, 560, 108),
+    L('seams of the shell and stitch them together.', 320, 112, 560, 124)
+  ], images: [B(50, 140, 270, 295)], drawings: [{ box: { x0: 60, y0: 390, x1: 270, y1: 560 }, paths: 40 }] };
+  var links = F.link([{ id: 'a', text: s1, page: 6 }, { id: 'b', text: s2, page: 6 }, { id: 'c', text: s3, page: 6 }], { 6: page6 });
+  eq(links.length, 3, 'one link per step');
+  eq(links[0].mode, 'figure', 'step 1: the drawing under its text is its figure');
+  log(links[0].rect && links[0].rect.y0 < 140 / H && links[0].rect.y1 > 295 / H && links[0].rect.y1 < 330 / H, 'step 1: the crop holds the drawing and stops before step 2', JSON.stringify(links[0].rect));
+  eq(links[1].mode, 'figure', 'step 2: the drawing under its text is its figure');
+  log(links[1].rect && links[1].rect.y0 > 374 / H - 0.02 && links[1].rect.y1 > 560 / H, 'step 2: crop around the second drawing', JSON.stringify(links[1].rect));
+  eq(links[2].mode, 'page', 'step 3 (no drawing in its column): the page, framed round its text');
+  log(links[2].rect && links[2].rect.x0 > 0.45 && links[2].rect.y0 < 80 / H, 'step 3: the frame is its own text', JSON.stringify(links[2].rect));
+  log(/no drawing/.test(links[2].reason), 'step 3: the reason says so', links[2].reason);
+  log(links[0].confidence >= 0.6 && links[2].confidence === 0, 'confidence: figure ≥ 0.6, page 0');
+  log(links[0].text && links[0].text.y0 < 0.11, 'the step\'s own text box is reported');
+  log(links[0].aspect > 0.5 && links[0].aspect < 3, 'the crop\'s aspect is reported', links[0].aspect);
+
+  // a step whose drawings sit between its own paragraphs: separate figures, never one column chunk
+  var pgp = { page: 6, width: W, height: H, lines: [
+    L('1. Sew the bodice front pieces together at the seams.', 40, 80, 290, 92),
+    L('Match the notches on both sides and stitch the seam.', 40, 96, 290, 108),
+    L('Press all seams open using a pressing ham for curves.', 40, 330, 290, 342),
+    L('Stitch the right side seam of the shell, leave the left.', 40, 346, 290, 358),
+    L('Stitch the left side seam of the bodice lining now too.', 40, 362, 290, 374),
+    L('2. Join the lining to the bodice at the neckline edge.', 40, 600, 290, 612),
+    L('Place the lining over the shell and match all seams.', 40, 616, 290, 628)
+  ], images: [B(60, 120, 270, 310), B(60, 390, 270, 580)], drawings: [] };
+  var lkp = F.link([{ text: 'Sew the bodice front pieces together at the seams. Match the notches on both sides and stitch the seam. Press all seams open using a pressing ham for curves. Stitch the right side seam of the shell, leave the left. Stitch the left side seam of the bodice lining now too.', page: 6 },
+    { text: 'Join the lining to the bodice at the neckline edge. Place the lining over the shell and match all seams.', page: 6 }], { 6: pgp });
+  log(lkp[0].mode === 'figure' && lkp[0].rect.y1 < 330 / H, 'drawings split by the step\'s own paragraphs: the crop is the first drawing only', JSON.stringify(lkp[0].rect));
+  eq(lkp[0].parts && lkp[0].parts.length, 2, 'and each drawing is given as a part');
+  log(lkp[0].parts && lkp[0].parts[1].y0 > 374 / H && lkp[0].parts[1].y1 < 600 / H, 'the second part stops before the next step\'s first line');
+
+  group('step → figure: beside the text, and two-way ambiguity');
+  var sA = 'Place the back pocket pieces right sides together and sew around all four sides leaving an opening.';
+  var sB = 'Clip the corners and turn the pocket right side out through the opening, then press the edges.';
+  var pg = { page: 3, width: W, height: H, lines: [
+    L('2. Place the back pocket pieces right sides together', 300, 100, 570, 112),
+    L('and sew around all four sides leaving an opening.', 300, 116, 570, 128),
+    L('3. Clip the corners and turn the pocket right side', 300, 300, 570, 312),
+    L('out through the opening, then press the edges.', 300, 316, 570, 328),
+    L('Some more text that is not a step at all here.', 300, 500, 570, 512),
+    L('Another line of the same paragraph to make a column.', 300, 516, 570, 528)
+  ], images: [B(40, 90, 260, 140), B(40, 180, 260, 280)], drawings: [] };
+  var lk2 = F.link([{ text: sA, page: 3 }, { text: sB, page: 3 }], { 3: pg });
+  eq(lk2[0].mode, 'figure', 'a drawing level with the step\'s text, in an empty column, is that step\'s');
+  log(lk2[0].rect && lk2[0].rect.y1 < 150 / H, 'it takes only the level drawing', JSON.stringify(lk2[0].rect));
+  log(/beside/.test(lk2[0].reason), 'reason: beside the step', lk2[0].reason);
+  eq(lk2[1].mode, 'page', 'a drawing level with neither step is given to neither');
+
+  group('step → figure: caption mode, numbers inside figures, never another step\'s text');
+  var sC = 'Fold the long edges to the middle and press (Figure 2).';
+  var sD = 'Sew close to the folded edge (Figure 9).';
+  var pc = { page: 4, width: W, height: H, lines: [
+    L('Fold the long edges to the middle and press (Figure 2).', 40, 80, 300, 92),
+    L('Sew close to the folded edge (Figure 9).', 40, 100, 300, 112),
+    L('Figure 1', 360, 260, 420, 272),
+    L('Figure 2', 360, 470, 420, 482),
+    L('9', 380, 610, 388, 620)
+  ], images: [B(340, 120, 560, 255), B(340, 300, 560, 465), B(340, 560, 560, 700)], drawings: [] };
+  var lk3 = F.link([{ text: sC, page: 4 }, { text: sD, page: 4 }], { 4: pc });
+  eq(lk3[0].mode, 'figure', 'the caption "Figure 2" names its drawing');
+  log(lk3[0].rect && lk3[0].rect.y0 > 290 / H && lk3[0].rect.y1 < 495 / H, 'the crop is Figure 2 (and its caption), not Figure 1', JSON.stringify(lk3[0].rect));
+  log(/caption "Figure 2"/.test(lk3[0].reason), 'reason names the caption', lk3[0].reason);
+  eq(lk3[0].ref, 'Figure 2', 'the reference the step names is reported');
+  eq(lk3[1].mode, 'figure', 'a number printed inside a drawing names that figure');
+  log(lk3[1].rect && lk3[1].rect.y0 > 550 / H, 'the crop is the drawing numbered 9', JSON.stringify(lk3[1].rect));
+  // a figure on the next page
+  var p5 = { page: 5, width: W, height: H, lines: [L('Figure 7', 100, 330, 160, 342)], images: [B(60, 100, 300, 320)], drawings: [] };
+  var p4b = { page: 4, width: W, height: H, lines: [L('Pin the waistband to the top edge (Figure 7).', 40, 700, 320, 712)], images: [], drawings: [] };
+  var lk4 = F.link([{ text: 'Pin the waistband to the top edge (Figure 7).', page: 4 }], { 4: p4b, 5: p5 });
+  eq(lk4[0].mode + ':' + lk4[0].page, 'figure:5', 'a captioned figure on the next page is found, on its own page');
+  log(/next page/.test(lk4[0].reason), 'reason: on the next page', lk4[0].reason);
+  // wrong-figure guard: a picture that holds another step's text is never used
+  var pw = { page: 2, width: W, height: H, lines: [
+    L('1. Sew the strap pieces together along the long edge.', 40, 100, 300, 112),
+    L('2. Turn the strap right side out and press it flat.', 40, 400, 300, 412)
+  ], images: [B(30, 90, 310, 420)], drawings: [] };
+  var lk5 = F.link([{ text: 'Sew the strap pieces together along the long edge.', page: 2 }, { text: 'Turn the strap right side out and press it flat.', page: 2 }], { 2: pw });
+  eq(lk5[0].mode + ',' + lk5[1].mode, 'page,page', 'a picture under both steps\' text belongs to neither');
+  // no page, unread page
+  var lk6 = F.link([{ text: 'x' }, { text: 'Sew it.', page: 9 }], {});
+  eq(lk6[0].mode + ',' + lk6[1].mode, 'none,none', 'no page / unread page: mode none');
+  // a full-page scan is not a figure
+  var ps = { page: 1, width: W, height: H, lines: [L('Sew the side seams and press them open.', 40, 100, 300, 112)], images: [B(0, 0, 600, 800)], drawings: [] };
+  eq(F.link([{ text: 'Sew the side seams and press them open.', page: 1 }], { 1: ps })[0].mode, 'page', 'a full-page picture (a scan) is never a figure');
+  // a step carried over a page break owns the drawing at the top of the next page
+  var pA = { page: 7, width: W, height: H, lines: [L('4. Hem. Turn the hem up twice and', 40, 740, 300, 752)], images: [], drawings: [] };
+  var pB = { page: 8, width: W, height: H, lines: [
+    L('press, then edgestitch close to the fold.', 40, 60, 300, 72),
+    L('5. Buttons. Mark the buttonholes on the band.', 40, 300, 300, 312)
+  ], images: [B(40, 80, 300, 280)], drawings: [] };
+  var lk7 = F.link([{ text: 'Hem. Turn the hem up twice and press, then edgestitch close to the fold.', page: 7 },
+    { text: 'Buttons. Mark the buttonholes on the band.', page: 8 }], { 7: pA, 8: pB });
+  eq(lk7[1].mode, 'page', 'the drawing under the carried-over text is not given to the next step');
+
+  // numbers printed inside the pictures (no caption text): the k-th picture is the k-th figure named
+  var pn2 = { page: 12, width: W, height: H, lines: [
+    L('4. Attach the pockets. Stitch in place (Figure 7).', 300, 100, 570, 112),
+    L('Press the pocket and understitch (Figure 8).', 300, 116, 570, 128),
+    L('Baste the pocket in place (Figure 9).', 300, 132, 570, 144),
+    L('5. Side seams. Sew the side seams and overlock (Figure 10).', 300, 400, 570, 412),
+    L('Press the seams to the back of the pants.', 300, 416, 570, 428)
+  ], images: [B(40, 90, 260, 200), B(40, 220, 260, 330), B(40, 380, 260, 470), B(40, 500, 260, 640)], drawings: [] };
+  var lk8 = F.link([{ text: 'Attach the pockets. Stitch in place (Figure 7). Press the pocket and understitch (Figure 8). Baste the pocket in place (Figure 9).', page: 12 },
+    { text: 'Side seams. Sew the side seams and overlock (Figure 10). Press the seams to the back of the pants.', page: 12 }], { 12: pn2 });
+  log(lk8[0].mode === 'figure' && lk8[0].rect.y1 > 460 / H && lk8[0].rect.y0 < 95 / H, 'figures 7–9 by order on the page: the third picture is step 4\'s although it sits level with step 5', JSON.stringify(lk8[0].rect));
+  log(lk8[1].mode === 'figure' && lk8[1].rect.y0 > 490 / H, 'figure 10 is the fourth picture', JSON.stringify(lk8[1].rect));
+  eq(lk8[0].parts && lk8[0].parts.length, 3, 'each figure is also given on its own (parts)');
+  var pn3 = JSON.parse(JSON.stringify(pn2));
+  pn3.images = pn3.images.slice(0, 3);      // three pictures for four named figures: cannot be counted
+  var lk9 = F.link([{ text: 'Attach the pockets. Stitch in place (Figure 7). Press the pocket and understitch (Figure 8). Baste the pocket in place (Figure 9).', page: 12 },
+    { text: 'Side seams. Sew the side seams and overlock (Figure 10). Press the seams to the back of the pants.', page: 12 }], { 12: pn3 });
+  eq(lk9[0].mode + ',' + lk9[1].mode, 'page,page', 'numbered figures that cannot be counted: the page, not a nearby picture');
+  log(/numbered/.test(lk9[0].reason), 'and the reason says why', lk9[0].reason);
+
+  group('assignLines (order-independent)');
+  var own = F._assignLines([L('stitch the side seam and press it open', 0, 0, 10, 10), L('unrelated line here', 0, 20, 10, 30)],
+    [{ text: 'First, stitch the side seam and press it open towards the back.' }]);
+  eq(own.join(','), '0,-1', 'a line inside a step\'s text is that step\'s; others are nobody\'s');
+  var own2 = F._assignLines([L('1. Sew the bodice', 0, 0, 100, 10)], [{ text: 'Sew the bodice: with right sides…' }]);
+  eq(own2[0], 0, 'the printed step number is ignored when matching');
+
+  group('swatches: letter labels, codes, a slip in the code, a mapping page');
+  var sp = { page: 2, width: W, height: H, lines: [
+    L('(A)', 80, 205, 100, 215), L('(B)   (C)', 180, 205, 340, 215), L('(D)', 380, 205, 400, 215)
+  ], images: [B(40, 100, 140, 200), B(150, 100, 250, 200), B(260, 100, 360, 200), B(370, 100, 470, 200), B(0, 600, 600, 800)], drawings: [] };
+  var fab = [{ name: '(A) Blue Magic Panel' }, { name: '(B) Somewhere Bluebird' }, { name: '(C) Little Plum' }, { name: '(D) Scattered' }, { name: '(Q) Not on the page' }];
+  var sw = F.swatches(fab, { 2: sp });
+  eq(sw.length, 5, 'one result per fabric row');
+  eq(sw.filter(function (s) { return s.clean; }).length, 4, '4 of 5 captured cleanly (Q has no picture)');
+  log(sw[0].rect && Math.abs(sw[0].rect.x0 - 40 / W) < 0.01, '(A) is the first picture', JSON.stringify(sw[0].rect));
+  log(sw[2].rect && Math.abs(sw[2].rect.x0 - 260 / W) < 0.01, '(C) shares a text line with (B) and still gets its own picture', JSON.stringify(sw[2].rect));
+  eq(sw[4].rect, null, '(Q): no picture, no rect');
+  log(/no picture/.test(sw[4].reason), '(Q): the reason says so');
+  var cp = { page: 2, width: W, height: H, lines: [
+    L('OHM-33440', 50, 90, 120, 98), L('OHM-33441', 160, 90, 230, 98), L('OHM-33442', 270, 90, 340, 98)
+  ], images: [B(40, 100, 140, 200), B(150, 100, 250, 200), B(260, 100, 360, 200)], drawings: [] };
+  var mp = { page: 4, width: W, height: H, lines: [L('Fabric A  OMH-33441 F8', 40, 100, 200, 110), L('Fabric B  OMH-33442 F8', 40, 120, 200, 130)], images: [], drawings: [] };
+  var sw2 = F.swatches([{ name: 'Fabric A' }, { name: 'Fabric B' }, { name: 'Fus-P-1208 Rounded Seeds' }], { 2: cp, 4: mp });
+  log(sw2[0].rect && Math.abs(sw2[0].rect.x0 - 150 / W) < 0.01, 'Fabric A → OMH-33441 (from the mapping page) → the picture labelled OHM-33441', JSON.stringify(sw2[0].rect));
+  log(/slip/.test(sw2[0].reason), 'a one-letter slip in the printed code is named', sw2[0].reason);
+  eq(sw2[2].rect, null, 'a code on no picture: none');
+  eq(F.codeMatch(F.codesIn('FUS-P-1208')[0], F.codesIn('Fus-P-1208')[0]), 2, 'codes match regardless of case');
+  eq(F.codeMatch(F.codesIn('PWCG006.BUBBLEGUM')[0], F.codesIn('PWCG006.GRASS')[0]), 0, 'same number, different colourway: no match');
+  // two pictures carrying one label: not clean
+  var dp = { page: 2, width: W, height: H, lines: [L('(A)', 80, 205, 100, 215), L('(A)', 190, 205, 210, 215), L('(B)', 300, 205, 320, 215)],
+    images: [B(40, 100, 140, 200), B(150, 100, 250, 200), B(260, 100, 360, 200)], drawings: [] };
+  var sw3 = F.swatches([{ name: '(A) Blue' }, { name: '(B) Red' }], { 2: dp });
+  eq(sw3[0].clean, false, 'a label under two pictures is not clean');
+  eq(sw3[1].clean, true, 'its neighbour still is');
+  // a picture drawn twice (image + mask) is one picture; a row of labels on one line pairs left to right
+  var rp2 = { page: 2, width: W, height: H, lines: [L('(M)', 60, 205, 80, 215), L('(N) (O) (P)', 170, 205, 470, 215), L('Backing', 60, 330, 120, 340)],
+    images: [B(40, 100, 140, 200), B(40, 100, 140, 200), B(150, 100, 250, 200), B(260, 100, 360, 200), B(370, 100, 470, 200), B(40, 225, 140, 320)], drawings: [] };
+  var sw4 = F.swatches([{ name: '(M) Guava' }, { name: '(N) Lime' }, { name: '(O) Cream' }, { name: '(P) Navy' }], { 2: rp2 });
+  eq(sw4.map(function (s) { return s.clean ? Math.round(s.rect.x0 * W) : 'x'; }).join(','), '40,150,260,370', 'doubled draws collapse; (N)(O)(P) on one line pair left to right; the picture under (M) does not borrow it');
+  // binding and backing rows that name the same fabric share its picture and stay clean
+  var sw5 = F.swatches([{ name: '(A) Blue' }, { name: 'Binding (A)' }, { name: '(B) Red' }, { name: '(C) Gold' }], { 2: sp });
+  eq(sw5[1].clean && sw5[0].clean, true, 'two rows naming the same fabric share its swatch');
+  log(/same picture as row 1/.test(sw5[1].reason), 'and say so', sw5[1].reason);
+  // flat-colour swatches from shapes
+  var fp = { page: 3, width: W, height: H, lines: [L('PE-464 PE-486 PE-444', 50, 205, 360, 215)], images: [], drawings: [],
+    shapes: [{ poly: [[40, 100], [140, 100], [140, 200], [40, 200]], box: { x0: 40, y0: 100, x1: 140, y1: 200 }, fill: '#c03030' },
+      { poly: [[150, 100], [250, 100], [250, 200], [150, 200]], box: { x0: 150, y0: 100, x1: 250, y1: 200 }, fill: '#30c030' },
+      { poly: [[260, 100], [360, 100], [360, 200], [260, 200]], box: { x0: 260, y0: 100, x1: 360, y1: 200 }, fill: '#3030c0' }] };
+  var sw6 = F.swatches([{ name: 'Fabric M PE-464' }, { name: 'Fabric N PE-486' }, { name: 'Fabric O PE-444' }], { 3: fp });
+  eq(sw6.filter(function (s) { return s.clean; }).length, 3, 'flat-colour squares (a solid) are swatches when the page was read with shapes');
+  // a single labelled photo is not a swatch page
+  var one = { page: 1, width: W, height: H, lines: [L('(A)', 80, 205, 100, 215)], images: [B(40, 100, 140, 200)], drawings: [] };
+  eq(F.swatches([{ name: '(A) Blue' }], { 1: one })[0].rect, null, 'one labelled picture alone is not a swatch page');
+
+  group('colourOf');
+  var id = { width: 10, height: 10, data: new Uint8ClampedArray(400) };
+  for (var i = 0; i < 400; i += 4) { id.data[i] = 200; id.data[i + 1] = 40; id.data[i + 2] = 40; id.data[i + 3] = 255; }
+  var c = F.colourOf(id);
+  eq(c.colour, '#c82828', 'a flat red reads as itself');
+  log(c.spread < 0.02, 'a flat colour has no spread', c.spread);
+  for (var j = 0; j < 400; j += 8) { id.data[j] = 20; id.data[j + 1] = 20; id.data[j + 2] = 220; }
+  log(F.colourOf(id).spread > 0.5, 'a two-colour print has a high spread', F.colourOf(id).spread);
+
+  group('tape-up map from registration labels');
+  // 2 rows x 3 sheets. Label "1a" sits where sheet (0,0) meets (0,1): right edge of one, left edge of the other.
+  function sheet(n, labels) { return { page: n, width: 600, height: 800, lines: labels.map(function (l) { return L(l[0], l[1] * 600 - 8, l[2] * 800 - 6, l[1] * 600 + 8, l[2] * 800 + 6); }) }; }
+  var tp = [
+    sheet(2, [['1a', 0.97, 0.5], ['1b', 0.5, 0.97]]),
+    sheet(3, [['1a', 0.03, 0.5], ['2a', 0.97, 0.5], ['2b', 0.5, 0.97]]),
+    sheet(4, [['2a', 0.03, 0.5], ['3b', 0.5, 0.97]]),
+    sheet(5, [['1b', 0.5, 0.03], ['1c', 0.97, 0.5]]),
+    sheet(6, [['2b', 0.5, 0.03], ['1c', 0.03, 0.5], ['2c', 0.97, 0.5]]),
+    sheet(7, [['3b', 0.5, 0.03], ['2c', 0.03, 0.5]]),
+    { page: 1, width: 600, height: 800, lines: [L('Instructions for printing', 100, 100, 400, 112)] }
+  ];
+  var tm = F.tapeMap(tp);
+  log(!!tm, 'a map is made');
+  if (tm) {
+    eq(tm.rows + 'x' + tm.cols, '2x3', '2 rows of 3 sheets');
+    eq(tm.tiles.map(function (t) { return t.page; }).join(','), '2,3,4,5,6,7', 'sheets in reading order');
+    eq(tm.conflicts, 0, 'no conflicts');
+    eq(tm.ok, true, 'ok');
+  }
+  eq(F.tileLabel('1 a'), '1A', 'tile label "1 a"');
+  eq(F.tileLabel('4D'), '4D', 'tile label "4D"');
+  eq(F.tileLabel('B12'), 'B12', 'tile label "B12"');
+  eq(F.tileLabel('Fold'), null, 'a word is not a tile label');
+  eq(F.tapeMap([{ page: 1, width: 600, height: 800, lines: [L('Hello', 0, 0, 10, 10)] }]), null, 'no labels: no map');
+  // corner marks (four sheets share one label)
+  var cm = F.tapeMap([
+    sheet(1, [['1A', 0.98, 0.98]]), sheet(2, [['1A', 0.02, 0.98]]),
+    sheet(3, [['1A', 0.98, 0.02]]), sheet(4, [['1A', 0.02, 0.02]])
+  ]);
+  eq(cm && (cm.rows + 'x' + cm.cols + ':' + cm.tiles.map(function (t) { return t.page; }).join(',')), '2x2:1,2,3,4', 'a corner mark shared by four sheets places all four');
+  // '1A 2A' read as one line along a sheet's foot: one label per corner
+  function foot(n, top, bottom) {
+    var ls = [];
+    if (top) ls.push(L(top, 4, 6, 490, 18));
+    if (bottom) ls.push(L(bottom, 4, 692, 490, 704));
+    return { page: n, width: 496, height: 709, lines: ls };
+  }
+  function oneLab(n, t, right, top) { return { page: n, width: 496, height: 709, lines: [L(t, right ? 476 : 4, top ? 6 : 692, right ? 490 : 18, top ? 18 : 704)] }; }
+  var fm = F.tapeMap([oneLab(1, '1A', true), foot(2, '', '1A 2A'), oneLab(3, '2A', false), oneLab(4, '1A', true, true), foot(5, '1A 2A', ''), oneLab(6, '2A', false, true)]);
+  log(!!fm, 'labels on one line along the foot make a map');
+  eq(fm && fm.rows + 'x' + fm.cols, '2x3', 'corner labels split from one line: 2 rows of 3');
+  eq(fm && fm.tiles.map(function (t) { return t.page; }).join(','), '1,2,3,4,5,6', 'in order');
+
+  group('quilt layout: blocks from patch outlines and labels');
+  function sq(x, y, s, fill) { return { poly: [[x, y], [x + s, y], [x + s, y + s], [x, y + s]], box: { x0: x, y0: y, x1: x + s, y1: y + s }, fill: fill || '#cc6633', image: null }; }
+  var shapes = [], qlines = [];
+  // a 3 x 3 top of 9 blocks, 60 pt each, each block four 30 pt patches; labels B1, B2a, B3 …
+  var labs = ['B1', 'B2a', 'B3', 'B3', 'C', 'B3', 'B3', 'B2b', 'H'];
+  for (var by = 0; by < 3; by++) for (var bx = 0; bx < 3; bx++) {
+    var X = 100 + bx * 60, Y = 200 + by * 60;
+    shapes.push(sq(X, Y, 30), sq(X + 30, Y, 30, '#3366cc'), sq(X, Y + 30, 30, '#3366cc'), sq(X + 30, Y + 30, 30));
+    qlines.push(L(labs[by * 3 + bx], X + 24, Y + 24, X + 36, Y + 36));
+  }
+  qlines.push(L('Quilt Layout', 100, 150, 250, 165));
+  var qpage = { page: 12, width: 600, height: 800, lines: qlines, shapes: shapes };
+  var qm = SQ.fromShapes(qpage, []);
+  log(!!qm, 'a model is read');
+  if (qm) {
+    eq(qm.mode, 'vector', 'vector mode');
+    eq(qm.patches.length, 36, '36 patches');
+    eq(qm.blocks.length, 9, '9 labelled blocks');
+    eq(qm.labels, 'blocks', 'labelled by blocks');
+    eq(qm.blocks.filter(function (b) { return b.label === 'B3'; }).length, 4, 'B3 is four blocks');
+    eq(qm.blocks.every(function (b) { return b.patches.length === 4; }), true, 'each block owns its four patches');
+    near(qm.box.x0, 100 / 600, 0.002, 'the quilt box');
+    // progress: units ↔ labels
+    var d = { units: [{ name: 'Block 3', target: 8, done: 4 }, { name: 'Block 2a', target: 1, done: 1 }, { name: 'Block 1', target: 4, done: 3 }], steps: [] };
+    var pr = SQ.progress(qm, d);
+    eq(pr.mapping, 'units', 'progress maps units to block labels');
+    var b3 = qm.blocks.filter(function (b) { return b.label === 'B3'; }).map(function (b) { return pr.byBlock[b.id]; });
+    eq(b3.join(','), '1,1,0,0', '4 of 8 "Block 3" (a counter of blocks) light two of the four B3 blocks');
+    eq(pr.byBlock[qm.blocks.filter(function (b) { return b.label === 'B2a'; })[0].id], 1, 'Block 2a done → B2a in colour');
+    near(pr.byBlock[qm.blocks.filter(function (b) { return b.label === 'B1'; })[0].id], 0.75, 0.01, '3 of 4 Block 1 → B1 three quarters');
+    var pr2 = SQ.progress(qm, { units: [{ name: 'Block 3', target: 8, done: 6 }, { name: 'Block 2a', target: 1, done: 1 }, { name: 'Block 1', target: 4, done: 3 }] }, pr);
+    log(!!pr2.newest, 'the block that just finished is reported as newest', pr2.newest);
+    var po = SQ.progress(qm, { steps: [{ text: 'a', done: true }, { text: 'b', done: false }, { text: 'c', done: true }] });
+    eq(po.mapping, 'order', 'nothing names a block: layout order');
+    eq(po.done, 6, '2 of 3 steps → 6 of 9 blocks, in reading order');
+    var ps2 = SQ.progress(qm, { steps: [{ text: 'Make block B2a from the squares.', done: true }, { text: 'Sew H to the side', done: false }] });
+    eq(ps2.mapping, 'steps', 'steps that name a block light it');
+    eq(ps2.byBlock[qm.blocks.filter(function (b) { return b.label === 'B2a'; })[0].id], 1, 'B2a lit by its step');
+  }
+  // rows
+  var rshapes = [], rlines = [];
+  for (var ry = 0; ry < 4; ry++) for (var rx = 0; rx < 5; rx++) rshapes.push(sq(100 + rx * 40, 100 + ry * 40, 40, rx % 2 ? '#aa3344' : '#3344aa'));
+  for (var rr = 0; rr < 4; rr++) rlines.push(L('ROW ' + (rr + 1), 40, 115 + rr * 40, 90, 125 + rr * 40));
+  var rm = SQ.fromShapes({ page: 6, width: 600, height: 800, lines: rlines, shapes: rshapes }, []);
+  eq(rm && rm.labels, 'rows', 'ROW 1–4 labels beside the quilt make rows');
+  eq(rm && rm.rows.length, 4, '4 rows');
+  eq(rm && rm.rows[0].patches.length, 5, 'each row holds its 5 patches');
+  var rp = rm && SQ.progress(rm, { steps: [{ text: 'Sew row 1 together.', done: true }, { text: 'Sew row 2 together.', done: false }, { text: 'Sew rows 3 and 4 together, then row 4.', done: false }] });
+  eq(rp && rp.mapping, 'rows', 'steps that name a row light that row');
+  eq(rp && rp.byBlock.r1, 1, 'row 1 lit');
+  // no labels: no block-by-block claim
+  var nm = SQ.fromShapes({ page: 6, width: 600, height: 800, lines: [], shapes: rshapes }, []);
+  eq(nm && nm.labels, 'none', 'no labels: the model says it has none');
+  eq(nm && nm.blocks.length, 0, 'no labels: no invented blocks');
+  eq(SQ.fromShapes({ page: 1, width: 600, height: 800, lines: [], shapes: [sq(1, 1, 5)] }, []), null, 'a page with a handful of shapes is not a quilt');
+  var picPage = { page: 6, width: 612, height: 792, lines: [L('Join rows 1-8.', 57, 43, 128, 53)], images: [B(0, 0, 41, 792), B(130, 104, 519, 652)] };
+  var fpm = SQ.findPicture({ 6: picPage, 2: { page: 2, width: 612, height: 792, lines: [L('Fabric', 0, 0, 10, 10)], images: [B(100, 100, 500, 600)] } });
+  eq(fpm && fpm.mode + ':' + fpm.page, 'picture:6', 'findPicture: the page that says "join rows" with one big picture');
+  log(fpm && Math.abs(fpm.box.x0 - 130 / 612) < 0.01, 'the picture\'s box, not the page-edge band');
+  eq(SQ.findPicture({ 2: { page: 2, width: 612, height: 792, lines: [L('Join rows 1-8.', 0, 0, 10, 10)], images: [B(0, 0, 612, 792)] } }), null, 'a full-page scan is not a layout picture');
+  var pm = SQ.pictureModel(6, { x0: 0.1, y0: 0.1, x1: 0.9, y1: 0.7 }, 'the layout is a picture');
+  eq(pm.mode + ':' + pm.blocks.length, 'picture:0', 'picture model holds no blocks');
+  eq(SQ.findLayout({ 12: qpage, 3: { page: 3, width: 600, height: 800, lines: [], shapes: rshapes } }, []).page, 12, 'findLayout prefers the labelled page');
+
+  group('unit and label keys');
+  eq(SQ.unitKey('Unit 2a'), 'u2a', 'Unit 2a');
+  eq(SQ.progress(qm, { units: [{ name: 'Unit 2a', target: 1, done: 1 }] }).mapping === 'units', false, 'a unit (a part) never lights the block labelled B2a');
+  eq(SQ.unitKey('Unit 7B'), 'u7b', 'Unit 7B');
+  eq(SQ.unitKey('Block 3'), 'b3', 'Block 3');
+  eq(SQ.unitKey('Flying geese'), null, 'a unit with no number has no key');
+  eq(SQ.labelKey('B2a'), 'b2a', 'B2a');
+  eq(SQ.labelKey('C'), null, 'C (a border letter) has no key');
+
+  group('cutting board: dimensions');
+  function dj(s) { var d = SQ.parseDims(s); return d ? [d.w, d.h, d.unit, d.wof].join(',') : 'null'; }
+  eq(dj('3½" x WOF'), ',3.5,in,true', '3½" x WOF');
+  eq(dj('(2) 2 1/2" x 42" strips'), '2.5,42,in,false', '2 1/2" x 42"');
+  eq(dj('4½" x 2½" rectangles'), '4.5,2.5,in,false', '4½" x 2½"');
+  eq(dj('2½" squares'), '2.5,2.5,in,false', '2½" squares');
+  eq(dj('10 x 20 cm'), '10,20,cm,false', '10 x 20 cm');
+  eq(dj('15cm x 40cm'), '15,40,cm,false', '15cm x 40cm');
+  eq(dj('Front bodice'), 'null', 'a garment piece has no dimensions');
+  eq(dj('6 3/4" tall x 7 5/8" wide B rectangle'), '6.75,7.625,in,false', '6 3/4" tall x 7 5/8" wide (Harmony)');
+  eq(SQ.parseMeasure('⅛'), 0.125, '⅛');
+  var cut = [
+    { id: 'c1', piece: '2½" x WOF strip', dims: '2½" x WOF', qty: 2, cutCount: 1, note: 'Fabric A' },
+    { id: 'c2', piece: '2½" square', dims: '2½" squares', qty: 30, cutCount: 10, note: 'Fabric A', subcut: true },
+    { id: 'c3', piece: 'rectangle', dims: '4½" x 2½"', qty: 5, cutCount: 0, note: 'Fabric B' },
+    { id: 'c4', piece: 'Front bodice', dims: '', qty: 2, cutCount: 0, material: 'main' }
+  ];
+  var bmod = SQ.boardModel(cut, []);
+  eq(bmod.groups.length, 3, 'grouped by fabric: A, B, main');
+  var gA = bmod.groups[0];
+  eq(gA.name, 'Fabric A', 'group named by its fabric letter');
+  eq(gA.rects.filter(function (r) { return r.item.id === 'c1'; }).length, 2, 'two strips drawn');
+  eq(gA.rects.filter(function (r) { return r.item.id === 'c2'; }).length, 30, 'every subcut square drawn, inside its strips (16 + 14)');
+  eq(gA.rects.filter(function (r) { return r.item.id === 'c2' && r.cut; }).length, 10, 'cut state per piece');
+  var inside = gA.rects.filter(function (r) { return r.sub; }).every(function (r) { return r.x + r.w <= 42 + 1e-6; });
+  eq(inside, true, 'subcuts stay inside the 42" strip');
+  var gB = bmod.groups[1], over = false;
+  gB.rects.forEach(function (a, i) { gB.rects.forEach(function (b2, k) { if (k > i && a.x < b2.x + b2.w - 1e-6 && b2.x < a.x + a.w - 1e-6 && a.y < b2.y + b2.h - 1e-6 && b2.y < a.y + a.h - 1e-6) over = true; }); });
+  eq(over, false, 'loose pieces do not overlap');
+  eq(gB.rects.length, 5, 'every rectangle drawn');
+  eq(bmod.undrawn.length, 1, 'the garment piece is listed, not drawn');
+  eq(bmod.groups[2].drawn, false, 'a group without dimensions draws nothing');
+}
+
+// ---- DOM parts (need a document; still synthetic) ----
+function domTests() {
+  group('mount: quilt top on a canvas');
+  var host = document.createElement('div');
+  host.style.cssText = 'width:300px;height:300px;position:fixed;left:-1000px;top:0';
+  document.body.appendChild(host);
+  var cv = document.createElement('canvas');
+  cv.style.cssText = 'width:300px;height:300px;display:block';
+  host.appendChild(cv);
+  function sq(x, y, s, fill) { return { poly: [[x, y], [x + s, y], [x + s, y + s], [x, y + s]], box: { x0: x, y0: y, x1: x + s, y1: y + s }, fill: fill, image: null }; }
+  var shapes = [], lines = [];
+  for (var i = 0; i < 4; i++) for (var k = 0; k < 4; k++) shapes.push(sq(100 + k * 50, 100 + i * 50, 50, (i + k) % 2 ? '#d04040' : '#4040d0'));
+  ['B1', 'B2', 'B3', 'B4'].forEach(function (l, n) { lines.push({ text: l, box: { x0: 140 + (n % 2) * 100, y0: 140 + Math.floor(n / 2) * 100, x1: 160 + (n % 2) * 100, y1: 160 + Math.floor(n / 2) * 100 } }); });
+  var m = SQ.fromShapes({ page: 1, width: 600, height: 800, lines: lines, shapes: shapes }, []);
+  eq(m && m.blocks.length, 4, '4 blocks of 4 patches');
+  var tapped = null;
+  var ctl = SQ.mount(cv, m, { progress: SQ.progress(m, { units: [{ name: 'Block 1', target: 1, done: 1 }] }), onTapBlock: function (b) { tapped = b; }, reducedMotion: true });
+  log(cv.width > 0 && cv.height > 0, 'canvas sized');
+  log(/1 of 4 blocks/.test(cv.getAttribute('aria-label')), 'aria-label says how many blocks are made', cv.getAttribute('aria-label'));
+  var hb = ctl.hit(125, 125);
+  eq(hb && hb.label, 'B1', 'hit-testing finds the block under a point');
+  eq(ctl.hit(50, 50), null, 'outside the quilt: no block');
+  // the colour shows where B1 is made, grey elsewhere
+  ctl.redraw();
+  var v = ctl.view();
+  var x = cv.getContext('2d');
+  var px1 = x.getImageData(Math.round(v.tx + 25 * v.s), Math.round(v.ty + 25 * v.s), 1, 1).data;
+  var px2 = x.getImageData(Math.round(v.tx + 175 * v.s), Math.round(v.ty + 175 * v.s), 1, 1).data;
+  log(Math.abs(px1[0] - px1[2]) > 60, 'a made block is drawn in colour', Array.prototype.slice.call(px1, 0, 3).join(','));
+  log(Math.abs(px2[0] - px2[2]) < 8, 'a block not made yet is grey', Array.prototype.slice.call(px2, 0, 3).join(','));
+  // tap
+  var rect = cv.getBoundingClientRect();
+  var cx = rect.left + (v.tx + 175 * v.s) / (window.devicePixelRatio || 1), cy = rect.top + (v.ty + 175 * v.s) / (window.devicePixelRatio || 1);
+  cv.dispatchEvent(new PointerEvent('pointerdown', { pointerId: 7, clientX: cx, clientY: cy, bubbles: true }));
+  cv.dispatchEvent(new PointerEvent('pointerup', { pointerId: 7, clientX: cx, clientY: cy, bubbles: true }));
+  eq(tapped && tapped.label, 'B4', 'a tap reports the block under the finger');
+  var s0 = ctl.view().s;
+  cv.dispatchEvent(new KeyboardEvent('keydown', { key: '+', bubbles: true }));
+  log(ctl.view().s > s0, '+ zooms in');
+  cv.dispatchEvent(new KeyboardEvent('keydown', { key: '0', bubbles: true }));
+  near(ctl.view().s, s0, 1e-6, '0 fits again');
+  ctl.setProgress(SQ.progress(m, { units: [{ name: 'Block 1', target: 1, done: 1 }, { name: 'Block 2', target: 1, done: 1 }] }));
+  log(/2 of 4 blocks/.test(cv.getAttribute('aria-label')), 'setProgress updates the label');
+  ctl.destroy();
+  // picture mode
+  var pcv = document.createElement('canvas');
+  pcv.style.cssText = 'width:200px;height:200px;display:block';
+  host.appendChild(pcv);
+  var img = document.createElement('canvas'); img.width = 100; img.height = 100;
+  var ix = img.getContext('2d'); ix.fillStyle = '#e03030'; ix.fillRect(0, 0, 100, 100);
+  var pctl = SQ.mount(pcv, SQ.pictureModel(6, null), { image: img, progress: { fraction: 0.5 }, reducedMotion: true });
+  log(/is a picture/.test(pcv.getAttribute('aria-label')) && /50%/.test(pcv.getAttribute('aria-label')), 'picture mode says it is a picture, with the percentage', pcv.getAttribute('aria-label'));
+  pctl.destroy();
+
+  group('mountUnit, mountButtonPicture, mountTapeMap, mountBoard');
+  var btn = document.createElement('button');
+  btn.textContent = 'Step done';
+  host.appendChild(btn);
+  var u = SQ.mountUnit(btn, { name: 'Unit 2', done: 1, target: 4, model: m, block: 'B2' });
+  log(/Unit 2 · 1 of 4/.test(btn.textContent), 'the unit and its count in the button', btn.textContent);
+  u.update({ done: 2 });
+  log(/2 of 4/.test(btn.textContent), 'update changes the count');
+  u.destroy();
+  var pic = F.mountButtonPicture(btn, { canvas: img });
+  var span = btn.querySelector('.sew-btn-pic');
+  log(!!span && span.getAttribute('aria-hidden') === 'true', 'a hidden picture layer behind the label');
+  eq(btn.textContent, 'Step done', 'the label text is unchanged');
+  pic.destroy();
+  eq(btn.querySelector('.sew-btn-pic'), null, 'destroy removes it');
+  var tmHost = document.createElement('div'); host.appendChild(tmHost);
+  var map = { rows: 1, cols: 2, tiles: [{ page: 2, row: 0, col: 0, label: '' }, { page: 3, row: 0, col: 1, label: '' }], gaps: [], conflicts: 0, ok: true };
+  var tapT = null;
+  var tctl = F.mountTapeMap(tmHost, map, { done: { 2: true }, onTap: function (t) { tapT = t; } });
+  var tiles = tmHost.querySelectorAll('.sew-tape-tile');
+  eq(tiles.length, 2, 'one tile per sheet');
+  eq(tiles[0].getAttribute('aria-pressed'), 'true', 'a taped sheet is pressed');
+  tiles[1].dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  eq(tapT && tapT.page, 3, 'Enter on a tile taps it');
+  tctl.update({ 2: true, 3: true });
+  eq(tmHost.querySelectorAll('.sew-tape-tile.is-done').length, 2, 'update marks tiles done');
+  tctl.destroy();
+  var bHost = document.createElement('div'); host.appendChild(bHost);
+  var tappedRow = null;
+  var bctl = SQ.mountBoard(bHost, [{ id: 'c1', piece: 'square', dims: '2½" squares', qty: 4, cutCount: 4, note: 'Fabric A' }, { id: 'c2', piece: 'Front', qty: 2, cutCount: 0 }], { onTap: function (r) { tappedRow = r; } });
+  eq(bHost.querySelectorAll('svg .sew-board-piece').length, 1, 'one drawn tap target per row with dimensions');
+  eq(bHost.querySelectorAll('svg .sew-board-piece.is-cut').length, 1, 'a row cut in full is marked cut');
+  eq(bHost.querySelectorAll('button.sew-board-piece').length, 1, 'a piece with no dimensions is a plain button');
+  bHost.querySelector('button.sew-board-piece').click();
+  eq(tappedRow && tappedRow.id, 'c2', 'tapping a listed piece reports its row');
+  bctl.destroy();
+  document.body.removeChild(host);
+}
+</script>
+<script>
+// =====================================================================
+// Real fixtures (tmp-pdf, read at runtime; skipped when absent)
+// =====================================================================
+function fetchBlob(url) { return fetch(url).then(function (r) { return r.ok ? r.blob() : null; }).catch(function () { return null; }); }
+function openFixture(name) {
+  return fetchBlob('../tmp-pdf/' + name + '.pdf').then(function (b) {
+    if (!b || b.size < 1000) return null;
+    return PdfText.open(new File([b], name + '.pdf', { type: 'application/pdf' })).then(function (h) { h.__size = b.size; return h; });
+  });
+}
+function textOfFixture(name, handle) {
+  var key = 'sewvis:' + name + ':' + handle.__size;
+  try { var c = sessionStorage.getItem(key); if (c) return Promise.resolve(c); } catch (e) { /* ignore */ }
+  return handle.extract({ maxPages: 200 }).then(function (res) {
+    try { sessionStorage.setItem(key, res.text); } catch (e) { /* quota */ }
+    return res.text;
+  });
+}
+function probe(name, pages, shapes) {
+  info('opening ' + name);
+  return openFixture(name).then(function (h) {
+    if (!h) { skip(name + ' absent'); return; }
+    info('opened, ' + h.numPages + ' pages');
+    return F.readPages(h, pages, { shapes: !!shapes }).then(function (P) {
+      Object.keys(P).forEach(function (k) {
+        var p = P[k];
+        info('PAGE ' + k + ' ' + Math.round(p.width) + 'x' + Math.round(p.height) + ' lines=' + p.lines.length + ' images=' + p.images.length + ' drawings=' + p.drawings.length + (p.shapes ? ' shapes=' + p.shapes.length : ''));
+        p.images.forEach(function (im) { info('  IMG ' + [im.box.x0, im.box.y0, im.box.x1, im.box.y1].map(Math.round).join(',')); });
+        p.drawings.forEach(function (d) { info('  DRW ' + [d.box.x0, d.box.y0, d.box.x1, d.box.y1].map(Math.round).join(',') + ' paths=' + d.paths + ' fills=' + d.fills); });
+        p.lines.forEach(function (l) { info('  TXT ' + [l.box.x0, l.box.y0, l.box.x1, l.box.y1].map(Math.round).join(',') + ' ' + l.text.slice(0, 90)); });
+        if (p.shapes) {
+          var fills = {}; p.shapes.forEach(function (s) { var k2 = s.image ? 'IMG' : s.fill; fills[k2] = (fills[k2] || 0) + 1; });
+          info('  SHAPES by fill ' + JSON.stringify(fills).slice(0, 600));
+          p.shapes.slice(0, Q.nshapes ? +Q.nshapes : 0).forEach(function (s) { info('  SHP ' + [s.box.x0, s.box.y0, s.box.x1, s.box.y1].map(Math.round).join(',') + ' n=' + s.poly.length + ' ' + (s.image || s.fill)); });
+        }
+      });
+      h.destroy();
+    });
+  });
+}
+function viewQuilt(name, pageNo, units) {
+  return openFixture(name).then(function (h) {
+    if (!h) { skip(name + ' absent'); return; }
+    return F.readPages(h, [pageNo], { shapes: true }).then(function (P) {
+      var pg = P[pageNo];
+      var m = SQ.fromShapes(pg, []);
+      if (!m) { info('no model'); return; }
+      info('model ' + m.mode + ' labels=' + m.labels + ' patches=' + m.patches.length + ' blocks=' + m.blocks.length + ' ' + m.reason);
+      m.blocks.forEach(function (b) { info('  ' + b.id + ' ' + b.label + ' patches=' + b.patches.length + ' box=' + [b.box.x0, b.box.y0, b.box.x1, b.box.y1].map(Math.round).join(',')); });
+      info('  region ' + [m.region.x0, m.region.y0, m.region.x1, m.region.y1].map(Math.round).join(','));
+      m.patches.slice().sort(function (a, b) { return (b.box.x1 - b.box.x0) * (b.box.y1 - b.box.y0) - (a.box.x1 - a.box.x0) * (a.box.y1 - a.box.y0); }).slice(0, 5).forEach(function (p) {
+        info('  big ' + p.id + ' ' + [p.box.x0, p.box.y0, p.box.x1, p.box.y1].map(Math.round).join(',') + ' ' + (p.image || p.fill) + ' block=' + p.block);
+      });
+      if (Q.seq) info('  seq ' + m.patches.map(function (p) { return (p.block || '-').replace('b', '') + (p.image ? '*' : ''); }).join(' '));
+      var unassigned = m.patches.filter(function (p) { return !p.block && !p.row; }).length;
+      info('  unassigned patches: ' + unassigned);
+      return F._renderPdfRegion(h, pageNo, m.box, 900, 2e6).then(function (img) {
+        var cv = document.createElement('canvas');
+        cv.style.cssText = 'width:343px;height:343px;display:block;margin:8px 0;background:#fff';
+        document.body.insertBefore(cv, out);
+        var d = { units: units || [], steps: [] };
+        var ctl = SQ.mount(cv, m, { image: img, progress: SQ.progress(m, d), reducedMotion: true });
+        info(cv.getAttribute('aria-label'));
+        window.__ctl = ctl;
+        if (Q.outline) {
+          var x = cv.getContext('2d'), v = ctl.view();
+          x.setTransform(v.s, 0, 0, v.s, v.tx, v.ty);
+          var cols = ['#f00', '#0a0', '#00f', '#f0f', '#0aa', '#a50', '#000'];
+          m.blocks.forEach(function (b, i) {
+            x.strokeStyle = cols[i % cols.length]; x.lineWidth = 2 / v.s * 2;
+            x.strokeRect(b.box.x0 - m.region.x0, b.box.y0 - m.region.y0, b.box.x1 - b.box.x0, b.box.y1 - b.box.y0);
+          });
+        }
+        h.destroy();
+      });
+    });
+  });
+}
+var FIX = [
+  { f: 'sew-sundress', kind: 'garment' },
+  { f: 'sew-pencilskirt', kind: 'garment' },
+  { f: 'sew-peppermint-samford-pants', kind: 'garment' },
+  { f: 'sew-peppermint-bronte-bathers', kind: 'garment' },
+  { f: 'sew-peppermint-apron', kind: 'garment' },
+  { f: 'sew-peppermint-westend-jacket', kind: 'garment' },
+  { f: 'sew-swoon-mabel-bag', kind: 'bag' },
+  { f: 'sew-rileyblake-triple-t-tote', kind: 'bag' },
+  { f: 'sew-freespirit-harmony-quilt', kind: 'quilt' },
+  { f: 'sew-agf-joyous-picnic-quilt', kind: 'quilt' },
+  { f: 'sew-agf-catwalk-quilt', kind: 'quilt' },
+  { f: 'sew-sundress-pattern', kind: 'sheet' },
+  { f: 'sew-pencilskirt-pattern', kind: 'sheet' },
+  { f: 'sew-tianas-jogger-12m-6y', kind: 'sheet' },
+  { f: 'sew-tianas-jogger-7-12', kind: 'sheet' },
+  { f: 'sew-peppermint-apron-A0', kind: 'sheet' }
+];
+window.__table = [];
+function realFixture(fx) {
+  var t0 = performance.now();
+  return openFixture(fx.f).then(function (h) {
+    if (!h) { skip(fx.f + ' absent'); return; }
+    return textOfFixture(fx.f, h).then(function (text) {
+      var parsed = Sewing.parse(text);
+      // the cards the app links (toCraftData's steps: sew-core splits long printed steps into cards)
+      var cd = typeof Sewing.toCraftData === 'function' ? Sewing.toCraftData(parsed) : null;
+      var steps = (cd && cd.steps && cd.steps.length ? cd.steps : parsed.steps) || [];
+      var want = [];
+      steps.forEach(function (s) { if (typeof s.page === 'number') { [s.page, s.page + 1].forEach(function (p) { if (p <= h.numPages && want.indexOf(p) < 0) want.push(p); }); } });
+      var all = [];
+      for (var p = 1; p <= Math.min(h.numPages, 40); p++) all.push(p);
+      var tRead = performance.now();
+      return F.readPages(h, fx.kind === 'quilt' || fx.kind === 'sheet' ? all : want, {}).then(function (P) {
+        var readMs = performance.now() - tRead;
+        var tl = performance.now();
+        var links = F.link(steps, P);
+        var linkMs = performance.now() - tl;
+        var row = { f: fx.f, steps: steps.length, figure: 0, page: 0, none: 0, linkMs: Math.round(linkMs), readMs: Math.round(readMs), pages: Object.keys(P).length };
+        links.forEach(function (l) { row[l.mode]++; });
+        log(linkMs < 3000, fx.f + ': linking ' + steps.length + ' steps over ' + row.pages + ' pages took ' + Math.round(linkMs) + ' ms (< 3 s)');
+        log(links.length === steps.length, fx.f + ': one link per step');
+        // Never a figure that holds another step's text (self-check over the real page).
+        var bad = 0;
+        links.forEach(function (l, i) {
+          if (l.mode !== 'figure' || l.page !== steps[i].page) return;
+          var pg = P[l.page];
+          // the same competition link() runs: every step on the page bids for every line;
+          // a sentence (25+ characters) another step wins must not sit inside this crop
+          var cand = steps.filter(function (s) { return s.page === l.page; });
+          var me = cand.indexOf(steps[i]);
+          var owner = F._assignLines(pg.lines, cand);
+          pg.lines.forEach(function (ln, li) {
+            if (owner[li] < 0 || owner[li] === me || String(ln.text).length < 25) return;
+            var c = F._geo.centre(ln.box);
+            if (c.x / pg.width > l.rect.x0 + 0.01 && c.x / pg.width < l.rect.x1 - 0.01 && c.y / pg.height > l.rect.y0 + 0.01 && c.y / pg.height < l.rect.y1 - 0.01) { bad++; info('  holds: step ' + i + ' crop has "' + ln.text.slice(0, 60) + '"'); }
+          });
+        });
+        eq(bad, 0, fx.f + ': no figure crop holds another step\'s text');
+        // A figure crop is a figure: at most two lines of prose (a caption, a label) inside it,
+        // whoever's they are (sundress p6 step 1 was a column chunk of its own paragraphs).
+        var prosey = [];
+        links.forEach(function (l, i) {
+          if (l.mode !== 'figure' || !P[l.page]) return;
+          var pg = P[l.page], n = 0;
+          pg.lines.forEach(function (ln) {
+            if (String(ln.text).length < 25) return;
+            var c = F._geo.centre(ln.box);
+            if (c.x / pg.width > l.rect.x0 && c.x / pg.width < l.rect.x1 && c.y / pg.height > l.rect.y0 && c.y / pg.height < l.rect.y1) n++;
+          });
+          if (n > 2) prosey.push(i + ':' + n);
+        });
+        eq(prosey.join(' '), '', fx.f + ': no figure crop holds more than two lines of prose');
+        if (fx.f === 'sew-sundress') {
+          var l0 = links[0];
+          log(l0.mode === 'figure' && prosey.every(function (p) { return p.indexOf('0:') !== 0; }) && l0.rect.y1 - l0.rect.y0 < 0.3, 'sundress step 1: the crop is its first drawing, not the column of paragraphs under it (audit #19)', JSON.stringify(l0.rect));
+          log(l0.mode === 'figure' && (l0.parts || []).length >= 2, 'sundress step 1: its drawings between paragraphs come as separate figures (parts)', (l0.parts || []).length);
+        }
+        info(fx.f + ': steps ' + row.steps + ' · figure ' + row.figure + ' · page ' + row.page + ' · none ' + row.none + ' · read ' + row.readMs + ' ms · link ' + row.linkMs + ' ms');
+        if (Q.links) links.forEach(function (l, i) { info('  ' + i + ' p' + l.page + ' ' + l.mode + ' ' + l.confidence + ' ' + l.reason + ' | ' + String(steps[i].text).slice(0, 60)); });
+        window.__table.push(row);
+        var more = fx.kind === 'quilt' ? quiltChecks(fx, parsed, P, h) : (fx.f === 'sew-sundress' ? cropChecks(fx, links, h) : null);
+        if (fx.kind === 'sheet') sheetChecks(fx, P, text);
+        if (fx.f === 'sew-sundress') log(row.figure >= 5, fx.f + ': at least 5 of its 11 steps get their own figure', row.figure + ' of ' + row.steps);
+        if (fx.f === 'sew-peppermint-samford-pants') {
+          log(row.figure >= 2, fx.f + ': p12 two steps get their figures (p11 and p13–15 cannot be counted, so they give the page)', row.figure + ' of ' + row.steps);
+          log(/figures 7, 8, 9, 10 by their order/.test(links[3].reason) && /figures 11, 12 by their order/.test(links[4].reason), fx.f + ': p12 figures counted in order (7–10 to step 4, 11–12 to step 5)', links[3].reason + ' / ' + links[4].reason);
+          eq(links[0].mode, 'page', fx.f + ': p11, whose numbered figures cannot be counted, gives the page, not a guess');
+        }
+        if (fx.f === 'sew-peppermint-westend-jacket') eq(row.figure, 0, fx.f + ': an image-only booklet links no figure');
+        return more;
+      });
+    }).then(function () { h.destroy(); }, function (e) { h.destroy(); throw e; });
+  }).then(null, function (e) { log(false, fx.f + ' threw', e && (e.stack || e.message)); });
+}
+function quiltChecks(fx, parsed, P, h) {
+  // the fabric pages are read again with their shapes (flat-colour swatches are vector squares)
+  var fabPages = Object.keys(P).map(Number).filter(function (n) { return n <= 5; });
+  var sw, clean;
+  return F.readPages(h, fabPages, { shapes: true }).then(function (FP) {
+    var SP = {};
+    Object.keys(P).forEach(function (k) { SP[k] = FP[k] || P[k]; });
+    var t0 = performance.now();
+    sw = F.swatches(parsed.fabric || [], SP);
+    var ms = performance.now() - t0;
+    clean = sw.filter(function (s) { return s.clean; }).length;
+    info(fx.f + ': swatches ' + clean + ' clean of ' + sw.length + ' fabric rows (' + sw.filter(function (s) { return s.rect; }).length + ' found, ' + Math.round(ms) + ' ms)');
+    if (Q.links) sw.forEach(function (s) { info('  ' + s.name.slice(0, 40) + ' → ' + (s.rect ? 'p' + s.page + ' ' + s.reason : s.reason) + (s.clean ? ' ✓' : '')); });
+    window.__swatches = window.__swatches || {};
+    window.__swatches[fx.f] = { clean: clean, rows: sw.length, found: sw.filter(function (s) { return s.rect; }).length };
+    var capture = fx.f === 'sew-freespirit-harmony-quilt' ? swatchCapture(sw, h) : Promise.resolve();
+    return capture.then(function () { return quiltLayoutChecks(fx, parsed, P, h, clean); });
+  });
+}
+// Crops into BlobStore under a throwaway project id, then removed.
+function cropChecks(fx, links, h) {
+  var pid = 'svtest' + Date.now().toString(36);
+  if (!window.BlobStore || !BlobStore.available()) { skip('BlobStore not available'); return Promise.resolve(); }
+  var t0 = performance.now();
+  return F.renderCrops(pid, links, { handle: h }, { modes: ['figure', 'page'] }).then(function (crops) {
+    var ms = performance.now() - t0;
+    var made = crops.filter(Boolean);
+    info(fx.f + ': ' + made.length + ' crops rendered in ' + Math.round(ms) + ' ms');
+    eq(made.length, links.filter(function (l) { return l.rect; }).length, fx.f + ': a crop for every link with a rectangle');
+    log(made.every(function (c) { return c.blobKey.indexOf('p:' + pid + ':fig:') === 0; }), 'crops live under p:<id>:fig:');
+    log(made.every(function (c) { return !c.w || c.w <= 750; }), 'crops are at most 750 px wide (375 px at 2×)', made.map(function (c) { return c.w + '×' + c.h; }).join(' '));
+    log(made.every(function (c) { return !c.w || c.w * c.h <= 1.2e6 + 1000; }), 'no crop over 1.2 Mpx (memory-safe on a phone)');
+    var t1 = performance.now();
+    return F.renderCrops(pid, links, { handle: h }, { modes: ['figure', 'page'] }).then(function (again) {
+      var ms2 = performance.now() - t1;
+      log(again.filter(Boolean).every(function (c) { return c.cached; }), 'a second call is served from BlobStore (' + Math.round(ms2) + ' ms)');
+      var sig = { cancelled: false };
+      var p = F.renderCrops(pid + 'x', links, { handle: h }, { modes: ['figure', 'page'], signal: sig });
+      sig.cancelled = true;
+      return p.then(function () { log(false, 'a cancelled run rejects'); }, function (e) { eq(e && e.name, 'AbortError', 'a cancelled run rejects with AbortError'); });
+    }).then(function () { return F.deleteCrops(pid); }).then(function () { return F.deleteCrops(pid + 'x'); }).then(function () {
+      return BlobStore.keys('p:' + pid + ':').then(function (k) { eq(k.length, 0, 'deleteCrops leaves nothing behind'); });
+    });
+  });
+}
+function swatchCapture(sw, h) {
+  var pid = 'svtest' + Date.now().toString(36);
+  if (!window.BlobStore || !BlobStore.available()) { skip('BlobStore not available'); return Promise.resolve(); }
+  return F.captureSwatches(pid, sw, { handle: h }, {}).then(function (bm) {
+    var got = bm.filter(Boolean);
+    info('Harmony swatch colours: ' + got.map(function (b) { return String.fromCharCode(65 + b.index) + ' ' + b.colour + (b.clean ? '' : '?'); }).join(', '));
+    eq(got.length, sw.filter(function (s) { return s.rect; }).length, 'Harmony: a bitmap and a colour for every swatch found');
+    log(got.every(function (b) { return /^#[0-9a-f]{6}$/.test(b.colour); }), 'each has a representative colour');
+    window.__swatchKeys = got.map(function (b) { return b.blobKey; });
+    if (Q.keep) return;
+    return F.deleteCrops(pid);
+  });
+}
+function quiltLayoutChecks(fx, parsed, P, h, clean) {
+  var shapesP = {};
+  var lay = null;
+  var pages = Object.keys(P).map(Number).filter(function (n) { return P[n].lines.some(function (l) { return /layout|assembly|join\s+rows|rows/i.test(l.text); }); });
+  return F.readPages(h, pages, { shapes: true }).then(function (S) {
+    lay = SQ.findLayout(S, parsed.fabric);
+    var pic = lay ? null : SQ.findPicture(P);
+    info(fx.f + ': quilt layout ' + (lay ? 'p' + lay.page + ' ' + lay.model.labels + ' · ' + lay.model.blocks.length + ' blocks · ' + lay.model.patches.length + ' patches' : 'none') + (pic ? ' · picture on p' + pic.page : ''));
+    if (fx.f === 'sew-freespirit-harmony-quilt') {
+      eq(clean >= 16, true, 'Harmony: the 16 lettered fabrics (A)–(P) carry their own swatch', clean + ' clean');
+      eq(lay && lay.page, 12, 'Harmony: the vector layout is page 12');
+      eq(lay && lay.model.labels, 'blocks', 'Harmony: read by block labels');
+      log(lay && lay.model.blocks.length >= 13, 'Harmony: at least the 13 labelled regions (B1, B2a–d, B3 ×4, C ×4)', lay && lay.model.blocks.length);
+      eq(lay && lay.model.blocks.filter(function (b) { return b.label === 'B3'; }).length, 4, 'Harmony: B3 four times');
+    }
+    if (fx.f === 'sew-agf-joyous-picnic-quilt') {
+      eq(lay, null, 'Joyous: the layout is a picture, so no vector model is claimed');
+      eq(pic && pic.page, 6, 'Joyous: the picture layout on page 6 is found for the progress-ring view');
+    }
+    if (fx.f === 'sew-agf-catwalk-quilt') {
+      log(!lay || lay.model.labels === 'none', 'Catwalk: no block labels are claimed', lay && lay.model.labels);
+      log(clean >= 16, 'Catwalk: at least 16 of its 18 fabrics plus binding and backing get a code-labelled swatch', clean);
+    }
+    if (fx.f === 'sew-freespirit-harmony-quilt' && lay && window.BlobStore && BlobStore.available()) {
+      var qpid = 'svtest' + Date.now().toString(36);
+      var tq = performance.now();
+      return SQ.loadImage(qpid, lay.model, { handle: h }).then(function (img) {
+        log(img && img.width > 300, 'Harmony: the layout picture is cut and decoded for mount()', img && (img.width + '×' + img.height + ' in ' + Math.round(performance.now() - tq) + ' ms'));
+        var prog = SQ.progress(lay.model, { steps: parsed.steps, units: parsed.units });
+        info('Harmony progress mapping with the parsed booklet: ' + prog.mapping + ', ' + prog.done + ' of ' + prog.total);
+        return F.deleteCrops(qpid);
+      });
+    }
+  });
+}
+function sheetChecks(fx, P, text) {
+  var tx = F.sheetTapeMap(text, null);
+  var own = F.tapeMap(P);
+  info(fx.f + ': sew-core tiles ' + (tx ? tx.rows + ' × ' + tx.cols + ' (' + tx.tiles.length + ', ' + (tx.marks || '') + ')' : 'none'));
+  if (tx && own) eq(tx.rows + 'x' + tx.cols, own.rows + 'x' + own.cols, fx.f + ': the text reading and the position reading agree on the grid');
+  var tm = F.tapeMap(P);
+  info(fx.f + ': tape-up map ' + (tm ? tm.rows + ' × ' + tm.cols + ' · ' + tm.tiles.length + ' sheets · gaps ' + tm.gaps.length + ' · conflicts ' + tm.conflicts + ' · ok ' + tm.ok : 'none'));
+  if (fx.f === 'sew-sundress-pattern') log(tm && tm.ok && tm.tiles.length >= 24, 'sundress sheet: a tape-up grid of its tiles', tm && (tm.rows + 'x' + tm.cols));
+  if (fx.f === 'sew-pencilskirt-pattern') log(tm && tm.ok && tm.tiles.length >= 16, 'pencil skirt sheet: a tape-up grid from its corner marks', tm && (tm.rows + 'x' + tm.cols));
+  if (fx.f === 'sew-peppermint-apron-A0') eq(tm, null, 'A0 copy-shop sheet: no tiles, no map');
+}
+// A reviewer page: every step's crop beside its text (?view=gallery&f=sew-sundress).
+function viewGallery(name) {
+  return openFixture(name).then(function (h) {
+    if (!h) { skip(name + ' absent'); return; }
+    return textOfFixture(name, h).then(function (text) {
+      var pp = Sewing.parse(text), cd0 = Sewing.toCraftData ? Sewing.toCraftData(pp) : null;
+      var steps = (cd0 && cd0.steps && cd0.steps.length ? cd0.steps : pp.steps) || [];
+      var want = [];
+      steps.forEach(function (s) { if (typeof s.page === 'number') [s.page, s.page + 1].forEach(function (p) { if (p <= h.numPages && want.indexOf(p) < 0) want.push(p); }); });
+      return F.readPages(h, want, {}).then(function (P) {
+        var links = F.link(steps, P);
+        var wrap = document.createElement('div');
+        wrap.style.cssText = 'background:#fff;color:#111;font:12px/1.3 sans-serif;padding:4px';
+        document.body.insertBefore(wrap, out);
+        var chain = Promise.resolve();
+        links.forEach(function (l, i) {
+          if (Q.from && i < +Q.from) return;
+          if (Q.to && i > +Q.to) return;
+          chain = chain.then(function () {
+            var card = document.createElement('div');
+            card.style.cssText = 'border-top:2px solid #888;margin:4px 0;padding:2px';
+            card.textContent = '#' + i + ' p' + l.page + ' [' + l.mode + ' ' + l.confidence + '] ' + l.reason + ' — ' + String(steps[i].text).slice(0, 110);
+            wrap.appendChild(card);
+            if (!l.rect) return;
+            return F._renderPdfRegion(h, l.page, l.rect, 340, 4e5).then(function (cv) {
+              cv.style.cssText = 'display:block;max-width:100%;border:1px solid ' + (l.mode === 'figure' ? '#0a0' : '#c80');
+              card.appendChild(cv);
+            });
+          });
+        });
+        return chain.then(function () { h.destroy(); });
+      });
+    });
+  });
+}
+function viewCaps(name, pages) {
+  return openFixture(name).then(function (h) {
+    return F.readPages(h, pages, {}).then(function (P) {
+      Object.keys(P).forEach(function (k) {
+        var pg = P[k];
+        info('PAGE ' + k + ' pdftext captions: ' + JSON.stringify((pg.captions || []).map(function (c) { return [c.ref, c.text, c.target]; })));
+        pg.lines.forEach(function (l) { if (F.captionKey(l.text)) info('  caption line ' + F.captionKey(l.text) + ' @' + Math.round(l.box.x0) + ',' + Math.round(l.box.y0) + ' "' + l.text + '"'); });
+        info('  regions ' + F._graphicRegions(pg).length);
+      });
+      h.destroy();
+    });
+  });
+}
+// Widgets at phone width with the app's theme variables (?view=widgets).
+function viewWidgets() {
+  var host = document.createElement('div');
+  host.style.cssText = '--surface:#fffaf3;--surface-2:#f1e8dc;--text:#2b2420;--text-muted:#7a6d62;--border:#cbbcaa;--primary:#b5523b;--primary-text:#fff;background:var(--surface);color:var(--text);font:14px sans-serif;padding:12px;width:351px';
+  document.body.insertBefore(host, out);
+  var cutF = 'sew-freespirit-harmony-quilt';
+  return openFixture(cutF).then(function (h) {
+    return textOfFixture(cutF, h).then(function (text) {
+      h.destroy();
+      var d = Sewing.toCraftData ? Sewing.toCraftData(Sewing.parse(text)) : null;
+      var cutting = (d && d.cutting) || [];
+      cutting.forEach(function (r, i) { r.cutCount = i % 3 === 0 ? r.qty : 0; });
+      var t = document.createElement('h3'); t.textContent = 'Cutting board (Harmony, ' + cutting.length + ' rows)'; host.appendChild(t);
+      var bm = SQ.mountBoard(host, cutting.slice(0, 12), {});
+      var b2 = document.createElement('button');
+      b2.style.cssText = 'display:block;width:100%;height:96px;margin:12px 0;border-radius:16px;border:0;background:var(--primary);color:var(--primary-text);font-size:20px';
+      b2.textContent = 'Step done';
+      host.appendChild(b2);
+      SQ.mountUnit(b2, { name: 'Unit 7a', done: 2, target: 4 });
+      var tm = { rows: 2, cols: 3, tiles: [1, 2, 3, 4, 5, 6].map(function (p, k) { return { page: p, row: Math.floor(k / 3), col: k % 3, label: '' + (Math.floor(k / 3) + 1) + 'ABC'[k % 3] }; }) };
+      var t2 = document.createElement('h3'); t2.textContent = 'Tape-up map'; host.appendChild(t2);
+      F.mountTapeMap(host, tm, { done: { 1: true, '2A': true } });
+    });
+  });
+}
+function realTests() {
+  if (Q.view === 'widgets') return viewWidgets();
+  if (Q.view === 'caps') return viewCaps(Q.f, Q.pages.split(',').map(Number));
+  if (Q.view === 'gallery') return viewGallery(Q.f);
+  if (Q.view === 'quilt') return viewQuilt(Q.f, +Q.page, Q.units ? JSON.parse(Q.units) : null);
+  if (Q.probe) return probe(Q.probe, (Q.pages || '1').split(',').map(Number), Q.shapes === '1');
+  var chain = Promise.resolve();
+  group('real fixtures (tmp-pdf)');
+  FIX.forEach(function (fx) {
+    if (Q.only && fx.f.indexOf(Q.only) < 0) return;
+    chain = chain.then(function () { return realFixture(fx); });
+  });
+  return chain.then(function () {
+    info('TABLE fixture | steps | figure | page | none | link ms');
+    window.__table.forEach(function (r) { info('TABLE ' + r.f + ' | ' + r.steps + ' | ' + r.figure + ' | ' + r.page + ' | ' + r.none + ' | ' + r.linkMs); });
+  });
+}
+</script>
+<script>
+(function () {
+  if (!Q.probe && !Q.only && !Q.view) try { syntheticTests(); } catch (e) { log(false, 'synthetic tests threw', e && e.stack); }
+  if (!Q.probe && !Q.only && !Q.view) try { domTests(); } catch (e) { log(false, 'DOM tests threw', e && e.stack); }
+  var wantReal = Q.real === '1' || Q.only || Q.probe || Q.view;
+  var after = (!wantReal || typeof realTests !== 'function') ? Promise.resolve() : realTests();
+  after.then(null, function (e) { log(false, 'real fixtures threw', e && (e.stack || e.message)); }).then(function () {
+    var s = document.getElementById('summary');
+    s.textContent = passed + ' passed, ' + failed + ' failed, ' + skipped + ' skipped';
+    s.className = failed ? 'bad' : 'ok';
+    document.title = (failed ? 'FAIL ' : 'OK ') + passed + '/' + (passed + failed);
+    window.__done = { passed: passed, failed: failed, skipped: skipped };
+  });
+})();
+</script>
+</body>
+</html>

@@ -132,6 +132,9 @@
    * Anything that labels one part's counter goes through these two.
    */
   function partMode(project, prt) {
+    // wave K (E13): a knitting part the reader found worked in the round
+    // (`Part.rowWord: 'rnd'`) says Rnd / Round, unless the knitter chose otherwise
+    if (prt && prt.rowWord === 'rnd' && (!prt.workMode || prt.workMode === 'auto')) return 'rounds';
     if (prt && window.Store && typeof Store.partWorkMode === 'function') {
       try {
         return Store.partWorkMode(prt, project) === 'rounds' ? 'rounds' : 'rows';
@@ -157,6 +160,13 @@
    * (`Store.rowWorkMode`). Falls back to the piece's own word.
    */
   function rowModeAt(project, prt, row) {
+    // wave K (E13): a knitting part read as worked in the round, row by row
+    // (a flat heel inside it still says Row: `Line.workedIn: 'rows'`)
+    if (prt && prt.rowWord === 'rnd' && (!prt.workMode || prt.workMode === 'auto')) {
+      var ln = null;
+      try { ln = row >= 1 && typeof Store.lineForRow === 'function' ? Store.lineForRow(prt, row) : null; } catch (e0) { ln = null; }
+      return ln && ln.workedIn === 'rows' ? 'rows' : 'rounds';
+    }
     if (prt && row >= 1 && window.Store && typeof Store.rowWorkMode === 'function') {
       try {
         return Store.rowWorkMode(prt, row, project) === 'rows' ? 'rows' : 'rounds';
@@ -451,6 +461,43 @@
       announceQueue = [];
       els.live.textContent = said;
     }, 30);
+  }
+
+  /**
+   * Wave K (docs/wave-k/api/shell-ui.md §5): `ctx.counted(ev)` — the one
+   * place a craft reports a count, so the policy above, the haptic / sound
+   * and the progress node's value are the same in every craft. The policy is
+   * the pure `WorkMode.countPolicy` (js/workmode.js): milestones speak, a
+   * plain tap speaks only at the total or, with no grouping, every 50th.
+   * @param {{n?:number,total?:number,unit?:string,units?:string,label?:string,
+   *          kind?:string,groupSize?:number,say?:string,node?:HTMLElement,quiet?:boolean}} ev
+   * @returns {{said: (string|null), fb: string}}
+   */
+  function counted(ev) {
+    ev = ev || {};
+    var r = window.WorkMode && typeof window.WorkMode.countPolicy === 'function'
+      ? window.WorkMode.countPolicy(ev)
+      : { say: ev.kind && ev.kind !== 'tap' && ev.kind !== 'undo' ? ev.say || null : null, fb: ev.kind || 'tap' };
+    var node = ev.node;
+    if (node && node.setAttribute) {
+      var n = Math.max(0, Math.round(Number(ev.n) || 0));
+      var total = Math.max(0, Math.round(Number(ev.total) || 0));
+      var units = ev.units || (window.WorkMode ? window.WorkMode.plural(ev.unit || 'stitch') : 'stitches');
+      var text = (ev.label ? ev.label + ': ' : '') + n + (total ? ' of ' + total : '') + ' ' + units;
+      var role = node.getAttribute('role');
+      if (role === 'progressbar' || role === 'meter' || role === 'slider' || role === 'spinbutton') {
+        node.setAttribute('aria-valuenow', String(n));
+        node.setAttribute('aria-valuemin', '0');
+        if (total) node.setAttribute('aria-valuemax', String(total)); else node.removeAttribute('aria-valuemax');
+        node.setAttribute('aria-valuetext', text);
+      } else {
+        // a button cannot carry a value: say it as its description instead
+        node.setAttribute('aria-description', text);
+      }
+    }
+    if (r.say) announce(r.say);
+    if (!ev.quiet) fb(r.fb);
+    return { said: r.say || null, fb: r.fb };
   }
 
   /**
@@ -759,21 +806,77 @@
    * disk from another tab (Store.referencedProjectIds) — and an unreadable
    * or conflicted store sweeps nothing.
    */
+  /*
+   * Wave K: the page images (IndexedDB) are shared by every store key on this
+   * origin — the user's own and any test or agent profile — but a key only
+   * knows its own projects. So the sweep (a) never runs when the store key
+   * has changed since boot (`Store.__setKeyForTests`: a test page or an
+   * agent's private profile), and (b) also keeps every project named in ANY
+   * other `stitchkeeper*` key in localStorage. A real user's images can only
+   * go when no store on the device mentions their project.
+   */
+  var sweepBootKey = null;
+
+  /** Project ids every OTHER store key on this origin still holds (projects, and the undo / import copies it carries). */
+  function otherStoreIds(currentKey) {
+    var out = [];
+    var ls = null;
+    try { ls = window.localStorage; } catch (e) { ls = null; }
+    if (!ls) return out;
+    for (var i = 0; i < ls.length; i++) {
+      var k = ls.key(i);
+      if (!k || k === currentKey || !/^stitchkeeper/i.test(k)) continue;
+      var raw = null;
+      try { raw = ls.getItem(k); } catch (e2) { raw = null; }
+      if (!raw || raw.charAt(0) !== '{') continue;
+      // any "id" that looks like a project id inside "projects": cheap and wide on purpose
+      try {
+        var st = JSON.parse(raw);
+        (st && Array.isArray(st.projects) ? st.projects : []).forEach(function (p) {
+          if (p && typeof p.id === 'string' && out.indexOf(p.id) < 0) out.push(p.id);
+        });
+      } catch (e3) {
+        // unreadable: keep everything its text names as p:<id>:
+        var re = /p:([A-Za-z0-9_-]+):/g, m;
+        while ((m = re.exec(raw))) if (out.indexOf(m[1]) < 0) out.push(m[1]);
+      }
+    }
+    return out;
+  }
+
+  /** The ids a sweep keeps: this store's referenced projects plus every other store key's. */
+  function sweepLiveIds() {
+    var mine = typeof Store.referencedProjectIds === 'function' ? Store.referencedProjectIds() : [];
+    var all = mine.slice();
+    otherStoreIds(Store.KEY).forEach(function (id) { if (all.indexOf(id) < 0) all.push(id); });
+    return all;
+  }
+
+  /** @returns {Promise<{skipped?: string, count?: number, bytes?: number}>} */
+  function runBlobSweep() {
+    var B = window.BlobStore;
+    if (!B || typeof B.sweep !== 'function' || typeof Store.referencedProjectIds !== 'function') return Promise.resolve({ skipped: 'unavailable' });
+    try {
+      if (Store.isCorrupt() || Store.conflict()) return Promise.resolve({ skipped: 'store' });
+      if (sweepBootKey !== null && Store.KEY !== sweepBootKey) return Promise.resolve({ skipped: 'key changed' });
+      if (!(Store.referencedProjectIds() || []).length) return Promise.resolve({ skipped: 'empty' });
+      var ids = sweepLiveIds();
+      return B.sweep(ids).then(function (r) {
+        if (r && r.count && window.console) {
+          console.info('BlobStore sweep: removed ' + r.count + ' orphaned page images (' + mb(r.bytes) + ')');
+        }
+        return r || { count: 0 };
+      }, function () { return { skipped: 'failed' }; });
+    } catch (e) {
+      return Promise.resolve({ skipped: 'failed' });   // housekeeping; never in the user's way
+    }
+  }
+
   function scheduleBlobSweep() {
     var B = window.BlobStore;
     if (!B || typeof B.sweep !== 'function' || typeof Store.referencedProjectIds !== 'function') return;
-    var run = function () {
-      try {
-        if (Store.isCorrupt() || Store.conflict()) return;
-        var ids = Store.referencedProjectIds();
-        if (!ids.length) return;
-        B.sweep(ids).then(function (r) {
-          if (r && r.count && window.console) {
-            console.info('BlobStore sweep: removed ' + r.count + ' orphaned page images (' + mb(r.bytes) + ')');
-          }
-        }, noop);
-      } catch (e) { /* a sweep is housekeeping; never in the user's way */ }
-    };
+    sweepBootKey = Store.KEY || null;
+    var run = function () { runBlobSweep(); };
     window.setTimeout(function () {
       if (typeof window.requestIdleCallback === 'function') window.requestIdleCallback(run, { timeout: 10000 });
       else run();
@@ -1427,6 +1530,14 @@
     }
     // wave H: `faq: [{q, a}]` joins Settings → Help (same as ctx.addFaq)
     if (Array.isArray(def.faq)) def.faq.forEach(function (it) { addFaq(it); });
+    // wave K: a craft's template hook (and settings defaults) reach the Store's
+    // side (docs/wave-k/api/shell-data.md §1: Store.setCraftHooks)
+    if ((def.template || def.settings) && window.Store && typeof Store.setCraftHooks === 'function') {
+      var hooks = {};
+      if (def.template && typeof def.template === 'object') hooks.template = def.template;
+      if (def.settings && typeof def.settings === 'object') hooks.settings = def.settings;
+      try { Store.setCraftHooks(id, hooks); } catch (e) { /* the store keeps today's behaviour */ }
+    }
     // Registering after boot (a late module, a console experiment) still shows
     // up straight away.
     if (booted) {
@@ -1461,6 +1572,33 @@
     var d = craftDefs[key];
     if (d) return { id: key, name: d.name || key, emoji: d.emoji || '🧵', tagline: d.tagline || '' };
     return { id: key, name: key, emoji: '🧵', tagline: '' };
+  }
+
+  /**
+   * Wave K (00 gap 17): the words a craft's first run, empty states and drop
+   * zone use — `def.copy = { dropLabel, homeEmpty, allDone, importEmpty,
+   * newProjectHint }` — with the shell's own for crochet and knitting.
+   * '' when nothing is set (the caller keeps its generic text).
+   */
+  var BUILTIN_COPY = {
+    crochet: {
+      allDone: 'Nothing on the hook right now — everything you have made is on the shelf below.',
+      importEmpty: 'No rows found yet. Paste the instruction part of your pattern (e.g. “Rnd 1: 6 sc in MR (6)”).'
+    },
+    knitting: {
+      allDone: 'Nothing on the needles right now — everything you have made is on the shelf below.',
+      importEmpty: 'No rows found yet. Paste the instruction part of your pattern (e.g. “Row 1 (RS): K2, p2 to end”).',
+      dropLabel: 'Drop a knitting pattern PDF here, or choose a file'
+    }
+  };
+
+  function craftCopy(id, key) {
+    var cid = id || CROCHET.id;
+    var d = craftDefs[cid];
+    var own = d && d.copy && typeof d.copy === 'object' ? d.copy[key] : null;
+    if (typeof own === 'string' && own.trim()) return own.trim();
+    var b = BUILTIN_COPY[cid];
+    return b && typeof b[key] === 'string' ? b[key] : '';
   }
 
   /** True once more than one craft can be picked. */
@@ -1528,6 +1666,10 @@
     closeAllSheets: closeAllSheets,
     toast: toast,
     announce: announce,
+    // wave K: one count policy for every craft (shell-ui.md §5)
+    counted: counted,
+    // wave K (knit-ui P2): pattern text with the chosen size's number marked (<mark>, never innerHTML)
+    fillSizeMarked: fillSizeMarked,
     // Wrap a list rebuild so keyboard focus survives it (UX sweep D5).
     preserveFocus: preserveFocus,
     fb: fb,
@@ -1568,8 +1710,58 @@
     },
 
     // Help
-    addFaq: addFaq
+    addFaq: addFaq,
+
+    // wave K (docs/wave-k/api/shell-ui.md): the shared check sheet, page viewer, share card
+    check: {
+      badge: function (v, o) { return window.CheckSheet ? window.CheckSheet.badge(v, o) : el('span'); },
+      line: function (c, o) { return window.CheckSheet ? window.CheckSheet.line(c, o) : el('div'); },
+      render: function (node, c, o) { return window.CheckSheet ? window.CheckSheet.render(node, c, o) : node; },
+      open: function (c, o) { return openCheckSheet(c, o); },
+      guard: function (c, o) {
+        return window.CheckSheet ? window.CheckSheet.guard(c, confirmSheet, o) : Promise.resolve(true);
+      },
+      demote: function (btn, c) { return window.CheckSheet ? window.CheckSheet.demote(btn, c) : null; },
+      fromCountReport: function (rep, o) { return window.CheckSheet ? window.CheckSheet.fromCountReport(rep, o) : null; },
+      fromXStitch: function (c) { return window.CheckSheet ? window.CheckSheet.fromXStitch(c) : null; }
+    },
+    pageViewer: function (o) { return openPageViewerSheet(o); },
+    // wave K: the opt-in text reader (shell-ui.md §9); never wired silently
+    ocr: {
+      LABEL: 'Read from a picture — check it',
+      available: function () { return !!ocrApi(); },
+      sizeLabel: function () { return ocrSizeLabel(); },
+      ensure: function (o) { return ocrEnsure(o); },
+      offerButton: function (o) { return ocrOfferButton(o); },
+      mark: function (node, o) { return ocrMark(node, o); },
+      check: function (r, o) { return ocrCheck(r, o); },
+      /** "These pages are pictures, so there is no text to read." (+ the reader, where it runs) */
+      noText: function () { return noTextMessage(); },
+      /** the message a failed PDF read shows: the no-text one, else the error's own */
+      failText: function (err) { return pdfFailText(err); }
+    },
+    sharePicture: function (projectId) { return openShareCard(projectId); }
   };
+
+  /** The one check sheet (CheckSheet.open with the shell's own openSheet). */
+  function openCheckSheet(check, opts) {
+    if (!window.CheckSheet) return null;
+    var o = {};
+    var k;
+    for (k in (opts || {})) if (Object.prototype.hasOwnProperty.call(opts, k)) o[k] = opts[k];
+    o.openSheet = openSheet;
+    return window.CheckSheet.open(check, o);
+  }
+
+  /** The one page viewer in a sheet (PageViewer.open with the shell's own openSheet). */
+  function openPageViewerSheet(opts) {
+    if (!window.PageViewer) return null;
+    var o = {};
+    var k;
+    for (k in (opts || {})) if (Object.prototype.hasOwnProperty.call(opts, k)) o[k] = opts[k];
+    o.openSheet = openSheet;
+    return window.PageViewer.open(o);
+  }
 
   function addFaq(entry) {
     if (!entry || typeof entry !== 'object') return false;
@@ -1791,7 +1983,13 @@
     // Everything is finished or frogged: the shelf holds it all and this list
     // would otherwise be a silent blank space.
     if (all.length > 0 && live.length === 0) {
-      var allDone = el('p', 'muted home-all-done', 'Nothing on the hook right now — everything you have made is on the shelf below.');
+      // wave K: in the words of the craft the shelf holds (crochet: "on the hook")
+      var shelfCrafts = {};
+      all.forEach(function (q) { shelfCrafts[q.craft || CROCHET.id] = true; });
+      var only = Object.keys(shelfCrafts);
+      var doneText = (only.length === 1 && craftCopy(only[0], 'allDone')) ||
+        'Nothing in progress right now — everything you have made is on the shelf below.';
+      var allDone = el('p', 'muted home-all-done', doneText);
       els.homeList.appendChild(allDone);
     }
 
@@ -2343,6 +2541,18 @@
         var rep = Store.countReport(prt);
         var all = countLineText(rep, partRowWord(p, prt), !!prt.makeCountInferred);
         if (all) body.appendChild(el('p', 'muted why-part', prt.name + ': ' + all));
+        // wave K: every row of the part against the pattern, in the shared check sheet
+        if (window.CheckSheet && rep && rep.rows) {
+          var whole = button('linkish check-open', 'See every ' + partRowWord(p, prt).toLowerCase() + ' checked');
+          on(whole, 'click', function () {
+            var lines = null;
+            try { lines = Store.linesFor(prt); } catch (e) { lines = null; }
+            openCheckSheet(window.CheckSheet.fromCountReport(rep, {
+              word: partRowWord(p, prt), name: prt.name, lines: lines
+            }));
+          });
+          body.appendChild(whole);
+        }
       },
       footer: [{ text: 'OK', cls: 'btn primary', onClick: function (api) { api.close(); } }]
     });
@@ -2698,6 +2908,41 @@
     return card;
   }
 
+  /** Wave K: "Opening the chart…", or the honest card when part of it is gone. */
+  function heavyWaitCard(p, state) {
+    var card = el('section', 'card craft-missing heavy-wait');
+    card.appendChild(el('div', 'craft-missing-emoji', craftInfo(p.craft).emoji));
+    if (state === 'missing') {
+      card.appendChild(el('h2', 'craft-missing-title', 'Part of this project is missing'));
+      card.appendChild(el('p', 'muted',
+        'Some of its saved data could not be found on this device (the browser may have cleared it). ' +
+        'A backup made earlier still has it: Settings → Import backup. Or open what is left.'));
+      if (typeof Store.discardMissingHeavy === 'function') {
+        var go = button('btn block', 'Open what is left');
+        on(go, 'click', function () {
+          confirmSheet({
+            title: 'Open what is left?',
+            message: 'The missing part stays missing. You can Undo this straight after.',
+            confirmText: 'Open it'
+          }).then(function (ok) {
+            if (!ok) return;
+            try { Store.discardMissingHeavy(p.id); } catch (e) { /* ignore */ }
+            render();
+          });
+        });
+        card.appendChild(go);
+      }
+      var back = button('btn primary block', 'Back to projects');
+      on(back, 'click', goHome);
+      card.appendChild(back);
+    } else {
+      var t = el('p', 'muted', 'Opening ' + p.name + '…');
+      t.setAttribute('role', 'status');
+      card.appendChild(t);
+    }
+    return card;
+  }
+
   function renderCraftProject(p) {
     if (!els.craftBody) return;
     if (els.cEmoji) els.cEmoji.textContent = p.emoji;
@@ -2718,6 +2963,22 @@
       return;
     }
 
+    // wave K (shell-data.md §4): a project whose big craft data lives in
+    // IndexedDB is read back before its craft paints it
+    var hs = typeof Store.heavyState === 'function' ? Store.heavyState(p.id) : 'none';
+    if (hs && hs !== 'none' && hs !== 'ready') {
+      destroyCraftProject();
+      clear(els.craftBody);
+      els.craftBody.appendChild(heavyWaitCard(p, hs));
+      if (hs !== 'missing' && typeof Store.whenReady === 'function') {
+        Store.whenReady(p.id).then(function () {
+          var cp = currentProject();
+          if (cp && cp.id === p.id) render();
+        }, function () { /* the card stays; the next render asks again */ });
+      }
+      return;
+    }
+
     if (!activeCraft) {
       clear(els.craftBody);
       activeCraft = { id: p.craft, projectId: p.id, def: def };
@@ -2729,13 +2990,107 @@
       destroyCraftProject();
       clear(els.craftBody);
       els.craftBody.appendChild(craftMissingCard(p));
+      return;
     }
+    // wave K: the craft's working mode, if it registered one (shell-ui.md §1)
+    syncCraftWork(p, def);
   }
+
+  /* ---- wave K: working mode for a #screen-craft craft (def.workMode) ---- */
+
+  var craftWork = Object.create(null);   // craft id → WorkMode session
+
+  function craftWorkSpec(def) {
+    var spec = def && def.workMode;
+    return spec && typeof spec === 'object' ? spec : null;
+  }
+
+  function craftWorkSession(def) {
+    var spec = craftWorkSpec(def);
+    if (!spec || !els.craft || !window.WorkMode || typeof window.WorkMode.create !== 'function') return null;
+    var s = craftWork[def.id];
+    if (s && s.source === spec) return s;
+    if (s) s.destroy();
+    // the shell's defaults under the craft's own spec (never mutated)
+    var full = Object.create(spec);
+    if (!spec.label) full.label = 'Working mode';
+    if (!spec.backTo) full.backTo = 'the project';
+    if (!spec.hudId) full.hudId = 'work-hud-' + def.id;
+    s = window.WorkMode.create(els.craft, full, workEnv(els.craft));
+    s.source = spec;
+    craftWork[def.id] = s;
+    return s;
+  }
+
+  function craftWorkWanted(p) {
+    if (!p || !isCraftProject(p)) return false;
+    if (typeof Store.focusMode === 'function') return !!Store.focusMode(p.id);
+    return work.fallbackId === p.id;
+  }
+
+  function syncCraftWork(p, def) {
+    Object.keys(craftWork).forEach(function (id) {
+      if (!def || id !== def.id) craftWork[id].sync(false);
+    });
+    var s = craftWorkSession(def);
+    if (s) s.sync(craftWorkWanted(p));
+  }
+
+  /** The working-mode session for whatever project is open (counter or craft), or null. */
+  function currentWorkSession() {
+    var p = currentProject();
+    if (!p) return null;
+    if (isCraftProject(p)) return craftWorkSession(craftFor(p));
+    return ensureWorkSession();
+  }
+
+  /** ctx.workMode: the shell's working-mode door for a craft's own screen. */
+  var workModeApi = {
+    supported: function () { return !!window.WorkMode; },
+    open: function () {
+      var p = currentProject();
+      if (p && !isCraftProject(p)) { openWorkMode(); return true; }
+      var s = currentWorkSession();
+      if (!s) return false;
+      s.openUser();
+      return true;
+    },
+    close: function () {
+      var s = currentWorkSession();
+      if (s && s.isOn()) s.closeUser();
+    },
+    isOn: function () {
+      var s = currentWorkSession();
+      return !!(s && s.isOn());
+    },
+    refresh: function () {
+      var s = currentWorkSession();
+      if (s) s.refresh();
+    },
+    /** A ready "⤢ <label>" button that opens the mode. */
+    button: function (label) {
+      var p = currentProject();
+      var def = p ? craftFor(p) : null;
+      var spec = craftWorkSpec(def);
+      var text = label || (spec && spec.label) || 'Working mode';
+      var b = button('btn work-open', null, text + ': full screen');
+      b.appendChild(el('span', 'work-open-glyph', (spec && spec.icon) || '⤢'));
+      b.appendChild(el('span', 'work-open-label', text));
+      on(b, 'click', function (e) {
+        e.stopPropagation();
+        workModeApi.open();
+      });
+      return b;
+    }
+  };
+  ctx.workMode = workModeApi;
 
   function destroyCraftProject() {
     if (!activeCraft) return;
     var def = activeCraft.def;
     activeCraft = null;
+    // wave K: hide the craft's working mode with its screen (the choice stays remembered)
+    if (def && craftWork[def.id]) craftWork[def.id].sync(false);
     if (def && typeof def.destroyProject === 'function') {
       try { def.destroyProject(); } catch (e) { /* ignore */ }
     }
@@ -3041,6 +3396,7 @@
 
   /** Called at the end of updateCounters: paint the knitting widgets. */
   function updateKnitWidgets(p, prt) {
+    syncKnitTapHint(p, prt);   // wave K (P13): "Tap = 1 repeat (5 sts) · hold = 1 st", knitting only
     if (!isKnit(p) || !prt) { hideKnitWidgets(); return; }
     var finished = partFinished(prt);
     var sr = null, si = null, ci = null;
@@ -3159,7 +3515,7 @@
         any = true;
       }
       if (ui) {
-        var ub = button('knit-chip knit-until-chip', untilChipText(ui, p));
+        var ub = button('knit-chip knit-until-chip', untilChipText(ui, p, prt));
         ub.setAttribute('aria-label', untilSentence(ui, p, prt) + ' Open the gauge');
         on(ub, 'click', function () { openPartEditor(p.id, prt.id); });
         extra.appendChild(ub);
@@ -3212,23 +3568,38 @@
       add.hidden = finished;
       add.setAttribute('aria-label', 'Place a marker after stitch ' + prt.stitch);
     }
+
+    // wave K (knit-ui): stretch, resolved repeat, panels, chart strip, colours, shaping
+    var kdef = craftDefs[KNIT_ID];
+    if (kdef && typeof kdef.counterPaint === 'function') {
+      try {
+        kdef.counterPaint(p, prt, { extra: knitEls.extra, patternLine: els.patternLine, patternTag: els.patternTag,
+          patternText: els.patternText, patternNotes: els.patternNotes, rowLabel: els.rowLabel, finished: finished, hook: true });
+      } catch (eK) { /* the counter stays as it was */ }
+    }
   }
 
-  function untilChipText(ui, p) {
+  /** "rows" / "rounds" for a part (wave K, E13: a part worked in the round counts rounds). */
+  function unitWords(p, prt, n) {
+    var w = partRowWord(p, prt).toLowerCase();
+    return n === 1 ? w : w + 's';
+  }
+
+  function untilChipText(ui, p, prt) {
     var len = ui.kind === 'length' ? knitNum(ui.value) + ' ' + (ui.unit || '') : null;
-    if (ui.kind === 'rows') return '↕ ' + ui.rows + ' rows';
+    if (ui.kind === 'rows') return '↕ ' + ui.rows + ' ' + unitWords(p, prt, ui.rows);
     if (!ui.rows) return '📏 ' + len + ' · add your gauge';
-    var s = '📏 ' + len + ' ≈ ' + ui.rows + ' rows';
+    var s = '📏 ' + len + ' ≈ ' + ui.rows + ' ' + unitWords(p, prt, ui.rows);
     if (ui.gaugeSource === 'swatch' && ui.patternRows && ui.patternRows !== ui.rows) s += ', not ' + ui.patternRows;
-    if (ui.targetRow) s += ' · ≈ ' + rowWord(p).toLowerCase() + ' ' + ui.targetRow;
+    if (ui.targetRow) s += ' · ≈ ' + (prt ? partRowWord(p, prt) : rowWord(p)).toLowerCase() + ' ' + ui.targetRow;
     return s;
   }
 
   function untilSentence(ui, p, prt) {
-    if (ui.kind === 'rows') return 'Work ' + ui.rows + ' rows.';
+    if (ui.kind === 'rows') return 'Work ' + ui.rows + ' ' + unitWords(p, prt, ui.rows) + '.';
     var len = knitNum(ui.value) + ' ' + (ui.unit || '');
-    if (!ui.rows) return 'Work until it measures ' + len + '. Add the gauge to turn this into rows.';
-    var s = len + ' is about ' + ui.rows + ' rows at ' +
+    if (!ui.rows) return 'Work until it measures ' + len + '. Add the gauge to turn this into ' + unitWords(p, prt, 2) + '.';
+    var s = len + ' is about ' + ui.rows + ' ' + unitWords(p, prt, ui.rows) + ' at ' +
       (ui.gaugeSource === 'swatch' ? 'your measured gauge' : 'the pattern’s gauge');
     if (ui.gaugeSource === 'swatch' && ui.patternRows && ui.patternRows !== ui.rows) s += ' (' + ui.patternRows + ' at the pattern’s)';
     s += '.';
@@ -3706,7 +4077,9 @@
   var knitCapture = null;
   var KNIT_CHART_KEYS = ['name', 'source', 'image', 'drawn', 'cols', 'rows', 'cells', 'spans', 'legend', 'noStitch',
     'readRS', 'startRow', 'rowStep', 'rowNos', 'labelSide', 'repeatBox', 'repeats', 'unknown', 'bbox', 'pageBox',
-    'turned', 'pitch', 'legendFromPage'];
+    'turned', 'pitch', 'legendFromPage',
+    // wave K (knit-charts): a chart read from a PICTURE, with how sure the reader is
+    'kind', 'confidence', 'reasons', 'calib', 'colour', 'imageBox', 'rowNosRead'];
 
   /** A drop zone's options with `onPages` present only while the craft is knitting. */
   function knitZoneOpts(opts, craftOf) {
@@ -3768,18 +4141,108 @@
     return new RegExp('\\b' + esc(n).replace(/ /g, '\\s+') + '\\b', 'i').test(t);
   }
 
-  function knitAttachCharts(projectId) {
+  /**
+   * Wave K (knit-ui P20): a knitting pattern's materials (yarn for each size,
+   * needles) live in its front matter, which the parts do not carry; keep
+   * them with the project at import, as view state (no undo step). In a book,
+   * the picked pattern's own (`bookPatterns()[i].materials`). Knitting only.
+   * @returns {boolean} whether something was kept
+   */
+  function knitKeepMaterials(projectId, fullText, bookName) {
+    var p = Store.project(projectId);
+    var K = window.Knits;
+    if (!isKnit(p) || !K || typeof Store.updateCraftData !== 'function' || !fullText) return false;
+    var mat = null;
+    try {
+      if (bookName && typeof K.bookPatterns === 'function') {
+        var list = K.bookPatterns(fullText) || [];
+        for (var i = 0; i < list.length; i++) if (list[i] && list[i].name === bookName) { mat = list[i].materials || null; break; }
+      } else if (typeof K.materials === 'function') {
+        mat = K.materials(fullText);
+      }
+    } catch (e) { mat = null; }
+    if (!mat || !((mat.yarn && mat.yarn.length) || (mat.needles && mat.needles.length))) return false;
+    Store.updateCraftData(projectId, function (cd) { cd.materials = mat; }, { undo: false });
+    return true;
+  }
+
+  /**
+   * Wave K (xs-audit): a PDF with no text layer is usually NOT a scan of
+   * paper — most are born-digital files whose pages are pictures. Say what
+   * is true and useful, and point at the opt-in text reader when this
+   * browser can run it. Other errors keep their own message.
+   */
+  var NO_TEXT_RE = /scanned images|no text to read|has no text/i;
+  function noTextMessage() {
+    var reader = !!(window.Ocr && typeof window.Ocr.available === 'function' && window.Ocr.available());
+    return 'These pages are pictures, so there is no text to read.' +
+      (reader ? ' The text reader (Settings → Read scanned pages) can try them; check what it reads.' : '');
+  }
+  function pdfFailText(err) {
+    var m = err && err.message ? String(err.message) : '';
+    if (!m || NO_TEXT_RE.test(m)) return noTextMessage();
+    return m;
+  }
+
+  /** Wave K (E12): is this chart page inside the imported book pattern's own pages? */
+  function knitPageInside(page, within) {
+    if (!within || !(within.from >= 1)) return true;
+    return page >= within.from && page <= (within.to || within.from);
+  }
+
+  /**
+   * Wave K (knit-audit 4): a knitting import's project name — the pattern's
+   * own title (`Knits.title`, null when it is not sure), else the file name
+   * tidied: no extension, no "knit-" style prefix, words spaced and
+   * capitalised ("knit-patons-boyfriend-cable.pdf" → "Patons Boyfriend Cable").
+   */
+  function knitProjectName(text, fileBase) {
+    var K = window.Knits;
+    if (K && typeof K.title === 'function') {
+      try { var t = K.title(text); if (t && String(t).trim()) return String(t).trim(); } catch (e) { /* the file name */ }
+    }
+    var b = String(fileBase || '').replace(/\.(pdf|txt|oxs|xml)$/i, '')
+      .replace(/^(?:knit(?:ting)?|crochet|xs|sew(?:ing)?)[-_ ]+/i, '')
+      .replace(/[-_]+/g, ' ').replace(/\s+/g, ' ').trim();
+    if (!b) return '';
+    return b.replace(/(^|\s)([a-z])/g, function (m, s, c) { return s + c.toUpperCase(); });
+  }
+
+  /** Wave K: the background chart scan in flight; a newer import (or ctx) cancels it. */
+  var knitScanSignal = null;
+
+  function cancelKnitScan() {
+    if (knitScanSignal) { knitScanSignal.cancelled = true; knitScanSignal.aborted = true; }
+    knitScanSignal = null;
+  }
+
+  /**
+   * After a knitting import: read the PDF's charts in the background (never
+   * awaited by the import). Wave K (knit-charts): pictures of charts are read
+   * too (`pictures: true`, about 0.3–1 s a picture page, text pages cheap);
+   * the scan starts after the import has painted and is cancelled by the
+   * next import. A text-only import (no PDF read) returns at once.
+   * @returns {boolean} whether a scan was started
+   */
+  function knitAttachCharts(projectId, within) {
     var cap = knitCapture;
     knitCapture = null;
     var p = Store.project(projectId);
     var KC = window.KnitChart;
     if (!cap || !cap.handle || !isKnit(p) || Date.now() - cap.at > KNIT_CAPTURE_MS ||
-        typeof Store.setChartPages !== 'function' || !KC || typeof KC.scan !== 'function') return;
+        typeof Store.setChartPages !== 'function' || !KC || typeof KC.scan !== 'function') return false;
     var handle = cap.handle;
     var found = [], blobs = {};
-    Promise.resolve().then(function () {
-      return KC.scan(handle, { signal: { cancelled: false } });
+    cancelKnitScan();
+    var sig = knitScanSignal = { cancelled: false, aborted: false };
+    new Promise(function (res) {
+      // off the import's critical path: after the toast and the new screen have painted
+      window.setTimeout(res, 50);
+    }).then(function () {
+      if (sig.cancelled) throw { name: 'AbortError' };
+      return KC.scan(handle, { signal: sig, pictures: true });
     }).then(function (pages) {
+      if (sig.cancelled) return Promise.reject({ name: 'AbortError' });
       var work = Promise.resolve(), drawn = 0, seen = {};
       // wave H (knit-qa): a pattern book imports ONE pattern (or a few); the
       // charts kept are those its own text names, not the book's other
@@ -3789,13 +4252,16 @@
       (pages || []).forEach(function (pg) {
         (pg && pg.charts || []).forEach(function (c) {
           if (!c) return;
+          // wave K (E12): a book pattern keeps only the charts on its own pages
+          if (!knitPageInside(pg.page, within)) return;
           if (mentionText !== null && !knitChartMentioned(c.name, mentionText)) return;
           found.push({ page: pg.page, name: String(c.name || ''), chart: slimChart(c) });
           if (seen[pg.page] || drawn >= KNIT_CHART_PAGES_MAX) return;
           seen[pg.page] = true;
           drawn++;
           work = work.then(function () {
-            return handle.renderPage(pg.page, { scale: KNIT_CHART_SCALE }).then(function (canvas) {
+            if (sig.cancelled) return null;
+            return handle.renderPage(pg.page, { scale: KNIT_CHART_SCALE, signal: sig }).then(function (canvas) {
               return new Promise(function (res) {
                 try { canvas.toBlob(function (b) { res(b); }, 'image/jpeg', 0.85); } catch (e) { res(null); }
               });
@@ -3824,7 +4290,13 @@
         if (cur && cur.id === projectId) render();
         toast(plural(entries.length, 'chart') + ' read and kept with the project', { ms: 2400 });
       });
-    }).then(null, function () { /* the pattern imported; only the charts are missing */ });
+    }).then(function () {
+      if (knitScanSignal === sig) knitScanSignal = null;
+    }, function () {
+      /* the pattern imported; only the charts are missing (or a newer import cancelled them) */
+      if (knitScanSignal === sig) knitScanSignal = null;
+    });
+    return true;
   }
 
   /**
@@ -3851,6 +4323,10 @@
   /* ---- the chart sheet: the page image, and the row written out ---- */
 
   function openKnitChartSheet(projectId, partId) {
+    // wave K (knit-ui): the craft's own chart sheet (your row on the chart) when it has one
+    if (window.AppKnitting && typeof window.AppKnitting.openChartSheet === 'function') {
+      return window.AppKnitting.openChartSheet(projectId, partId);
+    }
     var p = Store.project(projectId);
     var prt = Store.part(p, partId);
     if (!p || !prt) return;
@@ -4005,13 +4481,132 @@
   var tapState = null;
   var MOVE_TOLERANCE_SQ = 12 * 12;
 
-  function doStitchTap() {
+  /* ---- wave K (01 P13): on a long knitting row a tap counts a repeat ----
+   * On a knitting row of 40 stitches or more whose stitches fall into the
+   * row's real repeat groups (Store.rowGroups: the runs that add up exactly
+   * to the target) — or, without those, into marker segments on a row the
+   * markers were set for — one tap counts the stitches up to the end of the
+   * repeat or segment it is in. A long press (or Settings for the project:
+   * ⋯ → "Tap counts: stitches") counts one stitch. Crochet never does this;
+   * nor does a short row, a row with no target, or a row whose groups the
+   * counter cannot vouch for.
+   * The setting: settings.crafts.knitting.tapUnit = { <projectId>: 'stitch' }
+   * (absent = repeats on long rows), a device setting with no undo step.
+   */
+  var KNIT_LONG_ROW = 40;
+  var LONG_PRESS_MS = 550;
+
+  function knitTapUnit(p) {
+    if (!isKnit(p) || typeof Store.craftSettings !== 'function') return 'stitch';
+    var m = (Store.craftSettings(KNIT_ID) || {}).tapUnit;
+    return m && typeof m === 'object' && m[p.id] === 'stitch' ? 'stitch' : 'repeat';
+  }
+
+  function setKnitTapUnit(p, unit) {
+    if (!p || typeof Store.setCraftSetting !== 'function') return;
+    var old = (Store.craftSettings(KNIT_ID) || {}).tapUnit;
+    var next = {};
+    if (old && typeof old === 'object') {
+      Object.keys(old).forEach(function (id) { if (old[id] === 'stitch' && Store.project(id)) next[id] = 'stitch'; });
+    }
+    if (unit === 'stitch') next[p.id] = 'stitch'; else delete next[p.id];
+    Store.setCraftSetting(KNIT_ID, 'tapUnit', next);
+  }
+
+  /**
+   * The ends (stitch counts) of the units a tap counts on this row, or null
+   * to count stitches. `{ kind: 'repeat'|'segment', ends: [..., target] }`.
+   */
+  function knitTapUnits(p, prt) {
+    if (!p || !prt || !isKnit(p) || knitTapUnit(p) !== 'repeat' || partFinished(prt)) return null;
+    var target = Store.currentTarget(prt);
+    if (!target || target < KNIT_LONG_ROW) return null;
+    var sr = null;
+    try { sr = typeof Store.shortRowInfo === 'function' ? Store.shortRowInfo(prt) : null; } catch (e) { sr = null; }
+    if (sr) return null;
+    var rg = null;
+    try { rg = typeof Store.rowGroups === 'function' ? Store.rowGroups(prt) : null; } catch (e2) { rg = null; }
+    var ends = [], cum = 0;
+    if (rg && rg.runs && rg.runs.length >= 2 && rg.total === target) {
+      rg.runs.forEach(function (r) { cum += r.size; ends.push(cum); });
+      return ends[ends.length - 1] === target ? { kind: 'repeat', ends: ends } : null;
+    }
+    // marker segments, only on a row the markers were set for
+    var ms = Array.isArray(prt.markers) ? prt.markers : [];
+    if (ms.length && prt.markerTotal === target) {
+      var at = ms.map(function (m) { return m && typeof m.at === 'number' ? m.at : -1; })
+        .filter(function (a) { return a > 0 && a < target; })
+        .sort(function (a, b) { return a - b; });
+      at.forEach(function (a) { if (!ends.length || ends[ends.length - 1] !== a) ends.push(a); });
+      ends.push(target);
+      return ends.length >= 2 ? { kind: 'segment', ends: ends } : null;
+    }
+    return null;
+  }
+
+  /** How many stitches one tap counts from `stitch`: to the end of its unit (1 past the row). */
+  function knitTapStep(units, stitch) {
+    if (!units) return 1;
+    for (var i = 0; i < units.ends.length; i++) if (units.ends[i] > stitch) return units.ends[i] - stitch;
+    return 1;
+  }
+
+  /**
+   * Count `n` stitches as one action. `Store.tapStitches` (one undo step)
+   * when the store has it; else `n` single taps stopping at a row's end, the
+   * last result applied (announcement and buzz once).
+   */
+  function tapMany(p, prt, n) {
+    if (typeof Store.tapStitches === 'function') return Store.tapStitches(p.id, prt.id, n);
+    var res = null;
+    var startRow = prt.row, startPart = prt.id;
+    for (var i = 0; i < n; i++) {
+      res = Store.tapStitch(p.id, prt.id);
+      var cp = Store.activePart(Store.project(p.id));
+      if (!res || res.event === 'none' || !cp || cp.id !== startPart || cp.row !== startRow) break;
+    }
+    return res;
+  }
+
+  function doStitchTap(opts) {
     var p = currentProject();
     if (!p) return false;
     var prt = Store.activePart(p);
     if (!prt) return false;
+    var units = opts && opts.single ? null : knitTapUnits(p, prt);
+    if (units) {
+      var n = knitTapStep(units, prt.stitch);
+      if (n > 1) {
+        applyResult(tapMany(p, prt, n));
+        return true;
+      }
+    }
     applyResult(Store.tapStitch(p.id, prt.id));
     return true;
+  }
+
+  /** The one-line hint under the readout while taps count repeats (knitting only). */
+  function syncKnitTapHint(p, prt) {
+    var units = knitTapUnits(p, prt);
+    var hint = document.getElementById('knit-tap-unit');
+    if (!units) {
+      if (hint) hint.hidden = true;
+      if (els.stitchBtn) els.stitchBtn.removeAttribute('aria-description');
+      return;
+    }
+    if (!hint && els.stitchReadout && els.stitchReadout.parentNode) {
+      hint = el('div', 'knit-tap-unit');
+      hint.id = 'knit-tap-unit';
+      els.stitchReadout.parentNode.insertBefore(hint, els.stitchReadout.nextSibling);
+    }
+    var n = knitTapStep(units, prt.stitch);
+    var what = units.kind === 'repeat' ? 'repeat' : 'marker segment';
+    var text = 'Tap = 1 ' + what + ' (' + n + ' st' + (n === 1 ? '' : 's') + ') · hold = 1 st';
+    if (hint) { hint.textContent = text; hint.hidden = false; }
+    if (els.stitchBtn) {
+      els.stitchBtn.setAttribute('aria-description', 'Each tap counts one ' + what + ', ' + n + ' stitch' +
+        (n === 1 ? '' : 'es') + ' now. Hold to count one stitch.');
+    }
   }
 
   function bindStitchButton() {
@@ -4040,6 +4635,17 @@
       // A second finger on the button is ignored; there is nothing to pinch.
       if (tapState) return;
       tapState = { id: e.pointerId, x: e.clientX, y: e.clientY, lx: e.clientX, ly: e.clientY, dragging: false };
+      // wave K (P13): while taps count repeats, a long press counts one stitch
+      var cpL = currentProject();
+      if (cpL && knitTapUnits(cpL, Store.activePart(cpL))) {
+        var mine = tapState;
+        mine.longTimer = window.setTimeout(function () {
+          if (tapState !== mine || mine.dragging) return;
+          mine.long = true;
+          btn.classList.remove('pressed');
+          doStitchTap({ single: true });
+        }, LONG_PRESS_MS);
+      }
       try {
         btn.setPointerCapture(e.pointerId);
       } catch (err) {
@@ -4068,13 +4674,16 @@
 
     on(btn, 'pointerup', function (e) {
       if (!tapState || e.pointerId !== tapState.id) return;
-      var counted = !tapState.dragging;
+      if (tapState.longTimer) window.clearTimeout(tapState.longTimer);
+      // a long press already counted its one stitch
+      var counted = !tapState.dragging && !tapState.long;
       end();
       if (counted) doStitchTap();
     });
 
     on(btn, 'pointercancel', function (e) {
       if (tapState && e.pointerId !== tapState.id) return;
+      if (tapState && tapState.longTimer) window.clearTimeout(tapState.longTimer);
       end();
     });
     on(btn, 'contextmenu', function (e) {
@@ -4162,7 +4771,7 @@
   /** The viewer header's follow button, in step with the stored setting. */
   function syncFollowButton() {
     // wave I: the working mode's Turn chips write the same setting
-    if (work.panelOpen && work.segs.follow) work.segs.follow.set(diagramFollowOn() ? 'on' : 'off');
+    if (workPanelIsOpen() && work.segs.follow) work.segs.follow.set(diagramFollowOn() ? 'on' : 'off');
     var b = viewer.followBtn;
     if (!b) return;
     var on = diagramFollowOn();
@@ -4389,6 +4998,11 @@
     if (!live.handle && !viewer.handle) return;
     // Nothing but the deliberately-opened viewer pays for a heavy piece.
     if (!viewer.handle && partIsHeavy(currentPart())) return;
+    // wave K (K1): only the viewer, on Whole piece — the single part's model is not needed at all
+    if (!live.handle && viewer.handle && viewerWholeOn(currentProject())) {
+      pushWhole(currentProject());
+      return;
+    }
     var model = currentModel();
     if (!model) return;
     var opts = { animate: animate || 'none' };
@@ -4404,6 +5018,16 @@
       }
     }
     if (viewer.handle) {
+      // wave K (K1): a knitting project's whole piece, in the viewer only.
+      // A tap (same rows) costs nothing here; a row change rebuilds once,
+      // off the tap path (a timeout), and only if the view still wants it.
+      var wp = currentProject();
+      var wantWhole = viewerWholeOn(wp);
+      if (wantWhole) {
+        pushWhole(wp);
+        return;
+      }
+      viewer.wholeShown = '';
       try {
         viewer.handle.setModel(model, {
           animate: opts.animate,
@@ -4487,11 +5111,11 @@
   function syncDiagramInsets() {
     if (!live.handle || typeof live.handle.setSafeInsets !== 'function') return;
     // wave I: in working mode the piece gets what the heads-up layer leaves
-    if (work.on && work.hud && !work.hud.hidden) {
-      syncWorkInsets();
+    if (work.on && work.session) {
+      work.session.measure(false);
       return;
     }
-    work.insetKey = '';
+    if (work.session) work.session.resetInsets();
     var head = document.getElementById('stitch-head');
     var hint = document.getElementById('stitch-hint');
     var top = head ? head.offsetHeight : 0;
@@ -4506,40 +5130,10 @@
     }
   }
 
-  /**
-   * Wave I: the working mode's free area. Portrait: between the readout stack
-   * and the next-row line / buttons. Side by side (landscape): right of the
-   * readout column, between the header and the buttons. Measured, and only
-   * handed over when it changed (it is on the tap path).
-   */
-  function syncWorkInsets() {
-    var n = work.n;
-    if (!els.stitchBtn || !n.stack) return;
-    var br = els.stitchBtn.getBoundingClientRect();
-    if (!br.width || !br.height) return;
-    var st = n.stack.getBoundingClientRect();
-    var bt = n.btns.getBoundingClientRect();
-    var ft = n.foot.getBoundingClientRect();
-    var top, bottom, left = 8, right = 8;
-    if (workSide()) {
-      left = Math.max(8, st.right - br.left + 8);
-      top = Math.max(8, n.head.getBoundingClientRect().bottom - br.top + 4);
-      bottom = Math.max(8, br.bottom - bt.top + 4);
-    } else {
-      top = Math.max(8, st.bottom - br.top + 6);
-      var low = ft.height > 0 ? Math.min(ft.top, bt.top) : bt.top;
-      bottom = Math.max(8, br.bottom - low + 6);
-    }
-    var ins = { top: Math.round(top), right: right, bottom: Math.round(bottom), left: Math.round(left) };
-    var key = ins.top + ',' + ins.right + ',' + ins.bottom + ',' + ins.left;
-    if (key === work.insetKey) return;
-    work.insetKey = key;
-    try {
-      live.handle.setSafeInsets(ins);
-    } catch (e) {
-      /* ignore */
-    }
-  }
+  /* Wave I's working-mode free area (portrait: between the readout stack and
+     the next line / buttons; landscape: right of the column) is measured by
+     the engine now (js/workmode.js `measure`), and handed to the piece through
+     the session's `onInsets` only when it changed. */
 
   /** Just the canvas and its renderer; the "3D view" button stays. */
   /**
@@ -4635,7 +5229,7 @@
       // the app reads it back.
       live.canvas.diagram = live.handle;
       // wave I: a fresh handle has no insets yet, whatever was handed before
-      work.insetKey = '';
+      if (work.session) work.session.resetInsets();
     }
     els.stitchBtn.classList.add('has-diagram');
     resizeDiagrams();
@@ -4827,12 +5421,197 @@
     }
   }
 
+  /* ---- wave K (K1, docs/wave-k/api/knit-3d.md): the whole piece ----------
+   * A knitting project of two or more parts can show, in the ⤢ viewer only,
+   * every part joined into one thing — the sock, the pullover — or, when the
+   * geometry cannot join them honestly, the pieces laid out on a board with
+   * the reason why. The stitch button always stays on the part being counted.
+   * The choice is remembered per project as a device setting (no undo):
+   * `settings.crafts.knitting.viewWhole = { <projectId>: true }`.
+   */
+  var assembled = { key: '', a: null };
+
+  function wholeAvailable(p) {
+    return !!(p && isKnit(p) && p.parts && p.parts.length >= 2 &&
+      window.DiagramGeo && typeof window.DiagramGeo.assemble === 'function');
+  }
+
+  function viewerWholeOn(p) {
+    if (!wholeAvailable(p) || typeof Store.craftSettings !== 'function') return false;
+    var w = (Store.craftSettings('knitting') || {}).viewWhole;
+    return !!(w && typeof w === 'object' && w[p.id] === true);
+  }
+
+  function setViewerWhole(p, onFlag) {
+    if (!p || typeof Store.setCraftSetting !== 'function') return;
+    var old = (Store.craftSettings('knitting') || {}).viewWhole;
+    var next = {};
+    // keep only projects that still exist
+    if (old && typeof old === 'object') {
+      Object.keys(old).forEach(function (id) { if (old[id] === true && Store.project(id)) next[id] = true; });
+    }
+    if (onFlag) next[p.id] = true; else delete next[p.id];
+    Store.setCraftSetting('knitting', 'viewWhole', next);
+  }
+
+  /** `DiagramGeo.assemble` over the project's parts, rebuilt only when a count moved. */
+  /**
+   * What the assembled piece depends on: rows, pieces, the active part and
+   * the per-part readings — NOT the stitch. A stitch tap never changes it, so
+   * a tap never rebuilds (the pullover is ~132k vertices, hundreds of ms on a
+   * phone); only a row change, a part switch or a chip does, off the tap path.
+   */
+  function wholeKey(p) {
+    var act = Store.activePart(p);
+    // with handle.setDone (knit-3d) a row or a stitch only moves progress: the
+    // key is the STRUCTURE (who is working / done / started, the chips, the
+    // frame's shape); without it, every part's row too (wave K's first fix)
+    var moves = !!(viewer.handle && typeof viewer.handle.setDone === 'function');
+    return p.id + '|' + (act ? act.id : '') + '|' + viewerAspectBucket() + '|' + p.parts.map(function (q) {
+      var started = q.row > 0 || q.stitch > 0 || q.piecesDone > 0 ? 1 : 0;
+      var state = partFinished(q) ? 'd' : (act && q.id === act.id ? 'w' : 't');
+      return q.id + ':' + state + started + ':' + (moves ? '' : q.row) + ':' + q.piecesDone + ':' +
+        (q.makeCount || 1) + ':' + (q.workMode || '') + ':' + (q.orientation || '');
+    }).join(',');
+  }
+
+  /** The viewer canvas's width / height (1 without one), and the bucket the key uses. */
+  function viewerAspect() {
+    var c = viewer.canvas;
+    var w = c ? c.clientWidth : 0, h = c ? c.clientHeight : 0;
+    return w > 0 && h > 0 ? w / h : 1;
+  }
+  function viewerAspectBucket() {
+    return Math.round(viewerAspect() * 10) / 10;
+  }
+
+  /**
+   * Move the working part's progress in the shown whole piece without a
+   * rebuild (`handle.setDone`, knit-3d): the stitch on a tap, the round on a
+   * row change (the part's own model gives the round index, once per row).
+   * False when it cannot, so the caller rebuilds instead.
+   */
+  function wholeProgress(p) {
+    var h = viewer.handle;
+    var b = viewer.wholeBase;
+    if (!h || typeof h.setDone !== 'function' || !b) return false;
+    var act = Store.activePart(p);
+    if (!act || b.partId !== act.id) return false;
+    if (act.row !== b.row || act.piecesDone !== b.pieces) {
+      var m = null;
+      try { m = Store.diagramModel(act, p); } catch (e) { m = null; }
+      if (!m || typeof m.current !== 'number') return false;
+      b.round = m.current;
+      b.row = act.row;
+      b.pieces = act.piecesDone;
+    }
+    var r = null;
+    try { r = h.setDone(act.id, b.round, act.stitch); } catch (e2) { r = null; }
+    return !!(r && r.ok);
+  }
+
+  function assembledFor(p, fresh) {
+    if (!wholeAvailable(p)) return null;
+    var act = Store.activePart(p);
+    var key = wholeKey(p);
+    if (key === assembled.key && !fresh) return assembled.a;
+    var list = [];
+    assembled.base = null;
+    try {
+      p.parts.forEach(function (q) {
+        var m = Store.diagramModel(q, p);
+        if (act && q.id === act.id) {
+          assembled.base = { partId: q.id, row: q.row, pieces: q.piecesDone, round: m && typeof m.current === 'number' ? m.current : 0 };
+        }
+        list.push({
+          id: q.id, name: q.name, makeCount: q.makeCount || 1,
+          state: partFinished(q) ? 'done' : (act && q.id === act.id ? 'working' : 'todo'),
+          model: m
+        });
+      });
+      // the board wraps to the frame's shape (knit-3d): a phone gets shelves, not one long row
+      assembled.a = window.DiagramGeo.assemble(list, { aspect: viewerAspect() }) || null;
+    } catch (e) {
+      assembled.a = null;
+    }
+    assembled.key = key;
+    return assembled.a;
+  }
+
+  /**
+   * The viewer's whole piece on the tap path: the structure unchanged →
+   * move progress in place (`setDone`, microseconds); else, or when that
+   * fails, one rebuild just after the tap.
+   */
+  function pushWhole(p) {
+    var wk = wholeKey(p);
+    if (wk !== viewer.wholeShown) {
+      scheduleWholePush(wk);
+    } else if (viewer.handle && typeof viewer.handle.setDone === 'function' && !wholeProgress(p)) {
+      viewer.wholeShown = '';
+      assembled.key = '';
+      scheduleWholePush(wk);
+    }
+    updateViewerReadout();
+  }
+
+  /** The screen turned / the viewer resized: the board re-wraps when the frame's shape changed (once). */
+  function wholeResized() {
+    var cp = currentProject();
+    if (viewer.handle && viewerWholeOn(cp)) pushWhole(cp);
+  }
+  window.addEventListener('resize', debounce(wholeResized, 200));
+
+  var wholeTimer = null;
+
+  /** Build and push the assembled piece once, after the tap that asked for it has returned. */
+  function scheduleWholePush(key) {
+    viewer.wholeWanted = key;
+    if (wholeTimer) return;
+    wholeTimer = window.setTimeout(function () {
+      wholeTimer = null;
+      var p = currentProject();
+      if (!viewer.handle || !p || !viewerWholeOn(p)) return;
+      var k = wholeKey(p);
+      if (k === viewer.wholeShown) return;
+      var A = assembledFor(p);
+      if (!A || !A.model) return;
+      try {
+        viewer.handle.setModel(A.model, { animate: 'none', fitPurpose: 'viewer', finished: !!A.model.finished });
+        viewer.wholeShown = k;
+        var bb = assembled.base;
+        viewer.wholeBase = bb ? { partId: bb.partId, row: bb.row, pieces: bb.pieces, round: bb.round } : null;
+        // the stitches of the working round, which the build did not count
+        wholeProgress(p);
+      } catch (e) { /* the viewer says so through onStatus */ }
+      updateViewerReadout();
+    }, 0);
+  }
+
+  /** The viewer's caption for an assembled model, in plain words. */
+  function assembledCaption(A) {
+    if (!A) return { name: '', detail: '' };
+    if (A.kind === 'sock') return { name: 'The whole sock', detail: 'every part joined, in the order you knit it' };
+    if (A.kind === 'sweater-flat') return { name: 'The whole pullover', detail: 'the pieces sewn together' };
+    return { name: 'All the pieces', detail: A.reason || 'laid out side by side' };
+  }
+
   function updateViewerReadout() {
     if (!viewer.readout) return;
     var p = currentProject();
     var prt = p ? Store.activePart(p) : null;
     syncViewerOrientation();
     setViewerReadout(viewer.readout, p, prt);
+    if (viewer.shape && viewerWholeOn(p)) {
+      // never builds here (this runs on the tap path): the last piece built, if it is current
+      var A = assembled.key === wholeKey(p) ? assembled.a : null;
+      if (A) {
+        var cap = assembledCaption(A);
+        viewer.shape.textContent = cap.name || prt.name;
+        if (viewer.shapeSub) viewer.shapeSub.textContent = cap.detail;
+      }
+      return;
+    }
     if (viewer.shape) {
       var sum = shapeSummary(currentModel());
       viewer.shape.textContent = sum ? sum.name : (prt ? prt.name : '');
@@ -4867,6 +5646,9 @@
     viewer.followBtn = null;
     viewer.note = null;
     viewer.sheet = null;
+    viewer.wholeSeg = null;
+    viewer.wholeShown = '';
+    viewer.wholeWanted = '';
     // give the button its piece back
     if (els.project && !els.project.hidden) mountLiveDiagram();
   }
@@ -5090,6 +5872,35 @@
         viewer.dialectSeg = dialectSeg;
         viewer.dialectHint = dialectHintEl;
 
+        /* wave K (K1): a knitting project of 2+ parts — This part / Whole piece.
+           The per-part chips only mean something for one part, so they fold
+           away while the whole piece shows. */
+        if (wholeAvailable(p)) {
+          var wholeRow = el('div', 'viewer-bar-row viewer-whole-row');
+          var syncWhole = function () {
+            var w = viewerWholeOn(p);
+            modeSeg.node.hidden = w;
+            orientRow.hidden = w;
+          };
+          var wholeSeg = segmented(
+            [{ id: 'part', label: 'This part' }, { id: 'whole', label: 'Whole piece' }],
+            viewerWholeOn(p) ? 'whole' : 'part',
+            function (v) {
+              setViewerWhole(p, v === 'whole');
+              syncWhole();
+              pushDiagram('none');
+              updateViewerReadout();
+              fb('tap');
+            }
+          );
+          wholeSeg.node.setAttribute('aria-label', 'Show this part, or the whole piece');
+          wholeSeg.node.setAttribute('data-viewer-whole', '1');
+          wholeRow.appendChild(wholeSeg.node);
+          bar.insertBefore(wholeRow, bar.firstChild);
+          viewer.wholeSeg = wholeSeg;
+          syncWhole();
+        }
+
         body.appendChild(bar);
         /* Fill the shape line now, not only on the canvas's first frame: with
            no WebGL (or a throttled rAF) the summary used to stay blank. */
@@ -5153,27 +5964,30 @@
    * per project (`Store.focusMode` / `Store.setFocusMode`).
    * ================================================================== */
 
+  /*
+   * Wave K (docs/wave-k/api/shell-ui.md §1): the mode now runs through the
+   * shared engine in js/workmode.js (`WorkMode.create`), the same one every
+   * craft's `def.workMode` gets. The engine owns the HUD skeleton (header,
+   * corner buttons, Options panel and scrim), the keys (pedal included), the
+   * remembered state hand-off, the open / close announcements and the free-area
+   * measuring; this section keeps what is the counter's own: the readout stack
+   * (`build` / `paint`, unchanged from wave I), the next-row line and the
+   * Options chips. `adopt: true` — the counter's stitch button is the surface.
+   */
   var work = {
     on: false,
     hud: null,
     n: {},
-    panelOpen: false,
+    session: null,
     segs: {},
-    insetKey: '',
     mirrors: Object.create(null),
     nextKey: '',
     // without Store.focusMode (an old cached store.js): this page load only
     fallbackId: null
   };
-  /** Side-by-side layout: the readouts in a left column, the piece to the right. */
-  var WORK_SIDE_MQ = '(orientation: landscape)';
 
-  function workSide() {
-    try {
-      return !!window.matchMedia(WORK_SIDE_MQ).matches;
-    } catch (e) {
-      return false;
-    }
+  function workPanelIsOpen() {
+    return !!(work.session && work.session.panelOpen());
   }
 
   function workWanted(p) {
@@ -5198,52 +6012,107 @@
       (target ? prt.stitch + ' of ' + target : String(prt.stitch)) + ' ' + (prt.stitch === 1 && !target ? 'stitch' : 'stitches');
   }
 
+  /** The shell's side of every working-mode session (crochet's and the crafts'). */
+  function workEnv(host) {
+    return {
+      remember: function (onFlag) { rememberWork(currentProject(), onFlag); },
+      announce: announce,
+      counted: counted,
+      fb: fb,
+      render: render,
+      undo: function () { if (Store.canUndo()) { Store.undo(); render(); } },
+      canUndo: function () { return Store.canUndo(); },
+      project: currentProject,
+      blocked: function () {
+        if (openSheets.length) return true;
+        return !!(window.Tour && typeof window.Tour.isRunning === 'function' && window.Tour.isRunning());
+      },
+      wake: ctx.wake,
+      host: host
+    };
+  }
+
+  /** The counter's working mode: one engine session on #screen-project. */
+  function ensureWorkSession() {
+    if (work.session) return work.session;
+    if (!els.project || !window.WorkMode || typeof window.WorkMode.create !== 'function') return null;
+    work.session = window.WorkMode.create(els.project, {
+      label: 'Working mode',
+      backTo: 'the counter',
+      hudId: 'work-hud',
+      panelId: 'work-panel',
+      adopt: true,
+      tip: 'Tap anywhere to count · swipe to turn',
+      rectNode: function () { return els.stitchBtn; },
+      build: buildWorkStack,
+      paint: function () {
+        var p = currentProject();
+        paintWorkHud(p, p ? Store.activePart(p) : null);
+      },
+      primary: { label: 'Count a stitch', run: function () { doStitchTap(); } },
+      forward: {
+        label: 'Complete row', glyph: '+', word: 'Row', cls: 'work-row-plus',
+        run: function () { clickCounter(document.getElementById('row-plus')); }
+      },
+      back: {
+        label: 'Previous row', glyph: '−', cls: 'work-row-minus',
+        run: function () { clickCounter(document.getElementById('row-minus')); }
+      },
+      undo: {
+        label: 'Undo last action', cls: 'work-undo',
+        run: function () { clickCounter(els.btnUndo); },
+        enabled: function () { return Store.canUndo(); }
+      },
+      secondary: [{
+        id: 'stMinus', side: 'start', glyph: '−1', label: 'Remove one stitch', cls: 'work-st-minus',
+        run: function () { clickCounter(document.getElementById('stitch-minus')); }
+      }],
+      panel: function (body) { buildWorkPanel(body); },
+      syncPanel: function () { syncWorkPanel(currentProject(), currentPart()); },
+      onInsets: function (ins) {
+        if (!live.handle || typeof live.handle.setSafeInsets !== 'function') return;
+        try { live.handle.setSafeInsets(ins); } catch (e) { /* ignore */ }
+      },
+      onToggle: function () {
+        // the stitch button just changed size: the canvas follows once laid out
+        // (mountLiveDiagram resizes at once; this catches the settled layout)
+        window.requestAnimationFrame(function () { resizeDiagrams(); });
+      },
+      say: function () {
+        var p = currentProject();
+        return workCountSentence(p, p ? Store.activePart(p) : null);
+      },
+      focusNode: function () { return els.stitchBtn; },
+      returnFocus: function () { return document.getElementById('stitch-3d') || els.stitchBtn; }
+    }, workEnv(els.project));
+    return work.session;
+  }
+
   function openWorkMode() {
     var p = currentProject();
     if (!p) return;
+    var s = ensureWorkSession();
+    if (s) { s.openUser(); return; }
+    // no js/workmode.js (an old cached copy): remember it; the next load has it
     rememberWork(p, true);
-    fb('tap');
     render();
-    announce('Working mode. ' + workCountSentence(p, Store.activePart(p)));
-    if (els.stitchBtn) {
-      try { els.stitchBtn.focus({ preventScroll: true }); } catch (e) { els.stitchBtn.focus(); }
-    }
   }
 
   function closeWorkMode() {
-    var p = currentProject();
-    rememberWork(p, false);
-    fb('tap');
+    var s = ensureWorkSession();
+    if (s) { s.closeUser(); return; }
+    rememberWork(currentProject(), false);
     render();
-    announce('Back to the counter. ' + workCountSentence(p, p ? Store.activePart(p) : null));
-    var b = document.getElementById('stitch-3d') || els.stitchBtn;
-    if (b) {
-      try { b.focus({ preventScroll: true }); } catch (e) { b.focus(); }
-    }
   }
 
   /** Called by renderProject before the counters paint: the remembered mode. */
   function syncWorkMode(p) {
-    var want = workWanted(p);
-    if (want) ensureWorkHud();
-    if (want === work.on) return;
-    work.on = want;
-    work.insetKey = '';
-    if (els.project) els.project.classList.toggle('work-mode', want);
-    if (work.hud) work.hud.hidden = !want;
-    if (!want) setWorkPanel(false);
-    // the stitch button just changed size: the canvas follows once laid out
-    // (mountLiveDiagram resizes at once; this catches the settled layout)
-    window.requestAnimationFrame(function () {
-      resizeDiagrams();
-    });
-  }
-
-  function workButton(cls, glyph, label, word) {
-    var b = button('work-btn ' + cls, null, label);
-    b.appendChild(el('span', 'work-btn-glyph', glyph));
-    if (word) b.appendChild(el('span', 'work-btn-word', word));
-    return b;
+    var s = ensureWorkSession();
+    if (!s) { work.on = false; return; }
+    s.sync(workWanted(p));
+    work.on = s.isOn();
+    work.n = s.nodes;
+    work.hud = document.getElementById('work-hud');
   }
 
   /** Click one of the counter's own controls, so every rule stays the counter's. */
@@ -5251,35 +6120,10 @@
     if (node && !node.disabled) node.click();
   }
 
-  function ensureWorkHud() {
-    if (work.hud && document.contains(work.hud)) return work.hud;
-    if (!els.project) return null;
-    var n = (work.n = {});
-    var hud = el('div', 'work-hud');
-    hud.id = 'work-hud';
-    hud.hidden = true;
-    hud.setAttribute('role', 'region');
-    hud.setAttribute('aria-label', 'Working mode');
-
-    /* ---- header: ✕, whose piece, the folded chips ---- */
-    var head = el('div', 'work-head');
-    var close = button('work-icon work-close', '✕', 'Close working mode');
-    on(close, 'click', closeWorkMode);
-    n.title = el('div', 'work-title');
-    var more = button('work-icon work-more', null, 'Working mode options');
-    more.appendChild(el('span', 'work-more-text', 'Options'));
-    more.appendChild(el('span', 'work-more-caret', '▾'));
-    more.setAttribute('aria-expanded', 'false');
-    more.setAttribute('aria-controls', 'work-panel');
-    on(more, 'click', function () { setWorkPanel(!work.panelOpen); });
-    head.appendChild(close);
-    head.appendChild(n.title);
-    head.appendChild(more);
-    n.head = head;
-    n.more = more;
-
-    /* ---- the readouts, the pattern line, the hints ---- */
-    var stack = el('div', 'work-stack');
+  /** The counter's readout stack inside the engine's HUD (wave I's nodes, unchanged). */
+  function buildWorkStack(n) {
+    work.n = n;
+    var stack = n.stack;
     var read = el('div', 'work-read');
     var rowCell = el('div', 'work-cell work-rowcell');
     n.rowCap = el('div', 'work-cap');
@@ -5335,71 +6179,14 @@
     n.markers.hidden = true;
     n.hints.appendChild(n.markers);
     stack.appendChild(n.hints);
-    n.stack = stack;
-
-    /* ---- what comes next ---- */
-    var foot = el('div', 'work-foot');
-    n.tip = el('div', 'work-tip', 'Tap anywhere to count · swipe to turn');
-    n.next = el('div', 'work-next');
-    n.nextTag = el('span', 'work-next-tag');
-    n.nextText = el('span', 'work-next-text');
-    n.next.appendChild(n.nextTag);
-    n.next.appendChild(n.nextText);
-    foot.appendChild(n.tip);
-    foot.appendChild(n.next);
-    n.foot = foot;
-
-    /* ---- the bottom corners ---- */
-    var btns = el('div', 'work-btns');
-    n.stMinus = workButton('work-st-minus', '−1', 'Remove one stitch');
-    on(n.stMinus, 'click', function (e) { e.stopPropagation(); clickCounter(document.getElementById('stitch-minus')); });
-    n.undo = workButton('work-undo', '↶', 'Undo last action');
-    on(n.undo, 'click', function (e) { e.stopPropagation(); clickCounter(els.btnUndo); });
-    n.rowMinus = workButton('work-row-minus', '−', 'Previous row');
-    on(n.rowMinus, 'click', function (e) { e.stopPropagation(); clickCounter(document.getElementById('row-minus')); });
-    n.rowPlus = workButton('work-row-plus', '+', 'Complete row', 'Row');
-    on(n.rowPlus, 'click', function (e) { e.stopPropagation(); clickCounter(document.getElementById('row-plus')); });
-    btns.appendChild(n.stMinus);
-    btns.appendChild(n.undo);
-    btns.appendChild(el('span', 'work-gap'));
-    btns.appendChild(n.rowMinus);
-    btns.appendChild(n.rowPlus);
-    n.btns = btns;
-
-    /* ---- the folded chips ---- */
-    var scrim = el('div', 'work-scrim');
-    scrim.hidden = true;
-    on(scrim, 'click', function () { setWorkPanel(false); });
-    var panel = el('div', 'work-panel');
-    panel.id = 'work-panel';
-    panel.hidden = true;
-    panel.setAttribute('role', 'group');
-    panel.setAttribute('aria-label', 'Working mode options');
-    n.scrim = scrim;
-    n.panel = panel;
-
-    hud.appendChild(head);
-    hud.appendChild(stack);
-    hud.appendChild(foot);
-    hud.appendChild(btns);
-    hud.appendChild(scrim);
-    hud.appendChild(panel);
-    els.project.appendChild(hud);
-    work.hud = hud;
-    // a web font landing late, or a hint wrapping, moves the free area too
-    if (typeof window.ResizeObserver === 'function') {
-      try {
-        var ro = new window.ResizeObserver(function () {
-          if (work.on) syncDiagramInsets();
-        });
-        ro.observe(stack);
-        ro.observe(foot);
-        ro.observe(btns);
-      } catch (e) { /* the tap path re-measures anyway */ }
-    }
+    // the engine's corner buttons, under wave I's names
+    var b = n.buttons || {};
+    n.stMinus = b.stMinus;
+    n.undo = b.undo;
+    n.rowMinus = b.back;
+    n.rowPlus = b.forward;
     work.mirrors = Object.create(null);
     work.nextKey = '';
-    return hud;
   }
 
   /**
@@ -5488,7 +6275,13 @@
 
   /** Paint the HUD from the counter (called at the end of updateCounters). */
   function updateWorkHud(p, prt) {
-    if (!work.on || !work.hud || !p || !prt) return;
+    if (!work.on || !work.session || !p || !prt) return;
+    // the engine calls paintWorkHud, then syncs its buttons, the open panel and the insets
+    work.session.refresh();
+  }
+
+  function paintWorkHud(p, prt) {
+    if (!work.on || !p || !prt || !work.n || !work.n.rowCap) return;
     var n = work.n;
     var finished = partFinished(prt);
     var ri = Store.repeatInfo(prt);
@@ -5544,7 +6337,9 @@
     var approx = target && Store.isComputed(line) ? '≈ ' : '';
     n.stNum.textContent = String(prt.stitch);
     n.stOf.textContent = target && !finished ? '/ ' + approx + target : '';
-    n.stSub.textContent = readoutText();
+    // wave K (P13): say when a tap counts a whole repeat / marker segment
+    var tu = knitTapUnits(p, prt);
+    n.stSub.textContent = readoutText() + (tu ? ' · tap = ' + knitTapStep(tu, prt.stitch) + ' sts' : '');
     n.stCell.classList.toggle('over', !!(target && prt.stitch > target));
 
     // the pattern line: the strip's own nodes, so it is the same text
@@ -5582,31 +6377,13 @@
     var w = n.rowPlus.querySelector('.work-btn-word');
     if (w) w.textContent = headWord;
     n.rowMinus.setAttribute('aria-label', 'Previous ' + rowWordAt(p, prt, Math.max(1, prt.row)).toLowerCase());
-    n.undo.disabled = !Store.canUndo();
-
-    if (work.panelOpen) syncWorkPanel(p, prt);
-    syncDiagramInsets();
+    // Undo's enabled state, the open panel and the insets: the engine's refresh
   }
 
   /* ---- the folded chips: worked in, way up, terms, turn, and the sheets ---- */
 
   function setWorkPanel(open) {
-    var n = work.n;
-    if (!n.panel) return;
-    open = !!open;
-    var wasOpen = work.panelOpen;
-    work.panelOpen = open;
-    if (open) buildWorkPanel();
-    n.panel.hidden = !open;
-    n.scrim.hidden = !open;
-    n.more.setAttribute('aria-expanded', open ? 'true' : 'false');
-    n.more.classList.toggle('on', open);
-    if (open) {
-      var first = n.panel.querySelector('button');
-      if (first) { try { first.focus({ preventScroll: true }); } catch (e) { first.focus(); } }
-    } else if (wasOpen && n.panel.contains(document.activeElement)) {
-      try { n.more.focus({ preventScroll: true }); } catch (e2) { n.more.focus(); }
-    }
+    if (work.session) work.session.setPanel(open);
   }
 
   function workPanelRow(label, node, hint) {
@@ -5617,10 +6394,10 @@
     return row;
   }
 
-  function buildWorkPanel() {
+  function buildWorkPanel(panel) {
     var p = currentProject();
     var prt = p ? Store.activePart(p) : null;
-    var panel = work.n.panel;
+    panel = panel || work.n.panel;
     clear(panel);
     work.segs = {};
     if (!p || !prt) return;
@@ -5721,7 +6498,7 @@
   /** Keep the open panel's chips in step with the Store (an Undo moves them too). */
   function syncWorkPanel(p, prt) {
     var segs = work.segs;
-    if (!work.panelOpen || !prt) return;
+    if (!workPanelIsOpen() || !prt) return;
     if (segs.mode) segs.mode.set(prt.workMode === 'rounds' || prt.workMode === 'rows' ? prt.workMode : 'auto');
     if (segs.orient) {
       segs.orient.set(partOrientation(prt));
@@ -5746,38 +6523,9 @@
    * from a text field, and never on top of a control's own Enter / Space.
    */
   function bindWorkKeys() {
-    on(document, 'keydown', function (e) {
-      if (!work.on || !els.project || els.project.hidden) return;
-      if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey) return;
-      if (openSheets.length) return;
-      if (window.Tour && typeof window.Tour.isRunning === 'function' && window.Tour.isRunning()) return;
-      var t = e.target;
-      var tag = t && t.tagName ? t.tagName.toLowerCase() : '';
-      if (tag === 'input' || tag === 'textarea' || tag === 'select' || (t && t.isContentEditable)) return;
-      var inPanel = !!(work.n.panel && work.n.panel.contains(t));
-      var key = e.key;
-      if (key === 'Escape' || key === 'Esc') {
-        e.preventDefault();
-        if (work.panelOpen) setWorkPanel(false);
-        else closeWorkMode();
-        return;
-      }
-      if (key === ' ' || key === 'Spacebar' || key === 'Enter') {
-        // a focused control (the stitch button included) activates itself
-        if (tag === 'button' || (t && t.getAttribute && t.getAttribute('role') === 'button')) return;
-        e.preventDefault();
-        if (!e.repeat) doStitchTap();
-        return;
-      }
-      if (inPanel || work.panelOpen) return;
-      if (key === 'ArrowUp' || key === 'ArrowRight') {
-        e.preventDefault();
-        if (!e.repeat) clickCounter(document.getElementById('row-plus'));
-      } else if (key === 'ArrowDown' || key === 'ArrowLeft') {
-        e.preventDefault();
-        if (!e.repeat) clickCounter(document.getElementById('row-minus'));
-      }
-    });
+    // Wave K: js/workmode.js holds the one keydown listener for every session
+    // (Space / Enter, the arrows, PageDown / PageUp for a page-turner pedal,
+    // Escape), with the same guards: no sheet, no tour, no text field.
   }
 
   /* ---- Yarn colours ---- */
@@ -5963,8 +6711,9 @@
         accept: accept,
         icon: info.emoji,
         ariaLabel: 'Choose a ' + info.name.toLowerCase() + ' pattern file',
-        label: 'Drop a ' + info.name.toLowerCase() + ' PDF' +
-          (extra.length ? ' or ' + extra.join(' / ') + ' file' : '') + ' here, or choose a file',
+        // wave K: the craft's own words ("…or a picture of a chart"), else the extensions
+        label: craftCopy(chosenCraft, 'dropLabel') || ('Drop a ' + info.name.toLowerCase() + ' PDF' +
+          (extra.length ? ' or ' + extra.join(' / ') + ' file' : '') + ' here, or choose a file'),
         rejectMessage: 'That needs to be a PDF' + (extra.length ? ' or ' + extra.join(' / ') : ''),
         handOff: function (file) {
           var base = String(file.name || '').replace(/\.[a-z0-9]+$/i, '').trim();
@@ -6192,7 +6941,7 @@
         {
           text: 'Save',
           cls: 'btn primary',
-          onClick: function (api) {
+          onClick: function saveNewProject(api) {
             var patch = {
               name: nameInput.value,
               emoji: emoji.get(),
@@ -6217,10 +6966,23 @@
               pdf.focusSize();
               return;
             }
+            // wave K (BUILD.md): counts that disagree with the pattern in many
+            // places ask once before the parts are made; never a block
+            var pdfCheck = secs.length && pdf.check ? pdf.check() : null;
+            if (pdfCheck && pdfCheck.verdict === 'off' && !api.__checked && window.CheckSheet) {
+              window.CheckSheet.guard(pdfCheck, confirmSheet, { confirmText: 'Create it anyway' }).then(function (go) {
+                if (!go) return;
+                api.__checked = true;
+                saveNewProject(api);
+              });
+              return;
+            }
             // wave H (knit-qa-2): one pattern out of a book is named after it
             // ("Plain Socks For A Go-Go Guy", not "Single piece" / the file)
             var bookPattern = secs.length && pdf.patternName ? pdf.patternName() : null;
             if (!patch.name.trim() && bookPattern) patch.name = bookPattern;
+            // wave K (knit-audit 4): a knitting pattern is named by its own title, else a tidy file name
+            if (!patch.name.trim() && secs.length && chosenCraft === KNIT_ID) patch.name = knitProjectName(pdf.text(), pdf.fileBase());
             if (!patch.name.trim() && secs.length && pdf.fileBase()) patch.name = pdf.fileBase();
             patch.templateId = chosenTemplate === PDF_TEMPLATE_ID ? 'blank' : chosenTemplate;
             patch.craft = chosenCraft;
@@ -6237,12 +6999,15 @@
             var importRes = null;
             if (secs.length) {
               var res = Store.importPatternSections(created.id, secs, {
-                mode: 'parts', text: pdf.text(), noTargets: pdf.noTargets(),
+                mode: 'parts', text: pdf.importText ? pdf.importText() : pdf.text(), noTargets: pdf.noTargets(),
                 size: pdf.size ? pdf.size() : null
               });
               importRes = res;
+              var pairsN = applyBothAtOnce(created.id, pdf.bothAtOnce ? pdf.bothAtOnce() : []);   // wave K (P8)
+              if (pairsN) bits.push(pairsN === 1 ? 'a pair knit both at once' : pairsN + ' pairs knit both at once');
               var extra = addChecklistItems(created.id, pdf.checkedChecklist());
-              knitAttachCharts(created.id);   // wave H: the PDF's chart pages
+              knitAttachCharts(created.id, pdf.bookPages ? pdf.bookPages() : null);   // wave H: the PDF's chart pages
+              knitKeepMaterials(created.id, pdf.text(), pdf.bookPick ? pdf.bookPick() : null);   // wave K (P20)
               var fresh = Store.project(created.id);
               bits.push(plural(fresh ? fresh.parts.length : secs.length, 'part'));
               if (res && res.sizeSet) bits.push('size ' + res.sizeSet);
@@ -6305,6 +7070,7 @@
               toast('Created ' + created.name + ' · ' + bits.join(' · '), { ms: 3600 });
             }
             modeFlipToast(importRes);
+            offerCraftTour(chosenCraft);
           }
         }
       ]
@@ -6440,6 +7206,13 @@
       focusSize: picker.focusSize,
       checkedSections: picker.checkedSections,
       checkedChecklist: picker.checkedChecklist,
+      // wave K (E12): the picked book pattern's pages, for its charts only
+      bookPages: function () { return picker.bookPages ? picker.bookPages() : null; },
+      bookPick: function () { return picker.bookPick ? picker.bookPick() : null; },
+      // wave K: the ticked sections' Check (the Save guard asks when it is "off")
+      check: function () { return picker.check ? picker.check() : null; },
+      importText: function () { return picker.importText ? picker.importText() : picker.getText(); },
+      bothAtOnce: function () { return picker.bothAtOnce ? picker.bothAtOnce() : []; },
       wantsTemplate: function () { return wantsTemplate; },
       templateName: function () {
         return (tplName && tplName.value.trim()) || defaultTemplateName();
@@ -7075,7 +7848,26 @@
    * 16c. Templates (list + editor)
    * ================================================================== */
 
+  /** The registered definition for a template's craft (any craft), or null. */
+  function templateCraftDef(craft) {
+    var id = craft || 'crochet';
+    return id === 'crochet' ? null : craftDefs[id] || null;
+  }
+
   function templateSub(tpl) {
+    // wave K: a chart or steps craft says what its seed holds (def.template.describe)
+    var def = templateCraftDef(tpl.craft);
+    if (def && !counterCraft(tpl.craft)) {
+      var said = '';
+      if (def.template && typeof def.template.describe === 'function') {
+        try { said = String(def.template.describe(tpl) || ''); } catch (e) { said = ''; }
+      }
+      var cb = [];
+      if (said) cb.push(said);
+      if (tpl.checklist.length) cb.push(plural(tpl.checklist.length, 'checklist item'));
+      if (!cb.length) cb.push(tpl.craftData ? 'with its own set-up' : 'name and checklist');
+      return cb.join(' · ');
+    }
     var bits = [tpl.parts.length + ' part' + (tpl.parts.length === 1 ? '' : 's')];
     if (tpl.checklist.length) {
       bits.push(tpl.checklist.length + ' checklist item' + (tpl.checklist.length === 1 ? '' : 's'));
@@ -7137,6 +7929,55 @@
     }
   }
 
+  /**
+   * Wave K: "＋ New template" asks which craft first when there is more than
+   * one (it used to make a crochet template whatever you were making).
+   */
+  function newTemplateFlow(onSaved) {
+    if (!multiCraft()) {
+      openTemplateEditor({ onSaved: onSaved });
+      return;
+    }
+    openSheet({
+      title: 'New template for…',
+      build: function (body, api) {
+        var list = el('div', 'list');
+        craftList().forEach(function (c) {
+          var b = button('menu-item tpl-craft-pick');
+          b.setAttribute('data-craft', c.id);
+          b.appendChild(el('span', 'menu-icon', c.emoji));
+          var main = el('span', 'tpl-item-main');
+          main.appendChild(el('span', 'tpl-item-name', c.name));
+          if (c.tagline) main.appendChild(el('span', 'tpl-item-sub', c.tagline));
+          b.appendChild(main);
+          on(b, 'click', function () {
+            api.close();
+            openTemplateEditor({ craft: c.id, onSaved: onSaved });
+          });
+          list.appendChild(b);
+        });
+        body.appendChild(list);
+      }
+    });
+  }
+
+  /** Wave K: ⋯ → Save as template, for every craft (the craft's own seed through Store). */
+  function saveProjectAsTemplate(p) {
+    var draft = Store.templateFromProject(p.id);
+    if (!draft) return;
+    // a Store from before wave K: the App-side hook fills the seed itself
+    var def = templateCraftDef(p.craft);
+    if (draft.craftData === null && def && def.template && typeof def.template.fromProject === 'function' &&
+        typeof Store.setCraftHooks !== 'function') {
+      try {
+        var seed = def.template.fromProject(JSON.parse(JSON.stringify(p)));
+        if (seed && seed.craftData) draft.craftData = seed.craftData;
+        if (seed && Array.isArray(seed.checklist)) draft.checklist = seed.checklist;
+      } catch (e) { /* name and checklist only */ }
+    }
+    openTemplateEditor({ draft: draft });
+  }
+
   /** The Templates sheet: list + "＋ New template". */
   function openTemplatesSheet(onChanged) {
     openSheet({
@@ -7148,11 +7989,9 @@
 
         var add = button('btn primary block', '＋ New template');
         on(add, 'click', function () {
-          openTemplateEditor({
-            onSaved: function () {
-              renderTemplateList(list, onChanged);
-              if (onChanged) onChanged();
-            }
+          newTemplateFlow(function () {
+            renderTemplateList(list, onChanged);
+            if (onChanged) onChanged();
           });
         });
         body.appendChild(add);
@@ -7170,6 +8009,18 @@
   function openTemplateEditor(opts) {
     opts = opts || {};
     var source = opts.draft || (opts.id ? Store.template(opts.id) : null);
+    // wave K: "＋ New template" for another craft starts from the Store's draft
+    // for it (the craft's blank seed), docs/wave-k/api/shell-data.md §2
+    if (!source && opts.craft && opts.craft !== 'crochet' && typeof Store.templateDraft === 'function') {
+      try { source = Store.templateDraft(opts.craft); } catch (e) { source = null; }
+      if (source && !source.emoji) source.emoji = craftInfo(opts.craft).emoji;
+    }
+    if (!source && opts.craft && opts.craft !== 'crochet') {
+      source = {
+        id: '', name: '', emoji: craftInfo(opts.craft).emoji, countMode: 'rows', groupSize: 10,
+        parts: [{ name: 'Main', makeCount: 1 }], checklist: [], builtIn: false, craft: opts.craft, craftData: null
+      };
+    }
     if (!source) {
       source = {
         id: '',
@@ -7212,6 +8063,7 @@
     if (!model.parts.length) model.parts.push({ name: '', makeCount: 1, patternText: '' });
 
     var nameInput, emoji, modeSeg, groupStep, partsWrap, checkWrap;
+    var craftFieldsRef = null;   // wave K: def.template.fields(...) → { get() → craftData }
     var partRefs = [];
     var checkRefs = [];
 
@@ -7380,8 +8232,28 @@
         }
 
         partsWrap = el('div', 'tpl-parts-edit');
-        body.appendChild(field('Parts', partsWrap, templateCraft === 'knitting' ? 'Sleeves ×2, socks ×2 — each piece is counted separately.' : 'Wings ×2, legs ×4 — each piece is counted separately.'));
+        var partsField = field('Parts', partsWrap, templateCraft === 'knitting' ? 'Sleeves ×2, socks ×2 — each piece is counted separately.' : 'Wings ×2, legs ×4 — each piece is counted separately.');
+        body.appendChild(partsField);
         renderParts();
+        // wave K: a chart or steps craft has no parts to edit (its one "Main"
+        // part rides along unseen); its own section comes from def.template.fields
+        if (!counterCraft(templateCraft)) {
+          partsField.hidden = true;
+          var tdef = templateCraftDef(templateCraft);
+          if (tdef && tdef.template && typeof tdef.template.fields === 'function') {
+            var own = el('div', 'tpl-craft-fields');
+            own.setAttribute('data-craft-template', templateCraft);
+            try {
+              craftFieldsRef = tdef.template.fields(own, source, ctx) || null;
+            } catch (e) {
+              craftFieldsRef = null;
+            }
+            if (own.firstChild) body.appendChild(own);
+          } else if (source.craftData) {
+            body.appendChild(el('p', 'field-hint tpl-craft-seed',
+              'New projects from this template start with this project’s set-up, without its progress.'));
+          }
+        }
 
         checkWrap = el('div', 'tpl-check-edit');
         body.appendChild(field('Assembly checklist', checkWrap));
@@ -7433,8 +8305,14 @@
           onClick: function (api) {
             syncModel();
             var saved;
+            // wave K: the craft's seed travels (a draft's craftData, or what its fields say)
+            var seedData = source && source.craftData !== undefined ? source.craftData : undefined;
+            if (craftFieldsRef && typeof craftFieldsRef.get === 'function') {
+              try { var got = craftFieldsRef.get(); if (got && typeof got === 'object') seedData = got; } catch (e) { /* keep the seed */ }
+            }
             try {
               saved = Store.saveTemplate({
+                craftData: seedData,
                 id: editingId,
                 name: nameInput.value,
                 emoji: emoji.get(),
@@ -7715,7 +8593,7 @@
           /* fall through to the toast */
         }
       }
-      toast((err && err.message) || 'Couldn’t read that PDF (it may be scanned images)', { ms: 4200 });
+      toast(pdfFailText(err), { ms: 5200 });
     }
 
     /**
@@ -8122,6 +9000,55 @@
     }
     var patGroups = false;
 
+    /*
+     * Wave K (E12, docs/wave-k/knit-parse.md): in a pattern BOOK exactly one
+     * pattern is imported, and it is the one whose tab is open. `bookPick`
+     * is its name; `bookList` is `Knits.bookPatterns(text)` (every pattern in
+     * the contents, "unread" ones too, each with its own pages, sizes, gauge).
+     * The size chips, the gauge chip, the checklist suggestions and the charts
+     * kept are that pattern's own.
+     */
+    var bookPick = null;
+    var bookList = null;
+    var bookNames = [];
+    /** wave K: the groups are one-of (a knitting book's patterns, or a knitting pattern's size groups) */
+    var singleGroups = false;
+
+    function readBookList() {
+      if (craftKey() !== 'knitting') return null;
+      var kp = parserOf('knitting');
+      if (!kp || typeof kp.bookPatterns !== 'function') return null;
+      try {
+        var l = kp.bookPatterns(text);
+        return Array.isArray(l) && l.length >= 2 ? l : null;
+      } catch (e) {
+        return null;
+      }
+    }
+
+    /** The picked book pattern's record from bookPatterns, or null. */
+    function bookEntry() {
+      if (!patGroups || !bookList || !bookPick) return null;
+      for (var i = 0; i < bookList.length; i++) if (bookList[i] && bookList[i].name === bookPick) return bookList[i];
+      return null;
+    }
+
+    function groupHasRows(g) {
+      return rows.some(function (r) { return r.group === g && r.rows > 0; });
+    }
+
+    /** A book's text cut to pages from..to ("=== PAGE n ===" markers); the whole text without markers. */
+    function pagesText(t, pages) {
+      if (!pages || !(pages.from >= 1)) return t;
+      var out = [], on = false, any = false;
+      String(t || '').split('\n').forEach(function (ln) {
+        var m = /^=== PAGE (\d+) ===$/.exec(ln);
+        if (m) { any = true; var n = +m[1]; on = n >= pages.from && n <= (pages.to || pages.from); }
+        if (on) out.push(ln);
+      });
+      return any ? out.join('\n') : t;
+    }
+
     /**
      * wave H (knit-qa-2): a knitting section with no numbered rows that is a
      * garment piece by name ("Back And Front", "Sleeves" of the Sandnes
@@ -8211,14 +9138,42 @@
       var prevNames = sizeNames.join('|');
       var pat = groupsArePatterns(secs);
       patGroups = pat;
-      if (pat) {
-        // patterns: the first one is ticked to start with, a tick the
-        // knitter changed survives a re-read
+      bookList = pat ? readBookList() : null;
+      // wave K (knit-audit): a knitting pattern's SIZE groups (the Sandnes
+      // raglan's Children and Ladies halves, the same parts in each) are a
+      // single choice too: the open tab is the group imported, with its own
+      // sizes — importing both gave every part twice. Crochet's size groups
+      // (the bee's Keyring / Medium / Big) stay "all on by default".
+      var sizeGroupsOne = !pat && craftKey() === KNIT_ID && (function () {
+        var gs = [];
+        secs.forEach(function (s) { if (s.group && gs.indexOf(s.group) < 0) gs.push(s.group); });
+        return gs.length >= 2;
+      })();
+      singleGroups = pat || sizeGroupsOne;
+      if (singleGroups) {
+        // wave K (E12): ONE pattern, the open tab's. Every pattern of the
+        // contents is listed (bookPatterns), unread ones too; the pick
+        // survives a re-read, else the first pattern that has rows.
         var seenG = [];
+        if (bookList) bookList.forEach(function (b) { if (b && b.name && seenG.indexOf(b.name) < 0) seenG.push(b.name); });
         secs.forEach(function (s) { if (s.group && seenG.indexOf(s.group) < 0) seenG.push(s.group); });
-        var was0 = groupTicks;
+        if (seenG.indexOf(bookPick) < 0) {
+          bookPick = null;
+          for (var bi = 0; bi < seenG.length && !bookPick; bi++) {
+            var g0 = seenG[bi];
+            var hasRows = secs.some(function (s) {
+              return s.group === g0 && !s.unread && sectionRowInfo(s.text, 0, 0, 0, craftKey()).rows > 0;
+            });
+            if (hasRows) bookPick = g0;
+          }
+          if (!bookPick) bookPick = seenG[0] || null;
+        }
         groupTicks = {};
-        seenG.forEach(function (n, gi) { groupTicks[n] = was0[n] === undefined ? gi === 0 : was0[n]; });
+        seenG.forEach(function (n) { groupTicks[n] = n === bookPick; });
+        bookNames = seenG;
+      } else {
+        bookPick = null;
+        bookNames = [];
       }
       // knitting groups (patterns or size ranges) each name their own sizes:
       // the chips are the first imported group's
@@ -8229,6 +9184,13 @@
       // pattern's own in a book, with the gauge lines the reader carries for
       // it), shown in the preview
       var gaugeText = sizeText === null ? text : sizeText + '\n' + groupGaugeLines(sizeSecs);
+      // wave K (E12): a book pattern's own sizes and gauge, from bookPatterns
+      var be = bookEntry();
+      if (be && Array.isArray(be.sizes) && be.sizes.length >= 2) {
+        sizeNames = be.sizes.map(String);
+        sizeDocCount = sizeNames.length;
+      }
+      if (be && (be.gaugeLine || be.needleLine)) gaugeText = [be.gaugeLine || '', be.needleLine || ''].join('\n');
       gaugeRead = craftKey() !== 'crochet' && typeof Store.gaugeFromText === 'function'
         ? Store.gaugeFromText(gaugeText, craftKey()) : null;
       // a different document's sizes are a different question
@@ -8249,6 +9211,10 @@
           group: sec.group || null,
           makeCount: sec.makeCount,
           makeCountInferred: !!sec.makeCountInferred,
+          // wave K (knit-parse P8): a garment pair (sleeves, socks …) and the knitter's "both at once"
+          makeCountWhy: sec.makeCountWhy || null,
+          pairNoun: sec.pairNoun || null,
+          bothAtOnce: keep ? !!old.bothAtOnce : false,
           gaugeLines: sec.gaugeLines || null,
           text: sec.text,
           placement: sec.placement || '',
@@ -8269,13 +9235,17 @@
       // wave G: the sizes, in document order; every one ticked by default,
       // a tick the maker took off survives a re-read of the same document
       var names = [];
-      rows.forEach(function (r) { if (r.group && r.rows > 0 && names.indexOf(r.group) < 0) names.push(r.group); });
-      var was = groupTicks;
-      groupTicks = {};
-      names.forEach(function (n) { groupTicks[n] = was[n] === undefined ? !pat : was[n]; });
-      // wave H (knit-qa): a book with nothing ticked (the first one had no rows) imports the first with rows
-      if (pat && !ticksTouched && names.length && !names.some(function (n) { return groupTicks[n]; })) groupTicks[names[0]] = true;
+      if (singleGroups) {
+        // wave K (E12): a book lists every pattern; only the picked one is imported
+        names = bookNames.slice();
+      } else {
+        rows.forEach(function (r) { if (r.group && r.rows > 0 && names.indexOf(r.group) < 0) names.push(r.group); });
+        var was = groupTicks;
+        groupTicks = {};
+        names.forEach(function (n) { groupTicks[n] = was[n] === undefined ? true : was[n]; });
+      }
       groupNames = names.length >= 2 ? names : [];
+      if (singleGroups && bookPick) openGroup = bookPick;
       if (groupNames.indexOf(openGroup) < 0) openGroup = groupNames.length ? groupNames[0] : null;
     }
 
@@ -8341,7 +9311,8 @@
         // been read, so the whole field stays out of the way.
         listField.hidden = !!opts.hideWhenEmpty;
         targetsRow.hidden = true;
-        list.appendChild(el('p', 'muted', IMPORT_EMPTY));
+        // wave K: the craft's own example (a knitter never reads "6 sc in MR")
+        list.appendChild(el('p', 'muted imp-empty', craftCopy(craftKey(), 'importEmpty') || IMPORT_EMPTY));
         return;
       }
       listField.hidden = false;
@@ -8370,7 +9341,11 @@
         main.appendChild(nameIn);
 
         var meta = [];
-        if (r.makeCount > 1) meta.push('×' + r.makeCount + (r.makeCountInferred ? ' (from the assembly text)' : ''));
+        var isPair = r.makeCountWhy === 'pair' && r.makeCount === 2 && craftKey() === KNIT_ID;
+        if (r.makeCount > 1) {
+          meta.push('×' + r.makeCount + (isPair ? ' (a pair of ' + (r.pairNoun || 'pieces') + 's)'
+            : r.makeCountInferred ? ' (from the assembly text)' : ''));
+        }
         // The section's own word when it has one; the rows it will COUNT (the
         // target, which includes "Rep 3rd Rnd 3 times") when it has a target.
         var w = r.mode ? (r.mode === 'rounds' ? 'round' : 'row') : word();
@@ -8404,9 +9379,36 @@
           var conf = countLineText(rep, w, false).replace(/^\d+ \w+(?: · |$)/, '');
           if (!conf) conf = rep.printed === rep.rows ? 'every count printed' : '';
           if (conf) {
-            var cl = el('div', 'imp-conf' + (rep.disagree.length || rep.unresolved ? ' warn' : ''), conf);
+            var cl = el('div', 'imp-conf' + (rep.disagree.length || rep.unresolved ? ' warn' : ''));
+            // wave K: the shared badge in front, and the check sheet one tap away
+            var ck = sectionCheck(r, w);
+            if (ck && window.CheckSheet) cl.appendChild(window.CheckSheet.badge(ck.verdict));
+            cl.appendChild(el('span', 'imp-conf-text', conf));
+            if (ck && window.CheckSheet) {
+              var see = button('linkish check-open', 'See the check', 'See the check for ' + (r.name || 'this part'));
+              on(see, 'click', function (e) {
+                e.stopPropagation();
+                openCheckSheet(sectionCheck(r, w, true));
+              });
+              cl.appendChild(see);
+            }
             main.appendChild(cl);
           }
+        }
+
+        // wave K (P8): a pair the reader found ("Sleeves", "Socks") can be knit both at once
+        if (isPair && r.checked) {
+          var both = button('chip imp-both' + (r.bothAtOnce ? ' on' : ''), 'Knit both at once',
+            'Knit both ' + (r.pairNoun || 'pieces') + 's at once: one row tap moves both');
+          both.setAttribute('aria-pressed', r.bothAtOnce ? 'true' : 'false');
+          both.setAttribute('data-both-at-once', '1');
+          on(both, 'click', function (e) {
+            e.stopPropagation();
+            r.bothAtOnce = !r.bothAtOnce;
+            both.classList.toggle('on', r.bothAtOnce);
+            both.setAttribute('aria-pressed', r.bothAtOnce ? 'true' : 'false');
+          });
+          main.appendChild(both);
         }
 
         item.appendChild(chk);
@@ -8453,11 +9455,28 @@
         t.setAttribute('data-focus-key', 'imp-size-tab:' + g.replace(/"/g, ''));
         t.tabIndex = sel ? 0 : -1;
         t.appendChild(el('span', 'size-tab-name', g));
-        if (!groupTicks[g]) t.appendChild(el('span', 'size-tab-skip', ' · skipped'));
-        t.setAttribute('aria-label', g + (pat ? '' : ' size') + (groupTicks[g] ? '' : ', not imported'));
+        var unreadG = pat && !groupHasRows(g);
+        if (unreadG) t.appendChild(el('span', 'size-tab-skip', ' · not read'));
+        else if (!groupTicks[g] && !pat) t.appendChild(el('span', 'size-tab-skip', ' · skipped'));
+        t.setAttribute('aria-label', pat
+          ? g + (unreadG ? ', rows not read' : '') + (groupTicks[g] ? ', the pattern to import' : '')
+          : g + ' size' + (groupTicks[g] ? '' : ', not imported'));
         var go = function (to, focus) {
           openGroup = groupNames[to];
-          renderList();
+          if (singleGroups) {
+            // wave K (E12): in a book the open tab IS the pattern imported —
+            // its sizes, gauge, checklist and charts follow it
+            bookPick = openGroup;
+            ticksTouched = true;
+            buildRows();
+            renderChips();
+            buildChecks();
+            renderChecks();
+            renderList();
+            changed();
+          } else {
+            renderList();
+          }
           if (focus) {
             var nt = list.querySelector('[data-focus-key="imp-size-tab:' + openGroup.replace(/"/g, '') + '"]');
             if (nt) { try { nt.focus({ preventScroll: true }); } catch (e) { nt.focus(); } }
@@ -8481,6 +9500,17 @@
       panel.id = uid0 + '-panel';
       panel.setAttribute('role', 'tabpanel');
       panel.setAttribute('aria-labelledby', selId);
+      if (singleGroups) {
+        // wave K (E12): no tick in a book — the open tab is the one pattern imported
+        var note = el('div', 'imp-book-pick', groupHasRows(openGroup)
+          ? 'Importing “' + openGroup + '” only — pick ' + (pat ? 'another pattern' : 'the other sizes') + ' above to import that one instead.'
+          : 'The app could not read the rows of “' + openGroup + '”. Importing it gives one part with its text, to count by hand.');
+        note.setAttribute('role', 'status');
+        note.setAttribute('data-book-pick', openGroup);
+        panel.appendChild(note);
+        list.appendChild(panel);
+        return panel;
+      }
       var tickRow = el('div', 'imp-targets imp-size-tick');
       var tick = button('check', '✓', pat ? 'Import ' + openGroup : 'Import the ' + openGroup + ' size');
       tick.setAttribute('role', 'checkbox');
@@ -8509,8 +9539,20 @@
 
     function buildChecks() {
       var found = [];
+      // wave K (E12): a book pattern's own finishing steps, from its own pages
+      var be = bookEntry();
+      var checkText = text;
+      if (patGroups && bookPick) {
+        // the picked pattern's own pages; without page markers, its own sections' text
+        var paged = be && be.pages ? pagesText(text, be.pages) : text;
+        if (paged !== text) checkText = paged;
+        else {
+          var own = rows.filter(function (r) { return r.group === bookPick; }).map(function (r) { return r.text; });
+          if (own.length) checkText = own.join('\n');
+        }
+      }
       try {
-        found = Store.suggestChecklist(text, craftKey()) || [];
+        found = Store.suggestChecklist(checkText, craftKey()) || [];
       } catch (e) {
         found = [];
       }
@@ -8558,9 +9600,53 @@
       buildRows();
       renderChips();
       renderList();
-      buildChecks();
+      buildChecks();   // after buildRows: a book's checklist reads the picked pattern's rows
       renderChecks();
       changed();
+    }
+
+    /**
+     * Wave K: a section's count report as a Check (js/checksheet.js). With
+     * `withLines` the table gets one row per counted pattern line (parsed
+     * on demand, only when the sheet opens).
+     */
+    function sectionCheck(r, w, withLines) {
+      if (!window.CheckSheet || !r || !r.report || !r.report.rows) return null;
+      var o = { word: w || word(), name: r.name || '' };
+      if (withLines) {
+        var rp = parserOf(craftKey());
+        try { o.lines = rp && typeof rp.parse === 'function' ? rp.parse(r.text) : null; } catch (e) { o.lines = null; }
+      }
+      return window.CheckSheet.fromCountReport(r.report, o);
+    }
+
+    /** Wave K: every ticked section's check in one ("off" if any is off). */
+    function combinedCheck() {
+      if (!window.CheckSheet) return null;
+      var secs = rows.filter(function (r) { return r.checked && r.rows > 0 && r.report && r.report.rows; });
+      if (!secs.length) return window.CheckSheet.normalize({ verdict: 'unchecked', rows: [] });
+      var verdicts = secs.map(function (r) { return sectionCheck(r).verdict; });
+      var off = secs.filter(function (r, i) { return verdicts[i] === 'off'; });
+      var v = off.length ? 'off'
+        : verdicts.indexOf('close') >= 0 ? 'close'
+        : verdicts.every(function (x) { return x === 'exact'; }) ? 'exact' : 'close';
+      return window.CheckSheet.normalize({
+        verdict: v,
+        title: 'Counts against the pattern',
+        summary: off.length
+          ? (off.length === 1 ? (off[0].name || 'One part') + '’s counts disagree' : off.length + ' parts’ counts disagree') +
+            ' with the pattern in many places — the stitch terms or the size may be read wrong.'
+          : v === 'exact' ? 'Every count is printed in the pattern.' : 'Some counts are worked out by the app (≈).',
+        rows: secs.map(function (r, i) {
+          var rep = r.report;
+          return {
+            label: r.name || 'Part ' + (i + 1), verdict: verdicts[i] === 'unchecked' ? 'unknown' : (verdicts[i] === 'close' ? 'close' : verdicts[i]),
+            printed: rep.printed, read: rep.rows,
+            why: countLineText(rep, word(), false)
+          };
+        }),
+        note: 'Printed: rows whose count is printed. Read: rows the app counted.'
+      });
     }
 
     function checkedSections() {
@@ -8625,6 +9711,38 @@
         sizeField.classList.add('nudge');
       },
       checkedSections: checkedSections,
+      /** Wave K: the ticked sections' Check (js/checksheet.js), or null. */
+      check: combinedCheck,
+      /** Wave K (E12): the picked book pattern's PDF pages ({from, to}), or null (not a book). */
+      bookPages: function () { var be = bookEntry(); return be && be.pages ? { from: be.pages.from, to: be.pages.to } : null; },
+      /**
+       * Wave K (knit-audit 1): the text an import reads its document-wide
+       * facts from (sizes, gauge, abbreviations). In a book, the picked
+       * pattern's own pages (else its own sections), so a one-size pattern
+       * never takes the book's first pattern's sizes; otherwise everything.
+       */
+      importText: function () {
+        if (!patGroups || !bookPick) return text;
+        var be = bookEntry();
+        var paged = be && be.pages ? pagesText(text, be.pages) : text;
+        if (paged !== text) return paged;
+        var own = rows.filter(function (r) { return r.group === bookPick; }).map(function (r) { return r.text; });
+        return own.length ? own.join('\n') : text;
+      },
+      /** Wave K (E12): the picked book pattern's name, or null. */
+      bookPick: function () { return patGroups ? bookPick : null; },
+      /** Wave K (E12): pick a book pattern as the tab does (tests, deep links). */
+      pickBookPattern: function (name) {
+        if (!patGroups || groupNames.indexOf(name) < 0) return false;
+        bookPick = name; openGroup = name; ticksTouched = true;
+        buildRows(); renderChips(); buildChecks(); renderChecks(); renderList(); changed();
+        return true;
+      },
+      /** Wave K (P8): names of the ticked pair sections the knitter wants knit both at once. */
+      bothAtOnce: function () {
+        return rows.filter(function (r) { return r.checked && r.bothAtOnce && r.makeCountWhy === 'pair'; })
+          .map(function (r) { return (r.name || '').trim(); });
+      },
       checkedChecklist: function () {
         return checkItems.filter(function (c) { return c.checked; }).map(function (c) { return c.text; });
       },
@@ -8670,9 +9788,20 @@
     var activeName = (Store.activePart(p) || {}).name || 'this part';
     var area, picker;
     var dropZone = null;
+    var demoter = null;   // wave K: "off" demotes Create parts behind a confirm
 
     function refresh() {
       if (picker) picker.setText(area.value);
+      syncCheckDemote();
+    }
+
+    function syncCheckDemote() {
+      if (!picker || typeof picker.check !== 'function' || !window.CheckSheet) return;
+      var btn = document.querySelector('dialog [data-tour="import-create"]');
+      if (!btn) return;
+      var c = picker.check();
+      if (!demoter) demoter = window.CheckSheet.demote(btn, c);
+      else demoter.set(c);
     }
 
     /* ---------------- PDF drop zone (the shared builder) ---------------- */
@@ -8720,12 +9849,16 @@
           // wave F: a re-import keeps the size already picked for the project
           initialSize: p.size ? p.size.index : null,
           // wave H: the project's craft reads it (knitting → Knits)
-          craft: p.craft || 'crochet'
+          craft: p.craft || 'crochet',
+          // wave K: ticking a section re-checks the button's standing
+          onChange: function () { syncCheckDemote(); }
         });
         body.appendChild(picker.node);
 
         on(area, 'input', debounce(refresh, 200));
         refresh();
+        // the footer is built after the body
+        window.setTimeout(syncCheckDemote, 0);
       },
       onClose: function () {
         if (dropZone) dropZone.destroy();
@@ -8752,7 +9885,8 @@
               { mode: 'active', text: area.value, noTargets: picker.noTargets(), size: picker.size() }
             );
             var extra = addChecklistItems(p.id, picker.checkedChecklist());
-            knitAttachCharts(p.id);   // wave H: the PDF's chart pages
+            knitAttachCharts(p.id, picker.bookPages ? picker.bookPages() : null);   // wave H: the PDF's chart pages
+            knitKeepMaterials(p.id, area.value, picker.bookPick ? picker.bookPick() : null);   // wave K (P20)
             api.close();
             render();
             toast('Pattern saved into ' + activeName + checklistSuffix(extra), { ms: extra ? 3200 : 2600 });
@@ -8762,7 +9896,7 @@
           text: 'Create parts',
           cls: 'btn primary',
           tour: 'import-create',
-          onClick: function (api) {
+          onClick: function createParts(api) {
             var secs = picker.checkedSections();
             if (!secs.length) {
               toast('Tick at least one section first');
@@ -8773,11 +9907,22 @@
               picker.focusSize();
               return;
             }
+            // wave K (BUILD.md): a check that says "off" asks first; it never blocks
+            if (demoter && demoter.isDemoted() && !api.__checked) {
+              demoter.guard(confirmSheet, { confirmText: 'Create parts anyway' }).then(function (go) {
+                if (!go) return;
+                api.__checked = true;
+                createParts(api);
+              });
+              return;
+            }
             var res = Store.importPatternSections(p.id, secs, {
-              mode: 'parts', text: area.value, noTargets: picker.noTargets(), size: picker.size()
+              mode: 'parts', text: picker.importText ? picker.importText() : area.value, noTargets: picker.noTargets(), size: picker.size()
             });
+            var pairs = applyBothAtOnce(p.id, picker.bothAtOnce ? picker.bothAtOnce() : []);   // wave K (P8)
             var extra = addChecklistItems(p.id, picker.checkedChecklist());
-            knitAttachCharts(p.id);   // wave H: the PDF's chart pages
+            knitAttachCharts(p.id, picker.bookPages ? picker.bookPages() : null);   // wave H: the PDF's chart pages
+            knitKeepMaterials(p.id, area.value, picker.bookPick ? picker.bookPick() : null);   // wave K (P20)
             api.close();
             render();
             var msg;
@@ -8791,6 +9936,7 @@
               msg = 'Nothing imported';
             }
             if (res.sizeSet) msg += ' · size ' + res.sizeSet;
+            if (pairs) msg += ' · ' + (pairs === 1 ? 'a pair' : pairs + ' pairs') + ' knit both at once';
             toast(msg + placingSuffix(res.placed) + checklistSuffix(extra), { ms: 3600 });
             modeFlipToast(res);
           }
@@ -8811,6 +9957,26 @@
     window.setTimeout(function () {
       toast('This pattern is worked in rounds — switched the project to Rounds', { ms: 4200 });
     }, 900);
+  }
+
+  /**
+   * Wave K (P8): after a knitting import, the pairs the knitter asked to knit
+   * both at once become two linked parts (Store.splitTwoAtATime: "Sleeve 1" +
+   * "Sleeve 2", one row tap moves both). Matched by name, made twice, not started.
+   * @returns {number} how many pairs were split
+   */
+  function applyBothAtOnce(projectId, names) {
+    if (!names || !names.length || typeof Store.splitTwoAtATime !== 'function') return 0;
+    var n = 0;
+    names.forEach(function (name) {
+      var proj = Store.project(projectId);
+      if (!proj) return;
+      var hit = proj.parts.filter(function (q) {
+        return q.name === name && q.makeCount === 2 && !q.piecesDone && !q.row && !q.stitch;
+      })[0];
+      if (hit && Store.splitTwoAtATime(projectId, hit.id)) n++;
+    });
+    return n;
   }
 
   function checklistSuffix(n) {
@@ -9387,6 +10553,10 @@
         }
       });
     }
+    // wave K: the craft's working mode, full screen (def.workMode)
+    if (craftWorkSpec(def) && window.WorkMode) {
+      items.push({ icon: craftWorkSpec(def).icon || '⤢', label: craftWorkSpec(def).label || 'Working mode', run: function () { workModeApi.open(); } });
+    }
     items.push({ icon: '✅', label: 'Checklist', run: function () { openChecklistSheet(p.id); } });
 
     // The craft's own entries sit above Notes.
@@ -9404,6 +10574,8 @@
     items.push({ icon: '📝', label: 'Notes', run: function () { openNotesSheet(p.id); } });
     items.push({ icon: '🕘', label: 'History', run: function () { openHistorySheet(p.id); } });
     items.push({ icon: '🏷️', label: 'Status', run: function () { openStatusSheet(p.id); } });
+    // wave K (00 gap 10): every craft can save its project as a template
+    items.push({ icon: '🧵', label: 'Save as template', run: function () { saveProjectAsTemplate(p); } });
     fileMenuItems(p).forEach(function (it) { items.push(it); });
     items.push({
       icon: '❓',
@@ -9460,11 +10632,7 @@
       {
         icon: '🧵',
         label: 'Save as template',
-        run: function () {
-          var draft = Store.templateFromProject(p.id);
-          if (!draft) return;
-          openTemplateEditor({ draft: draft });
-        }
+        run: function () { saveProjectAsTemplate(p); }
       },
       { icon: '❓', label: 'Show me around', run: function () { startTour(counterTourId(p)); } }
     ];
@@ -9473,6 +10641,22 @@
       // Wave H: a counter craft's own entries (knitting's Glossary) sit
       // above the file items, below Save as template.
       counterMenuExtras(p).forEach(function (it) { items.splice(at++, 0, it); });
+      // wave K (P13): what a tap counts on long rows, for this project
+      if (isKnit(p)) {
+        var unitNow = knitTapUnit(p);
+        items.splice(at++, 0, {
+          icon: '🔢',
+          label: unitNow === 'repeat' ? 'Long rows: a tap counts a repeat (switch to stitches)'
+            : 'Long rows: a tap counts a stitch (switch to repeats)',
+          run: function () {
+            var next = knitTapUnit(p) === 'repeat' ? 'stitch' : 'repeat';
+            setKnitTapUnit(p, next);
+            render();
+            toast(next === 'repeat' ? 'On long rows a tap counts a whole repeat — hold for one stitch'
+              : 'A tap counts one stitch again');
+          }
+        });
+      }
       fileMenuItems(p).forEach(function (it) { items.splice(at++, 0, it); });
     }
     openSheet({
@@ -9542,8 +10726,11 @@
    */
   function buildBackupFile(projectId) {
     try { Store.flush(); } catch (e) { /* the export reads the in-memory state anyway */ }
+    // wave K (shell-data §4): heavy craft data read back first, so a .json fallback is whole too
+    var ready = typeof Store.hydrateAll === 'function'
+      ? Promise.resolve(Store.hydrateAll()).then(null, noop) : Promise.resolve();
     if (typeof Store.exportThready !== 'function' || !window.Zip) {
-      return Promise.resolve(jsonBackupFile(projectId));
+      return ready.then(function () { return jsonBackupFile(projectId); });
     }
     return Store.exportThready({ projectId: projectId || null, appVersion: APP_VERSION }).then(function (res) {
       return {
@@ -9553,7 +10740,7 @@
         kind: 'thready'
       };
     }, function () {
-      return jsonBackupFile(projectId);
+      return ready.then(function () { return jsonBackupFile(projectId); });
     });
   }
 
@@ -9629,6 +10816,8 @@
   /** The file entries in every project's ⋯ menu. */
   function fileMenuItems(p) {
     return [
+      // wave K: a picture card of the project, for every craft (shell-ui.md §3)
+      { icon: '🖼️', label: 'Share a picture', run: function () { openShareCard(p.id); } },
       { icon: '📦', label: 'Send this project', run: function () { exportProject(p.id); } },
       { icon: '📂', label: 'Open a project file', run: function () { importBackup(); } },
       { icon: '📤', label: 'Back up everything', run: function () { exportBackup(); } }
@@ -9778,6 +10967,30 @@
           body.appendChild(field('Templates', tl));
         }
 
+        // wave K (00 gap 18; shell-data.md §3): the backup's settings come back
+        // too — theme, feedback, each craft's settings and the profile — when ticked
+        var sp = preview.settings;
+        if (sp && sp.present) {
+          choices.settings = 'merge';
+          var sw = el('label', 'restore-settings');
+          var cb = document.createElement('input');
+          cb.type = 'checkbox';
+          cb.checked = true;
+          cb.className = 'check';
+          cb.setAttribute('data-restore-settings', '1');
+          on(cb, 'change', function () { choices.settings = cb.checked ? 'merge' : 'skip'; });
+          sw.appendChild(cb);
+          var stext = el('span', 'restore-settings-text');
+          var nChanges = typeof sp.count === 'number' ? sp.count : (Array.isArray(sp.changes) ? sp.changes.length : 0);
+          stext.appendChild(el('span', 'imp-name', 'Settings'));
+          var labels = Array.isArray(sp.changes) ? sp.changes.slice(0, 4).map(function (c) { return c.label || c.key; }) : [];
+          stext.appendChild(el('span', 'muted', ' — ' + (nChanges
+            ? plural(nChanges, 'change') + (labels.length ? ': ' + labels.join(', ') + (nChanges > labels.length ? '…' : '') : '')
+            : 'the same as this phone') + '. Theme, feedback, each craft’s settings and your profile.'));
+          sw.appendChild(stext);
+          body.appendChild(sw);
+        }
+
         if (pages.length) {
           // Only the projects that are imported bring theirs (a skipped
           // project's images stay in the file), so the count is the file's.
@@ -9913,6 +11126,465 @@
   }
 
   /* ================================================================== *
+   * 19b. Share a picture (wave K, shell-ui.md §3; js/sharecard.js)
+   *
+   * A square card of the project — name, craft, time from the timer, dates,
+   * progress and the craft's own picture — drawn on the device in the
+   * current theme and sent through the share sheet, else downloaded.
+   * Crochet and knitting get a still of the 3D piece; a craft module hands
+   * its own picture through `def.sharePicture(project, {size})`.
+   * ================================================================== */
+
+  /** `{text, pct}` for the card's bar: a craft's own, else the counter's rows. */
+  function shareProgress(p) {
+    var text = projectSummary(p) || '';
+    var def = craftFor(p) || counterCraftDef(p.craft);
+    if (def && typeof def.shareProgress === 'function') {
+      try {
+        var r = def.shareProgress(p);
+        if (r && typeof r === 'object') return { text: r.text || text, pct: typeof r.pct === 'number' ? r.pct : null };
+      } catch (e) { /* the summary line */ }
+    }
+    if (isCraftProject(p)) {
+      var m = /(\d{1,3})\s?%/.exec(text);
+      return { text: text, pct: m ? Math.min(100, +m[1]) / 100 : null };
+    }
+    var want = 0, have = 0;
+    (p.parts || []).forEach(function (q) {
+      if (!q.targetRows) return;
+      var mk = Math.max(1, q.makeCount || 1);
+      want += mk * q.targetRows;
+      have += Math.min(mk, q.piecesDone || 0) * q.targetRows + (q.piecesDone >= mk ? 0 : Math.min(q.row || 0, q.targetRows));
+    });
+    return { text: text, pct: want ? have / want : null };
+  }
+
+  /**
+   * A still of the 3D piece on its own short-lived canvas (fit for viewing,
+   * finished look when it is finished), copied to a 2D canvas in the frame
+   * it was drawn. Null when there is no piece, no WebGL or no frame comes
+   * (a hidden pane): the card then shows the project's emoji.
+   */
+  function snapshot3D(p, size) {
+    if (!diagramAvailable() || !window.Diagram || typeof window.Diagram.mount !== 'function') return Promise.resolve(null);
+    var cp = currentProject();
+    if (!cp || cp.id !== p.id || isCraftProject(p)) return Promise.resolve(null);
+    var model = currentModel();
+    // wave K (K1): a knitter who looks at the whole piece shares the whole piece
+    var whole = viewerWholeOn(p) ? assembledFor(p, true) : null;   // fresh: today's progress
+    if (whole && whole.model) model = whole.model;
+    if (!model) return Promise.resolve(null);
+    return new Promise(function (resolve) {
+      var c = document.createElement('canvas');
+      c.className = 'share-snap-canvas';
+      c.setAttribute('aria-hidden', 'true');
+      c.style.cssText = 'position:fixed;left:-10000px;top:0;width:' + size + 'px;height:' + size + 'px;pointer-events:none;';
+      document.body.appendChild(c);
+      var handle = null, done = false, frames = 0;
+      function finish(out) {
+        if (done) return;
+        done = true;
+        try { if (handle) handle.destroy({ release: true }); } catch (e) { /* ignore */ }
+        if (c.parentNode) c.parentNode.removeChild(c);
+        resolve(out);
+      }
+      try {
+        handle = window.Diagram.mount(c, {
+          palette: diagramPalette(), reducedMotion: true, interactive: false,
+          fitPurpose: 'viewer', finished: modelFinished(model), follow: false
+        });
+        handle.setModel(model, { animate: 'none', fitPurpose: 'viewer', finished: whole ? !!model.finished : modelFinished(model) });
+        if (typeof handle.resize === 'function') handle.resize();
+      } catch (e) {
+        finish(null);
+        return;
+      }
+      /* wave K (knit-3d): the renderer draws one frame synchronously and hands
+         back the piece cropped (works on a hidden page); the frame-copy below
+         stays as the fallback for an older diagram.js */
+      var snap = window.ShareCard && typeof window.ShareCard.snapshot === 'function'
+        ? window.ShareCard.snapshot(handle, { size: size, crop: true, pad: 0.06 }) : null;
+      if (snap) { finish(snap); return; }
+      function grab() {
+        if (done) return;
+        frames++;
+        var out = document.createElement('canvas');
+        out.width = c.width || size;
+        out.height = c.height || size;
+        var g = out.getContext('2d');
+        var ink = false, box = null;
+        try {
+          g.drawImage(c, 0, 0);
+          var W = out.width, H = out.height;
+          var px = g.getImageData(0, 0, W, H).data;
+          // the inked box, sampled every 3 px, so the card shows the piece, not the empty frame
+          var x0 = W, y0 = H, x1 = -1, y1 = -1;
+          for (var y = 0; y < H; y += 3) {
+            for (var x = 0; x < W; x += 3) {
+              if (px[(y * W + x) * 4 + 3] > 8) {
+                if (x < x0) x0 = x; if (x > x1) x1 = x;
+                if (y < y0) y0 = y; if (y > y1) y1 = y;
+              }
+            }
+          }
+          ink = x1 >= x0 && y1 >= y0;
+          if (ink) {
+            var m = Math.round(Math.max(x1 - x0, y1 - y0) * 0.08) + 6;
+            box = { x: Math.max(0, x0 - m), y: Math.max(0, y0 - m) };
+            box.w = Math.min(W, x1 + m) - box.x;
+            box.h = Math.min(H, y1 + m) - box.y;
+          }
+        } catch (e) { ink = false; }
+        if (ink && box && box.w > 8 && box.h > 8) {
+          var crop = document.createElement('canvas');
+          crop.width = box.w;
+          crop.height = box.h;
+          crop.getContext('2d').drawImage(out, box.x, box.y, box.w, box.h, 0, 0, box.w, box.h);
+          finish(crop);
+          return;
+        }
+        if (ink) { finish(out); return; }
+        if (frames > 12) { finish(null); return; }
+        window.requestAnimationFrame(grab);
+      }
+      window.requestAnimationFrame(function () { window.requestAnimationFrame(grab); });
+      // a hidden pane never paints a frame: give up and use the emoji
+      window.setTimeout(function () { finish(null); }, 2500);
+    });
+  }
+
+  function sharePictureOf(p, size) {
+    var def = craftFor(p) || counterCraftDef(p.craft);
+    if (def && typeof def.sharePicture === 'function') {
+      try {
+        return Promise.resolve(def.sharePicture(p, { size: size })).then(function (x) { return x || null; }, function () { return null; });
+      } catch (e) {
+        return Promise.resolve(null);
+      }
+    }
+    if (!isCraftProject(p)) return snapshot3D(p, size);
+    return Promise.resolve(null);
+  }
+
+  function shareInfo(p, picture) {
+    var info = craftInfo(p.craft);
+    var prog = shareProgress(p);
+    var parts = (p.parts || []).length > 1 && !isCraftProject(p)
+      ? [p.parts.slice(0, 4).map(function (q) { return q.name + (q.makeCount > 1 ? ' ×' + q.makeCount : ''); }).join(' · ') + (p.parts.length > 4 ? ' …' : '')]
+      : [];
+    return {
+      name: p.name, emoji: p.emoji, craft: info, status: p.status,
+      startedAt: p.createdAt, finishedAt: p.finishedAt, elapsedMs: Store.elapsedMs(p),
+      progress: p.status === 'finished' ? { text: 'Finished', pct: 1 } : prog,
+      lines: parts, picture: picture
+    };
+  }
+
+  /** ⋯ → Share a picture: a preview, then Share (or Save picture where sharing is unavailable). */
+  function openShareCard(projectId) {
+    var p = Store.project(projectId);
+    if (!p || !window.ShareCard) {
+      toast('Pictures are unavailable right now');
+      return null;
+    }
+    var size = 1080;
+    var canvas = document.createElement('canvas');
+    canvas.className = 'share-card-canvas';
+    canvas.setAttribute('role', 'img');
+    var blob = null;
+    var status = el('p', 'muted share-card-status', 'Drawing the card…');
+    status.setAttribute('aria-live', 'polite');
+    var shareBtnNode = null;
+    function paint(picture) {
+      var info = shareInfo(Store.project(projectId) || p, picture);
+      window.ShareCard.draw(canvas, info, { size: size, theme: window.ShareCard.theme(null) });
+      canvas.setAttribute('aria-label', 'Picture card: ' + window.ShareCard.textLines(info).concat([info.name]).join('. '));
+      return window.ShareCard.toBlob(canvas).then(function (b) {
+        blob = b;
+        status.textContent = b ? 'Ready. Nothing leaves this device unless you share it.' : 'The picture could not be made.';
+        if (shareBtnNode) shareBtnNode.disabled = !b;
+      });
+    }
+    paint(null);
+    sharePictureOf(p, 900).then(function (pic) { if (pic) paint(pic); });
+    var canFiles = false;
+    try {
+      canFiles = !!(navigator.share && navigator.canShare && typeof File === 'function' &&
+        navigator.canShare({ files: [new File([new Blob(['x'], { type: 'image/png' })], 'probe.png', { type: 'image/png' })] }));
+    } catch (e) { canFiles = false; }
+    return openSheet({
+      subject: projectId,
+      title: 'Share a picture',
+      cls: 'sheet-share-card',
+      build: function (body) {
+        var wrap = el('div', 'share-card-wrap');
+        wrap.appendChild(canvas);
+        body.appendChild(wrap);
+        body.appendChild(status);
+      },
+      footer: [
+        { text: 'Close', cls: 'btn ghost', onClick: function (api) { api.close(); } },
+        {
+          text: canFiles ? '📤 Share' : '📥 Save picture',
+          cls: 'btn primary',
+          onClick: function () {
+            if (!blob) { toast('Still drawing — one moment'); return; }
+            var info = shareInfo(Store.project(projectId) || p, null);
+            window.ShareCard.share(blob, {
+              filename: window.ShareCard.fileName(info),
+              title: info.name,
+              text: info.name + ' · ' + info.craft.name
+            }).then(function (r) {
+              if (r === 'downloaded') toast('Picture saved');
+              else if (r === 'failed') toast('The picture could not be saved');
+            });
+          }
+        }
+      ]
+    });
+  }
+
+  /* ================================================================== *
+   * 19c. The opt-in text reader (wave K, docs/wave-k/ocr.md; js/ocr.js)
+   *
+   * Nothing downloads until the maker asks: a craft offers "Try reading
+   * this scanned page (downloads about 5 MB once)", or Settings → Read
+   * scanned pages → Download. The engine then lives in its own Cache Storage
+   * bucket (thready-ocr-*, kept by sw.js across deploys) and works offline.
+   * OCR text is never trusted silently: everything it read is shown as
+   * "read from a picture — check it" (ctx.ocr.mark / ctx.ocr.check).
+   * ================================================================== */
+
+  var OCR_LABEL = 'Read from a picture — check it';
+
+  function ocrApi() {
+    return window.Ocr && typeof window.Ocr.available === 'function' && window.Ocr.available() ? window.Ocr : null;
+  }
+
+  function mbText(bytes) {
+    var mb = (Number(bytes) || 0) / 1048576;
+    return (mb >= 10 ? Math.round(mb) : Math.round(mb * 10) / 10) + ' MB';
+  }
+
+  /** "about 5 MB" (the manifest's own words), for every button that downloads. */
+  function ocrSizeLabel() {
+    var O = ocrApi();
+    var s = O && typeof O.downloadSize === 'function' ? O.downloadSize() : null;
+    return s && s.label ? s.label : 'about 5 MB';
+  }
+
+  /**
+   * Make sure the reader is on this device, asking first. Resolves true when
+   * it is installed (at once if it already was), false when the maker
+   * declines or cancels. The sheet shows the size before anything moves,
+   * then "Getting the text reader… 2.1 of 4.9 MB" with Cancel.
+   */
+  function ocrEnsure(opts) {
+    opts = opts || {};
+    var O = ocrApi();
+    if (!O) {
+      toast('This browser cannot run the text reader');
+      return Promise.resolve(false);
+    }
+    return Promise.resolve(O.installed()).then(function (have) {
+      if (have) return true;
+      return new Promise(function (resolve) {
+        var settled = false, ctl = null;
+        function done(v) { if (!settled) { settled = true; resolve(v); } }
+        openSheet({
+          title: 'Read scanned pages',
+          cls: 'sheet-ocr',
+          build: function (body, api) {
+            body.appendChild(el('p', null, (opts.reason ? opts.reason + ' ' : '') +
+              'The text reader is a one-time download of ' + ocrSizeLabel() + '. It stays on this device, ' +
+              'works offline, and sends nothing anywhere. You can remove it in Settings.'));
+            body.appendChild(el('p', 'muted', 'What it reads is marked “read from a picture — check it”: ' +
+              'a scan can be misread, so check it against the page.'));
+            var prog = el('div', 'progress ocr-progress');
+            prog.hidden = true;
+            var bar = el('div', 'bar');
+            var fill = el('div', 'bar-fill');
+            bar.appendChild(fill);
+            prog.appendChild(bar);
+            var lbl = el('div', 'bar-label');
+            lbl.setAttribute('aria-live', 'polite');
+            prog.appendChild(lbl);
+            prog.setAttribute('role', 'progressbar');
+            prog.setAttribute('aria-label', 'Getting the text reader');
+            body.appendChild(prog);
+            var go = button('btn primary block ocr-download', 'Download (' + ocrSizeLabel() + ')');
+            var cancel = button('btn ghost block', 'Not now');
+            on(go, 'click', function () {
+              go.disabled = true;
+              prog.hidden = false;
+              cancel.textContent = 'Cancel';
+              ctl = { cancelled: false, aborted: false };
+              lbl.textContent = 'Getting the text reader…';
+              O.install({
+                signal: ctl,
+                onProgress: function (p) {
+                  var f = p && p.total ? p.loaded / p.total : (p && p.fraction) || 0;
+                  fill.style.width = Math.round(f * 100) + '%';
+                  prog.setAttribute('aria-valuenow', String(Math.round(f * 100)));
+                  lbl.textContent = 'Getting the text reader… ' + mbText(p && p.loaded) + ' of ' + mbText(p && p.total);
+                }
+              }).then(function () {
+                toast('The text reader is ready');
+                announce('The text reader is ready');
+                done(true);
+                api.close();
+              }, function (err) {
+                if (err && err.name === 'AbortError') { lbl.textContent = 'Stopped. Nothing half-done was kept.'; }
+                else lbl.textContent = 'The download did not finish. Check the connection and try again.';
+                go.disabled = false;
+                go.textContent = 'Try again (' + ocrSizeLabel() + ')';
+              });
+            });
+            on(cancel, 'click', function () {
+              if (ctl) { ctl.cancelled = true; ctl.aborted = true; }
+              done(false);
+              api.close();
+            });
+            body.appendChild(go);
+            body.appendChild(cancel);
+          },
+          onClose: function () {
+            if (ctl && !settled) { ctl.cancelled = true; ctl.aborted = true; }
+            done(false);
+          }
+        });
+      });
+    }, function () { return false; });
+  }
+
+  /**
+   * The button a craft puts beside a page it could not read:
+   * "Try reading this scanned page (downloads about 5 MB once)" — or without
+   * the download note once the reader is here. On tap it gets the reader
+   * (asking first) and calls `opts.onReady(Ocr)`; the craft reads the page.
+   */
+  function ocrOfferButton(opts) {
+    opts = opts || {};
+    var O = ocrApi();
+    var text = opts.text || 'Try reading this scanned page';
+    var b = button('btn ocr-offer' + (opts.cls ? ' ' + opts.cls : ''), text + ' (downloads ' + ocrSizeLabel() + ' once)');
+    if (!O) {
+      b.hidden = true;
+      return b;
+    }
+    Promise.resolve(O.installed()).then(function (have) { if (have) b.textContent = text; }, noop);
+    on(b, 'click', function () {
+      ocrEnsure({ reason: opts.reason }).then(function (ok) {
+        if (!ok) return;
+        b.textContent = text;
+        if (typeof opts.onReady === 'function') {
+          try { opts.onReady(window.Ocr); } catch (e) { toast('The page could not be read'); }
+        }
+      });
+    });
+    return b;
+  }
+
+  /** Mark a node as OCR text: a ? badge and "Read from a picture — check it". */
+  function ocrMark(node, opts) {
+    opts = opts || {};
+    if (!node || !node.classList) return node;
+    node.classList.add('ocr-read');
+    node.setAttribute('data-ocr', '1');
+    if (!node.querySelector(':scope > .ocr-flag')) {
+      var flag = el('span', 'ocr-flag');
+      flag.appendChild(window.CheckSheet ? window.CheckSheet.badge('unknown', { label: 'read from a picture' }) : el('span', null, '?'));
+      flag.appendChild(el('span', 'ocr-flag-text', opts.label || OCR_LABEL));
+      if (typeof opts.conf === 'number') flag.title = 'Reader confidence ' + Math.round(opts.conf) + ' of 100';
+      node.insertBefore(flag, node.firstChild);
+    }
+    return node;
+  }
+
+  /**
+   * An OCR result (or its lines) as a Check: every line "?" — nothing read
+   * from a picture is ever "✓". Low-confidence lines say so. Feed it to
+   * ctx.check.open / line, or a craft's own banner.
+   */
+  function ocrCheck(result, opts) {
+    opts = opts || {};
+    var lines = result && Array.isArray(result.lines) ? result.lines : (Array.isArray(result) ? result : []);
+    var low = typeof opts.lowConf === 'number' ? opts.lowConf : 60;
+    var rows = lines.filter(function (l) { return l && String(l.text || '').trim(); }).map(function (l, i) {
+      var c = typeof l.conf === 'number' ? Math.round(l.conf) : null;
+      return {
+        label: String(l.text).trim().slice(0, 120), printed: null, read: c, verdict: 'unknown',
+        why: c !== null && c < low ? 'The reader was unsure here (' + c + ' of 100). Check this line against the page.'
+          : 'Read from a picture: check it against the page.',
+        page: typeof opts.page === 'number' ? opts.page : (typeof l.page === 'number' ? l.page : null)
+      };
+    });
+    var unsure = rows.filter(function (r) { return r.read !== null && r.read < low; }).length;
+    var check = {
+      verdict: 'unchecked',
+      title: opts.title || 'Read from a picture',
+      summary: 'Read from a picture — check every row.' + (unsure ? ' ' + plural(unsure, 'line') + ' the reader was unsure of.' : ''),
+      rows: rows,
+      note: 'Read: the reader’s confidence, 0–100. Nothing read from a picture is taken as certain.'
+    };
+    return window.CheckSheet ? window.CheckSheet.normalize(check) : check;
+  }
+
+  /** Settings → Read scanned pages: not installed / installed (size), Download with progress, Remove. */
+  function ocrSettingsSection() {
+    var O = ocrApi();
+    var wrap = el('div', 'field ocr-settings');
+    wrap.setAttribute('data-settings', 'ocr');
+    wrap.appendChild(el('div', 'field-label', 'Read scanned pages'));
+    var status = el('p', 'muted ocr-status');
+    status.setAttribute('aria-live', 'polite');
+    wrap.appendChild(status);
+    var row = el('div', 'ocr-actions');
+    wrap.appendChild(row);
+    wrap.appendChild(el('div', 'field-hint',
+      'Optional. Lets the app try to read patterns that are scanned pictures. Everything it reads is marked ' +
+      '“check it”. Downloaded once, kept on this device, works offline, sends nothing anywhere.'));
+    function paint() {
+      clear(row);
+      if (!O) {
+        status.textContent = 'This browser cannot run the text reader.';
+        return;
+      }
+      status.textContent = 'Checking…';
+      Promise.resolve(O.installed()).then(function (have) {
+        if (!have) {
+          status.textContent = 'Not installed.';
+          var dl = button('btn block ocr-download', 'Download (' + ocrSizeLabel() + ' once)');
+          on(dl, 'click', function () { ocrEnsure().then(paint); });
+          row.appendChild(dl);
+          return;
+        }
+        return Promise.resolve(O.storedBytes()).then(function (bytes) {
+          status.textContent = 'Installed · ' + mbText(bytes) + ' on this device.';
+          var rm = button('btn block ocr-remove', 'Remove the text reader');
+          on(rm, 'click', function () {
+            confirmSheet({
+              title: 'Remove the text reader?',
+              message: 'It frees ' + mbText(bytes) + '. What it already read stays in your projects. You can download it again any time.',
+              confirmText: 'Remove',
+              danger: true
+            }).then(function (ok) {
+              if (!ok) return;
+              Promise.resolve(O.remove()).then(function () {
+                toast('Text reader removed');
+                paint();
+              });
+            });
+          });
+          row.appendChild(rm);
+        });
+      }, function () { status.textContent = 'Not installed.'; });
+    }
+    paint();
+    return wrap;
+  }
+
+  /* ================================================================== *
    * 20. Settings sheet
    * ================================================================== */
 
@@ -9995,6 +11667,39 @@
       return Promise.resolve(null);
     }
     return window.Tour.start(id, opts || {});
+  }
+
+  /**
+   * Wave K (00 gap 17): after the first project in a craft other than
+   * crochet, its own tour is offered once, the way crochet's welcome chain
+   * offers the counter. Never while a sheet or tour is up; offering marks it
+   * seen, so "Not now" is never asked again (Settings → Help still has it).
+   */
+  function offerCraftTour(craftId) {
+    if (!craftId || craftId === CROCHET.id || !tourAvailable()) return;
+    var def = craftDefs[craftId];
+    var id = def ? def.tourId || def.id : craftId;
+    var t = null;
+    try {
+      window.Tour.list().forEach(function (x) { if (x.id === id) t = x; });
+    } catch (e) { t = null; }
+    if (!t || t.seen) return;
+    var mine = Store.projects().filter(function (q) { return (q.craft || CROCHET.id) === craftId; });
+    if (mine.length !== 1) return;
+    window.setTimeout(function () {
+      if (openSheets.length || (typeof window.Tour.isRunning === 'function' && window.Tour.isRunning())) return;
+      if (typeof window.Tour.markSeen === 'function') window.Tour.markSeen(id);
+      if (typeof window.Tour.prompt !== 'function') return;
+      var info = craftInfo(craftId);
+      window.Tour.prompt({
+        title: info.emoji + ' Your first ' + info.name.toLowerCase() + ' project',
+        body: 'Want a quick look round? It takes about a minute.',
+        confirmText: 'Show me',
+        cancelText: 'Not now'
+      }).then(function (go) {
+        if (go) startTour(id);
+      }).catch(noop);
+    }, 1200);
   }
 
   /** First run: home → counter (sample project) → offer the import tour. */
@@ -10103,6 +11808,80 @@
       faqWrap.appendChild(d);
     });
     wrap.appendChild(faqWrap);
+    return wrap;
+  }
+
+  /**
+   * Wave K (00 gap 18; shell-data.md §3): Settings → Your profile — the
+   * maker's preferred unit, body measurements (every craft reads them:
+   * sewing's size advice, knitting's fit), and what the stashes hold (they
+   * are filled from the crafts' own screens). Hidden without Store.profile.
+   */
+  var PROFILE_MEASURES = [
+    { key: 'bust', label: 'Bust / chest' },
+    { key: 'waist', label: 'Waist' },
+    { key: 'hip', label: 'Hip' },
+    { key: 'height', label: 'Height' }
+  ];
+
+  function profileSection() {
+    if (typeof Store.profile !== 'function' || typeof Store.setProfile !== 'function') return null;
+    var wrap = el('div', 'field profile-section');
+    wrap.setAttribute('data-settings', 'profile');
+    wrap.appendChild(el('div', 'field-label', 'Your profile'));
+    var pr = Store.profile();
+    var unit = pr && pr.units && pr.units.length === 'in' ? 'in' : 'cm';
+    var unitSeg = segmented([{ id: 'cm', label: 'Centimetres' }, { id: 'in', label: 'Inches' }], unit, function (v) {
+      Store.setProfile({ units: { length: v } });
+      redraw();
+      fb('tap');
+    });
+    unitSeg.node.setAttribute('aria-label', 'Measure in centimetres or inches');
+    var urow = el('div', 'profile-row');
+    urow.appendChild(el('span', 'field-hint', 'Measure in'));
+    urow.appendChild(unitSeg.node);
+    wrap.appendChild(urow);
+
+    var list = el('div', 'profile-measures');
+    wrap.appendChild(list);
+    function redraw() {
+      clear(list);
+      var p2 = Store.profile();
+      var u = p2.units && p2.units.length === 'in' ? 'in' : 'cm';
+      var keys = PROFILE_MEASURES.slice();
+      Object.keys(p2.measurements || {}).forEach(function (k) {
+        if (!keys.some(function (m) { return m.key === k; })) keys.push({ key: k, label: k });
+      });
+      keys.forEach(function (m) {
+        var have = typeof Store.measurement === 'function' ? Store.measurement(m.key, u) : null;
+        var inp = numInput(have === null ? '' : Math.round(have * 10) / 10, 0, 10000);
+        inp.step = '0.1';
+        inp.setAttribute('inputmode', 'decimal');
+        inp.setAttribute('data-measure', m.key);
+        inp.setAttribute('aria-label', m.label + ' in ' + (u === 'in' ? 'inches' : 'centimetres'));
+        if (have === null) inp.value = '';
+        on(inp, 'change', function () {
+          var v = parseFloat(inp.value);
+          if (!inp.value.trim() || !isFinite(v) || v <= 0) {
+            if (typeof Store.removeMeasurement === 'function') Store.removeMeasurement(m.key);
+          } else if (typeof Store.setMeasurement === 'function') {
+            Store.setMeasurement(m.key, v, u);
+          }
+        });
+        var row = el('label', 'profile-row');
+        row.appendChild(el('span', 'profile-measure-label', m.label));
+        row.appendChild(inp);
+        row.appendChild(el('span', 'muted', u));
+        list.appendChild(row);
+      });
+      var fl = typeof Store.flossStash === 'function' ? Store.flossStash() : [];
+      var fa = typeof Store.fabricStash === 'function' ? Store.fabricStash() : [];
+      list.appendChild(el('p', 'field-hint profile-stash',
+        'Stash: ' + plural(fl.length, 'floss colour') + ' · ' + plural(fa.length, 'piece') + ' of fabric. ' +
+        'Add to them from a cross-stitch or sewing project.'));
+    }
+    redraw();
+    wrap.appendChild(el('div', 'field-hint', 'Kept on this device, used by every craft (sewing sizes, knitting fit). Your backup carries it.'));
     return wrap;
   }
 
@@ -10217,10 +11996,8 @@
         var newTpl = button('btn block', '＋ New template');
         newTpl.setAttribute('data-tour', 'settings-new-template');
         on(newTpl, 'click', function () {
-          openTemplateEditor({
-            onSaved: function () {
-              renderTemplateList(tplList);
-            }
+          newTemplateFlow(function () {
+            renderTemplateList(tplList);
           });
         });
         tplField.appendChild(newTpl);
@@ -10249,6 +12026,13 @@
           'A backup is one .thready file with every project, template and page image in it. ' +
           'Import reads a .thready file or an older .json backup, and lets you choose what comes back.'));
         body.appendChild(backup);
+
+        /* ---- Your profile (wave K) ---- */
+        var prof = profileSection();
+        if (prof) body.appendChild(prof);
+
+        /* ---- Read scanned pages (wave K, opt-in OCR) ---- */
+        if (window.Ocr) body.appendChild(ocrSettingsSection());
 
         /* ---- Help & tours ---- */
         body.appendChild(helpSection());
@@ -10542,6 +12326,13 @@
     openGlossarySheet: openGlossarySheet,
     ctx: ctx,
     pdfDropZone: pdfDropZone,
+    // wave K: shared surfaces (docs/wave-k/api/shell-ui.md)
+    workMode: workModeApi,
+    counted: counted,
+    openCheckSheet: openCheckSheet,
+    openPageViewer: openPageViewerSheet,
+    openShareCard: function (id) { return openShareCard(id); },
+    ocr: ctx.ocr,
     version: APP_VERSION,
     /** QA only: open every sheet down the no-`showModal` path (UX sweep D3). */
     __forceSheetFallback: function (on) { forceSheetFallback = !!on; return forceSheetFallback; },
@@ -10549,6 +12340,56 @@
     __importBackupFile: importBackupFile,
     /** QA only: the .thready (or JSON fallback) the backup buttons would save. */
     __buildBackupFile: buildBackupFile,
+    /** QA only (wave K): the page-image sweep's guard, for test/crafts.test.html. */
+    __sweepQa: {
+      liveIds: function () { return sweepLiveIds(); },
+      otherIds: function () { return otherStoreIds(Store.KEY); },
+      run: function () { return runBlobSweep(); },
+      bootKey: function () { return sweepBootKey; }
+    },
+    /** QA only (wave K, P13 / P8): repeat taps and "knit both at once", for test/crafts.test.html. */
+    __knitTapQa: {
+      units: function (p, prt) { return knitTapUnits(p, prt); },
+      step: knitTapStep,
+      unit: function (p) { return knitTapUnit(p); },
+      setUnit: function (p, u) { setKnitTapUnit(p, u); },
+      tap: function (o) { return doStitchTap(o); },
+      bothAtOnce: function (id, names) { return applyBothAtOnce(id, names); },
+      /** wave K (E12): a chart page inside a book pattern's pages */
+      pageInside: knitPageInside,
+      keepMaterials: function (id, t, book) { return knitKeepMaterials(id, t, book); },
+      projectName: knitProjectName,
+      untilChip: function (ui, p, prt) { return untilChipText(ui, p, prt); },
+      partWord: function (p, prt) { return partRowWord(p, prt); },
+      chartKeys: function () { return KNIT_CHART_KEYS.slice(); },
+      /** run the background chart scan on a stand-in handle, as a PDF import would */
+      attachWith: function (projectId, handle, within) {
+        knitCapture = handle ? { handle: handle, at: Date.now() } : null;
+        return knitAttachCharts(projectId, within);
+      },
+      scanSignal: function () { return knitScanSignal; }
+    },
+    /** QA only (wave K, K1): the viewer's whole-piece switch, for test/crafts.test.html. */
+    __viewerQa: {
+      wholeAvailable: function (p) { return wholeAvailable(p); },
+      wholeOn: function (p) { return viewerWholeOn(p); },
+      setWhole: function (p, v) { setViewerWhole(p, v); },
+      assembled: function (p) { return assembledFor(p); },
+      caption: function (a) { return assembledCaption(a); },
+      open: function () { openViewerSheet(); },
+      handle: function () { return viewer.handle; },
+      /** the tap path's own push, as a stitch tap makes it */
+      push: function () { pushDiagram('stitch'); },
+      resized: function () { wholeResized(); },
+      /** what every tap used to cost: assemble + setModel, now (for measuring) */
+      rebuildNow: function () {
+        var p = currentProject();
+        assembled.key = '';
+        var A = assembledFor(p);
+        if (viewer.handle && A && A.model) viewer.handle.setModel(A.model, { animate: 'none', fitPurpose: 'viewer', finished: !!A.model.finished });
+        return A;
+      }
+    },
     /** QA only (wave H, knit-qa): the pure helpers test/knit-counter.test.html asserts. */
     __knitQa: {
       gaugeChipText: gaugeChipText,

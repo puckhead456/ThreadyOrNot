@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cross-stitch gallery</title>
+<style>
+  html, body { margin: 0; background: #1b1b1f; color: #eee; font: 14px/1.4 system-ui, sans-serif; }
+  body.one { background: #000; overflow: hidden; }
+  .one iframe { position: fixed; left: 0; top: 0; border: 0; }
+  .index { padding: 16px; max-width: 1100px; }
+  .index h1 { font-size: 20px; margin: 0 0 6px; }
+  .index p { color: #bbb; max-width: 70ch; }
+  .index table { border-collapse: collapse; margin-top: 10px; }
+  .index td, .index th { padding: 4px 10px; border-bottom: 1px solid #333; text-align: left; vertical-align: top; }
+  .index a { color: #9cf; margin-right: 8px; }
+  .index .peek { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 14px; }
+  .index .peek figure { margin: 0; }
+  .index .peek iframe { border: 1px solid #444; background: #000; }
+  .index figcaption { font-size: 12px; color: #aaa; }
+</style>
+</head>
+<body>
+<!-- Reviewer page for the cross-stitch screens (wave K, xs-audit). Each card is the real app
+     (../index.html) in a frame of exact phone size on a private store key, set up on a
+     synthetic chart built in code (nothing from tmp-pdf/).
+       ?card=<id>&size=375x812&theme=stardew-night[&render=2d]
+     shows ONE card filling the page, for a headless screenshot at that viewport; the frame's
+     document title becomes "ready:<card>" when the card is set up ("error:<why>" if not).
+     With no ?card the page lists every card, size and theme (and ?peek=1 previews a row).
+     Themes: stardew-night (Stardrop Night), dragon-pixel (Pixel Wyrm), stardew-spring (light).
+     render=2d forces the stitched-fabric renderer's Canvas 2D fallback. -->
+<div id="root"></div>
+<script>
+'use strict';
+var CARDS = [
+  ['main', 'Project screen: chart strip, colour bar, the tap button (stitched fabric, whole view)'],
+  ['main-key', 'Project screen scrolled to the colour key'],
+  ['loupe', 'Tap button on a 224 × 288 chart: the loupe on the next stitch'],
+  ['stitchmode', 'Stitch mode: the chart under the HUD'],
+  ['stitchmode-options', 'Stitch mode with Options ▾ open'],
+  ['stitchmode-zoom', 'Stitch mode zoomed in: the busy chart under the HUD panels'],
+  ['chart', 'Full chart sheet (tools, rulers, page outlines, parking)'],
+  ['floss', 'Floss list'],
+  ['fabric', 'Fabric & size (with "What are you making?")'],
+  ['pages', 'Chart pages and Mark page done'],
+  ['parking', 'Parking'],
+  ['rows', 'Row by row'],
+  ['find', 'Find my place'],
+  ['resolve', 'Which colour are these?'],
+  ['gridcheck', 'Chart against the key (band → check sheet)'],
+  ['band', 'Project screen with a chart that has colours not told apart'],
+  ['menu', 'The ⋯ menu'],
+  ['share', 'Share a picture'],
+  ['x-pace', 'Extras: Stitching time and goals'],
+  ['x-fabric', 'Extras: Fabric, hoop and frame'],
+  ['x-kit', 'Extras: Floss stash and kit list'],
+  ['x-brands', 'Extras: Other brands and substitutes'],
+  ['x-grow', 'Extras: Watch it grow'],
+  ['x-framed', 'Extras: Framed picture'],
+  ['x-print', 'Extras: Print what’s left'],
+  ['x-join', 'Extras: Join with other files']
+];
+var THEMES = ['stardew-night', 'dragon-pixel', 'stardew-spring'];
+var SIZES = ['375x812', '375x640'];
+var Q = new URLSearchParams(location.search);
+var card = Q.get('card');
+
+if (!card) {
+  var root = document.getElementById('root');
+  root.className = 'index';
+  var h = '<h1>Cross-stitch gallery</h1><p>Each link opens one card at its exact phone size. For a headless picture, ' +
+    'set the viewport to the card size and wait for the document title "ready:&lt;card&gt;". Synthetic charts only.</p><table><tr><th>card</th><th>what</th><th>open</th></tr>';
+  CARDS.forEach(function (c) {
+    h += '<tr><td>' + c[0] + '</td><td>' + c[1] + '</td><td>';
+    THEMES.forEach(function (t) { SIZES.forEach(function (s) { h += '<a href="?card=' + c[0] + '&size=' + s + '&theme=' + t + '">' + t.replace('stardew-', '').replace('dragon-', '') + ' ' + s.split('x')[1] + '</a>'; }); });
+    h += '</td></tr>';
+  });
+  h += '</table>';
+  if (Q.get('peek')) {
+    h += '<div class="peek">';
+    THEMES.forEach(function (t) { h += '<figure><iframe width="375" height="812" src="?card=' + (Q.get('peek') === '1' ? 'main' : Q.get('peek')) + '&size=375x812&theme=' + t + '"></iframe><figcaption>' + t + '</figcaption></figure>'; });
+    h += '</div>';
+  }
+  root.innerHTML = h;
+} else {
+  runCard();
+}
+
+/* ------------------------------------------------------------------ */
+function runCard() {
+  document.body.className = 'one';
+  var sz = (Q.get('size') || '375x812').split('x');
+  var W = parseInt(sz[0], 10) || 375, H = parseInt(sz[1], 10) || 812;
+  var theme = Q.get('theme') || 'stardew-night';
+  var KEY = 'stitchkeeper-wavek-xsaudit-gallery';
+  var f = document.createElement('iframe');
+  f.width = W; f.height = H;
+  f.style.width = W + 'px'; f.style.height = H + 'px';
+  f.title = 'Thready or Not, ' + card;
+  document.title = 'loading:' + card;
+  var t0 = Date.now();
+  f.onload = function () {
+    var w = f.contentWindow;
+    (function wait() {
+      if (!(w.App && w.Store && w.XStitchApp && w.XStitch && w.document.getElementById('screen-home'))) {
+        if (Date.now() - t0 < 30000) return setTimeout(wait, 100);
+        document.title = 'error:boot';
+        return;
+      }
+      setUp(w).then(function (msg) { document.title = 'ready:' + card + (msg ? ':' + msg : ''); },
+        function (e) { document.title = 'error:' + String(e && e.message || e); console.error(e); });
+    })();
+  };
+  f.src = '../index.html';
+  document.body.appendChild(f);
+
+  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+  /* A picture-like chart: sky, a sun, two hills, flowers and a fabric margin. */
+  var PAL = [
+    { brand: 'DMC', code: '3325', name: 'Baby Blue', hex: 'b8d2e6' },
+    { brand: 'DMC', code: '334', name: 'Medium Baby Blue', hex: '739fc1' },
+    { brand: 'DMC', code: '444', name: 'Dark Lemon', hex: 'ffd600' },
+    { brand: 'DMC', code: '702', name: 'Kelly Green', hex: '47a73b' },
+    { brand: 'DMC', code: '890', name: 'Ultra Dark Pistachio Green', hex: '174923' },
+    { brand: 'DMC', code: '321', name: 'Red', hex: 'c72b3b' },
+    { brand: 'DMC', code: '310', name: 'Black', hex: '000000' },
+    { brand: 'DMC', code: 'B5200', name: 'Snow White', hex: 'ffffff' },
+    { brand: 'DMC', code: '208', name: 'Very Dark Lavender', hex: '835b8b' },
+    { brand: 'DMC', code: '3371', name: 'Black Brown', hex: '1e1108' }
+  ];
+  function picture(w0, h0) {
+    var c = new Array(w0 * h0), m = Math.max(2, Math.round(w0 / 30));
+    for (var y = 0; y < h0; y++) for (var x = 0; x < w0; x++) {
+      var v;
+      var u = x / w0, t = y / h0;
+      if (x < m || y < m || x >= w0 - m || y >= h0 - m) v = -1;
+      else {
+        var hill1 = 0.62 + 0.06 * Math.sin(u * 6.3), hill2 = 0.74 + 0.05 * Math.sin(u * 9 + 1);
+        var dx = u - 0.72, dy = (t - 0.22) * h0 / w0;
+        if (dx * dx + dy * dy < 0.012) v = 2;
+        else if (t > hill2) v = ((x * 7 + y * 13) % 23 === 0) ? 5 : 4;
+        else if (t > hill1) v = ((x * 5 + y * 11) % 31 === 0) ? 7 : 3;
+        else v = t < 0.3 ? 0 : 1;
+        if (t < 0.5 && Math.abs(t - 0.15 - 0.03 * Math.sin(u * 20)) < 0.012 && u < 0.5) v = 7;   // a cloud line
+      }
+      c[y * w0 + x] = v;
+    }
+    /* a house */
+    var hx = Math.round(w0 * 0.2), hy = Math.round(h0 * 0.5), hw = Math.round(w0 * 0.16), hh = Math.round(h0 * 0.14);
+    for (var yy = hy; yy < hy + hh; yy++) for (var xx = hx; xx < hx + hw; xx++) c[yy * w0 + xx] = (xx === hx || xx === hx + hw - 1 || yy === hy) ? 9 : 8;
+    for (var r = 0; r < hw / 2; r++) for (var xx2 = hx + r; xx2 < hx + hw - r; xx2++) { var yy2 = hy - 1 - r; if (yy2 >= 0) c[yy2 * w0 + xx2] = 5; }
+    return c;
+  }
+  function counts(cells, n) { var k = []; for (var i = 0; i < n; i++) k.push(0); cells.forEach(function (v) { if (v >= 0) k[v]++; }); return k; }
+  function raw(X, w0, h0, o) {
+    o = o || {};
+    var cells = picture(w0, h0), k = counts(cells, PAL.length);
+    var pal = PAL.map(function (e, i) { return { brand: e.brand, code: e.code, name: e.name, hex: e.hex, kind: 'cross', stitchCount: k[i], keyCount: k[i], strands: 2 }; });
+    var hw = Math.ceil(w0 / 2), hh = Math.ceil(h0 / 2);
+    var d = {
+      v: 1, fabric: { count: 14, over: 1, kind: 'aida', color: 'Antique White' },
+      design: { w: w0, h: h0, title: 'Hill house' }, palette: pal, strandsDefault: 2,
+      chart: { w: w0, h: h0, cells: X.packCells(cells, w0, h0), part: [], back: o.back || [], knots: o.knots || [] },
+      progress: { mode: 'cells' },
+      pages: [{ n: 0, label: 'Page 1', region: { x: 0, y: 0, w: hw, h: hh } }, { n: 1, label: 'Page 2', region: { x: hw, y: 0, w: w0 - hw, h: hh } },
+        { n: 2, label: 'Page 3', region: { x: 0, y: hh, w: hw, h: h0 - hh } }, { n: 3, label: 'Page 4', region: { x: hw, y: hh, w: w0 - hw, h: h0 - hh } }],
+      parking: [{ key: 'DMC 321', paletteIndex: 5, x: Math.round(w0 * 0.6), y: Math.round(h0 * 0.8), corner: 'tr', note: '' }],
+      source: { kind: 'oxs', fileName: 'hill-house.oxs' }
+    };
+    var n = X.normalize(d, null);
+    /* work on Kelly Green in the hills, where some stitches are done */
+    n.current.paletteIndex = 3;
+    n.current.cx = Math.round(w0 * 0.3); n.current.cy = Math.round(h0 * 0.62);
+    /* the bottom 45% done, plus a scatter, so done and to-do both show */
+    var bits = X.bitsState('', w0 * h0);
+    for (var i = 0; i < w0 * h0; i++) if (cells[i] >= 0 && ((i / w0) > h0 * 0.72 || (i % 17 === 0 && (i / w0) > h0 * 0.4))) X.setBit(bits, i, 1);
+    n.progress.done = X.bitsB64(bits);
+    return n;
+  }
+
+  async function setUp(w) {
+    var d = w.document, Store = w.Store, App = w.App, X = w.XStitch, XA = w.XStitchApp, T = XA.__test;
+    Store.__setKeyForTests(KEY);
+    try { Store.setSetting('focusProjects', {}); } catch (e) { /* ignore */ }
+    try { Store.setSetting('seenWelcome', true); } catch (e) { /* ignore */ }
+    App.closeAllSheets();
+    try { if (w.Tour && w.Tour.stop) w.Tour.stop(); } catch (e) { /* ignore */ }
+    Store.projects().slice().forEach(function (p) { if (/^Gallery /.test(p.name)) Store.deleteProject(p.id); });
+    App.applyTheme(theme, false);
+    if (Q.get('render') === '2d' && w.XSRender && w.XSRender.mount) {
+      var m0 = w.XSRender.mount;
+      w.XSRender.mount = function (c, o) { o = o || {}; o.force2d = true; return m0.call(w.XSRender, c, o); };
+    }
+    var big = card === 'loupe';
+    var cd = raw(X, big ? 224 : 60, big ? 288 : 80);
+    /* backstitch round the house door and two knots, so the layers show */
+    if (!big) {
+      cd.chart.back = [{ x1: 15, y1: 46, x2: 15, y2: 51, p: 6 }, { x1: 15, y1: 46, x2: 18, y2: 46, p: 6 }, { x1: 18, y1: 46, x2: 18, y2: 51, p: 6 }];
+      cd.chart.knots = [{ x: 17, y: 49, p: 2 }, { x: 40, y: 66, p: 7 }];
+      cd = X.normalize(cd, null);
+    }
+    if (card === 'band' || card === 'resolve' || card === 'gridcheck') {
+      /* twelve sky squares the read could not tell apart */
+      cd.palette.push({ brand: '', code: '', name: 'DMC 3325 or DMC 334 (not told apart)', hex: '96b8d4', kind: 'cross', symbol: '?', unresolved: [0, 1] });
+      var list = picture(60, 80), moved = 0;
+      for (var i = 0; i < list.length && moved < 12; i++) if (list[i] === 0) { list[i] = 10; moved++; }
+      cd.chart.cells = X.packCells(list, 60, 80);
+      cd.source = { kind: 'pdf', fileName: 'hill-house.pdf', check: { verdict: 'off', summary: '12 stitches could not be given a key colour.', off: 1 } };
+      cd = X.normalize(cd, null);
+    }
+    var p = Store.createProject({ name: 'Gallery Hill house', craft: 'crossstitch', craftData: cd });
+    Store.setActiveProject(p.id);
+    App.render();
+    await sleep(400);
+    var scr = d.getElementById('screen-craft');
+    var id = p.id;
+    function openX(x) { var ok = w.XStitchExtras && w.XStitchExtras.open(x, Store.project(id), { ctx: App.ctx, app: XA }); return ok ? '' : 'not-listed'; }
+    var msg = '';
+    switch (card) {
+      case 'main': case 'loupe': case 'band': break;
+      case 'main-key': { var kc = scr.querySelector('.xs-key-card'); if (kc) kc.scrollIntoView(); var cb = d.getElementById('craft-body'); break; }
+      case 'stitchmode': App.ctx.workMode.open(); await sleep(900); App.ctx.workMode.refresh(); break;
+      case 'stitchmode-zoom': {
+        App.ctx.workMode.open(); await sleep(600);
+        for (var z = 0; z < 5; z++) d.body.dispatchEvent(new w.KeyboardEvent('keydown', { key: '+', bubbles: true }));
+        await sleep(300); break;
+      }
+      case 'stitchmode-options': App.ctx.workMode.open(); await sleep(500); scr.querySelector('.work-more').click(); break;
+      case 'chart': XA.openSheet('chart'); break;
+      case 'floss': XA.openSheet('floss'); break;
+      case 'fabric': XA.openSheet('fabric'); break;
+      case 'pages': XA.openSheet('pages'); break;
+      case 'parking': XA.openSheet('parking'); break;
+      case 'rows': XA.openSheet('rows'); break;
+      case 'find': XA.openSheet('find'); break;
+      case 'resolve': T.openResolveSheet(id, XA.dataOf(Store.project(id)).palette.length - 1); break;
+      case 'gridcheck': T.openGridCheck(id); break;
+      case 'menu': d.getElementById('c-menu').click(); break;
+      case 'share': App.openShareCard(id); await sleep(1500); break;
+      default:
+        if (/^x-/.test(card)) msg = openX(card.slice(2));
+        else msg = 'unknown-card';
+    }
+    await sleep(card === 'x-grow' || card === 'loupe' || card === 'main' ? 2500 : 700);
+    return msg;
+  }
+}
+</script>
+</body>
+</html>

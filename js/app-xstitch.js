@@ -239,8 +239,50 @@
     // 50,000 iterations on a 200x250 chart — far too much for a tap. The
     // single-cell paths keep the tallies up to date themselves (bumpStats)
     // and only bulk edits, imports and undo force a full recount.
-    if (!view.stats) view.stats = X.progressStats(data);
+    if (!view.stats) view.stats = statsOf(data);
     if (hasChart(data) && !view.img) buildImages(data);
+  }
+
+  /**
+   * #1 the honesty sweep: ONE total. progressStats over the chart, plus each
+   * cross colour the chart holds no square of but whose key printed a count
+   * (palette[i].keyCount): that colour is counted from the key ("counted from
+   * the key, not on the chart"), its done from progress.keyDone, so the
+   * header, the key row, the Floss sheet and the home card all agree with
+   * XStitch.totals. Placeholders a read could not name are never counted twice.
+   */
+  function statsOf(data) {
+    var st = X.progressStats(data);
+    if (!hasChart(data) || data.progress.mode !== 'cells') return st;
+    var kd = isObj(data.progress.keyDone) ? data.progress.keyDone : {};
+    for (var i = 0; i < data.palette.length; i++) {
+      var e = data.palette[i], c = st.byColor[i];
+      if (!c || c.total > 0 || e.unresolved || !(e.keyCount > 0)) continue;
+      if (e.kind !== 'cross' && e.kind !== 'blend') continue;
+      c.fromKey = true;
+      c.total = e.keyCount;
+      c.done = Math.min(e.keyCount, clampInt(kd[i], 0, 1e9, 0));
+      c.complete = colourComplete(c);
+      st.total += c.total;
+      st.done += c.done;
+      if (st.breakdown && st.breakdown.cross) {
+        st.breakdown.cross.total += c.total;
+        st.breakdown.cross.done += c.done;
+      }
+    }
+    st.pct = st.total > 0 ? Math.floor(st.done / st.total * 100) : 0;
+    return st;
+  }
+
+  /** "0.03%", "41%": one decimal style everywhere (XStitch.pctText). */
+  function pctOf(done, total) {
+    if (typeof X.pctText === 'function') return X.pctText(done, total);
+    return (total > 0 ? Math.round(done / total * 100) : 0) + '%';
+  }
+
+  function oneTotal(data, stats) {
+    var st = stats || statsOf(data);
+    return { done: st.done, total: st.total, pctText: pctOf(st.done, st.total) };
   }
 
   /**
@@ -267,7 +309,7 @@
       b.done = Math.max(0, Math.min(b.total || Infinity, b.done + delta));
     }
     s.done = Math.max(0, s.done + delta);
-    s.pct = s.total > 0 ? Math.round(s.done / s.total * 100) : 0;
+    s.pct = s.total > 0 ? Math.floor(s.done / s.total * 100) : 0;
   }
 
   /** Every layer of one colour finished. */
@@ -439,6 +481,58 @@
     g.fill();
   }
 
+  /* ---- #9 / R5: the designer's own symbols -------------------------------
+     A palette entry read cleanly from the pattern carries `glyph` (a 16 × 16
+     bitmap, and a vector path for PDF charts). It is drawn instead of the
+     app's symbol only when `glyph.clean`; a half-read symbol never is (BUILD
+     decision). Settings → Cross-stitch "Symbols" switches back to the app's set. */
+  function patternSymbols() {
+    var s = Store.craftSettings ? Store.craftSettings(CRAFT) : null;
+    return !(s && s.appSymbols === true);
+  }
+
+  var spriteCache = { key: '', map: {} };
+
+  function glyphSprite(v, e, size, ink) {
+    var gl = e && e.glyph;
+    if (!gl || !gl.clean || !(gl.path || gl.bits)) return null;
+    var sig = (view ? view.paletteKey : '') + '|' + (view ? view.projectId : '');
+    if (spriteCache.key !== sig) spriteCache = { key: sig, map: {} };
+    var k = v + '|' + size + '|' + ink;
+    if (spriteCache.map[k] !== undefined) return spriteCache.map[k];
+    var c = document.createElement('canvas');
+    c.width = size; c.height = size;
+    var g = c.getContext('2d');
+    var ok = false;
+    try {
+      if (gl.path && window.Path2D) {
+        g.save();
+        g.scale(size / 100, size / 100);
+        g.fillStyle = ink;
+        g.fill(new window.Path2D(gl.path));
+        g.restore();
+        ok = true;
+      } else if (gl.bits) {
+        var raw = window.atob(gl.bits);
+        var t = document.createElement('canvas');
+        t.width = 16; t.height = 16;
+        var tg = t.getContext('2d'), img = tg.createImageData(16, 16);
+        for (var q = 0; q < 256; q++) {
+          if ((raw.charCodeAt(q >> 3) >> (7 - (q & 7))) & 1) img.data[q * 4 + 3] = 255;
+        }
+        tg.putImageData(img, 0, 0);
+        g.imageSmoothingEnabled = size < 16;
+        g.drawImage(t, 0, 0, size, size);
+        g.globalCompositeOperation = 'source-in';
+        g.fillStyle = ink;
+        g.fillRect(0, 0, size, size);
+        ok = true;
+      }
+    } catch (err) { ok = false; }
+    spriteCache.map[k] = ok ? c : null;
+    return spriteCache.map[k];
+  }
+
   function makeChartView(opts) {
     opts = opts || {};
     var wrap = el('div', 'xs-chart-wrap' + (opts.cls ? ' ' + opts.cls : ''));
@@ -482,14 +576,29 @@
 
     /* The ruler gutters overlay the canvas, so Fit and the pan limits leave
        room for them: the first column and row are never hidden underneath. */
-    function insets() {
+    function rulerIns() {
       if (!rulers) return { l: 0, t: 0 };
       return { l: view.h >= 1000 ? RULER_L_WIDE : RULER_L, t: RULER_T };
     }
 
+    /* wave K (xs-audit): `opts.safe()` -> { l, t, r, b } is the part of the
+       canvas a floating HUD covers (Stitch mode under the HUD). Fit, the pan
+       limits, centring and the rulers work inside the free rectangle; the
+       chart still paints the whole canvas, under the HUD's panels. */
+    function safeIns() {
+      var o = null;
+      if (typeof opts.safe === 'function') { try { o = opts.safe(); } catch (e) { o = null; } }
+      return o ? { l: o.l || 0, t: o.t || 0, r: o.r || 0, b: o.b || 0 } : { l: 0, t: 0, r: 0, b: 0 };
+    }
+
+    function insets() {
+      var ru = rulerIns(), sf = safeIns();
+      return { l: sf.l + ru.l, t: sf.t + ru.t, r: sf.r, b: sf.b };
+    }
+
     function fitZ(s) {
       var ins = insets();
-      var z = Math.min((s.w - ins.l) / view.w, (s.h - ins.t) / view.h);
+      var z = Math.min((s.w - ins.l - ins.r) / view.w, (s.h - ins.t - ins.b) / view.h);
       return z > 0 ? z : 1;
     }
 
@@ -499,8 +608,8 @@
       var ins = insets();
       var z = fitZ(s);
       st.z = z;
-      st.ox = ins.l + (s.w - ins.l - view.w * z) / 2;
-      st.oy = ins.t + (s.h - ins.t - view.h * z) / 2;
+      st.ox = ins.l + (s.w - ins.l - ins.r - view.w * z) / 2;
+      st.oy = ins.t + (s.h - ins.t - ins.b - view.h * z) / 2;
       st.laidOut = true;
       st.userView = false;
       st.cw = s.w; st.ch = s.h;
@@ -512,26 +621,26 @@
       var s = cssSize();
       var ins = insets();
       var cw = view.w * st.z, ch = view.h * st.z;
-      var aw = s.w - ins.l, ah = s.h - ins.t;
+      var aw = s.w - ins.l - ins.r, ah = s.h - ins.t - ins.b;
       if (cw <= aw) st.ox = ins.l + (aw - cw) / 2;
-      else st.ox = Math.min(ins.l, Math.max(s.w - cw, st.ox));
+      else st.ox = Math.min(ins.l, Math.max(s.w - ins.r - cw, st.ox));
       if (ch <= ah) st.oy = ins.t + (ah - ch) / 2;
-      else st.oy = Math.min(ins.t, Math.max(s.h - ch, st.oy));
+      else st.oy = Math.min(ins.t, Math.max(s.h - ins.b - ch, st.oy));
     }
 
     /** The stitch (fractional) at the middle of the chart area. */
     function centreCell(s) {
       var ins = insets();
       return {
-        x: (ins.l + (s.w - ins.l) / 2 - st.ox) / st.z,
-        y: (ins.t + (s.h - ins.t) / 2 - st.oy) / st.z
+        x: (ins.l + (s.w - ins.l - ins.r) / 2 - st.ox) / st.z,
+        y: (ins.t + (s.h - ins.t - ins.b) / 2 - st.oy) / st.z
       };
     }
 
     function placeCentre(s, x, y) {
       var ins = insets();
-      st.ox = ins.l + (s.w - ins.l) / 2 - x * st.z;
-      st.oy = ins.t + (s.h - ins.t) / 2 - y * st.z;
+      st.ox = ins.l + (s.w - ins.l - ins.r) / 2 - x * st.z;
+      st.oy = ins.t + (s.h - ins.t - ins.b) / 2 - y * st.z;
       clampPan();
     }
 
@@ -597,6 +706,8 @@
       else if (z * 10 >= 5) drawGrid(g, s, z, false);
       if (z >= GRID_MIN_PX * 1.5) drawSymbols(g, s, z);
       if (z >= GRID_MIN_PX) drawExtras(g, s, z);
+      if (opts.pages !== false) drawPages(g, s, z);
+      if (z >= GRID_MIN_PX) drawParking(g, s, z);
       drawCentreLines(g, s, z);
       drawCrosshair(g, z);
       if (rulers) drawRulers(g, s, z);
@@ -615,8 +726,8 @@
       }
       if (st.laidOut && st.userView && st.cw > 1 && st.ch > 1) {
         var ins = insets();
-        var cx = (ins.l + (st.cw - ins.l) / 2 - st.ox) / st.z;
-        var cy = (ins.t + (st.ch - ins.t) / 2 - st.oy) / st.z;
+        var cx = (ins.l + (st.cw - ins.l - ins.r) / 2 - st.ox) / st.z;
+        var cy = (ins.t + (st.ch - ins.t - ins.b) / 2 - st.oy) / st.z;
         st.z = Math.max(fitZ(s), st.z);
         st.cw = s.w; st.ch = s.h;
         placeCentre(s, cx, cy);
@@ -667,8 +778,23 @@
      * arrows (▼ / ▶) sit at the design centre at every zoom.
      */
     function drawRulers(g, s, z) {
+      /* under a floating HUD the rulers frame the free rectangle */
+      var sf = safeIns();
+      if (!sf.l && !sf.t && !sf.r && !sf.b) { drawRulersIn(g, s, z); return; }
+      var ox = st.ox, oy = st.oy;
+      g.save();
+      g.beginPath();
+      g.rect(sf.l, sf.t, Math.max(0, s.w - sf.l - sf.r), Math.max(0, s.h - sf.t - sf.b));
+      g.clip();
+      g.translate(sf.l, sf.t);
+      st.ox = ox - sf.l; st.oy = oy - sf.t;
+      try { drawRulersIn(g, { w: s.w - sf.l - sf.r, h: s.h - sf.t - sf.b }, z); }
+      finally { st.ox = ox; st.oy = oy; g.restore(); }
+    }
+
+    function drawRulersIn(g, s, z) {
       var c = rulerColours();
-      var ins = insets();
+      var ins = rulerIns();
       var L = ins.l, T = ins.t;
       var step = X.rulerStep(z, 30);
       var x, y, px, py;
@@ -827,6 +953,82 @@
       }
     }
 
+    /**
+     * #4 the printed pages on the chart: a dashed outline round each page's
+     * stitch range (pages[i].region, wave F) and its label ("p9"), so the
+     * phone talks to the paper copy by page number. A finished page is solid.
+     */
+    function drawPages(g, s, z) {
+      var data = view.data;
+      var pages = data && data.pages;
+      if (!pages || !pages.length) return;
+      var c = rulerColours();
+      g.save();
+      g.lineWidth = 2;
+      g.font = '700 ' + Math.max(10, Math.min(14, Math.round(z * 1.2))) + 'px ' + RULER_FONT;
+      g.textBaseline = 'top';
+      g.textAlign = 'left';
+      for (var i = 0; i < pages.length; i++) {
+        var r = pages[i] && pages[i].region;
+        if (!r) continue;
+        var x = st.ox + r.x * z, y = st.oy + r.y * z, w = r.w * z, h = r.h * z;
+        if (x > s.w || y > s.h || x + w < 0 || y + h < 0) continue;
+        var done = isPageDone(data, i);
+        g.strokeStyle = c.mark;
+        g.globalAlpha = done ? 0.9 : 0.7;
+        if (g.setLineDash) g.setLineDash(done ? [] : [8, 5]);
+        g.strokeRect(Math.round(x) + 1, Math.round(y) + 1, Math.max(0, Math.round(w) - 2), Math.max(0, Math.round(h) - 2));
+        if (w >= 34 && h >= 18) {
+          var lab = 'p' + (String(pages[i].label || '').match(/(\d+)\s*$/) || [0, pages[i].n + 1])[1] + (done ? ' ✓' : '');
+          var tw = g.measureText(lab).width + 8;
+          var lx = Math.max(x + 3, 30), ly = Math.max(y + 3, 18);
+          if (lx + tw < x + w && ly + 16 < y + h) {
+            g.globalAlpha = 0.92;
+            g.fillStyle = c.bg;
+            g.fillRect(lx, ly, tw, 16);
+            g.fillStyle = c.text;
+            g.fillText(lab, lx + 4, ly + 2);
+          }
+        }
+      }
+      g.restore();
+    }
+
+    /**
+     * #3 parked threads: a corner triangle in the floss colour, in the corner
+     * the stitcher chose, at 8 px a stitch and more.
+     */
+    function drawParking(g, s, z) {
+      var data = view.data;
+      var list = data && data.parking;
+      if (!list || !list.length) return;
+      var pal = data.palette;
+      g.save();
+      for (var i = 0; i < list.length; i++) {
+        var pk = list[i];
+        if (typeof pk.x !== 'number' || typeof pk.y !== 'number') continue;
+        var x = st.ox + pk.x * z, y = st.oy + pk.y * z;
+        if (x + z < 0 || y + z < 0 || x > s.w || y > s.h) continue;
+        var e = pk.paletteIndex >= 0 ? pal[pk.paletteIndex] : null;
+        var hex = '#' + ((e && e.hex) || '202020');
+        var t = Math.max(5, z * 0.55);
+        var cx = pk.corner === 'tr' || pk.corner === 'br' ? x + z : x;
+        var cy = pk.corner === 'bl' || pk.corner === 'br' ? y + z : y;
+        var sx = cx === x ? 1 : -1, sy = cy === y ? 1 : -1;
+        g.beginPath();
+        g.moveTo(cx, cy);
+        g.lineTo(cx + sx * t, cy);
+        g.lineTo(cx, cy + sy * t);
+        g.closePath();
+        g.fillStyle = hex;
+        g.fill();
+        g.lineWidth = 1.5;
+        g.strokeStyle = X.symbolInk((e && e.hex) || '202020') === 'light' ? 'rgba(255,255,255,0.95)' : 'rgba(0,0,0,0.85)';
+        g.stroke();
+      }
+      g.restore();
+    }
+
     function drawGrid(g, s, z, minor) {
       var x0 = Math.max(0, Math.floor(-st.ox / z));
       var x1 = Math.min(view.w, Math.ceil((s.w - st.ox) / z));
@@ -888,9 +1090,15 @@
           var e = pal[v];
           if (!e.symbol) continue;
           var doneBit = (view.bits.bytes[i >> 3] >> (i & 7)) & 1;
-          g.fillStyle = doneBit
+          var ink = doneBit
             ? (X.symbolInk(e.hex) === 'light' ? 'rgba(255,255,255,0.85)' : 'rgba(0,0,0,0.7)')
             : 'rgba(0,0,0,0.78)';
+          var spr = patternSymbols() ? glyphSprite(v, e, Math.max(6, Math.floor(z * 0.8)), ink) : null;
+          if (spr) {
+            g.drawImage(spr, Math.round(st.ox + x * z + (z - spr.width) / 2), Math.round(st.oy + y * z + (z - spr.height) / 2));
+            continue;
+          }
+          g.fillStyle = ink;
           g.fillText(e.symbol, st.ox + (x + 0.5) * z, st.oy + (y + 0.55) * z);
         }
       }
@@ -1133,6 +1341,7 @@
       syncModel(data);
       clear(main);
       var n = buildScreen(project, data);
+      if (sm.chart && sm.projectId === project.id && view.charts.indexOf(sm.chart) < 0) view.charts.push(sm.chart);
       // Appended straight into #craft-body so the shell's own .craft-body
       // rules — the scrolling column and the sticky bottom bar — apply.
       for (var s = 0; s < n.parts.length; s++) main.appendChild(n.parts[s]);
@@ -1141,6 +1350,7 @@
         if (!view || view.destroyed) return;
         for (var i = 0; i < view.charts.length; i++) view.charts[i].fit();
         if (view.live) view.live.invalidate();
+        if (view.nodes && view.nodes.stitchCanvas && view.data) syncStitched(view.data);
       });
     } else {
       syncModel(data);
@@ -1150,6 +1360,7 @@
 
   function destroyProject() {
     if (!view) return;
+    destroyStitched();
     view.destroyed = true;
     for (var i = view.charts.length - 1; i >= 0; i--) {
       try { view.charts[i].destroy(); } catch (e) { /* ignore */ }
@@ -1179,15 +1390,27 @@
       var expand = button('xs-expand', '⤢', 'Open the full chart');
       on(expand, 'click', function () { openChartSheet(project.id); });
       n.chart.node.appendChild(expand);
+      /* wave K #2: the chart full screen as the working surface */
+      if (C.workMode && typeof C.workMode.open === 'function' && data.progress.mode === 'cells') {
+        var sm0 = button('btn ghost xs-stitch-mode-btn', '⤢ Stitch mode', 'Stitch mode: the chart full screen');
+        on(sm0, 'click', function () { C.workMode.open(); });
+        n.chartCard.appendChild(sm0);
+      }
       /* Wave J: a chart read from a picture says how its check went, and
          is the way back into that check. */
       n.readBand = button('xs-read-band', null, 'Open the chart check');
       n.readBand.hidden = true;
       n.readBandText = el('span', 'xs-read-band-text');
-      n.readBand.appendChild(el('span', 'xs-read-band-icon', '🖼'));
+      n.readBandIcon = el('span', 'xs-read-band-icon', '🖼');
+      n.readBand.appendChild(n.readBandIcon);
       n.readBand.appendChild(n.readBandText);
       n.readBand.appendChild(el('span', 'xs-read-band-go', '›'));
-      on(n.readBand, 'click', function () { reopenRead(project.id); });
+      on(n.readBand, 'click', function () {
+        var pp = Store.project(project.id);
+        var dd = pp ? dataOf(pp) : null;
+        if (dd && dd.source && dd.source.kind === 'picture' && !unresolvedCount(dd)) reopenRead(project.id);
+        else openGridCheck(project.id);
+      });
       n.chartCard.appendChild(n.readBand);
     } else {
       n.pageFrame = el('div', 'xs-page-frame');
@@ -1245,16 +1468,34 @@
     n.liveCanvas = document.createElement('canvas');
     n.liveCanvas.className = 'stitch-canvas xs-live';
     n.liveCanvas.setAttribute('aria-hidden', 'true');
+    /* wave K (X1 + X2): the stitched piece, shown once it has drawn */
+    if (stitchedOk() && hasChart(data)) {
+      n.stitchCanvas = document.createElement('canvas');
+      n.stitchCanvas.className = 'stitch-canvas xs-live xs-stitched';
+      n.stitchCanvas.setAttribute('aria-hidden', 'true');
+      n.stitchCanvas.hidden = true;
+      n.stitchBtn.appendChild(n.stitchCanvas);
+    }
     n.stitchBtn.appendChild(n.liveCanvas);
     n.stitchCap = el('span', 'stitch-caption', 'STITCHES');
     n.stitchNum = el('span', 'stitch-number', '0');
     n.stitchHint = el('span', 'stitch-hint', 'tap');
-    n.stitchBtn.appendChild(n.stitchCap);
-    n.stitchBtn.appendChild(n.stitchNum);
+    /* xs-audit: the caption and the number sit in the shell's pinned
+       .stitch-head row (as on the crochet button), above the canvases; loose
+       in the button they were painted under the stitched picture and the
+       count could not be seen. */
+    n.stitchHead = el('span', 'stitch-head');
+    n.stitchHead.appendChild(n.stitchCap);
+    n.stitchHead.appendChild(n.stitchNum);
+    n.stitchBtn.appendChild(n.stitchHead);
     n.stitchBtn.appendChild(n.stitchHint);
     section.appendChild(n.stitchBtn);
     bindStitchButton(n.stitchBtn, project.id);
     view.live = makeLivePreview(n.liveCanvas);
+
+    n.stitchNote = el('p', 'muted xs-stitch-note');
+    n.stitchNote.hidden = true;
+    section.appendChild(n.stitchNote);
 
     n.readout = el('div', 'readout xs-readout');
     section.appendChild(n.readout);
@@ -1359,7 +1600,7 @@
     var idx = [];
     for (var i = 0; i < data.palette.length; i++) idx.push(i);
     if (view.sortMode === 'left') {
-      var stats = view.stats || X.progressStats(data);
+      var stats = view.stats || statsOf(data);
       idx.sort(function (a, b) {
         var la = leftOf(stats, a), lb = leftOf(stats, b);
         return lb - la || a - b;
@@ -1436,8 +1677,15 @@
       have.setAttribute('aria-checked', e.have ? 'true' : 'false');
       on(have, 'click', function () { toggleHave(project.id, i); });
 
-      var edit = button('xs-key-edit', '✎', 'Edit ' + paletteLabel(e));
-      on(edit, 'click', function () { openColourEditor(project.id, i); });
+      var edit = button('xs-key-edit', e.unresolved ? '?' : '✎',
+        e.unresolved ? 'Choose which colour these stitches are' : 'Edit ' + paletteLabel(e));
+      on(edit, 'click', function () {
+        var pp = Store.project(project.id);
+        var pe2 = pp ? dataOf(pp).palette[i] : null;
+        if (pe2 && pe2.unresolved) openResolveSheet(project.id, i);
+        else openColourEditor(project.id, i);
+      });
+      if (e.unresolved) row.classList.add('unresolved');
 
       row.appendChild(mainBtn);
       row.appendChild(iso);
@@ -1453,7 +1701,7 @@
   function syncScreen(project, data) {
     var n = view.nodes;
     if (!n) return;
-    var stats = view.stats || X.progressStats(data);
+    var stats = view.stats || statsOf(data);
     var pal = data.palette;
     var cur = pal.length ? clampInt(data.current.paletteIndex, 0, pal.length - 1, 0) : -1;
     var e = cur >= 0 ? pal[cur] : null;
@@ -1497,7 +1745,8 @@
           : 'Crosses done — the button is now counting ' + LAYER_NOUNS[layer]);
       }
     }
-    n.stitchCap.textContent = X.tapCaption(layer);
+    var KD = X.KINDS && typeof X.kindOf === 'function' ? X.KINDS[X.kindOf(data)] : null;
+    n.stitchCap.textContent = layer === 'cross' && KD && KD.unit !== 'stitch' ? KD.units.toUpperCase() : X.tapCaption(layer);
     n.stitchNum.textContent = comma(tally.done);
     n.stitchBtn.disabled = cur < 0;
     n.stitchBtn.setAttribute('aria-label',
@@ -1532,11 +1781,18 @@
 
     var extras = stats.breakdown
       ? stats.breakdown.back.total + stats.breakdown.knots.total + stats.breakdown.part.total : 0;
-    n.barFill.style.width = (stats.total ? Math.round(stats.done / stats.total * 100) : 0) + '%';
+    n.barFill.style.width = (stats.total ? Math.min(100, stats.done / stats.total * 100) : 0) + '%';
     n.barLabel.textContent = stats.total
       ? (comma(stats.done) + ' of ' + comma(stats.total) +
-         (extras ? ' · ' : ' stitches · ') + stats.pct + '%')
+         (extras ? ' · ' : ' ' + (KD ? KD.units : 'stitches') + ' · ') + pctOf(stats.done, stats.total))
       : 'No stitch counts yet';
+    if (n.progress) {
+      n.progress.setAttribute('role', 'progressbar');
+      n.progress.setAttribute('aria-valuemin', '0');
+      n.progress.setAttribute('aria-valuemax', String(stats.total || 0));
+      n.progress.setAttribute('aria-valuenow', String(stats.done || 0));
+      n.progress.setAttribute('aria-valuetext', n.barLabel.textContent);
+    }
 
     /* key rows */
     for (var r = 0; r < n.rows.length; r++) {
@@ -1548,12 +1804,28 @@
       row.sw.textContent = pe.symbol || '';
       row.sw.style.background = swatchHex(pe);
       row.sw.style.color = X.symbolInk(pe.hex) === 'light' ? '#fff' : '#111';
+      var ksp = patternSymbols() && pe.glyph && pe.glyph.clean
+        ? glyphSprite(row.i, pe, 18, X.symbolInk(pe.hex) === 'light' ? '#ffffff' : '#111111') : null;
+      if (ksp) {
+        row.sw.textContent = '';
+        var kc = document.createElement('canvas');
+        kc.width = 18; kc.height = 18;
+        kc.className = 'xs-glyph';
+        kc.setAttribute('aria-hidden', 'true');
+        kc.getContext('2d').drawImage(ksp, 0, 0);
+        row.sw.appendChild(kc);
+      }
       row.code.textContent = paletteLabel(pe);
       var left = Math.max(0, st.total - st.done);
       var subBits = [];
       if (st.total) subBits.push(comma(left) + ' left of ' + comma(st.total));
       else if (st.done) subBits.push(comma(st.done) + ' done');
       extraBits(st).forEach(function (b) { subBits.push(b); });
+      if (pe.unresolved) subBits.unshift('not told apart: tap ? to choose');
+      else if (st.fromKey) {
+        /* #1: a colour the grid found no square of is counted from the key */
+        subBits.push('counted from the key, not on the chart');
+      }
       if (!subBits.length) subBits.push('no count yet');
       if (KIND_LABEL[pe.kind]) subBits.push(KIND_LABEL[pe.kind]);
       if (pe.strands) subBits.push(pe.strands + ' strand' + (pe.strands === 1 ? '' : 's'));
@@ -1590,6 +1862,7 @@
     n.btnChart.disabled = !hasChart(data);
     if (n.rowsBtn) n.rowsBtn.hidden = !rowsAvailable(data);
     if (n.readBand) syncReadBand(project, data);
+    if (n.stitchCanvas) syncStitched(data);
 
     redrawAll();
   }
@@ -1680,6 +1953,539 @@
       }
     };
     return api;
+  }
+
+  /* ---- #2 Stitch mode: the chart IS the screen (wave K) -----------------
+     On the shell's working-mode contract (docs/wave-k/api/shell-ui.md §1):
+     the shell owns the full-screen layout, the header, Options ▾, Keep awake,
+     the pedal keys, Escape, the remembered state (Store.focusMode, per
+     project) and the announcements; this supplies the chart surface and the
+     actions. Taps on the chart are the chart's own (the current tool). */
+
+  var sm = { tool: 'tap', erase: false, chart: null, wrap: null, projectId: null };
+
+  function smProject() {
+    var p = C && C.currentProject ? C.currentProject() : null;
+    return p && p.craft === CRAFT ? p : null;
+  }
+
+  function smPaint() {
+    if (sm.chart) sm.chart.invalidate();
+  }
+
+  var STITCH_MODE = {
+    label: 'Stitch mode',
+    icon: '⤢',
+    backTo: 'the project',
+    tapSurface: false,
+    /* wave K (xs-audit): the chart fills the whole screen and the HUD floats
+       over it (shell-ui.md §1); Fit and the crosshair stay in the free
+       rectangle api.insets() reports. A shell without the option ignores it. */
+    surfaceUnderHud: true,
+    surface: function (node, api) {
+      var p = smProject();
+      if (!p || !view || !hasChart(dataOf(p))) {
+        node.appendChild(el('p', 'muted xs-work-empty', 'This project has no chart to stitch from yet.'));
+        return {};
+      }
+      sm.projectId = p.id;
+      var wrap = el('div', 'xs-work-chart');
+      node.appendChild(wrap);
+      sm.wrap = wrap;
+      sm.chart = makeChartView({
+        cls: 'xs-full xs-work',
+        interactive: true,
+        paintMode: function () { return sm.tool === 'paint'; },
+        paintEvery: function () { return false; },
+        safe: function () { return sm.safe; },
+        onPaint: function (c) { if (sm.projectId) paintAt(sm.projectId, 'cross', c, !sm.erase, true); },
+        onTap: function (c) {
+          if (!sm.projectId) return;
+          setCrosshair(c.x, c.y);
+          applyTool(sm.projectId, sm.tool, 'cross', c, !sm.erase);
+          api.refresh();
+        },
+        onViewChange: function () { /* the stitch-mode view is not remembered separately */ }
+      });
+      sm.chart.canvas.setAttribute('tabindex', '-1');
+      wrap.appendChild(sm.chart.node);
+      window.requestAnimationFrame(function () {
+        if (!sm.chart) return;
+        var d = view && view.data;
+        var saved = d && d.current && d.current.view;
+        if (saved) sm.chart.setView(saved); else sm.chart.fit();
+      });
+      return {
+        destroy: function () {
+          if (sm.chart) sm.chart.destroy();
+          sm.chart = null;
+          sm.wrap = null;
+          sm.safe = null;
+        },
+        resize: function () { smPaint(); },
+        insets: function (ins) {
+          if (!sm.wrap) return;
+          var under = !!(api && typeof api.underHud === 'function' && api.underHud());
+          var l = Math.max(0, ins.left - 8), r = Math.max(0, ins.right - 8);
+          if (under) {
+            /* the canvas fills the screen; the free rectangle is its safe area */
+            sm.wrap.style.top = sm.wrap.style.bottom = sm.wrap.style.left = sm.wrap.style.right = '0px';
+            sm.safe = { l: l, t: ins.top, r: r, b: ins.bottom };
+            sm.wrap.classList.add('xs-under-hud');
+            /* the position readout sits in the free rectangle, not under the buttons */
+            if (sm.chart && sm.chart.coord) {
+              sm.chart.coord.style.bottom = (ins.bottom + 8) + 'px';
+              sm.chart.coord.style.left = (l + 36) + 'px';
+            }
+          } else {
+            sm.safe = null;
+            sm.wrap.style.top = ins.top + 'px';
+            sm.wrap.style.bottom = ins.bottom + 'px';
+            sm.wrap.style.left = l + 'px';
+            sm.wrap.style.right = r + 'px';
+          }
+          if (sm.chart && !sm.chart.state.userView) sm.chart.fit();
+          smPaint();
+        }
+      };
+    },
+    primary: {
+      label: 'Mark the next stitch of this colour',
+      run: function (api) {
+        var p = smProject();
+        if (!p) return;
+        advanceStitch(p.id);
+        smCentre();
+        api.refresh();
+      }
+    },
+    /* xs-audit: five corner buttons fit 375 px (six, with words, ran ~70 px off
+       the right edge and hid +1); 🎯 lives in Options ▾ and on the N key. */
+    cls: 'xs-work-hud',
+    back: {
+      label: 'Take back the last stitch', glyph: '−1',
+      run: function (api) {
+        var p = smProject();
+        if (p) unmarkOne(p.id);
+        api.refresh();
+      }
+    },
+    forward: {
+      label: 'Mark the next stitch', glyph: '+1',
+      run: function (api) { STITCH_MODE.primary.run(api); }
+    },
+    undo: true,
+    secondary: [
+      { id: 'prevColour', glyph: '‹', label: 'Previous colour', side: 'start',
+        run: function (api) { var p = smProject(); if (p) stepColour(p.id, -1); api.refresh(); } },
+      { id: 'nextColour', glyph: '›', label: 'Next colour', side: 'start',
+        run: function (api) { var p = smProject(); if (p) stepColour(p.id, 1); api.refresh(); } }
+    ],
+    readout: function () {
+      var p = smProject();
+      if (!p || !view || !view.data) return { title: p ? p.name : 'Stitch mode' };
+      return stitchModeReadout(p, view.data);
+    },
+    panel: function (body, api) {
+      var p = smProject();
+      if (!p) return;
+      body.appendChild(el('div', 'work-panel-label', 'Tap on the chart'));
+      var seg = C.segmented(TOOLS, sm.tool, function (v) { sm.tool = v; });
+      seg.node.classList.add('xs-tool-seg');
+      body.appendChild(seg.node);
+      var acts = el('div', 'work-actions');
+      var er = button('btn ghost xs-erase' + (sm.erase ? ' on' : ''), 'Unmark');
+      er.setAttribute('aria-pressed', sm.erase ? 'true' : 'false');
+      on(er, 'click', function () {
+        sm.erase = !sm.erase;
+        er.classList.toggle('on', sm.erase);
+        er.setAttribute('aria-pressed', sm.erase ? 'true' : 'false');
+      });
+      acts.appendChild(er);
+      var hl = button('btn ghost' + (view && view.isolate ? ' on' : ''), '◉ Highlight this colour');
+      hl.setAttribute('aria-pressed', view && view.isolate ? 'true' : 'false');
+      on(hl, 'click', function () {
+        smHighlight(p.id);
+        hl.classList.toggle('on', !!(view && view.isolate));
+        hl.setAttribute('aria-pressed', view && view.isolate ? 'true' : 'false');
+        api.refresh();
+      });
+      acts.appendChild(hl);
+      var bs = button('btn ghost' + (blockScope === 'all' ? ' on' : ''), '10×10: whole block');
+      bs.setAttribute('aria-pressed', blockScope === 'all' ? 'true' : 'false');
+      bs.title = 'Off: 10×10 marks only the current colour in the block';
+      on(bs, 'click', function () {
+        blockScope = blockScope === 'all' ? 'colour' : 'all';
+        bs.classList.toggle('on', blockScope === 'all');
+        bs.setAttribute('aria-pressed', blockScope === 'all' ? 'true' : 'false');
+      });
+      acts.appendChild(bs);
+      var near = button('btn ghost xs-work-near', '🎯 Nearest stitch to do');
+      near.setAttribute('aria-label', 'Nearest stitch of this colour still to do');
+      on(near, 'click', function () {
+        if (sm.chart) findNextStitch(p.id, sm.chart, sm.seen || (sm.seen = {}));
+        api.refresh();
+      });
+      acts.appendChild(near);
+      var fit = button('btn ghost', 'Fit the chart');
+      on(fit, 'click', function () { if (sm.chart) sm.chart.fit(); });
+      acts.appendChild(fit);
+      if (typeof X.findPlace === 'function') {
+        var fp = button('btn ghost', '🔢 Find my place');
+        on(fp, 'click', function () { openFindSheet(p.id); });
+        acts.appendChild(fp);
+      }
+      body.appendChild(acts);
+      body.appendChild(el('p', 'muted xs-work-keys',
+        'Keys: Space marks the next stitch, arrows or a page-turner pedal mark and take back, ' +
+        'H highlights, + and − zoom, F fits, N finds the nearest stitch, J finds a place.'));
+    },
+    keys: {
+      h: function () { var p = smProject(); if (p) smHighlight(p.id); },
+      H: function () { var p = smProject(); if (p) smHighlight(p.id); },
+      f: function () { if (sm.chart) sm.chart.fit(); },
+      '+': function () { if (sm.chart) sm.chart.zoomBy(1.4); },
+      '=': function () { if (sm.chart) sm.chart.zoomBy(1.4); },
+      '-': function () { if (sm.chart) sm.chart.zoomBy(1 / 1.4); },
+      n: function () { var p = smProject(); if (p && sm.chart) findNextStitch(p.id, sm.chart, sm.seen || (sm.seen = {})); },
+      j: function () { var p = smProject(); if (p && typeof X.findPlace === 'function') openFindSheet(p.id); }
+    },
+    onOpen: function () { sm.seen = {}; },
+    onClose: function () { sm.seen = null; }
+  };
+
+  function smHighlight(projectId) {
+    var p = Store.project(projectId);
+    if (!p) return;
+    var d = dataOf(p);
+    if (!d.palette.length) return;
+    toggleIsolate(projectId, clampInt(d.current.paletteIndex, 0, d.palette.length - 1, 0));
+    C.announce(view && view.isolate ? 'Highlighting ' + paletteLabel(currentEntry(d)) : 'Every colour shown');
+  }
+
+  /** Keep the stitch just marked in view (stitch mode follows the work). */
+  function smCentre() {
+    if (!sm.chart || !view) return;
+    var st = sm.chart.state;
+    var r = sm.chart.canvas.getBoundingClientRect();
+    var px = st.ox + (view.cx + 0.5) * st.z, py = st.oy + (view.cy + 0.5) * st.z;
+    var sf = sm.safe || { l: 0, t: 0, r: 0, b: 0 };
+    /* keep the stitch just marked inside the free rectangle, never under the HUD */
+    if (px < sf.l + 30 || py < sf.t + 20 || px > r.width - sf.r - 10 || py > r.height - sf.b - 10) sm.chart.centerOn(view.cx, view.cy, st.z);
+    else sm.chart.invalidate();
+  }
+
+  /** The working-mode readout: this colour, the block, the one total. */
+  function stitchModeReadout(p, data) {
+    var stats = view.stats || statsOf(data);
+    var pal = data.palette;
+    var cur = pal.length ? clampInt(data.current.paletteIndex, 0, pal.length - 1, 0) : -1;
+    var e = cur >= 0 ? pal[cur] : null;
+    var c = cur >= 0 ? (stats.byColor[cur] || { done: 0, total: 0 }) : { done: 0, total: 0 };
+    var where = '';
+    if (view.cells && cur >= 0 && !c.fromKey) {
+      var bx = Math.floor(view.cx / 10) * 10, by = Math.floor(view.cy / 10) * 10, here = 0;
+      var bb = view.bits.bytes;
+      for (var yy = by; yy < by + 10 && yy < view.h; yy++) {
+        for (var xx = bx; xx < bx + 10 && xx < view.w; xx++) {
+          var ci = yy * view.w + xx;
+          if (view.cells[ci] === cur && !((bb[ci >> 3] >> (ci & 7)) & 1)) here++;
+        }
+      }
+      where = X.positionLabel(view.cx, view.cy, view.w, view.h).block + ' · ' + comma(here) + ' left here';
+    }
+    var isl = islandLine(data, cur);
+    var pg = pageLine(data);
+    return {
+      title: p.name,
+      cells: [
+        { cap: e ? paletteLabel(e).toUpperCase().slice(0, 28) : 'NO COLOUR', big: comma(c.done), of: '/ ' + comma(c.total),
+          sub: [where, isl].filter(Boolean).join(' · '), cls: 'xs-work-cell',
+          label: e ? paletteLabel(e) + ': ' + comma(c.done) + ' of ' + comma(c.total) + ' stitches' : 'No colour' },
+        { cap: 'ALL', big: pctOf(stats.done, stats.total), of: '',
+          sub: comma(stats.done) + ' of ' + comma(stats.total) + (pg ? ' · ' + pg : ''), cls: 'xs-work-cell xs-work-all' }
+      ],
+      tip: stats.done ? null : 'Tap a stitch to mark it · Options ▾ for tools',
+      say: (e ? paletteLabel(e) + ', ' + comma(c.done) + ' of ' + comma(c.total) + '. ' : '') +
+        comma(stats.done) + ' of ' + comma(stats.total) + ' stitches in all.'
+    };
+  }
+
+  /* ---- #13 islands and travel: worked out when the stitcher pauses ------
+     X.islandAt floods the colour and searches for the nearest other island,
+     which is too much for every tap on a big chart, so the readout shows the
+     last answer and asks again 400 ms after the crosshair settles. */
+  var islandMemo = { key: '', text: '', timer: null };
+
+  function islandLine(data, cur) {
+    if (typeof X.islandAt !== 'function' || cur < 0 || !view || !view.cells) return '';
+    var key = view.projectId + '|' + cur + '|' + view.cx + ',' + view.cy + '|' + view.cellsKey;
+    if (islandMemo.key === key) return islandMemo.text;
+    if (islandMemo.timer) window.clearTimeout(islandMemo.timer);
+    islandMemo.timer = window.setTimeout(function () {
+      islandMemo.timer = null;
+      if (!view || !view.data) return;
+      var cx = view.cx, cy = view.cy, at = cy * view.w + cx, txt = '';
+      /* the island of the current colour nearest the crosshair */
+      var pos = view.cells[at] === cur ? at
+        : X.nearestCellOf(view.cells, view.w, view.h, cur, cx, cy, function () { return false; });
+      if (pos >= 0) {
+        var r = null;
+        try { r = X.islandAt(view.data, pos % view.w, (pos / view.w) | 0); } catch (e) { r = null; }
+        if (r) {
+          txt = 'island ' + (r.id + 1) + '/' + r.of + (r.nextCm !== null && r.nextCm !== undefined
+            ? ' · next ≈ ' + r.nextCm + ' cm' + (r.cut ? ', new thread' : '') : '');
+        }
+      }
+      islandMemo.key = key;
+      islandMemo.text = txt;
+      if (C.workMode && typeof C.workMode.refresh === 'function') { try { C.workMode.refresh(); } catch (e2) { /* ignore */ } }
+    }, 400);
+    return islandMemo.text;
+  }
+
+  /** "page 9 · 1,204 of 4,081": the printed page under the crosshair (#4). */
+  function pageLine(data) {
+    if (!view || !view.cells || !data.pages.length || typeof X.pageForCell !== 'function') return '';
+    var pi = X.pageForCell(data.pages, view.cx, view.cy);
+    var pg = pi >= 0 ? data.pages[pi] : null;
+    if (!pg || !pg.region) return '';
+    var r = pg.region, bb = view.bits.bytes, done = 0, total = 0;
+    for (var y = r.y; y < r.y + r.h && y < view.h; y++) {
+      for (var x = r.x; x < r.x + r.w && x < view.w; x++) {
+        var i = y * view.w + x;
+        if (view.cells[i] < 0) continue;
+        total++;
+        if ((bb[i >> 3] >> (i & 7)) & 1) done++;
+      }
+    }
+    return String(pg.label || ('Page ' + (pi + 1))).replace(/^Page/, 'page') + ' · ' + comma(done) + ' of ' + comma(total);
+  }
+
+  /**
+   * #21 "Find my place": col 134 row 57 · 134, 57 · page 9 · block 13,6.
+   * Lands the crosshair there (X.findPlace) and shows it on the chart.
+   */
+  function openFindSheet(projectId) {
+    var p = Store.project(projectId);
+    if (!p || typeof X.findPlace !== 'function') return;
+    var input = null, msg = null;
+    function go(api) {
+      var pp = Store.project(projectId);
+      if (!pp) return;
+      var d = dataOf(pp);
+      var r = X.findPlace(d, input.value || '');
+      if (!r || r.error) {
+        msg.textContent = (r && r.error) || 'I could not read that place.';
+        msg.className = 'xs-find-msg is-off';
+        fb('alert');
+        return;
+      }
+      setCrosshair(r.x, r.y);
+      saveViewState(projectId, { cx: r.x, cy: r.y, view: { z: 16, x: r.x + 0.5, y: r.y + 0.5 } });
+      api.close();
+      C.announce('Now at ' + (r.text || X.positionLabel(r.x, r.y, d.chart.w, d.chart.h).text));
+      if (sm.chart && C.workMode && C.workMode.isOn && C.workMode.isOn()) {
+        sm.chart.centerOn(r.x, r.y, 16);
+        C.workMode.refresh();
+      } else {
+        openChartSheet(projectId);
+      }
+      toast(r.text || X.positionLabel(r.x, r.y, d.chart.w, d.chart.h).grid);
+    }
+    C.openSheet({
+      title: 'Find my place',
+      cls: 'sheet-xs-find',
+      build: function (body, api) {
+        body.appendChild(el('p', 'muted', 'Type where you are on your paper chart: a column and row ' +
+          '(“col 134 row 57” or “134, 57”), a page (“page 9”) or a 10×10 block (“block 13,6”).'));
+        input = C.textInput ? C.textInput('', 'col 134 row 57') : document.createElement('input');
+        if (!C.textInput) { input.type = 'text'; input.className = 'input'; }
+        input.setAttribute('inputmode', 'text');
+        input.setAttribute('autocomplete', 'off');
+        input.setAttribute('aria-label', 'Your place on the chart');
+        on(input, 'keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); go(api || findApi); } });
+        body.appendChild(field('Where are you?', input));
+        /* a keypad for one-handed entry at the hoop */
+        var pad = el('div', 'xs-keypad');
+        pad.setAttribute('role', 'group');
+        pad.setAttribute('aria-label', 'Keypad');
+        ['1', '2', '3', '4', '5', '6', '7', '8', '9', ',', '0', '⌫'].forEach(function (k) {
+          var b = button('btn ghost xs-key', k, k === '⌫' ? 'Delete' : k === ',' ? 'Comma' : k);
+          on(b, 'click', function () {
+            if (k === '⌫') input.value = input.value.slice(0, -1);
+            else input.value += k === ',' ? ', ' : k;
+            try { input.focus(); } catch (e) { /* ignore */ }
+          });
+          pad.appendChild(b);
+        });
+        body.appendChild(pad);
+        var words = el('div', 'xs-find-words');
+        ['col ', 'row ', 'page ', 'block '].forEach(function (w) {
+          var b = button('btn ghost xs-key-word', w.trim());
+          on(b, 'click', function () {
+            input.value = (input.value && !/\s$/.test(input.value) ? input.value + ' ' : input.value) + w;
+            try { input.focus(); } catch (e) { /* ignore */ }
+          });
+          words.appendChild(b);
+        });
+        body.appendChild(words);
+        msg = el('p', 'xs-find-msg');
+        msg.setAttribute('role', 'status');
+        msg.setAttribute('aria-live', 'polite');
+        body.appendChild(msg);
+        /* goals live with the sessions sheet (js/app-xstitch-extras.js) */
+        var XE = window.XStitchExtras;
+        if (XE && typeof XE.menuItems === 'function' && typeof XE.open === 'function') {
+          var its = [];
+          try { its = XE.menuItems(pp0()) || []; } catch (e) { its = []; }
+          its.forEach(function (it) {
+            if (!it || !/goal|session/i.test(String(it.id) + ' ' + String(it.label))) return;
+            var gb = button('linkish xs-goal-link', (it.icon ? it.icon + ' ' : '') + it.label);
+            on(gb, 'click', function () { XE.open(it.id, pp0(), { ctx: C, app: window.XStitchApp }); });
+            body.appendChild(gb);
+          });
+        }
+        window.setTimeout(function () { try { input.focus(); } catch (e) { /* ignore */ } }, 50);
+      },
+      footer: [
+        { text: 'Cancel', cls: 'btn ghost', onClick: function (api) { api.close(); } },
+        { text: 'Go there', cls: 'btn primary', onClick: function (api) { go(api); } }
+      ]
+    });
+    var findApi = { close: function () { C.closeAllSheets(); } };
+    function pp0() { return Store.project(projectId) || p; }
+  }
+
+  /* ---- X1 + X2: the stitched piece in the tap button (wave K) ----------
+     docs/wave-k/api/xs-render.md "Wiring the tap button". The flat preview
+     above stays on screen until the renderer has compiled and drawn, and
+     comes back if its context is lost. One renderer per screen: the canvas
+     is released when the screen goes. */
+
+  function stitchedOk() {
+    return !!(window.XSRender && window.XSRender.VERSION && typeof window.XSRender.mount === 'function');
+  }
+
+  function stitchedModel(data) {
+    return {
+      w: view.w, h: view.h, cells: view.cells, done: view.bits.bytes,
+      palette: data.palette,
+      part: data.chart.part || [], back: data.chart.back || [], knots: data.chart.knots || [],
+      doneBack: view.backBits ? view.backBits.bytes : null,
+      doneKnots: view.knotBits ? view.knotBits.bytes : null,
+      donePart: view.partBits ? view.partBits.bytes : null,
+      fabric: { color: data.fabric.color, count: data.fabric.count, over: data.fabric.over, kind: data.fabric.kind },
+      strandsDefault: data.strandsDefault
+    };
+  }
+
+  /** Mount (once) and keep the renderer in step with the view model. */
+  function syncStitched(data) {
+    var n = view && view.nodes;
+    if (!n || !n.stitchCanvas) return;
+    if (!stitchedOk() || !hasChart(data) || data.progress.mode !== 'cells' || !view.cells) {
+      n.stitchCanvas.hidden = true;
+      if (n.liveCanvas) n.liveCanvas.hidden = false;
+      return;
+    }
+    var s = view.stitched;
+    var r = n.stitchBtn.getBoundingClientRect();
+    if (!s) {
+      if (!r.width || !r.height) return;          // after the first layout
+      var mode = window.XSRender.buttonView(view.w, view.h, r.width, r.height);
+      s = view.stitched = { handle: null, mode: mode, key: '', bits: null, shown: false, status: 'ok', dirty: false };
+      try {
+        s.handle = window.XSRender.mount(n.stitchCanvas, {
+          view: mode === 'whole' ? 'fit' : 'loupe', ghost: 0.28, symbols: false,
+          /* the free area under the pinned count row */
+          safeInsets: { top: n.stitchHead ? Math.max(34, Math.round(n.stitchHead.getBoundingClientRect().height) + 4) : 34, bottom: 8 },
+          minimap: mode !== 'whole',
+          reducedMotion: C.prefersReducedMotion ? !!C.prefersReducedMotion() : undefined,
+          onStatus: function (st) {
+            if (!view || view.stitched !== s) return;
+            s.status = st && st.status;
+            if (n.stitchNote) {
+              n.stitchNote.hidden = !(st && st.status === 'fallback' && st.message);
+              if (st && st.message) n.stitchNote.textContent = st.message;
+            }
+            if (st && st.status === 'lost') { s.shown = false; showStitched(false); }
+            if (st && st.status === 'restored') { s.key = ''; syncStitched(view.data); }
+          }
+        });
+      } catch (e) { s.handle = null; }
+      if (!s.handle) { view.stitched = null; return; }
+    }
+    var key = view.cellsKey + '|' + view.paletteKey + '|' + data.fabric.color + '|' + data.fabric.count + '|' +
+      data.fabric.kind + '|' + (data.chart.back || []).length + '|' + (data.chart.knots || []).length + '|' +
+      (data.chart.part || []).length + '|' + view.backKey + '|' + view.knotKey + '|' + view.partKey;
+    try {
+      if (s.key !== key) {
+        s.handle.setModel(stitchedModel(data), { keepView: !!s.key });
+        s.key = key;
+        s.bits = view.bits;
+        s.dirty = false;
+      } else if (s.bits !== view.bits) {
+        s.handle.setProgress(view.bits.bytes);    // undo, a bulk mark, a reload
+        s.bits = view.bits;
+      }
+      if (s.mode !== 'whole') {
+        var pi = data.palette.length ? clampInt(data.current.paletteIndex, 0, data.palette.length - 1, 0) : -1;
+        var nx = null;
+        if (pi >= 0 && typeof X.nextStitchNear === 'function') {
+          var bb = view.bits.bytes;
+          var at = X.nextStitchNear(view.cells, view.w, view.h, pi, view.cx, view.cy, function (i) {
+            return ((bb[i >> 3] >> (i & 7)) & 1) === 1;
+          });
+          if (at >= 0) nx = { x: at % view.w, y: (at / view.w) | 0 };
+        }
+        s.handle.setLoupe({ x: nx ? nx.x : view.cx, y: nx ? nx.y : view.cy, next: nx });
+      }
+    } catch (e2) { /* the flat preview stays */ }
+    if (!s.shown) watchCompile(s);
+  }
+
+  /* Keep the flat preview until the GPU has compiled and drawn a frame. */
+  function watchCompile(s) {
+    if (s.watching) return;
+    s.watching = true;
+    var tries = 0;
+    (function tick() {
+      if (!view || view.stitched !== s || !s.handle) return;
+      var st = null;
+      try { st = s.handle.getStats(); } catch (e) { st = null; }
+      if (st && !st.compiling && (st.frames > 0 || !st.webgl)) {
+        s.watching = false;
+        s.shown = true;
+        showStitched(true);
+        return;
+      }
+      if (++tries > 600) { s.watching = false; return; }   // ~10 s: the flat preview stays
+      window.setTimeout(tick, 16);
+    })();
+  }
+
+  function showStitched(on) {
+    var n = view && view.nodes;
+    if (!n || !n.stitchCanvas) return;
+    n.stitchCanvas.hidden = !on;
+    if (n.liveCanvas) n.liveCanvas.hidden = !!on;
+  }
+
+  /** The tap path: squares flipped by any tool reach the renderer at once. */
+  function stitchedMarked(cells, on) {
+    var s = view && view.stitched;
+    if (!s || !s.handle) return;
+    try {
+      if (cells.length === 1) s.handle.setDone(cells[0], on ? 1 : 0, { animate: !!on });
+      else if (cells.length) s.handle.setDoneMany(cells, on ? 1 : 0);
+    } catch (e) { /* ignore */ }
+  }
+
+  function destroyStitched() {
+    if (!view || !view.stitched) return;
+    try { if (view.stitched.handle) view.stitched.handle.destroy({ release: true }); } catch (e) { /* ignore */ }
+    view.stitched = null;
   }
 
   var MOVE_TOLERANCE_SQ = 12 * 12;
@@ -1804,10 +2610,25 @@
     var beforeByColor = snapshotByColor();
     var before = beforeByColor[pi] || { done: 0, total: 0 };
 
+    var keyStat = hasChart(data) && data.progress.mode === 'cells' && view.stats ? view.stats.byColor[pi] : null;
+    if (keyStat && keyStat.fromKey) {
+      /* #1: a colour counted from the key (the chart has none of its
+         squares) is counted like a counts-mode colour, in progress.keyDone. */
+      if (keyStat.done >= keyStat.total) { toast(paletteLabel(entry) + ' done ✓'); fb('done'); return; }
+      Store.updateCraftData(projectId, function (cd) {
+        if (!isObj(cd.progress.keyDone)) cd.progress.keyDone = {};
+        cd.progress.keyDone[pi] = clampInt(cd.progress.keyDone[pi], 0, 1e9, 0) + 1;
+      });
+      bumpStats(pi, 1);
+      recordWork(projectId, 1, pi, null, true);
+      afterCount(projectId, pi, before, beforeByColor);
+      return;
+    }
+
     if (hasChart(data) && data.progress.mode === 'cells') {
       /* Crosses first; when this colour has only backstitch, knots or
          fractionals left the same button walks those instead. */
-      var stats = view.stats || X.progressStats(data);
+      var stats = view.stats || statsOf(data);
       var layer = X.tapLayer(stats, pi);
       if (layer && layer !== 'cross') {
         var lidx = nextLayerItemFor(layer, pi);
@@ -1845,6 +2666,8 @@
       });
       view.doneKey = b64;
       bumpStats(pi, 1);
+      recordWork(projectId, 1, pi, [at], true);
+      if (data.parking.length) offerUnpark(projectId, cx, cy, pi);
     } else {
       if (entry.stitchCount && before.done >= entry.stitchCount) {
         toast(paletteLabel(entry) + ' done ✓');
@@ -1856,9 +2679,45 @@
         cd.progress.doneCount = (cd.progress.doneCount || 0) + 1;
       });
       bumpStats(pi, 1);
+      recordWork(projectId, 1, pi, null, true);
     }
 
     afterCount(projectId, pi, before, beforeByColor);
+  }
+
+  /* ---- wave K: every mark is recorded once (shell-data §5) --------------
+     Sessions, pace and the mark log (time-lapse) fill themselves from
+     Store.counted / Store.logMarks; the stitched preview and any listener
+     (XStitchApp.onMarked, for xs-extras) hear about it from the same place.
+     `cells` is the list of squares flipped (or null for a counts-mode tap or
+     an extra layer); `n` the signed number of units moved. */
+  var markListeners = [];
+
+  function recordWork(projectId, n, pi, cells, on, unit) {
+    if (!n) return;
+    var d = view && view.projectId === projectId ? view.data : null;
+    var e = d && pi >= 0 ? d.palette[pi] : null;
+    if (typeof Store.counted === 'function') {
+      try {
+        var tot = d && view.stats ? oneTotal(d, view.stats) : null;
+        Store.counted({ projectId: projectId, n: n, unit: unit || 'stitch',
+          part: e ? ((e.brand ? e.brand + ' ' : '') + (e.code || e.name || '')).trim() || undefined : undefined,
+          total: tot ? tot.total : undefined });
+      } catch (err) { /* recording never breaks a mark */ }
+    }
+    if (cells && cells.length && typeof Store.logMarks === 'function') {
+      try {
+        var pairs = new Array(cells.length);
+        for (var k = 0; k < cells.length; k++) pairs[k] = [cells[k], on ? 1 : 0];
+        Store.logMarks(projectId, pairs);
+      } catch (err2) { /* the time-lapse is a nicety */ }
+    }
+    if (cells && view && view.projectId === projectId) stitchedMarked(cells, on);
+    for (var i = 0; i < markListeners.length; i++) {
+      try {
+        markListeners[i]({ projectId: projectId, n: n, cells: cells || null, on: !!on, colour: pi >= 0 ? pi : -1 });
+      } catch (err3) { /* a listener's fault is its own */ }
+    }
   }
 
   function bumpPerColor(cd, pi, delta) {
@@ -1922,14 +2781,24 @@
     var group = clampInt(p.groupSize, 0, 50, 10);
 
     var finishedColour = !!after.complete && !before.complete;
-    if (finishedColour) fb('done');
-    else if (group > 0 && after.done > 0 && after.done % group === 0) fb('group');
-    else fb('tap');
+    var kind = finishedColour ? 'done' : (group > 0 && after.done > 0 && after.done % group === 0 ? 'group' : 'tap');
 
     syncScreen(p, data);
 
-    if (!finishedColour && after.total && after.done % 100 === 0) {
-      C.announce(comma(after.done) + ' of ' + comma(after.total) + ' ' + (entry.name || entry.code));
+    if (finishedColour) {
+      fb('done');
+    } else if (typeof C.counted === 'function') {
+      /* the shell's one policy (shell-ui §5): milestones only, every 50th
+         when there is no grouping; finishing a colour is said by noteMilestones */
+      C.counted({ n: after.done, total: after.total, unit: 'stitch', label: paletteLabel(entry),
+        kind: 'tap', groupSize: 0, node: view && view.nodes ? view.nodes.stitchBtn : null,
+        quiet: kind !== 'tap' });
+      if (kind !== 'tap') fb(kind);
+    } else {
+      fb(kind);
+      if (!finishedColour && after.total && after.done % 100 === 0) {
+        C.announce(comma(after.done) + ' of ' + comma(after.total) + ' ' + (entry.name || entry.code));
+      }
     }
     noteMilestones(projectId, beforeByColor);
   }
@@ -1952,7 +2821,16 @@
     if (!data.palette.length) return;
     var pi = clampInt(data.current.paletteIndex, 0, data.palette.length - 1, 0);
 
-    if (hasChart(data) && data.progress.mode === 'cells') {
+    var keyStat = hasChart(data) && data.progress.mode === 'cells' && view.stats ? view.stats.byColor[pi] : null;
+    if (keyStat && keyStat.fromKey) {
+      if (keyStat.done <= 0) { toast('Nothing to undo'); return; }
+      Store.updateCraftData(projectId, function (cd) {
+        if (!isObj(cd.progress.keyDone)) cd.progress.keyDone = {};
+        cd.progress.keyDone[pi] = Math.max(0, clampInt(cd.progress.keyDone[pi], 0, 1e9, 0) - 1);
+      });
+      bumpStats(pi, -1);
+      recordWork(projectId, -1, pi, null, false);
+    } else if (hasChart(data) && data.progress.mode === 'cells') {
       var undoLayer = unmarkLayerFor(pi);
       if (undoLayer !== 'cross') {
         var lidx = lastLayerItemFor(undoLayer, pi);
@@ -1984,6 +2862,7 @@
       });
       view.doneKey = b64;
       bumpStats(pi, -1);
+      recordWork(projectId, -1, pi, [at], false);
     } else {
       var st = (view.stats.byColor[pi] || { done: 0 });
       if (st.done <= 0) { toast('Nothing to undo'); return; }
@@ -1992,6 +2871,7 @@
         cd.progress.doneCount = Math.max(0, (cd.progress.doneCount || 0) - 1);
       });
       bumpStats(pi, -1);
+      recordWork(projectId, -1, pi, null, false);
     }
     fb('undo');
     var p2 = Store.project(projectId);
@@ -2018,9 +2898,9 @@
       if (!p2) return;
       var d2 = dataOf(p2);
       if (hasChart(d2) && d2.progress.mode === 'cells') {
-        var cells = view.cells;
+        var cells = view.cells, gone = [];
         for (var i = 0; i < cells.length; i++) {
-          if (cells[i] === pi) X.setBit(view.bits, i, false);
+          if (cells[i] === pi && X.getBit(view.bits, i)) { X.setBit(view.bits, i, false); gone.push(i); }
         }
         var b64 = X.bitsB64(view.bits);
         /* Backstitch, knots and fractionals of this colour go back too — the
@@ -2045,10 +2925,12 @@
             cd.progress[f[1]] = X.countBits(extras[layer], layerItems(cd, layer).length);
           });
           setPerColor(cd, pi, 0);
+          if (isObj(cd.progress.keyDone)) delete cd.progress.keyDone[pi];
         });
         view.doneKey = b64;
         view.img = null;
         view.stats = null;
+        recordWork(projectId, -gone.length, pi, gone, false);
       } else {
         Store.updateCraftData(projectId, function (cd) { setPerColor(cd, pi, 0); });
         view.stats = null;
@@ -2533,6 +3415,10 @@
     bumpStats(layerColours(layer, item), delta, layer);
     view.cx = cx;
     view.cy = cy;
+    recordWork(projectId, delta, layerColours(layer, item)[0], null, !!value);
+    if (view.stitched && view.stitched.handle && typeof view.stitched.handle.setLayerDone === 'function') {
+      try { view.stitched.handle.setLayerDone(layer, idx, !!value); } catch (e) { /* ignore */ }
+    }
 
     fb('tap');
     var p = Store.project(projectId);
@@ -2602,6 +3488,8 @@
     });
     view[LAYER_KEY[layer]] = b64;
     view.stats = null;                 // several colours moved: recount properly
+    recordWork(projectId, total, -1, null, total > 0);
+    if (view.stitched) view.stitched.dirty = true;
     fb(total > 0 ? 'group' : 'undo');
     var p = Store.project(projectId);
     var data = dataOf(p);
@@ -2629,6 +3517,8 @@
     });
     view.doneKey = b64;
     bumpStats(pi, value ? 1 : -1);
+    recordWork(projectId, value ? 1 : -1, pi, [c.i], value);
+    if (value && view.data && view.data.parking.length) offerUnpark(projectId, c.x, c.y, pi);
     fb('tap');
     var p = Store.project(projectId);
     var data = dataOf(p);
@@ -2642,12 +3532,13 @@
     var beforeByColor = snapshotByColor();
     var bx = Math.floor(c.x / 10) * 10, by = Math.floor(c.y / 10) * 10;
     var changed = {};
-    var total = 0;
-    /* 04 #13: with a colour isolated, 10×10 means "this colour in this
-       block" — a parker who has done the black in a block has not done the
-       other colours in it. */
+    var total = 0, flipped = [];
+    /* 04 #13 (wave K, the owner's default): 10×10 means "this colour in this
+       block", whether the colour is isolated or merely current — a parker who
+       has done the black in a block has not done the other colours in it.
+       The "Whole block" chip in the chart sheet marks every colour. */
     var only = -1;
-    if (view.isolate && view.data && view.data.palette.length) {
+    if ((view.isolate || blockScope !== 'all') && view.data && view.data.palette.length) {
       only = clampInt(view.data.current.paletteIndex, 0, view.data.palette.length - 1, 0);
     }
     for (var y = by; y < by + 10 && y < view.h; y++) {
@@ -2662,6 +3553,7 @@
         paintCell(i, value ? 1 : 0);
         changed[pi] = (changed[pi] || 0) + (value ? 1 : -1);
         total += value ? 1 : -1;
+        flipped.push(i);
       }
     }
     var what = only >= 0 ? paletteLabel(view.data.palette[only]) + ' ' : '';
@@ -2670,10 +3562,14 @@
         : 'That block is already ' + (value ? 'done' : 'clear'));
       return;
     }
-    commitBulk(projectId, changed, total, c, beforeByColor);
+    commitBulk(projectId, changed, total, c, beforeByColor, flipped, value, only);
     toast((value ? 'Marked ' : 'Cleared ') + Math.abs(total) + ' ' + what + 'stitches in this 10×10 block' +
-      (only >= 0 ? ' (isolated colour only)' : ''));
+      (only >= 0 ? ' (this colour only)' : ''));
   }
+
+  /* 10×10 scope: 'colour' (the current colour, the default) or 'all' (every
+     colour in the block). A view detail for this session, never undoable. */
+  var blockScope = 'colour';
 
   function markWholeColour(projectId, layer, value) {
     if (layer && layer !== 'cross') { markLayerColour(projectId, layer, value); return; }
@@ -2681,10 +3577,29 @@
     if (!p) return;
     var data = dataOf(p);
     var pi = clampInt(data.current.paletteIndex, 0, Math.max(0, data.palette.length - 1), 0);
+    /* #1: a whole-colour mark over XStitch.CONFIRM_ABOVE stitches asks first
+       (21,207 Pokémon stitches in one tap was a silent disaster). */
+    var plan = typeof X.bulkPlan === 'function' ? X.bulkPlan(data, { color: pi }, { unmark: !value }) : null;
+    if (plan && plan.confirm) {
+      C.confirmSheet({
+        title: value ? 'Mark the whole colour?' : 'Unmark the whole colour?',
+        message: plan.text + ' You can Undo it.',
+        confirmText: value ? 'Mark ' + comma(plan.count) : 'Unmark ' + comma(plan.count),
+        danger: !value
+      }).then(function (ok) { if (ok) doWholeColour(projectId, pi, value); });
+      return;
+    }
+    doWholeColour(projectId, pi, value);
+  }
+
+  function doWholeColour(projectId, pi, value) {
+    var p = Store.project(projectId);
+    if (!p || !view) return;
+    var data = dataOf(p);
     var beforeByColor = snapshotByColor();
     var cells = view.cells;
     var changed = {};
-    var total = 0;
+    var total = 0, flipped = [];
     for (var i = 0; i < cells.length; i++) {
       if (cells[i] !== pi) continue;
       var was = (view.bits.bytes[i >> 3] >> (i & 7)) & 1;
@@ -2692,15 +3607,37 @@
       X.setBit(view.bits, i, value);
       changed[pi] = (changed[pi] || 0) + (value ? 1 : -1);
       total += value ? 1 : -1;
+      flipped.push(i);
     }
     if (!total) { toast('Nothing to change'); return; }
     view.img = null;
-    commitBulk(projectId, changed, total, null, beforeByColor);
+    commitBulk(projectId, changed, total, null, beforeByColor, flipped, value, pi);
     toast((value ? 'Marked ' : 'Cleared ') + comma(Math.abs(total)) + ' stitches of ' +
       paletteLabel(data.palette[pi]));
   }
 
-  function commitBulk(projectId, changed, total, c, beforeByColor) {
+  /** Mark (or unmark) a list of squares as one undo step (page, row, block). */
+  function markCellList(projectId, list, value, colour, c) {
+    if (!view || !view.bits) return 0;
+    var beforeByColor = snapshotByColor();
+    var changed = {}, total = 0, flipped = [];
+    for (var k = 0; k < list.length; k++) {
+      var i = list[k], pi = view.cells[i];
+      if (pi < 0) continue;
+      var was = (view.bits.bytes[i >> 3] >> (i & 7)) & 1;
+      if (was === (value ? 1 : 0)) continue;
+      X.setBit(view.bits, i, value);
+      changed[pi] = (changed[pi] || 0) + (value ? 1 : -1);
+      total += value ? 1 : -1;
+      flipped.push(i);
+    }
+    if (!total) return 0;
+    view.img = null;
+    commitBulk(projectId, changed, total, c || null, beforeByColor, flipped, value, colour >= 0 ? colour : -1);
+    return total;
+  }
+
+  function commitBulk(projectId, changed, total, c, beforeByColor, flipped, value, colour) {
     var b64 = X.bitsB64(view.bits);
     Store.updateCraftData(projectId, function (cd) {
       cd.progress.done = b64;
@@ -2716,6 +3653,8 @@
     var p = Store.project(projectId);
     var data = dataOf(p);
     syncModel(data);
+    recordWork(projectId, total, typeof colour === 'number' ? colour : -1, flipped || null,
+      value === undefined ? total > 0 : !!value);
     syncScreen(p, data);
     if (total > 0) noteMilestones(projectId, beforeByColor);
   }
@@ -2786,16 +3725,65 @@
         continue;
       }
       var e = data.palette[r.p] || {};
-      var chip = el('span', 'xs-run');
+      var full = r.done !== undefined && r.done >= r.n, part = r.done !== undefined && r.done > 0 && !full;
+      var chip = el('span', 'xs-run' + (full ? ' xs-run-done' : part ? ' xs-run-part' : ''));
       var sw = el('span', 'xs-run-sw', e.symbol || '');
       sw.style.background = swatchHex(e);
       sw.style.color = X.symbolInk(e.hex || '808080') === 'light' ? '#fff' : '#111';
       chip.appendChild(sw);
-      chip.appendChild(el('span', 'xs-run-n', String(r.n)));
+      /* #14: done stitches show inside the row: "✓5", or "3/5" part way */
+      chip.appendChild(el('span', 'xs-run-n', full ? '✓' + r.n : part ? r.done + '/' + r.n : String(r.n)));
       wrap.appendChild(chip);
     }
     if (lim < runs.length) wrap.appendChild(el('span', 'xs-run xs-run-skip', '+' + (runs.length - lim) + ' more'));
     return wrap;
+  }
+
+  /* ---- #14 Row by row that fits a real chart ---------------------------- */
+
+  /** The scope switch is offered when xs-core's writtenRows takes a scope
+      and the chart is wide or has printed pages. */
+  function rowsScopeAvailable(d) {
+    return !!(X.WAVE_K && hasChart(d) && (d.chart.w > 40 || d.pages.some(function (pg) { return pg && pg.region; })));
+  }
+
+  /** writtenRows options for a scope: 'all' | 'page' | 'band' (around the crosshair). */
+  function rowsOptsScoped(ro, d, scope) {
+    var o = writtenOptsFor(ro, d);
+    if (!X.WAVE_K) return o;
+    o.done = true;
+    if (d.chart.w > 40) o.chunk = 10;
+    var cx = clampInt(d.current.cx, 0, Math.max(0, d.chart.w - 1), 0);
+    var cy = clampInt(d.current.cy, 0, Math.max(0, d.chart.h - 1), 0);
+    if (scope === 'page' && typeof X.pageForCell === 'function') {
+      var pi = X.pageForCell(d.pages, cx, cy);
+      if (pi >= 0) o.scope = { page: pi };
+    } else if (scope === 'band') {
+      o.xFrom = Math.floor(cx / 10) * 10;
+      o.xTo = Math.min(d.chart.w - 1, o.xFrom + 9);
+    }
+    return o;
+  }
+
+  /** A row's done state from its runs (null when the runs carry no done counts). */
+  function rowDoneByRuns(row) {
+    var runs = row && row.runs;
+    if (!runs || !runs.length || runs[0].done === undefined) return null;
+    for (var i = 0; i < runs.length; i++) if (runs[i].p >= 0 && runs[i].done < runs[i].n) return false;
+    return true;
+  }
+
+  /** The squares a written row covers (its runs, in its own band), or null. */
+  function rowCellsByRuns(row, w) {
+    var runs = row && row.runs;
+    if (!runs || !runs.length || runs[0].done === undefined) return null;
+    var out = [], base = row.y * w;
+    for (var i = 0; i < runs.length; i++) {
+      var r = runs[i];
+      if (r.p < 0) continue;
+      for (var k = 0; k < r.n; k++) out.push(base + (row.rtl ? r.x - k : r.x + k));
+    }
+    return out;
   }
 
   function openRowsSheet(projectId) {
@@ -2811,13 +3799,21 @@
     var wr = null, focus = -1, lo = 0, hi = 0;
     var WINDOW = 30;
     var nd = {};
+    /* #14: what part of the chart the rows cover — the whole chart, the
+       printed page under the crosshair, or the 10-wide column band it is in
+       (a session detail). Big rows are chunked at every 10 columns, and each
+       run knows how many of its squares are done. */
+    var scope = 'all';
+    var scoped = rowsScopeAvailable(d0);
 
     function data() { return dataOf(Store.project(projectId)); }
-    function wopts(d) { return writtenOptsFor(ro, d); }
+    function wopts(d) { return rowsOptsScoped(ro, d, scope); }
     function live() { return !!(view && view.projectId === projectId && view.bits && view.cells); }
 
     function isDone(d, row) {
       if (!row || !row.stitches) return false;
+      var byRuns = rowDoneByRuns(row);
+      if (byRuns !== null) return byRuns;
       try { return !!X.rowDone(d, row.y, wopts(d)); } catch (e) { return false; }
     }
 
@@ -2859,6 +3855,14 @@
       if (C.preserveFocus) C.preserveFocus(function () { renderList(d); });
       else renderList(d);
       nd.optsSummary.textContent = rowOptsLabel(ro, d);
+      if (nd.scopeNote) {
+        var sc = wr && wr.scope;
+        nd.scopeNote.textContent = sc ? 'Columns ' + (sc.x0 + 1) + '–' + (sc.x1 + 1) + ', rows ' + (sc.y0 + 1) + '–' + (sc.y1 + 1) +
+          (sc.label ? ' (' + sc.label + ')' : '') + '.'
+          : (scope === 'band' ? (function () { var o2 = wopts(d); return 'Columns ' + (o2.xFrom + 1) + '–' + (o2.xTo + 1) + '.'; })()
+            : (scope === 'page' ? 'The crosshair is not on a printed page; showing the whole chart.' : ''));
+        nd.scopeNote.hidden = !nd.scopeNote.textContent;
+      }
     }
 
     function renderNow(d) {
@@ -2992,8 +3996,10 @@
       if (!live()) { toast('Open the project to mark rows'); return; }
       var o = wopts(d);
       var value = !isDone(d, row);
-      var cells;
-      try { cells = X.cellsOfRow(d, row.y, o) || []; } catch (e) { cells = []; }
+      var cells = rowCellsByRuns(row, d.chart.w);
+      if (!cells) {
+        try { cells = X.cellsOfRow(d, row.y, o) || []; } catch (e) { cells = []; }
+      }
       var before = snapshotByColor();
       var changed = {};
       var total = 0;
@@ -3009,7 +4015,13 @@
       }
       if (!total) { toast(value ? 'That row is already done' : 'Nothing to unmark in that row'); return; }
       view.img = null;                 // a whole row: rebuild the picture once
-      commitBulk(projectId, changed, total, { x: firstStitchX(row), y: row.y }, before);
+      var flippedRow = [];
+      for (var q = 0; q < cells.length; q++) {
+        if (view.cells[cells[q]] >= 0 && ((view.bits.bytes[cells[q] >> 3] >> (cells[q] & 7)) & 1) === (value ? 1 : 0)) flippedRow.push(cells[q]);
+      }
+      commitBulk(projectId, changed, total, { x: firstStitchX(row), y: row.y }, before, flippedRow, value,
+        ro.one ? clampInt(d.current.paletteIndex, 0, Math.max(0, d.palette.length - 1), 0) : -1);
+      recompute(row.y);
       C.announce(value ? 'Row ' + row.n + ' done' : 'Row ' + row.n + ' unmarked');
       render();
     }
@@ -3017,6 +4029,7 @@
     function copyRows(oneColour) {
       var d = data();
       var o = wopts(d);
+      delete o.chunk;
       if (!oneColour) o.color = null;
       else o.color = clampInt(d.current.paletteIndex, 0, Math.max(0, d.palette.length - 1), 0);
       var all;
@@ -3068,6 +4081,19 @@
         opts.appendChild(C.switchRow('Hide empty rows', 'Rows with nothing to stitch are left out.',
           ro.skipEmpty, function (v) { ro.skipEmpty = v; optionsChanged(); }));
         body.appendChild(opts);
+
+        if (scoped) {
+          var dS = data();
+          var scopes = [{ id: 'all', label: 'Whole chart' }];
+          if (dS.pages.some(function (pg) { return pg && pg.region; })) scopes.push({ id: 'page', label: 'This page' });
+          if (dS.chart.w > 40) scopes.push({ id: 'band', label: '10 wide' });
+          var scSeg = C.segmented(scopes, scope, function (v) { scope = v; lo = 0; hi = 0; recompute(null); render(); });
+          scSeg.node.classList.add('xs-row-scope');
+          body.appendChild(field('Rows across', scSeg.node,
+            'This page: the printed page under the crosshair. 10 wide: the band of 10 columns the crosshair is in.'));
+          nd.scopeNote = el('p', 'muted xs-read-note', '');
+          body.appendChild(nd.scopeNote);
+        }
 
         nd.colours = el('div', 'xs-row-cols');
         nd.colours.setAttribute('role', 'group');
@@ -3152,7 +4178,7 @@
       build: function (body) {
         var proj = Store.project(projectId);
         var data = dataOf(proj);
-        var stats = X.progressStats(data);
+        var stats = statsOf(data);
 
         if (!data.palette.length) {
           body.appendChild(el('p', 'muted', 'No colours yet. Import a chart or add colours by hand.'));
@@ -3182,11 +4208,26 @@
           var text = el('span', 'xs-floss-text');
           text.appendChild(el('span', 'xs-key-code', paletteLabel(e)));
           var sub = [];
-          if (count) sub.push(comma(count) + ' sts');
-          sub.push(range.low === range.high
-            ? plural(range.high, 'skein')
-            : range.low + '–' + range.high + ' skeins');
-          sub.push((e.strands || data.strandsDefault) + ' strands');
+          var kindNow = typeof X.kindOf === 'function' ? X.kindOf(data) : 'cross';
+          if (kindNow !== 'cross' && typeof X.materials === 'function') {
+            /* #20: drills, yarn, thread or beads in the kind's own terms (≈) */
+            var mt = X.materials(data, i);
+            sub.push(mt.text || '');
+          } else {
+            if (count) sub.push(comma(count) + (count === 1 ? ' st' : ' sts') + (st.fromKey ? ' (from the key)' : ''));
+            /* #1: a range that informs: "56–125 skeins (buy 72)" (≈, a midpoint to act on) */
+            if (typeof X.skeinPlan === 'function') {
+              var sp = X.skeinPlan({ stitchCount: count, count: data.fabric.count, over: data.fabric.over,
+                strands: e.strands || data.strandsDefault });
+              totals.mid = (totals.mid || 0) + Math.max(sp.mid || 0, e.skeins || 0);
+              sub.push('≈ ' + (e.skeins && e.skeins > sp.high ? plural(e.skeins, 'skein') + ' (from the key)' : sp.text));
+            } else {
+              sub.push(range.low === range.high
+                ? plural(range.high, 'skein')
+                : range.low + '–' + range.high + ' skeins');
+            }
+            sub.push((e.strands || data.strandsDefault) + ' strands');
+          }
           if (!e.hex || e.hex === '808080') sub.push('no colour data');
           text.appendChild(el('span', 'xs-key-sub', sub.join(' · ')));
           var have = button('check xs-key-have', e.have ? '✓' : '', 'I own ' + paletteLabel(e));
@@ -3209,7 +4250,8 @@
         var summary = el('p', 'muted xs-floss-total',
           'About ' + (totals.low === totals.high
             ? plural(totals.high, 'skein')
-            : (totals.low + '–' + totals.high + ' skeins')) + ' in all. ' +
+            : (totals.low + '–' + totals.high + ' skeins')) +
+          (totals.mid && totals.low !== totals.high ? ' (buy ≈ ' + totals.mid + ')' : '') + ' in all. ' +
           'Estimates assume ' + X.lengthPerStitchCm(data.fabric.count, data.fabric.over) +
           ' cm per stitch at ' + Math.round(data.fabric.count / data.fabric.over) +
           ' ct and 20% waste, so treat them as a range.');
@@ -3220,6 +4262,16 @@
         on(shop, 'click', function () { copyShoppingList(projectId); });
         body.appendChild(shop);
 
+        /* #1: "Re-letter symbols", opt-in, for a project whose symbols repeat a
+           shape family (projects imported before wave K keep theirs until asked). */
+        var why = reletterReason(data);
+        if (why) {
+            var rl = button('btn ghost block xs-reletter', 'Re-letter symbols');
+            on(rl, 'click', function () { reletterSymbols(projectId); });
+            body.appendChild(rl);
+            body.appendChild(el('p', 'muted xs-reletter-why', why));
+        }
+
         body.appendChild(el('p', 'muted xs-disclaimer',
           'Screen colours are approximate — always check against a real shade card. ' +
           'DMC numbers and names are used only to identify threads.'));
@@ -3228,11 +4280,41 @@
     });
   }
 
+  /** Why this palette would read better re-lettered, or null when it is fine. */
+  function reletterReason(data) {
+    if (!data || data.palette.length < 2 || typeof X.symbolCheck !== 'function') return null;
+    var chk = null;
+    try { chk = X.symbolCheck(data.palette); } catch (e) { chk = null; }
+    if (!chk || chk.ok) return null;
+    var rep = (chk.repeats || []).length, fam = (chk.sameFamily || []).length;
+    return (rep ? plural(rep, 'pair') + ' of colours share a symbol' : plural(fam, 'pair') + ' of colours have look-alike symbols') +
+      '. Re-lettering gives each colour a symbol from a different shape family; your paper chart’s symbols do not change, and you can Undo it.';
+  }
+
+  /** One undo step: every colour gets a distinct symbol ("?" stays on a colour still to choose). */
+  function reletterSymbols(projectId) {
+    var p = Store.project(projectId);
+    if (!p) return;
+    C.confirmSheet({
+      title: 'Re-letter the symbols?',
+      message: 'The app’s symbols for this chart change so no two colours look alike. The pattern’s own symbols, where they were read, are not touched. You can Undo it.',
+      confirmText: 'Re-letter',
+      cancelText: 'Keep them'
+    }).then(function (ok) {
+      if (!ok) return;
+      Store.updateCraftData(projectId, function (cd) { letterPalette(cd.palette); });
+      forgetCaches();
+      C.closeAllSheets();
+      C.render();
+      toast('Symbols re-lettered · Undo from the bar');
+    });
+  }
+
   function copyShoppingList(projectId) {
     var p = Store.project(projectId);
     if (!p) return;
     var data = dataOf(p);
-    var stats = X.progressStats(data);
+    var stats = statsOf(data);
     var lines = [p.name + ' — floss to buy'];
     var n = 0;
     data.palette.forEach(function (e, i) {
@@ -3342,6 +4424,25 @@
         );
         body.appendChild(field('Fabric', kindSeg.node));
 
+        /* #20: the same chart engine for neighbouring grid crafts; only the
+           words, the material maths and this sheet change */
+        if (X.KINDS && typeof X.kindOf === 'function') {
+          draft.craftKind = X.kindOf(data);
+          var kinds = Object.keys(X.KINDS).map(function (k) { return { id: k, label: X.KINDS[k].label }; });
+          var kindSel = document.createElement('select');
+          kindSel.className = 'input xs-kind-select';
+          kinds.forEach(function (k) {
+            var op = document.createElement('option');
+            op.value = k.id; op.textContent = k.label;
+            if (k.id === draft.craftKind) op.selected = true;
+            kindSel.appendChild(op);
+          });
+          on(kindSel, 'change', function () { draft.craftKind = kindSel.value; });
+          body.insertBefore(field('What are you making?', kindSel,
+            'Diamond painting counts drills in packs, needlepoint yarn by mesh, filet crochet meshes, fuse beads by the bead.'),
+            body.firstChild);
+        }
+
         var overSwitch = C.switchRow('Stitched over 2 threads',
           'Evenweave and linen are normally worked over two, which halves the effective count.',
           draft.over === 2,
@@ -3404,6 +4505,9 @@
               cd.fabric.over = draft.over;
               cd.fabric.color = draft.color || 'White';
               cd.strandsDefault = draft.strands;
+              if (draft.craftKind) {
+                if (draft.craftKind === 'cross') delete cd.kind; else cd.kind = draft.craftKind;
+              }
               if (!hasChart(cd)) {
                 cd.design.w = draft.w;
                 cd.design.h = draft.h;
@@ -3465,25 +4569,36 @@
           var tick = button('btn ghost xs-thumb-tick', isPageDone(data, i) ? 'Done ✓' : 'Mark done');
           on(tick, 'click', function () {
             var next = !isPageDone(dataOf(Store.project(projectId)), i);
-            Store.updateCraftData(projectId, function (cd) {
-              var list = cd.progress.pageDone;
-              for (var k = 0; k < list.length; k++) {
-                if (list[k].page === i) { list[k].done = next; return; }
-              }
-              list.push({ page: i, done: next });
+            markPageDone(projectId, i, next, function (now) {
+              tick.textContent = now ? 'Done ✓' : 'Mark done';
+              doneMark.hidden = !now;
             });
-            tick.textContent = next ? 'Done ✓' : 'Mark done';
-            doneMark.hidden = !next;
-            fb(next ? 'done' : 'undo');
           });
           var box = el('div', 'xs-page-box');
           box.appendChild(cell);
           box.appendChild(tick);
           grid.appendChild(box);
 
+          /* xs-audit: a page with a stitch range but no page picture (an OXS
+             chart, a joined file) shows its part of the chart, not an empty box */
+          function regionThumb() {
+            if (!page.region || !view || view.projectId !== projectId || !view.imgCanvas) {
+              imgWrap.appendChild(el('span', 'muted xs-thumb-none', 'No page picture'));
+              return;
+            }
+            var r = page.region, k = Math.max(1, Math.min(150 / r.w, 110 / r.h));
+            var cv = document.createElement('canvas');
+            cv.width = Math.max(1, Math.round(r.w * k)); cv.height = Math.max(1, Math.round(r.h * k));
+            cv.className = 'xs-thumb-chart';
+            cv.setAttribute('aria-hidden', 'true');
+            var g = cv.getContext('2d');
+            if (g) { g.imageSmoothingEnabled = false; g.drawImage(view.imgCanvas, r.x, r.y, r.w, r.h, 0, 0, cv.width, cv.height); }
+            imgWrap.appendChild(cv);
+          }
+          if (!window.BlobStore || !page.blobKey) regionThumb();
           if (window.BlobStore && page.blobKey) {
             window.BlobStore.get(page.blobKey).then(function (blob) {
-              if (!blob) { imgWrap.textContent = '—'; return; }
+              if (!blob) { regionThumb(); return; }
               var url = URL.createObjectURL(blob);
               urls.push(url);
               var img = el('img');
@@ -3565,6 +4680,59 @@
     var list = data.progress.pageDone;
     for (var k = 0; k < list.length; k++) if (list[k].page === i) return !!list[k].done;
     return false;
+  }
+
+  function setPageFlag(cd, i, next) {
+    var list = cd.progress.pageDone;
+    for (var k = 0; k < list.length; k++) {
+      if (list[k].page === i) { list[k].done = next; return; }
+    }
+    list.push({ page: i, done: next });
+  }
+
+  /**
+   * #4 "Mark page done" that really marks the page: on a chart whose pages
+   * know their stitch range, it asks, then marks the page's stitches and the
+   * flag in one undo step, so page progress and stitch progress agree. An
+   * image-only project (no chart) keeps the flag alone. Un-marking a page
+   * clears the flag and leaves the stitches as they are (said so).
+   */
+  function markPageDone(projectId, i, next, after) {
+    var p = Store.project(projectId);
+    if (!p) return;
+    var data = dataOf(p);
+    var pg = data.pages[i];
+    var cellsMode = hasChart(data) && data.progress.mode === 'cells' && pg && pg.region &&
+      typeof X.bulkPlan === 'function' && view && view.projectId === projectId && view.bits;
+    function flagOnly() {
+      Store.updateCraftData(projectId, function (cd) { setPageFlag(cd, i, next); });
+      fb(next ? 'done' : 'undo');
+      if (after) after(next);
+      C.render();
+    }
+    if (!next || !cellsMode) {
+      flagOnly();
+      if (!next && cellsMode) toast('Page unticked · its stitches stay marked');
+      return;
+    }
+    var plan = X.bulkPlan(data, { page: i });
+    if (!plan.count) { flagOnly(); return; }
+    C.confirmSheet({
+      title: 'Mark ' + (pg.label || 'this page') + ' done?',
+      message: plan.text + ' You can Undo it.',
+      confirmText: 'Mark ' + comma(plan.count),
+      cancelText: 'Cancel'
+    }).then(function (ok) {
+      if (!ok) return;
+      var list = Array.prototype.slice.call(plan.cells);
+      markCellList(projectId, list, true, -1, null);
+      /* the flag rides in a second write; Undo takes back both */
+      Store.updateCraftData(projectId, function (cd) { setPageFlag(cd, i, true); }, { undo: false });
+      fb('done');
+      toast('Marked ' + comma(plan.count) + ' stitches · ' + (pg.label || 'page') + ' done ✓');
+      if (after) after(true);
+      C.render();
+    });
   }
 
   /** 'cols 54–106 · rows 1–77' for a page's chart region. */
@@ -3772,17 +4940,10 @@
         doneBtn = button('btn ghost xs-pv-done', 'Mark page done');
         on(doneBtn, 'click', function () {
           var nextDone = !isPageDone(dataOf(Store.project(projectId)), idx);
-          var at = idx;
-          Store.updateCraftData(projectId, function (cd) {
-            var list = cd.progress.pageDone;
-            for (var k = 0; k < list.length; k++) {
-              if (list[k].page === at) { list[k].done = nextDone; return; }
-            }
-            list.push({ page: at, done: nextDone });
+          markPageDone(projectId, idx, nextDone, function (now) {
+            doneBtn.textContent = now ? 'Page done ✓' : 'Mark page done';
+            doneBtn.setAttribute('aria-pressed', now ? 'true' : 'false');
           });
-          doneBtn.textContent = nextDone ? 'Page done ✓' : 'Mark page done';
-          doneBtn.setAttribute('aria-pressed', nextDone ? 'true' : 'false');
-          fb(nextDone ? 'done' : 'undo');
         });
         zoomRow.appendChild(zOut);
         zoomRow.appendChild(zFit);
@@ -3881,9 +5042,20 @@
     { id: 'bl', label: '↙' }, { id: 'br', label: '↘' }
   ];
 
+  /* #3 parking on the chart: the direction the stitcher works blocks in
+     (a view detail for this session; 'right' = rows of blocks left to right). */
+  var parkDir = 'right';
+  var PARK_DIRS = [{ id: 'right', label: 'Blocks →' }, { id: 'left', label: 'Blocks ←' }, { id: 'column', label: 'Columns ↓' }];
+
+  function parkingV2() {
+    return typeof X.parkAt === 'function' && typeof X.unpark === 'function' &&
+      typeof X.nextBlockFor === 'function' && typeof X.parkingOrder === 'function';
+  }
+
   function openParkingSheet(projectId) {
     var p = Store.project(projectId);
     if (!p) return;
+    if (parkingV2() && hasChart(dataOf(p))) { openParkingSheetV2(projectId); return; }
 
     C.openSheet({
       title: 'Parking notes',
@@ -3945,6 +5117,192 @@
   function cornerLabel(id) {
     for (var i = 0; i < CORNERS.length; i++) if (CORNERS[i].id === id) return CORNERS[i].label;
     return '↖';
+  }
+
+  var CORNER_WORDS = { tl: 'top left', tr: 'top right', bl: 'bottom left', br: 'bottom right' };
+
+  /** Move the crosshair to (x, y) and show it: stitch mode, else the chart sheet. */
+  function goToStitch(projectId, x, y) {
+    setCrosshair(x, y);
+    saveViewState(projectId, { cx: x, cy: y, view: { z: 16, x: x + 0.5, y: y + 0.5 } });
+    if (sm.chart && C.workMode && C.workMode.isOn && C.workMode.isOn()) {
+      C.closeAllSheets();
+      sm.chart.centerOn(x, y, 16);
+      C.workMode.refresh();
+    } else {
+      C.closeAllSheets();
+      openChartSheet(projectId);
+    }
+  }
+
+  /**
+   * #3 Parking that lives on the chart, with the parking assistant. Threads
+   * are listed in the order the stitcher will meet them (X.parkingOrder from
+   * the crosshair, in the chosen direction); each row jumps there, its corner
+   * and note can be changed; "Park here" parks the current colour at the
+   * crosshair in a chosen corner; the assistant names the next block in the
+   * working direction that still has the current colour (X.nextBlockFor).
+   */
+  function openParkingSheetV2(projectId) {
+    var corner = 'tl';
+    C.openSheet({
+      title: 'Parking',
+      cls: 'sheet-xs-park',
+      build: function (body) {
+        function redraw() {
+          clear(body);
+          var proj = Store.project(projectId);
+          if (!proj) return;
+          var data = dataOf(proj);
+          var e = currentEntry(data);
+          var pi = data.palette.length ? clampInt(data.current.paletteIndex, 0, data.palette.length - 1, 0) : -1;
+          var cx = clampInt(data.current.cx, 0, Math.max(0, data.chart.w - 1), 0);
+          var cy = clampInt(data.current.cy, 0, Math.max(0, data.chart.h - 1), 0);
+          body.appendChild(el('p', 'muted',
+            'Parking: leave a thread in the hole where that colour starts next. Each one is marked on the ' +
+            'chart with a small triangle in its corner.'));
+
+          var dirSeg = C.segmented(PARK_DIRS, parkDir, function (v) { parkDir = v; redraw(); });
+          dirSeg.node.classList.add('xs-park-dir');
+          body.appendChild(field('I work', dirSeg.node));
+
+          /* the assistant */
+          if (e && pi >= 0) {
+            var nb = X.nextBlockFor(data, pi, { x: cx, y: cy }, parkDir);
+            var tip = el('div', 'card xs-park-tip');
+            if (nb) {
+              var lab = X.positionLabel(nb.x, nb.y, data.chart.w, data.chart.h);
+              tip.appendChild(el('p', null, 'Next ' + paletteLabel(e) + ' in your direction: ' + lab.grid +
+                ' (block ' + (nb.bx + 1) + ',' + (nb.by + 1) + ', ' + comma(nb.left) + ' to do there).'));
+              var parkNext = button('btn ghost block', '📌 Park ' + (e.code ? (e.brand ? e.brand + ' ' : '') + e.code : 'it') + ' there');
+              on(parkNext, 'click', function () {
+                Store.updateCraftData(projectId, function (cd) {
+                  return X.parkAt(cd, { x: nb.x, y: nb.y, paletteIndex: pi, corner: corner, note: '' });
+                });
+                fb('tap');
+                C.announce('Parked ' + paletteLabel(e) + ' at ' + lab.grid);
+                C.render();
+                redraw();
+              });
+              tip.appendChild(parkNext);
+            } else {
+              tip.appendChild(el('p', 'muted', 'No other block has ' + paletteLabel(e) + ' left to do.'));
+            }
+            body.appendChild(tip);
+          }
+
+          /* park the current colour at the crosshair */
+          var cornerRow = el('div', 'xs-park-corners');
+          cornerRow.setAttribute('role', 'radiogroup');
+          cornerRow.setAttribute('aria-label', 'Corner of the stitch');
+          CORNERS.forEach(function (cn) {
+            var b = button('btn ghost xs-park-corner-btn' + (cn.id === corner ? ' on' : ''), cn.label, CORNER_WORDS[cn.id]);
+            b.setAttribute('role', 'radio');
+            b.setAttribute('aria-checked', cn.id === corner ? 'true' : 'false');
+            on(b, 'click', function () { corner = cn.id; redraw(); });
+            cornerRow.appendChild(b);
+          });
+          body.appendChild(field('Corner', cornerRow));
+          var note = C.textInput ? C.textInput('', 'Note (optional)') : el('input');
+          note.setAttribute('aria-label', 'Note for this parked thread');
+          note.className = (note.className ? note.className + ' ' : '') + 'xs-park-note';
+          body.appendChild(note);
+          var here = X.positionLabel(cx, cy, data.chart.w, data.chart.h);
+          var add = button('btn primary block', e ? '📌 Park ' + paletteLabel(e) + ' at ' + here.grid : 'Pick a colour first');
+          add.disabled = !e;
+          on(add, 'click', function () {
+            Store.updateCraftData(projectId, function (cd) {
+              return X.parkAt(cd, { x: cx, y: cy, paletteIndex: pi, corner: corner, note: note.value || '' });
+            });
+            fb('tap');
+            C.announce('Parked ' + paletteLabel(e) + ' at ' + here.grid + ', ' + CORNER_WORDS[corner]);
+            C.render();
+            redraw();
+          });
+          body.appendChild(add);
+
+          /* the parked threads, in the order they will be met */
+          var order = X.parkingOrder(data, { x: cx, y: cy }, parkDir);
+          var old = [];
+          data.parking.forEach(function (pk, i) { if (typeof pk.x !== 'number') old.push(i); });
+          body.appendChild(el('h3', 'xs-h3', data.parking.length ? 'Parked threads, in the order you will meet them' : 'Nothing parked yet'));
+          var list = el('div', 'list xs-park-list');
+          order.forEach(function (o) {
+            var pk = data.parking[o.i];
+            var pe = typeof pk.paletteIndex === 'number' ? data.palette[pk.paletteIndex] : null;
+            var row = el('div', 'list-item xs-park-row');
+            var jump = button('xs-key-main', null, 'Go to ' + (pe ? paletteLabel(pe) : pk.key) + ' parked at col ' + (pk.x + 1) + ' row ' + (pk.y + 1));
+            var sw = el('span', 'xs-swatch', pe ? pe.symbol || '' : '');
+            sw.style.background = pe ? swatchHex(pe) : 'transparent';
+            if (pe) sw.style.color = X.symbolInk(pe.hex) === 'light' ? '#fff' : '#111';
+            jump.appendChild(sw);
+            var t = el('span', 'xs-key-text');
+            t.appendChild(el('span', 'xs-key-code', (pe ? paletteLabel(pe) : pk.key || '—')));
+            t.appendChild(el('span', 'xs-key-sub', 'col ' + (pk.x + 1) + ' · row ' + (pk.y + 1) + ' · ' +
+              CORNER_WORDS[pk.corner || 'tl'] + (pk.note ? ' · ' + pk.note : '')));
+            jump.appendChild(t);
+            on(jump, 'click', function () { goToStitch(projectId, pk.x, pk.y); });
+            row.appendChild(jump);
+            var turn = button('xs-key-edit', cornerLabel(pk.corner), 'Move to the next corner');
+            on(turn, 'click', function () {
+              var ids = ['tl', 'tr', 'br', 'bl'];
+              var nx = ids[(ids.indexOf(pk.corner || 'tl') + 1) % 4];
+              Store.updateCraftData(projectId, function (cd) { if (cd.parking[o.i]) cd.parking[o.i].corner = nx; });
+              C.render();
+              redraw();
+            });
+            row.appendChild(turn);
+            var del = button('xs-key-edit', '✕', 'Unpark this thread');
+            on(del, 'click', function () {
+              Store.updateCraftData(projectId, function (cd) { return X.unpark(cd, o.i); });
+              C.render();
+              redraw();
+            });
+            row.appendChild(del);
+            list.appendChild(row);
+          });
+          old.forEach(function (i) {
+            var pk = data.parking[i];
+            var row = el('div', 'list-item xs-park-row');
+            var txt = el('span', 'xs-park-text');
+            txt.appendChild(el('span', 'xs-key-code', (pk.symbol || '•') + '  ' + (pk.key || '—')));
+            txt.appendChild(el('span', 'xs-key-sub', (pk.note ? pk.note + ' · ' : '') + 'a note from before; not on the chart'));
+            row.appendChild(txt);
+            var del = button('xs-key-edit', '✕', 'Remove this parking note');
+            on(del, 'click', function () {
+              Store.updateCraftData(projectId, function (cd) { return X.unpark(cd, i); });
+              redraw();
+            });
+            row.appendChild(del);
+            list.appendChild(row);
+          });
+          body.appendChild(list);
+        }
+        redraw();
+      },
+      footer: [{ text: 'Close', cls: 'btn primary', onClick: function (api) { api.close(); } }]
+    });
+  }
+
+  /** Marking a parked stitch offers to unpark it (#3). */
+  function offerUnpark(projectId, x, y, pi) {
+    if (typeof X.parkedAt !== 'function' || !view || !view.data) return;
+    var hits = X.parkedAt(view.data, x, y).filter(function (i) {
+      var pk = view.data.parking[i];
+      return pk && (pk.paletteIndex === pi || pk.paletteIndex === undefined);
+    });
+    if (!hits.length) return;
+    toast('A thread is parked here', {
+      actionText: 'Unpark', ms: 5000,
+      onAction: function () {
+        Store.updateCraftData(projectId, function (cd) {
+          var d = cd;
+          for (var k = hits.length - 1; k >= 0; k--) d = X.unpark(d, hits[k]);
+          return d;
+        });
+        C.render();
+      }
+    });
   }
 
   /* ---- colour editor -------------------------------------------------- */
@@ -4135,7 +5493,7 @@
           },
           onError: function (err) {
             setPreview(el('p', 'muted', (err && err.message) ||
-              'That PDF could not be read. It may be a scan — you can still add the colours by hand.'));
+              'That PDF could not be read. Its pages may be pictures — you can still add the colours by hand.'));
           }
         });
         body.appendChild(zone);
@@ -4388,6 +5746,28 @@
 
   var MAX_PAGES = 40;
 
+  /**
+   * xs-audit: colour names never hold digits. On a magazine key the parser can
+   * pick up the chart's symbol run as a name ("Zlnn9999MM"); such a name is
+   * replaced with the floss table's name (or left empty, never shown).
+   * Mutates `entries`; returns how many names were replaced.
+   */
+  function looksLikeSymbolSoup(name) {
+    var s = String(name || '').trim();
+    if (!s) return false;
+    return /\d/.test(s) || /(.)\1\1\1/.test(s) || (s.length >= 6 && !/\s/.test(s) && !/[aeiouy]/i.test(s));
+  }
+  function cleanKeyNames(entries) {
+    var n = 0;
+    (entries || []).forEach(function (e) {
+      if (!e || !looksLikeSymbolSoup(e.name)) return;
+      var t = typeof X.flossFor === 'function' ? X.flossFor(e.brand || 'DMC', e.code) : null;
+      e.name = t && t.name ? t.name : '';
+      n++;
+    });
+    return n;
+  }
+
   function handlePdfText(projectId, res, handle, setPreview) {
     var key;
     try { key = X.parseKey(res.text || ''); } catch (e) { key = null; }
@@ -4395,19 +5775,25 @@
       setPreview(el('p', 'muted', 'That PDF could not be read.'));
       return;
     }
+    var soup = cleanKeyNames(key.entries);
     var edits = { entries: key.entries.slice(), fabric: key.fabric, design: key.design, strands: key.strandsDefault };
 
     var card = el('div', 'card xs-preview-card');
     var band = el('div', 'xs-confidence');
     var level = key.confidence >= 0.7 ? 'good' : (key.confidence > 0 ? 'ok' : 'none');
+    /* xs-audit: a key whose names came back as chart-symbol soup was not read cleanly */
+    if (level === 'good' && soup) level = 'ok';
     band.classList.add('xs-conf-' + level);
     if (level === 'good') {
       band.textContent = 'Read the key cleanly — ' + plural(key.entries.length, 'colour') + ' found.';
+    } else if (level === 'ok' && soup) {
+      band.textContent = 'Read the key (' + plural(key.entries.length, 'colour') + '), but ' + plural(soup, 'name') +
+        ' came out as chart symbols and ' + (soup === 1 ? 'was' : 'were') + ' replaced with the DMC name. Check it before importing.';
     } else if (level === 'ok') {
       band.textContent = 'Read some of the key (' + plural(key.entries.length, 'colour') +
         '). Check it before importing.';
     } else if ((res.chars || 0) < 60) {
-      band.textContent = 'This PDF is a scan, so there is no text to read. The chart pages are ' +
+      band.textContent = 'These pages are pictures, so there is no text to read. The chart pages are ' +
         'here; ' + (handle && readerAvailable() ? 'read the chart from the page pictures below, or add colours by hand.' : 'add colours by hand or from a photo.');
     } else {
       band.textContent = 'I couldn’t find a colour key in this PDF. The chart pages are here; ' +
@@ -4542,7 +5928,10 @@
         stitchCount: e.stitchCount || 0, skeins: e.skeins || 0, have: false
       };
     });
-    X.assignSymbols(palette);
+    if (grid && grid.ok) palette.forEach(function (pe, i) { keepReadFields(pe, source[i]); });
+    letterPalette(palette);
+    var gridInfo = grid && grid.ok ? gridSourceCheck(grid) : null;
+    var orn = grid && grid.ok ? ornamentsOf(grid, palette) : null;
 
     Store.updateCraftData(projectId, function (cd) {
       if (palette.length) {
@@ -4571,8 +5960,9 @@
         cd.chart = {
           w: grid.w, h: grid.h,
           cells: X.packCells(grid.cells, grid.w, grid.h),
-          part: [], back: [], knots: []
+          part: orn ? orn.part : [], back: orn ? orn.back : [], knots: orn ? orn.knots : []
         };
+        clearExtraProgress(cd);
         cd.progress.mode = 'cells';
         cd.current.cx = 0;
         cd.current.cy = 0;
@@ -4586,6 +5976,7 @@
         warnings: key.warnings.concat(grid && grid.ok ? ['grid read from the PDF by the beta reader'] : [])
           .slice(0, 12)
       };
+      if (gridInfo) cd.source.check = gridInfo;
       return X.normalize(cd, null);
     });
 
@@ -4727,6 +6118,123 @@
     };
   }
 
+  /* ---- wave K: the grid read tells the truth (the pacman bug's UI half) -- */
+
+  /** Carry what a read knows about a colour onto the palette entry we store:
+      the key's printed count, the designer's symbol and "not told apart". */
+  function keepReadFields(out, src) {
+    if (!out || !src) return out;
+    if (typeof src.keyCount === 'number' && src.keyCount > 0) out.keyCount = src.keyCount;
+    if (src.glyph && typeof src.glyph === 'object') out.glyph = src.glyph;
+    if (Array.isArray(src.unresolved)) {
+      out.unresolved = src.unresolved.slice();
+      out.code = '';
+      out.brand = '';
+      out.name = src.name || 'Unknown colour (not told apart)';
+    }
+    return out;
+  }
+
+  /** Symbols for a freshly imported palette: one per shape family before any
+      family repeats (#1), and "?" on a colour the read could not name. */
+  function letterPalette(palette) {
+    try { X.assignSymbols(palette, { distinct: true }); } catch (e) { X.assignSymbols(palette); }
+    for (var i = 0; i < palette.length; i++) if (palette[i].unresolved) palette[i].symbol = '?';
+    return palette;
+  }
+
+  function sumOrNull(list) {
+    if (!Array.isArray(list) || !list.length) return null;
+    var s = 0;
+    for (var i = 0; i < list.length; i++) {
+      if (typeof list[i] !== 'number') return null;
+      s += list[i];
+    }
+    return s;
+  }
+
+  var UNRESOLVED_WHY = {
+    'shared-ink': 'These key colours are printed in the same ink, and no symbol on the chart told them apart.',
+    tie: 'These key colours have the same stitch count and nothing else to tell them apart.',
+    unknown: 'This ink matches no colour in the key.'
+  };
+
+  /** A CheckSheet Check for an extractGrid result: its count check, plus one row
+      per class it could not name. Any unresolved class makes the check "off". */
+  function gridCheckOf(res) {
+    if (!res || !res.ok) return null;
+    var base = null;
+    if (res.check && C.check && typeof C.check.fromXStitch === 'function') {
+      try { base = C.check.fromXStitch(res.check); } catch (e) { base = null; }
+    }
+    var c = base || { verdict: 'unchecked', title: 'Chart against the key', summary: '', rows: [] };
+    var ur = Array.isArray(res.unresolved) ? res.unresolved : [];
+    if (!ur.length) return c;
+    var rows = (c.rows || []).slice(), n = 0;
+    for (var i = ur.length - 1; i >= 0; i--) {
+      var u = ur[i];
+      n += u.cells || 0;
+      var pe = res.palette && res.palette[u.palette];
+      var exp = sumOrNull(u.expected);
+      rows.unshift({
+        label: (pe && pe.name) || 'Unknown colour',
+        printed: exp, read: u.cells || 0, verdict: 'off',
+        why: (UNRESOLVED_WHY[u.why] || UNRESOLVED_WHY.unknown) +
+          (u.expected && u.expected.length > 1 && exp !== null
+            ? ' The key prints ' + u.expected.map(comma).join(' and ') + ' for them.' : ''),
+        hex: /^[0-9a-f]{6}$/i.test(u.ink || '') ? '#' + u.ink : undefined
+      });
+    }
+    return {
+      verdict: 'off',
+      title: c.title || 'Chart against the key',
+      summary: comma(n) + ' ' + (n === 1 ? 'stitch' : 'stitches') + ' could not be given a key colour. ' +
+        'They come in marked “?” so you can choose. ' + (c.summary || ''),
+      rows: rows,
+      note: c.note
+    };
+  }
+
+  /**
+   * #10: backstitch, French knots and fractionals the PDF draws as lines and
+   * shapes (extractGrid().graphics), matched to the key's backstitch / knot
+   * rows by colour (XStitch.ornamentsFromGraphics). Nothing unmatched is guessed.
+   * -> { back, knots, part, unmatched } | null
+   */
+  function ornamentsOf(res, palette) {
+    if (!res || !res.graphics || typeof X.ornamentsFromGraphics !== 'function') return null;
+    var g = res.graphics;
+    if (!((g.segments && g.segments.length) || (g.circles && g.circles.length) || (g.polys && g.polys.length))) return null;
+    var o = null;
+    try { o = X.ornamentsFromGraphics(g, palette, {}); } catch (e) { o = null; }
+    if (!o || !(o.back.length || o.knots.length || o.part.length)) return null;
+    return o;
+  }
+
+  function ornamentWords(o) {
+    if (!o) return '';
+    var w = [];
+    if (o.back.length) w.push(comma(o.back.length) + ' backstitch ' + (o.back.length === 1 ? 'segment' : 'segments'));
+    if (o.knots.length) w.push(plural(o.knots.length, 'knot'));
+    if (o.part.length) w.push(plural(o.part.length, 'part stitch'));
+    return w.join(', ') + ' read from the PDF' + (o.unmatched && o.unmatched.length ? ' (' + comma(o.unmatched.length) + ' lines matched no key colour and were left out)' : '');
+  }
+
+  /** What craftData.source.check keeps of a grid read (the project's band). */
+  function gridSourceCheck(res) {
+    var c = gridCheckOf(res);
+    if (!c) return null;
+    var ur = Array.isArray(res.unresolved) ? res.unresolved : [];
+    var off = 0;
+    (c.rows || []).forEach(function (r) { if (r && r.verdict === 'off') off++; });
+    return {
+      verdict: c.verdict, summary: c.summary,
+      readTotal: res.filled || null,
+      expectedTotal: res.check && typeof res.check.expectedTotal === 'number' ? res.check.expectedTotal : null,
+      off: off, colours: (res.palette || []).length - ur.length
+    };
+  }
+
   function gridIsWorthTrying(key) {
     if (!key || !key.entries || key.entries.length < 2) return false;
     var withCounts = 0;
@@ -4767,9 +6275,17 @@
         return res;
       }
       var head = el('p', 'xs-beta-ok');
-      /* 04 #6: the rectangle is not the stitch count. */
-      head.textContent = 'Read ' + comma(res.filled || 0) + ' stitches over a ' + res.w + ' × ' + res.h +
-        ' grid, ' + res.matched + ' of ' + res.colors + ' colours matched.';
+      /* 04 #6: the rectangle is not the stitch count. xs-audit: the reader's
+         own "9 of 9 colours matched" counts inks, not key colours, and sat
+         right above "All 10 colours match the key" on Pac-Man; the check line
+         below is the one statement about the key, so the head gives only the
+         size and the number of key colours on the chart. */
+      var gcheck0 = gridCheckOf(res);
+      var nCol = (res.palette || []).filter(function (e) { return e && !e.unresolved; }).length;
+      head.textContent = 'Read ' + comma(res.filled || 0) + ' stitches over a ' + res.w + ' × ' + res.h + ' grid' +
+        (gcheck0 && C.check && typeof C.check.line === 'function'
+          ? ' in ' + plural(nCol, 'colour') + '.'
+          : ', ' + res.matched + ' of ' + res.colors + ' colours matched.');
       box.appendChild(head);
       box.appendChild(el('p', 'muted',
         'Read in ' + secs + ' s. Using it replaces the colour ' +
@@ -4777,11 +6293,47 @@
         'stitches, which starts from zero — any counts you have now are not carried over. ' +
         'The PDF pages are kept: 📄 on the chart shows the page for any stitch, for the ' +
         'backstitch and notes the grid reader cannot see.'));
+      /* Wave K: the read's own check, shown before "Use it" every time. An
+         "off" check (counts that disagree, colours not told apart) demotes the
+         button behind a plain confirm; it never blocks and never hides it. */
+      var gcheck = gridCheckOf(res);
+      var hasCheck = !!(gcheck && C.check && typeof C.check.line === 'function');
+      if (hasCheck) {
+        var cl = C.check.line(gcheck, {
+          onOpen: function () { C.check.open(gcheck, { title: 'Chart against the key' }); }
+        });
+        cl.classList.add('xs-grid-check');
+        box.appendChild(cl);
+      }
+      var ur = Array.isArray(res.unresolved) ? res.unresolved : [];
+      if (ur.length) {
+        box.appendChild(el('p', 'xs-grid-unresolved', ur.map(function (u) {
+          var pe = res.palette[u.palette];
+          return comma(u.cells) + ' ' + (u.cells === 1 ? 'stitch is' : 'stitches are') + ' ' +
+            ((pe && pe.name) || 'an unknown colour').replace(/ \((not told apart|not in the key\?)\)$/, '') +
+            ': not told apart.';
+        }).join(' ') + ' Using it keeps them as their own colour marked “?” on the chart, and ' +
+          'the key lets you choose which colour they are.'));
+      }
+      var orn0 = ornamentsOf(res, res.palette || []);
+      if (orn0) box.appendChild(el('p', 'muted', ornamentWords(orn0) + '.'));
       if (res.warnings.length) box.appendChild(warningList('Notes', res.warnings.slice(0, 4), true));
-      var use = button('btn primary block', 'Use it');
-      on(use, 'click', function () { onUse(res); });
+      var off = !!(gcheck && gcheck.verdict === 'off');
+      var use = button('btn primary block', off ? 'Use it anyway…' : 'Use it');
+      if (hasCheck && typeof C.check.demote === 'function') C.check.demote(use, gcheck);
+      else if (off) use.classList.remove('primary');
+      on(use, 'click', function () {
+        if (!off) { onUse(res); return; }
+        C.confirmSheet({
+          title: 'Use it with colours that are off?',
+          message: (gcheck.summary || '') + ' The chart may be wrong where those colours are. ' +
+            'You can fix them from the key afterwards.',
+          confirmText: 'Use it anyway',
+          cancelText: 'Go back'
+        }).then(function (ok) { if (ok) onUse(res); });
+      });
       box.appendChild(use);
-      fb('done');
+      fb(off ? 'alert' : 'done');
       return res;
     }, function () {
       clear(box);
@@ -4800,7 +6352,10 @@
         stitchCount: e.stitchCount || 0, skeins: e.skeins || 0, have: !!e.have
       };
     });
-    X.assignSymbols(palette);
+    palette.forEach(function (pe, i) { keepReadFields(pe, res.palette[i]); });
+    letterPalette(palette);
+    var gridInfo = gridSourceCheck(res);
+    var orn = ornamentsOf(res, palette);
 
     Store.updateCraftData(projectId, function (cd) {
       cd.palette = palette;
@@ -4809,7 +6364,7 @@
       cd.chart = {
         w: res.w, h: res.h,
         cells: X.packCells(res.cells, res.w, res.h),
-        part: [], back: [], knots: []
+        part: orn ? orn.part : [], back: orn ? orn.back : [], knots: orn ? orn.knots : []
       };
       cd.progress.mode = 'cells';
       cd.progress.done = '';
@@ -4833,6 +6388,7 @@
       var warn = (cd.source.warnings || []).slice(0);
       cd.source.warnings = warn.concat(['grid read from the PDF by the beta reader'])
         .concat(res.warnings || []).slice(0, 12);
+      if (gridInfo) { cd.source.check = gridInfo; cd.source.kind = 'pdf'; }
       return X.normalize(cd, null);
     });
     forgetCaches();
@@ -5481,8 +7037,20 @@
           cls: 'btn primary',
           onClick: function (api) {
             if (!result || !result.data) { toast('Convert a photo first'); return; }
-            applyPhoto(projectId, result, file);
-            api.close();
+            /* #1: a photo never replaces an imported key or chart without asking */
+            var pp = Store.project(projectId);
+            var ask = pp ? photoReplaceText(dataOf(pp)) : null;
+            if (!ask) { applyPhoto(projectId, result, file); api.close(); return; }
+            C.confirmSheet({
+              title: 'Replace this project’s colours?',
+              message: ask,
+              confirmText: 'Replace them',
+              cancelText: 'Keep my key'
+            }).then(function (ok) {
+              if (!ok) return;
+              applyPhoto(projectId, result, file);
+              api.close();
+            });
           }
         }
       ],
@@ -5507,6 +7075,23 @@
    * The photo module hands back a full XSData that has already been through
    * XStitch.normalize, so this is mostly a straight adoption plus a title.
    */
+  /**
+   * xs-audit (#1): what a photo would throw away, in words, or null when the
+   * project has nothing to lose (no colours yet).
+   */
+  function photoReplaceText(data) {
+    var n = data && data.palette ? data.palette.length : 0;
+    if (!n) return null;
+    var st = statsOf(data);
+    var bits = ['This project already has ' + plural(n, 'colour') +
+      (data.source && data.source.kind === 'pdf' ? ' from its PDF key' : '') +
+      (hasChart(data) ? ' and a ' + data.chart.w + ' × ' + data.chart.h + ' chart' : '') + '.'];
+    if (st.done > 0) bits.push(comma(st.done) + ' ' + (st.done === 1 ? 'stitch is' : 'stitches are') + ' marked, and the photo starts from zero.');
+    bits.push('The chart from the photo replaces the colours' + (hasChart(data) ? ' and the chart' : '') +
+      (data.pages && data.pages.length ? '; the PDF pages stay' : '') + '. You can Undo it.');
+    return bits.join(' ');
+  }
+
   function applyPhoto(projectId, result, file) {
     var d = result.data;
     var title = '';
@@ -5683,6 +7268,20 @@
    * The pdf.js scale to draw a page at so a stitch is at least 8 px, given
    * the pitch seen at scale `s0`, capped at 4096 px a side and 16 MP.
    */
+  /* xs-audit: the pages to join are the ones that look like the tile that
+     was found (the same square size at page scale), not every page with a
+     lattice: on a real 5-page sampler the cover photo "had a grid" and sank
+     the whole join. */
+  function tilePages(list, ref) {
+    var rp = ref && ref.det && ref.det.lattice ? Math.min(ref.det.lattice.pitchX, ref.det.lattice.pitchY) / (ref.s0 || 1) : 0;
+    return list.filter(function (c) {
+      if (!c.det || !c.det.ok) return false;
+      if (c === ref || !rp || !c.det.lattice) return true;
+      var cp = Math.min(c.det.lattice.pitchX, c.det.lattice.pitchY) / (c.s0 || 1);
+      return Math.abs(cp - rp) <= rp * 0.2;
+    });
+  }
+
   function pdfReadScale(base, pitchAtS0, s0) {
     var s = s0;
     if (pitchAtS0 > 0 && pitchAtS0 < PDF_MIN_PX * 1.05) s = s0 * (PDF_MIN_PX * 1.1) / pitchAtS0;
@@ -5690,6 +7289,14 @@
     var cap = Math.min(PDF_MAX_SIDE / Math.max(bw, bh), Math.sqrt(PDF_MAX_AREA / (bw * bh)));
     return Math.max(0.1, Math.min(s, cap));
   }
+
+  /** The scale to look for a chart at: about 2,000 px wide, within the caps. */
+  function pdfLookScale(base) {
+    var bw = Math.max(1, base.w), bh = Math.max(1, base.h);
+    var cap = Math.min(PDF_MAX_SIDE / Math.max(bw, bh), Math.sqrt(PDF_MAX_AREA / (bw * bh)));
+    return Math.max(0.1, Math.min(4, PDF_LOOK_W / bw, cap));
+  }
+  var PDF_LOOK_W = 2000;
 
   /** How many key colours a check says are off (an expected count not met). */
   function checkOff(check) {
@@ -5703,9 +7310,13 @@
   }
 
   /** The line a project read from a picture shows above its chart. */
-  function readBannerText(info) {
+  function readBannerText(info, kind) {
     if (!info) return '';
-    var head = 'Read from a picture. ';
+    var head = kind === 'pdf' ? 'Read from the PDF’s grid. ' : 'Read from a picture. ';
+    if (info.unresolved > 0) {
+      return head + comma(info.unresolved) + ' ' + (info.unresolved === 1 ? 'stitch has' : 'stitches have') +
+        ' no key colour yet (marked “?”); tap to choose.';
+    }
     if (info.verdict === 'exact' || info.verdict === 'close') {
       return head + (info.summary || 'The colours match the key.');
     }
@@ -5785,6 +7396,19 @@
         return;
       }
       clear(card);
+      /* wave K (xs-read 2 + xs-keyread): a picture of the colour key is read as a key */
+      if (det.reason === 'looks-like-a-key' && keyReadAvailable()) {
+        card.appendChild(el('h3', 'xs-h3', 'This looks like a colour key'));
+        card.appendChild(el('p', 'muted', det.message || 'It looks like the list of threads, not the chart.'));
+        var asKey = button('btn primary block', 'Read the colour key');
+        on(asKey, 'click', function () { openKeyReadSheet(projectId, { blob: file, name: file.name || 'Key picture' }); });
+        card.appendChild(asKey);
+        var asChart2 = button('btn block', 'No, it is a chart');
+        on(asChart2, 'click', function () { openReadSheet(projectId, src); });
+        card.appendChild(asChart2);
+        try { asKey.focus(); } catch (e) { /* ignore */ }
+        return;
+      }
       card.appendChild(el('h3', 'xs-h3', 'Is this a chart or a photo?'));
       var why;
       if (det.ok) {
@@ -5802,6 +7426,11 @@
       on(asPhoto, 'click', function () { openPhotoSheet(projectId, file); });
       card.appendChild(asChart);
       card.appendChild(asPhoto);
+      if (keyReadAvailable()) {
+        var asKey3 = button('btn ghost block', 'The colour key (the list of threads)');
+        on(asKey3, 'click', function () { openKeyReadSheet(projectId, { blob: file, name: file.name || 'Key picture' }); });
+        card.appendChild(asKey3);
+      }
       card.appendChild(el('p', 'muted xs-import-note',
         'A chart is read square by square and checked against its key. A photo is turned into a new ' +
         'chart of your own, with the colours you choose.'));
@@ -5848,7 +7477,9 @@
         if (stop.cancelled) return null;
         line.textContent = 'Looking for the chart: page ' + n + ' of ' + total + '…';
         return baseSize(n).then(function (base) {
-          var s0 = Math.min(3, 1600 / Math.max(base.w, base.h));
+          /* wave K (xs-read 2): a busy page is found far more reliably drawn
+             about 2,000 px wide (Satsuma: 70 × 97 at 2,200 px, doubtful at 1,250) */
+          var s0 = pdfLookScale(base);
           return handle.renderPage(n, { scale: s0, signal: stop }).then(function (canvas) {
             return Promise.resolve(R.detect(canvas, { size: null })).then(function (det) {
               cands.push({ n: n, det: det, base: base, s0: s0 });
@@ -5873,7 +7504,7 @@
       var det = c.det;
       var pitch = det.lattice ? Math.min(det.lattice.pitchX, det.lattice.pitchY) : 0;
       if (forceSize && det.crop) pitch = Math.min(det.crop.w / forceSize.w, det.crop.h / forceSize.h);
-      var s1 = pdfReadScale(c.base, pitch, c.s0);
+      var s1 = Math.max(pdfReadScale(c.base, pitch, c.s0), c.s0);
       line.textContent = 'Drawing page ' + c.n + ' at full size…';
       return handle.renderPage(c.n, { scale: s1, signal: stop }).then(function (canvas) {
         return canvasBlob(canvas, 'image/png').then(function (blob) {
@@ -5893,6 +7524,84 @@
         finish(el('p', 'muted', err && err.name === 'AbortError'
           ? 'Stopped. Nothing was changed.'
           : 'Page ' + c.n + ' could not be drawn. Nothing was changed.'));
+      });
+    }
+
+    /* #11: a chart printed across several pages as pictures (XSRead.readTiles).
+       The layout and every seam's agreement are shown before anything is used. */
+    function readPdfTiles(list) {
+      if (!list.length) { finish(el('p', 'muted', 'No chart pages to join.')); return Promise.resolve(); }
+      var canvases = [], i2 = 0;
+      function drawNext() {
+        if (stop.cancelled) return Promise.resolve();
+        if (i2 >= list.length) return Promise.resolve();
+        var c = list[i2++];
+        var pitch = c.det.lattice ? Math.min(c.det.lattice.pitchX, c.det.lattice.pitchY) : 0;
+        var s1 = Math.max(pdfReadScale(c.base, pitch, c.s0), c.s0);
+        line.textContent = 'Drawing chart page ' + c.n + ' (' + i2 + ' of ' + list.length + ')…';
+        return handle.renderPage(c.n, { scale: s1, signal: stop }).then(function (cv) {
+          canvases.push(cv);
+          return drawNext();
+        });
+      }
+      return drawNext().then(function () {
+        if (stop.cancelled) { finish(el('p', 'muted', 'Stopped. Nothing was changed.')); return; }
+        line.textContent = 'Joining ' + plural(canvases.length, 'page') + '…';
+        return Promise.resolve(window.XSRead.readTiles(canvases, { key: entries, size: declared })).then(function (tr) {
+          var out = el('div');
+          if (!tr || !tr.ok) {
+            out.appendChild(el('p', null, (tr && tr.message) || 'The pages could not be joined.'));
+            out.appendChild(el('p', 'muted', 'Nothing was changed. A picture of the whole design can be read instead.'));
+            finish(out);
+            fb('alert');
+            return;
+          }
+          out.appendChild(el('p', 'xs-beta-ok', 'Joined ' + plural(tr.tiles.length, 'page') + ' as ' + tr.layout.cols +
+            ' across × ' + tr.layout.rows + ' down: ' + tr.size.w + ' × ' + tr.size.h + ' squares. Is this the layout?'));
+          /* xs-audit: the PDF's own design size is a check too (the first real
+             join, a 5-page sampler, made 178 × 238 of a stated 138 × 172) */
+          var sizeOff = !!(declared && tr.size && (tr.size.w !== declared.w || tr.size.h !== declared.h));
+          if (sizeOff) {
+            out.appendChild(el('p', 'xs-size-doubt', 'The PDF says the design is ' + declared.w + ' × ' + declared.h +
+              ' stitches, but the joined pages make ' + tr.size.w + ' × ' + tr.size.h + '. The layout, or where a page’s ' +
+              'chart starts and ends, is probably wrong.'));
+          }
+          function pageNo(i) { return list[i] && list[i].n ? list[i].n : i + 1; }
+          var sl = el('ul', 'xs-tile-seams');
+          (tr.seams || []).forEach(function (s) {
+            sl.appendChild(el('li', s.ok === false ? 'is-off' : null, 'Pages ' + pageNo(s.a) + ' and ' + pageNo(s.b) +
+              (s.axis === 'x' ? ' (side by side)' : ' (one above the other)') + ': ' +
+              (s.cells ? Math.round((s.agree || 0) * 100) + '% of ' + comma(s.cells) + ' overlapping squares agree'
+                : (s.overlap ? 'overlap not checked' : 'they meet edge to edge')) + (s.ok === false ? ' ≠' : '')));
+          });
+          out.appendChild(sl);
+          var chk = tr.check || null;
+          var cc = chk && C.check && C.check.fromXStitch ? C.check.fromXStitch(chk) : null;
+          if (cc && C.check.line) out.appendChild(C.check.line(cc, { onOpen: function () { C.check.open(cc, {}); } }));
+          var seamOff = (tr.seams || []).some(function (s) { return s.ok === false; });
+          var off = seamOff || sizeOff || (cc && cc.verdict === 'off');
+          var use = button('btn primary block', off ? 'Use it anyway…' : 'Use this chart');
+          if (cc && C.check.demote) C.check.demote(use, seamOff || sizeOff ? { verdict: 'off', summary: seamOff ? 'A seam between pages disagrees.' : 'The joined size is not the size the PDF states.', rows: [] } : cc);
+          if (off) use.classList.remove('primary');
+          on(use, 'click', function () {
+            var go = function () {
+              applyRead(projectId, tr, { src: { name: 'Pages joined', blob: null, pdf: { handle: handle, key: key, progressLine: progressLine } },
+                o: { key: entries, size: tr.size, fabric: 'auto', mode: 'auto', assign: {} }, renames: {}, typed: {},
+                check: chk, keyMeta: keyMeta, data: tr.data });
+            };
+            if (!off) { go(); return; }
+            C.confirmSheet({ title: 'Use it with parts that disagree?',
+              message: ((cc && cc.summary) || '') + (seamOff ? ' A seam between pages disagrees.' : '') +
+                (sizeOff ? ' The joined size is not the size the PDF states.' : '') +
+                ' The joined chart may be wrong there.', confirmText: 'Use it anyway', cancelText: 'Go back' })
+              .then(function (ok) { if (ok) go(); });
+          });
+          out.appendChild(use);
+          finish(out);
+          fb(off ? 'alert' : 'done');
+        });
+      }, function (err) {
+        finish(el('p', 'muted', err && err.name === 'AbortError' ? 'Stopped. Nothing was changed.' : 'A page could not be drawn. Nothing was changed.'));
       });
     }
 
@@ -5919,8 +7628,21 @@
           box2.appendChild(el('p', null, 'Each chart page here seems to hold only part of the design ' +
             '(page ' + b.n + ' shows about ' + b.det.size.w + ' × ' + b.det.size.h + ' of the ' +
             declared.w + ' × ' + declared.h + ' squares).'));
-          box2.appendChild(el('p', 'muted', 'Reading a chart split across several pages is not something ' +
-            'this can do yet, and one piece is not the whole chart. A picture of the whole design works.'));
+          if (window.XSRead && typeof window.XSRead.readTiles === 'function') {
+            box2.appendChild(el('p', 'muted', 'The pages can be read one by one and joined into one chart. ' +
+              'This is new and has only been tried on made-up charts, so look closely at the check.'));
+            var joinBtn = button('btn ghost block', 'Join the chart pages (new)');
+            on(joinBtn, 'click', function () {
+              joinBtn.disabled = true;
+              clear(box);
+              box.appendChild(line);
+              readPdfTiles(tilePages(cands, b));
+            });
+            box2.appendChild(joinBtn);
+          } else {
+            box2.appendChild(el('p', 'muted', 'Reading a chart split across several pages is not something ' +
+              'this can do yet, and one piece is not the whole chart. A picture of the whole design works.'));
+          }
         } else {
           box2.appendChild(el('p', null, 'The grid on page ' + b.n + ' looks like ' + b.det.size.w + ' × ' +
             b.det.size.h + ' squares, but the PDF says ' + declared.w + ' × ' + declared.h + '.'));
@@ -5936,7 +7658,8 @@
         var counted = entries.some(function (e) { return e.stitchCount > 0; });
         box2.appendChild(el('p', 'muted xs-import-note', counted
           ? 'The check against the key’s stitch counts will say plainly whether that worked.'
-          : 'This key has no stitch counts to check the read against, so look closely at what was read.'));
+          : (entries.length ? 'This key has no stitch counts' : 'No colour key was found') +
+            ' to check the read against, so look closely at what was read.'));
         finish(box2);
         return;
       }
@@ -5975,7 +7698,7 @@
       key: src.key && src.key.length ? src.key.map(copyEntry) : null,
       fabric: typeof saved.fabric === 'string' ? saved.fabric : 'auto',
       mode: saved.mode === 'colour' || saved.mode === 'symbol' ? saved.mode : 'auto',
-      maxColors: 60,
+      maxColors: null,   // wave K: XSRead 2 decides by evidence (up to 256 flat colours)
       assign: isObj(saved.assign) ? JSON.parse(JSON.stringify(saved.assign)) : {}
     };
     var projectKeyEntries = src.keyFrom === 'project' && o.key ? o.key.slice() : null;
@@ -6453,6 +8176,16 @@
                 'a photo or a printed key beside it adds colours a chart does not have.'
               : 'Try a bigger picture, or type the size in stitches under “Adjust”.'));
         n.results.appendChild(help);
+        if (r.reason === 'looks-like-a-key' && keyReadAvailable()) {
+          help.firstChild.textContent = 'This looks like a colour key, not a chart.';
+          var kb = button('btn primary block', 'Read it as a colour key');
+          on(kb, 'click', function () {
+            var b2 = src.blob;
+            api.close();
+            openKeyReadSheet(projectId, { blob: b2, name: src.name, crop: o.crop || null });
+          });
+          help.appendChild(kb);
+        }
         if (n.adjust) n.adjust.open = true;
         if (n.cropDetails && (r.reason === 'too-many-colors' || r.reason === 'not-a-chart')) n.cropDetails.open = true;
         fb('alert');
@@ -6470,6 +8203,46 @@
       verdict.textContent = chk && chk.summary ? chk.summary
         : 'The key gave no stitch counts, so this read cannot be checked. Type the counts from the key below if you have them.';
       n.results.appendChild(verdict);
+      /* wave K (xs-read 2): a size the lattice's own evidence doubts is said
+         plainly, with the reasons, and the size steppers opened to correct it */
+      if (r.sizeVerdict === 'doubtful') {
+        var dz = el('div', 'xs-size-doubt');
+        dz.setAttribute('role', 'note');
+        dz.appendChild(el('p', null, 'The size ' + r.size.w + ' × ' + r.size.h + ' may be wrong. If your chart says ' +
+          'another size, type it under “Adjust the read”.'));
+        (r.sizeEvidence || []).forEach(function (ev) {
+          if (ev && ev.ok === false && ev.detail) dz.appendChild(el('p', 'muted xs-read-note', ev.detail));
+        });
+        n.results.appendChild(dz);
+        if (n.adjust) n.adjust.open = true;
+      }
+      if (r.region && Array.isArray(r.regions) && r.regions.length > 1) {
+        var left = r.regions.filter(function (g) { return !g.chosen && g.kind !== 'other'; })
+          .map(function (g) { return g.label; });
+        if (left.length) {
+          n.results.appendChild(el('p', 'muted xs-read-note', 'Read the chart part of the picture; left out: ' +
+            left.filter(function (v, i) { return left.indexOf(v) === i; }).join(', ') + '.'));
+        }
+        /* xs-audit (R1 + R2): the picture holds its own colour key and no key
+           is in hand: read that key (the key reader, cropped to the region the
+           segmenter found), then come back and read the chart against it. */
+        var keyReg = r.regions.filter(function (g) { return g.kind === 'key' && g.box; })[0];
+        if (keyReg && !hasKey() && keyReadAvailable() && (src.blob || src.canvas)) {
+          var kb = button('btn ghost block xs-read-keyhere', '🔑 Read the colour key in this picture');
+          on(kb, 'click', function () {
+            var go = function (blob) {
+              if (!blob) { toast('The picture could not be passed to the key reader'); return; }
+              closed = true;
+              C.closeAllSheets();
+              openKeyReadSheet(projectId, { blob: blob, name: src.name || 'Chart picture', crop: keyReg.box,
+                reread: { blob: blob, name: src.name || 'Chart picture', size: o.size } });
+            };
+            if (src.blob) go(src.blob);
+            else canvasBlob(src.canvas, 'image/png').then(go, function () { go(null); });
+          });
+          n.results.appendChild(kb);
+        }
+      }
       if (chk && chk.verdict === 'unchecked' && chk.summary) {
         n.results.appendChild(el('p', 'muted xs-read-note',
           'Type the stitch counts from the key into the table to check the read.'));
@@ -6491,6 +8264,14 @@
       var warn = (r.stats && r.stats.warnings) || [];
       if (warn.length) n.results.appendChild(warningList('Notes from the reader', warn.slice(0, 5), true));
       setUse(true);
+      /* wave K: an "off" check demotes "Use this chart" (it still confirms first) */
+      if (n.useBtn && C.check && typeof C.check.demote === 'function' && typeof C.check.fromXStitch === 'function') {
+        try {
+          var cc = C.check.fromXStitch(chk || { verdict: 'unchecked', rows: [] });
+          if (!n.demoter) n.demoter = C.check.demote(n.useBtn, cc);
+          else if (n.demoter.set) n.demoter.set(cc);
+        } catch (e) { /* ignore */ }
+      }
       if (chk && (chk.verdict === 'exact' || chk.verdict === 'close')) fb('done');
     }
 
@@ -6580,8 +8361,12 @@
           var e = o.key[cr.entry] || {};
           /* ok is null when the key printed no count: unchecked, not wrong */
           var printed = hasExp && !(typed['k' + cr.entry] > 0);
+          /* a key row with no printed count is claimed by colour only: say it
+             is not checked, never a tick and never a mismatch */
+          var unchecked = !hasExp && !(typed['k' + cr.entry] > 0)
+            ? el('span', 'xs-count-sub xs-count-unchecked', 'not checked (no count printed)') : null;
           row(cr.hex || e.hex, e.symbol, label, cr.read || 0, hasExp ? cr.expected : null,
-            printed ? null : 'k' + cr.entry, cr.ok === true ? true : cr.ok === false ? false : null, null);
+            printed ? null : 'k' + cr.entry, hasExp ? (cr.ok === true ? true : cr.ok === false ? false : null) : null, unchecked);
         });
       } else {
         /* the check entries are the palette itself, one to one by index */
@@ -6803,7 +8588,8 @@
 
     function setUse(ok) {
       if (!api) return;
-      var b = api.dialog.querySelector('.sheet-foot .btn.primary');
+      if (!n.useBtn) n.useBtn = api.dialog.querySelector('.sheet-foot .btn.primary');
+      var b = n.useBtn;
       if (b) b.disabled = !ok;
     }
 
@@ -7082,7 +8868,7 @@
       next.source = {
         kind: 'picture', fileName: String(x.src.name || ''), importedAt: Date.now(),
         warnings: ((res.stats && res.stats.warnings) || []).slice(0, 12),
-        check: info, picture: keys.pic
+        check: info, picture: x.src.blob ? keys.pic : undefined
       };
       return next;
     });
@@ -7098,7 +8884,7 @@
       },
       key: keyed, keyMeta: km
     };
-    if (window.BlobStore && window.BlobStore.available && window.BlobStore.available()) {
+    if (x.src.blob && window.BlobStore && window.BlobStore.available && window.BlobStore.available()) {
       var picBlob = x.src.blob;
       window.BlobStore.put(keys.pic, picBlob).then(function () {
         return window.BlobStore.put(keys.meta, new Blob([JSON.stringify(meta)], { type: 'application/json' }));
@@ -7167,6 +8953,365 @@
     }, function () { toast('The picture could not be loaded'); });
   }
 
+  /* ---- #7 / R1: a colour key that is a picture (XSKeyRead) --------------
+     docs/wave-k/api/xs-keyread.md. Exact-or-blank: a row's code is kept
+     only when the reader pinned it down or the stitcher confirmed it (a tap
+     on one of the possible codes, or typing it); a partial row's first
+     candidate is never written as its code. On a whole page the stitcher is
+     asked for a box round the key first. */
+
+  function keyReadAvailable() {
+    return !!(window.XSKeyRead && typeof window.XSKeyRead.read === 'function' &&
+      (typeof window.XSKeyRead.isAvailable !== 'function' || window.XSKeyRead.isAvailable()));
+  }
+
+  /** The chart's own colour counts, for the reader's count check. */
+  function chartCountsFor(data) {
+    if (!hasChart(data)) return null;
+    var st = (view && view.data === data && view.stats) || X.progressStats(data);
+    var classes = [], total = 0;
+    data.palette.forEach(function (e, i) {
+      var c = st.byColor[i];
+      var n2 = c && !c.fromKey ? c.total : 0;
+      if (!n2) return;
+      classes.push({ hex: e.hex, count: n2 });
+      total += n2;
+    });
+    return classes.length ? { classes: classes, total: total } : null;
+  }
+
+  /** A typed or tapped code, checked against the floss table: { code, name, hex } | null. */
+  function confirmCode(text) {
+    var t = String(text || '').trim().replace(/^dmc\s*/i, '');
+    if (!t) return null;
+    var f = typeof X.flossFor === 'function' ? X.flossFor('DMC', t) : null;
+    if (!f) return null;
+    return { code: f.code || t, name: f.name || '', hex: f.hex || null };
+  }
+
+  /** KeyRead entries + the stitcher's choices -> parseKey-shaped entries to keep. */
+  function keyEntriesFrom(res, choices) {
+    var out = [], left = 0;
+    (res && res.entries || []).forEach(function (e, i) {
+      var pick = choices[i] ? confirmCode(choices[i]) : null;
+      var exact = e.read && e.read.status === 'exact' && e.code;
+      if (!pick && !exact) { left++; return; }
+      var code = pick ? pick.code : e.code;
+      var tab = confirmCode(code) || {};
+      out.push({
+        symbol: '', brand: 'DMC', code: code,
+        name: pick ? pick.name : (e.name || tab.name || ''),
+        hex: pick ? (pick.hex || e.hex) : (e.hex || tab.hex || null),
+        strands: e.strands || null, stitchCount: e.stitchCount || null, skeins: null,
+        kind: e.kind || 'cross', glyph: e.glyph && e.glyph.clean ? e.glyph : null,
+        line: (pick ? 'DMC ' + code + ' (confirmed by you)' : e.line) || ''
+      });
+    });
+    return { entries: out, left: left };
+  }
+
+  /** ⋯ → Read a key from a picture: choose the picture, then the key sheet. */
+  function pickKeyPicture(projectId) {
+    var pick = document.createElement('input');
+    pick.type = 'file';
+    pick.accept = 'image/png,image/jpeg,image/webp,image/gif,image/bmp';
+    pick.className = 'sr-only';
+    document.body.appendChild(pick);
+    on(pick, 'change', function () {
+      var f = pick.files && pick.files[0];
+      if (pick.parentNode) pick.parentNode.removeChild(pick);
+      if (f) openKeyReadSheet(projectId, { blob: f, name: f.name || 'Key picture', wholePage: (f.size || 0) > 600000 });
+    });
+    pick.click();
+  }
+
+  function openKeyReadSheet(projectId, src) {
+    if (!keyReadAvailable()) { toast('Reading a key from a picture is not available on this device'); return; }
+    var KR = window.XSKeyRead;
+    var p = Store.project(projectId);
+    if (!p || !src || !src.blob) return;
+    var data0 = dataOf(p);
+    var counts = chartCountsFor(data0);
+    var crop = src.crop || null, res = null, token = null, timer = null, closed = false;
+    var choices = {};
+    var n = {};
+
+    function setStatus(t, kind) {
+      n.status.textContent = t;
+      n.status.className = 'xs-read-status' + (kind ? ' is-' + kind : '');
+    }
+
+    function run() {
+      timer = null;
+      if (closed) return;
+      if (token) { try { KR.cancel(token); } catch (e) { /* ignore */ } }
+      setStatus('Reading the key…', 'busy');
+      var pr;
+      try {
+        pr = KR.read(src.blob, { crop: crop, chart: counts, total: counts ? counts.total : null });
+      } catch (e) { pr = null; }
+      if (!pr) { setStatus('The key could not be read on this device.', 'bad'); return; }
+      token = pr.token || null;
+      Promise.resolve(pr).then(function (r) {
+        if (closed || (r && r.reason === 'cancelled')) return;
+        res = r;
+        choices = {};
+        ocrSugg = {};
+        render();
+      }, function () { if (!closed) setStatus('The key could not be read.', 'bad'); });
+    }
+
+    function schedule(ms) {
+      if (timer) window.clearTimeout(timer);
+      timer = window.setTimeout(run, typeof ms === 'number' ? ms : 300);
+    }
+
+    function glyphCanvas(g) {
+      if (!g || !g.clean || !g.bits) return null;
+      var c = document.createElement('canvas');
+      c.width = 16; c.height = 16;
+      c.className = 'xs-glyph';
+      c.setAttribute('aria-hidden', 'true');
+      try {
+        var raw = window.atob(g.bits), ctx = c.getContext('2d'), img = ctx.createImageData(16, 16);
+        for (var k = 0; k < 256; k++) {
+          var on2 = (raw.charCodeAt(k >> 3) >> (7 - (k & 7))) & 1;
+          img.data[k * 4 + 3] = on2 ? 255 : 0;
+        }
+        ctx.putImageData(img, 0, 0);
+      } catch (e) { return null; }
+      return c;
+    }
+
+    function render() {
+      clear(n.results);
+      var r = res;
+      if (!r || !r.ok) {
+        setStatus((r && r.message) || 'No colour key found in this picture.', 'bad');
+        n.results.appendChild(el('p', 'muted', 'Drag the box round just the key (the list of threads) under ' +
+          '“Crop to the key”, then it reads again.'));
+        if (n.cropDetails) n.cropDetails.open = true;
+        syncUse();
+        return;
+      }
+      var st = r.stats || {};
+      setStatus('Read ' + plural(r.entries.length, 'row') + ': ' + (st.exact || 0) + ' sure' +
+        ((st.partial || 0) ? ', ' + st.partial + ' to check' : '') + ((st.blank || 0) ? ', ' + st.blank + ' blank' : '') + '.',
+        r.verdict === 'read' ? 'ok' : 'warn');
+      n.results.appendChild(el('p', 'muted xs-read-note', r.verdict === 'read'
+        ? 'Every code was pinned down by the picture itself' + (counts ? ' and the chart’s own counts' : '') + '. Check them against your paper key anyway.'
+        : 'Rows marked “check” need your eye: tap the right code or type it. Blank rows are left out unless you type them.'));
+      var list = el('div', 'list xs-keyread-list');
+      r.entries.forEach(function (e, i) {
+        var rd = e.read || { status: 'blank', text: '', candidates: [] };
+        var row = el('div', 'list-item xs-keyread-row is-' + rd.status);
+        var sw = el('span', 'xs-swatch');
+        var hx = rd.swatchHex || e.hex;
+        sw.style.background = hx ? '#' + hx : 'transparent';
+        var gc = glyphCanvas(e.glyph);
+        if (gc) { sw.appendChild(gc); if (hx) sw.style.color = X.symbolInk(hx) === 'light' ? '#fff' : '#111'; }
+        row.appendChild(sw);
+        var txt = el('div', 'xs-key-text');
+        var conf = choices[i] ? confirmCode(choices[i]) : null;
+        var tabName = rd.status === 'exact' ? (e.name || (confirmCode(e.code) || {}).name || '') : '';
+        var head = rd.status === 'exact'
+          ? 'DMC ' + e.code + (tabName ? ' · ' + tabName : '')
+          : conf ? 'DMC ' + conf.code + (conf.name ? ' · ' + conf.name : '') + ' (you chose)'
+            : rd.status === 'partial' ? 'DMC ' + rd.text + ' · check' : 'Not read';
+        txt.appendChild(el('span', 'xs-key-code', head));
+        var sub = [];
+        if (e.stitchCount) sub.push(comma(e.stitchCount) + ' sts');
+        /* The key reader says, per row, whether the printed count was read. A
+           count it looked for and could not read is said plainly, so a missing
+           number never looks like "this colour has no count". */
+        else if (rd.countStatus === 'not-read') sub.push('count not read' + (rd.countWhy ? ' (' + rd.countWhy + ')' : ''));
+        if (rd.status === 'exact') sub.push('read from the picture');
+        if (rd.why && rd.status !== 'exact') sub.push(rd.why);
+        txt.appendChild(el('span', 'xs-key-sub', sub.join(' · ')));
+        if (rd.status !== 'exact') {
+          var fix = el('div', 'xs-keyread-fix');
+          (rd.candidates || []).forEach(function (cd) {
+            var f = confirmCode(cd);
+            var b = button('btn ghost xs-keyread-cand' + (choices[i] === cd ? ' on' : ''), cd, 'It is DMC ' + cd + (f && f.name ? ', ' + f.name : ''));
+            if (f && f.hex) { var dot = el('span', 'xs-swatch xs-swatch-sm'); dot.style.background = '#' + f.hex; b.insertBefore(dot, b.firstChild); }
+            on(b, 'click', function () { choices[i] = cd; render(); });
+            fix.appendChild(b);
+          });
+          if (ocrSugg[i] && choices[i] !== ocrSugg[i]) {
+            var os = button('btn ghost xs-keyread-cand', ocrSugg[i] + ' ?', 'The text reader read DMC ' + ocrSugg[i] + ': tap to accept it');
+            if (C.ocr && typeof C.ocr.mark === 'function') { try { C.ocr.mark(os, {}); } catch (e) { /* ignore */ } }
+            on(os, 'click', function () { choices[i] = ocrSugg[i]; render(); });
+            fix.appendChild(os);
+          }
+          var inp = C.textInput ? C.textInput(choices[i] && (rd.candidates || []).indexOf(choices[i]) < 0 ? choices[i] : '', 'Type the code') : el('input');
+          inp.setAttribute('inputmode', 'text');
+          inp.setAttribute('aria-label', 'Code for row ' + (i + 1));
+          inp.className = (inp.className ? inp.className + ' ' : '') + 'xs-keyread-input';
+          on(inp, 'change', function () {
+            var v = inp.value.trim();
+            if (!v) { delete choices[i]; render(); return; }
+            if (!confirmCode(v)) { toast('DMC ' + v + ' is not a DMC code'); fb('alert'); return; }
+            choices[i] = v;
+            render();
+          });
+          fix.appendChild(inp);
+          txt.appendChild(fix);
+        }
+        row.appendChild(txt);
+        list.appendChild(row);
+      });
+      n.results.appendChild(list);
+      /* the opt-in text reader (shell-ui.md §9): only for blank rows on a
+         cropped key; what it reads is offered as a code to tap, never taken */
+      if ((st.blank || 0) && crop && C.ocr && typeof C.ocr.available === 'function' && C.ocr.available() &&
+          typeof C.ocr.offerButton === 'function') {
+        var ob = C.ocr.offerButton({
+          reason: 'to read the codes the key reader left blank',
+          onReady: function (Ocr) { ocrBlankRows(Ocr); }
+        });
+        if (ob) n.results.appendChild(ob);
+      }
+      syncUse();
+    }
+
+    var ocrSugg = {};
+    function ocrBlankRows(Ocr) {
+      if (!res || !res.ok || !crop || !window.createImageBitmap) return;
+      setStatus('Reading the blank rows with the text reader…', 'busy');
+      window.createImageBitmap(src.blob).then(function (bmp) {
+        var cv = document.createElement('canvas');
+        cv.width = crop.w; cv.height = crop.h;
+        cv.getContext('2d').drawImage(bmp, crop.x, crop.y, crop.w, crop.h, 0, 0, crop.w, crop.h);
+        if (bmp.close) bmp.close();
+        return Ocr.recognize(cv, { mode: 'codes' });
+      }).then(function (out) {
+        var words = (out && out.words) || [], found = 0;
+        res.entries.forEach(function (e, i) {
+          if (!e.read || e.read.status !== 'blank' || choices[i]) return;
+          var rb = res.rows && res.rows[i] && res.rows[i].box;
+          if (!rb) return;
+          for (var k = 0; k < words.length; k++) {
+            var b = words[k].bbox, cy = (b.y0 + b.y1) / 2 + crop.y;
+            if (cy < rb.y || cy > rb.y + rb.h) continue;
+            var f = confirmCode(words[k].text);      // only a real code in the DMC table
+            if (f) { ocrSugg[i] = f.code; found++; break; }
+          }
+        });
+        if (typeof Ocr.terminate === 'function') { try { Ocr.terminate(); } catch (e2) { /* ignore */ } }
+        render();
+        setStatus(found ? 'The text reader suggests ' + plural(found, 'code') + ': tap each one to accept it.'
+          : 'The text reader found no DMC codes in the blank rows.', found ? 'warn' : 'bad');
+      }, function () { setStatus('The text reader could not read this key.', 'bad'); });
+    }
+
+    function syncUse() {
+      if (!n.api) return;
+      var b = n.useBtn || (n.useBtn = n.api.dialog.querySelector('.sheet-foot .btn.primary'));
+      var kept = res && res.ok ? keyEntriesFrom(res, choices) : { entries: [], left: 0 };
+      if (b) {
+        b.disabled = !kept.entries.length;
+        b.textContent = kept.entries.length ? 'Use ' + plural(kept.entries.length, 'colour') : 'Use this key';
+      }
+      if (n.leftNote) n.leftNote.textContent = kept.left ? plural(kept.left, 'row') + ' with no code will be left out.' : '';
+    }
+
+    function use() {
+      if (!res || !res.ok) return;
+      var kept = keyEntriesFrom(res, choices);
+      if (!kept.entries.length) { toast('No row has a code yet'); return; }
+      var pp = Store.project(projectId);
+      if (!pp) return;
+      var d = dataOf(pp);
+      var key = {
+        entries: kept.entries, design: { w: d.design.w || null, h: d.design.h || null, title: d.design.title || '' },
+        fabric: { count: null, kind: null, over: null, color: null }, strandsDefault: null,
+        stitchesUsed: [], warnings: ['key read from a picture' + (kept.left ? ' (' + plural(kept.left, 'row') + ' left out)' : '')],
+        copyrightLines: [], sizes: [], confidence: 0.6
+      };
+      closed = true;
+      if (hasChart(d) && d.source && d.source.kind === 'picture' && window.BlobStore && window.BlobStore.get) {
+        /* a chart read from a picture: read it again against this key */
+        var keys = readKeys(projectId);
+        var named = d.source.picture ? String(d.source.picture) : '';
+        if (/:readsrc:0$/.test(named)) keys = { pic: named };
+        window.BlobStore.get(keys.pic).then(function (blob) {
+          C.closeAllSheets();
+          if (!blob) { toast('The chart picture is not on this device any more'); return; }
+          openReadSheet(projectId, { blob: blob, name: 'Chart picture', key: kept.entries,
+            keyMeta: { title: d.design.title || '', design: d.design.w ? { w: d.design.w, h: d.design.h } : {} },
+            size: d.design.w && d.design.h ? { w: d.design.w, h: d.design.h } : null });
+        }, function () { C.closeAllSheets(); toast('The chart picture could not be loaded'); });
+        return;
+      }
+      if (hasChart(d)) {
+        C.confirmSheet({
+          title: 'Replace this chart’s colours?',
+          message: 'This project already has a chart with its own colours. Using the key replaces the colour ' +
+            'list and clears the chart. You can Undo it.',
+          confirmText: 'Replace', danger: true
+        }).then(function (ok) {
+          if (!ok) return;
+          applyPdf(projectId, { entries: kept.entries, fabric: key.fabric, design: key.design, strands: null }, key, null, el('p'));
+        });
+        return;
+      }
+      applyPdf(projectId, { entries: kept.entries, fabric: key.fabric, design: key.design, strands: null }, key, null, el('p'));
+      toast('Key read from the picture · ' + plural(kept.entries.length, 'colour') +
+        (kept.left ? ' · ' + plural(kept.left, 'row') + ' left out' : ''), { ms: 4200 });
+      /* xs-audit: opened from a chart picture that holds this key: read that
+         chart again, now against the key */
+      if (src.reread && src.reread.blob) {
+        C.closeAllSheets();
+        openReadSheet(projectId, { blob: src.reread.blob, name: src.reread.name || 'Chart picture', key: kept.entries,
+          keyMeta: { title: d.design.title || '', design: d.design.w ? { w: d.design.w, h: d.design.h } : {} },
+          size: src.reread.size || null });
+      }
+    }
+
+    n.api = C.openSheet({
+      title: 'Read a colour key',
+      cls: 'sheet-xs-keyread',
+      build: function (body) {
+        n.status = el('p', 'xs-read-status is-busy', 'Reading the key…');
+        n.status.setAttribute('role', 'status');
+        n.status.setAttribute('aria-live', 'polite');
+        body.appendChild(n.status);
+        var cropBox = el('details', 'xs-read-crop');
+        n.cropDetails = cropBox;
+        cropBox.appendChild(el('summary', null, 'Crop to the key'));
+        cropBox.appendChild(el('p', 'muted xs-read-note', 'On a whole page, drag the box round just the key: ' +
+          'it reads faster and does not mistake other text for codes.'));
+        n.cropper = makeCropFrame({ noun: 'picture', onChange: function (c) { crop = c; schedule(); } });
+        cropBox.appendChild(n.cropper.wrap);
+        cropBox.appendChild(n.cropper.row);
+        cropBox.appendChild(n.cropper.lockRow);
+        body.appendChild(cropBox);
+        n.cropper.load(src.blob);
+        if (crop) n.cropper.set(crop);
+        if (src.wholePage) cropBox.open = true;
+        n.results = el('div', 'xs-read-results');
+        body.appendChild(n.results);
+        n.leftNote = el('p', 'muted xs-read-note', '');
+        body.appendChild(n.leftNote);
+        body.appendChild(el('p', 'muted xs-import-note', 'Read on this device, with no text-recognition engine: ' +
+          'a code is only filled in when the picture’s own digits, the DMC list, the printed swatch' +
+          (counts ? ' and the chart’s counts' : '') + ' agree.'));
+      },
+      footer: [
+        { text: 'Cancel', cls: 'btn ghost', onClick: function (sa) { sa.close(); } },
+        { text: 'Use this key', cls: 'btn primary', onClick: function () { use(); } }
+      ],
+      onClose: function () {
+        closed = true;
+        if (timer) window.clearTimeout(timer);
+        if (token) { try { KR.cancel(token); } catch (e) { /* ignore */ } }
+        if (n.cropper) n.cropper.destroy();
+      }
+    });
+    syncUse();
+    schedule(0);
+  }
+
   /** What the project's banner says, or null when this chart was not read from a picture. */
   function readInfo(data) {
     if (!hasChart(data)) return null;
@@ -7174,7 +9319,39 @@
        source.kind 'picture' and source.check since wave J), so the band
        follows Undo / redo, a reload and an export / import like the chart. */
     var so = data.source || {};
-    return so.kind === 'picture' && isObj(so.check) ? so.check : null;
+    var ur = unresolvedCount(data);
+    if (so.kind === 'pdf' && isObj(so.check)) {
+      /* a grid read is checked again now, so the band follows the stitcher's
+         choices and Undo (the stored line is only the fallback) */
+      var live = liveCheckOf(data);
+      if (live) {
+        var offRows = 0;
+        (live.rows || []).forEach(function (r) { if (r && r.verdict === 'off') offRows++; });
+        return { verdict: live.verdict, summary: live.summary, off: offRows, unresolved: ur };
+      }
+    }
+    if ((so.kind === 'picture' || so.kind === 'pdf') && isObj(so.check)) {
+      if (!ur) return so.check;
+      var c = {};
+      for (var k in so.check) c[k] = so.check[k];
+      c.verdict = 'off';
+      c.unresolved = ur;
+      return c;
+    }
+    /* wave K: squares a read could not name stay visible however they came */
+    return ur ? { verdict: 'off', summary: '', unresolved: ur, off: 0 } : null;
+  }
+
+  /** Stitches sitting on a placeholder colour (palette[i].unresolved). */
+  function unresolvedCount(data) {
+    var pal = data.palette || [], n = 0, any = false;
+    for (var i = 0; i < pal.length; i++) if (pal[i].unresolved) { any = true; break; }
+    if (!any || !hasChart(data)) return 0;
+    var st = (view && view.data === data && view.stats) || statsOf(data);
+    for (i = 0; i < pal.length; i++) {
+      if (pal[i].unresolved && st.byColor[i]) n += st.byColor[i].total || 0;
+    }
+    return n;
   }
 
   function syncReadBand(project, data) {
@@ -7182,12 +9359,141 @@
     if (!n || !n.readBand) return;
     var info = readInfo(data);
     if (info) {
+      var kind = (data.source && data.source.kind) === 'picture' ? 'picture' : 'pdf';
       n.readBand.hidden = false;
       n.readBand.className = 'xs-read-band xs-verdict-' + (info.verdict || 'unchecked');
-      n.readBandText.textContent = readBannerText(info);
+      n.readBandText.textContent = readBannerText(info, kind);
+      n.readBandIcon.textContent = kind === 'picture' ? '🖼' : '🔍';
     } else {
       n.readBand.hidden = true;
     }
+  }
+
+  /**
+   * The chart against its key, worked out now (so it follows Undo and the
+   * stitcher's own choices): palette entries carry the key's printed count
+   * as keyCount since wave K; placeholders the read could not name are rows
+   * of their own, verdict off.
+   */
+  function liveCheckOf(data) {
+    if (!hasChart(data) || typeof X.checkCounts !== 'function') return null;
+    var pal = data.palette, entries = [], any = false, ur = [];
+    for (var i = 0; i < pal.length; i++) {
+      var e = pal[i];
+      if (e.unresolved) { ur.push(i); continue; }
+      if (e.keyCount > 0) any = true;
+      entries.push({ brand: e.brand, code: e.code, name: e.name, hex: e.hex, kind: e.kind,
+        stitchCount: e.keyCount > 0 ? e.keyCount : null });
+    }
+    if (!any && !ur.length) return null;
+    var raw = null;
+    try { raw = X.checkCounts(data, entries); } catch (err) { raw = null; }
+    var st = (view && view.data === data && view.stats) || statsOf(data);
+    var fake = { ok: true, check: raw, palette: pal, unresolved: ur.map(function (pi) {
+      return { palette: pi, ink: pal[pi].hex, cells: st.byColor[pi] ? st.byColor[pi].total : 0,
+        candidates: pal[pi].unresolved, expected: [], why: 'shared-ink' };
+    }) };
+    return gridCheckOf(fake);
+  }
+
+  /** The band's door for a chart read from the PDF grid (not a picture). */
+  function openGridCheck(projectId) {
+    var p = Store.project(projectId);
+    if (!p) return;
+    var data = dataOf(p);
+    var chk = liveCheckOf(data);
+    C.openSheet({
+      title: 'Chart against the key',
+      cls: 'sheet-xs-gridcheck',
+      build: function (body) {
+        if (chk && C.check && typeof C.check.render === 'function') C.check.render(body, chk, {});
+        else body.appendChild(el('p', 'muted', 'The key gave no stitch counts to check this chart against.'));
+        var ur = [];
+        data.palette.forEach(function (e, i) { if (e.unresolved) ur.push(i); });
+        if (ur.length) {
+          body.appendChild(el('h3', 'xs-h3', 'Colours to choose'));
+          ur.forEach(function (i) {
+            var b = button('btn ghost block xs-resolve-open', 'Choose for ' + data.palette[i].name);
+            on(b, 'click', function () { openResolveSheet(projectId, i); });
+            body.appendChild(b);
+          });
+        }
+      },
+      footer: [{ text: 'Close', cls: 'btn ghost', onClick: function (api) { api.close(); } }]
+    });
+  }
+
+  /**
+   * "Which colour are these?" for a placeholder the read could not name:
+   * one of the candidates, any key colour, or "these are fabric". One undo
+   * step through XStitch.resolveClass; never a silent guess.
+   */
+  function openResolveSheet(projectId, pi) {
+    var p = Store.project(projectId);
+    if (!p || typeof X.resolveClass !== 'function') return;
+    var data = dataOf(p), e = data.palette[pi];
+    if (!e || !e.unresolved) return;
+    var st = view && view.stats ? view.stats : statsOf(data);
+    var n = st.byColor[pi] ? st.byColor[pi].total : 0;
+    function apply(choice, word) {
+      Store.updateCraftData(projectId, function (cd) { return X.resolveClass(cd, pi, choice); });
+      forgetCaches();
+      C.closeAllSheets();
+      C.render();
+      fb('done');
+      toast(comma(n) + ' ' + (n === 1 ? 'stitch' : 'stitches') + ' set to ' + word + ' · Undo from the bar', { ms: 4200 });
+    }
+    C.openSheet({
+      title: 'Which colour are these?',
+      cls: 'sheet-xs-resolve',
+      build: function (body) {
+        body.appendChild(el('p', 'muted', comma(n) + ' ' + (n === 1 ? 'stitch' : 'stitches') +
+          ' could not be told apart when the chart was read: ' + e.name.replace(/ \((not told apart|not in the key\?)\)$/, '') +
+          '. Look at your printed chart, then choose. You can undo it.'));
+        var list = el('div', 'list xs-resolve-list');
+        var cands = (e.unresolved || []).filter(function (q) { return data.palette[q] && !data.palette[q].unresolved; });
+        var rest = [];
+        data.palette.forEach(function (q, qi) {
+          if (!q.unresolved && cands.indexOf(qi) < 0 && (q.kind === 'cross' || q.kind === 'blend' || q.kind === 'half')) rest.push(qi);
+        });
+        function row(qi) {
+          var q = data.palette[qi];
+          var b = button('list-item xs-resolve-row', null, 'They are ' + paletteLabel(q));
+          var sw = el('span', 'xs-swatch', q.symbol || '');
+          sw.style.background = swatchHex(q);
+          sw.style.color = X.symbolInk(q.hex) === 'light' ? '#fff' : '#111';
+          b.appendChild(sw);
+          var t = el('span', 'xs-key-text');
+          t.appendChild(el('span', 'xs-key-code', paletteLabel(q)));
+          var sq = st.byColor[qi];
+          var have = sq && !sq.fromKey ? sq.total : 0;
+          /* only keyCount is the key's printed count: after a picture read,
+             stitchCount can be the read count of a row the key gave none for */
+          var printedN = q.keyCount || 0;
+          t.appendChild(el('span', 'xs-key-sub', (printedN ? 'key prints ' + comma(printedN) + ' · ' : '') +
+            (have ? comma(have) + ' on the chart now' : 'none on the chart yet')));
+          b.appendChild(t);
+          on(b, 'click', function () { apply(qi, paletteLabel(q)); });
+          list.appendChild(b);
+        }
+        cands.forEach(row);
+        body.appendChild(list);
+        if (rest.length) {
+          var more = el('details', 'xs-advanced');
+          more.appendChild(el('summary', null, 'Another colour from the key'));
+          var l2 = list;
+          list = el('div', 'list xs-resolve-list');
+          rest.forEach(row);
+          more.appendChild(list);
+          list = l2;
+          body.appendChild(more);
+        }
+        var fab = button('btn ghost block', 'They are fabric (not stitched)');
+        on(fab, 'click', function () { apply(-1, 'fabric'); });
+        body.appendChild(fab);
+      },
+      footer: [{ text: 'Leave them for now', cls: 'btn ghost', onClick: function (api) { api.close(); } }]
+    });
   }
 
   /* ================================================================== *
@@ -7243,6 +9549,26 @@
     if (hasChart(data)) {
       items.push({ icon: '🖨', label: 'Printable chart', run: function () { openPrintSheet(project.id); } });
       items.push({ icon: '💾', label: 'Export as OXS', run: function () { exportOxs(project.id); } });
+      if (data.progress.mode === 'cells' && typeof X.findPlace === 'function') {
+        items.push({ icon: '🔢', label: 'Find my place', run: function () { openFindSheet(project.id); } });
+      }
+    }
+    if (keyReadAvailable()) {
+      items.push({ icon: '🔑', label: 'Read a key from a picture', run: function () { pickKeyPicture(project.id); } });
+    }
+    /* wave K: the self-contained sheets live in js/app-xstitch-extras.js
+       (BUILD.md "Craft screens are split in two"); the app only lists them. */
+    var XE = window.XStitchExtras;
+    if (XE && typeof XE.menuItems === 'function' && typeof XE.open === 'function') {
+      var extra = [];
+      try { extra = XE.menuItems(project) || []; } catch (e) { extra = []; }
+      extra.forEach(function (it) {
+        if (!it || !it.id || !it.label) return;
+        items.push({ icon: it.icon || '•', label: it.label, hint: it.hint, run: function () {
+          var pp = Store.project(project.id) || project;
+          try { XE.open(it.id, pp, { ctx: C, app: window.XStitchApp }); } catch (e2) { toast('That could not be opened'); }
+        } });
+      });
     }
     return items;
   }
@@ -7302,6 +9628,9 @@
     // canvas crisp after a theme swap changes its size. The rulers do follow
     // the theme, so their colours are read again.
     rulerTheme = null;
+    if (view && view.stitched && view.stitched.handle) {
+      try { view.stitched.handle.setTheme(); } catch (e) { /* ignore */ }
+    }
     if (view) redrawAll();
   }
 
@@ -7485,6 +9814,25 @@
     // HANDOFF item 13: the quota banner's "Free up space" button appears when
     // a craft publishes this. Image-only mode keeps pages, key and tallies.
     freeUpSpace: function (projectId) { switchToCountsMode(projectId); },
+    // wave K #9: Settings → Cross-stitch: the pattern's own symbols or the app's set
+    settingsFields: function (body, ctx) {
+      useCtx(ctx);
+      body.appendChild(C.switchRow('The pattern’s own symbols',
+        'When a chart’s symbols were read cleanly from the pattern, show those on the chart; otherwise the app’s set.',
+        patternSymbols(), function (v) {
+          Store.setCraftSetting(CRAFT, 'appSymbols', !v);
+          if (view) redrawAll();
+        }));
+    },
+    // wave K #2: Stitch mode on the shell's working-mode contract (shell-ui.md §1)
+    workMode: STITCH_MODE,
+    // wave K X4: the stitched piece for the shell's share card (shell-ui.md §3)
+    sharePicture: function (p, o) { return stitchedPicture(p, { size: o && o.size, frame: 'hoop' }); },
+    copy: {
+      dropLabel: 'Drop a chart PDF, an .oxs file or a picture of a chart here, or choose a file',
+      homeEmpty: 'No charts yet. Start a cross-stitch project and drop in its PDF.',
+      allDone: 'Nothing in the hoop right now.'
+    },
     // What the New project sheet's drop zone accepts for this craft before
     // handing the file to openImportSheet (the same list its own zone takes).
     importAccept: ['.pdf', '.oxs', '.xml']
@@ -7504,8 +9852,162 @@
      called by app code). The pure helpers, and the real entry points so a
      walkthrough can feed a picture or a parsed key down the same path a
      drop or a PDF import takes. */
+  /** X4: the stitched piece as a square canvas (share card, framed picture). */
+  function stitchedPicture(p, o) {
+    o = o || {};
+    if (!stitchedOk() || typeof window.XSRender.picture !== 'function' || !p) return Promise.resolve(null);
+    var d = dataOf(p);
+    if (!hasChart(d)) return Promise.resolve(null);
+    try {
+      return Promise.resolve(window.XSRender.picture(d, {
+        size: clampInt(o.size, 64, 4096, 1080), frame: o.frame || 'hoop', background: o.background || 'transparent', ghost: 0
+      })).then(function (c) { return c || null; }, function () { return null; });
+    } catch (e) { return Promise.resolve(null); }
+  }
+
+  function screenProjectId() {
+    return view && !view.destroyed ? view.projectId : null;
+  }
+
   window.XStitchApp = {
+    version: 1,
+    current: function () {
+      var id = screenProjectId();
+      var p = id ? Store.project(id) : null;
+      return p ? { projectId: id, project: p, data: dataOf(p) } : null;
+    },
+    dataOf: function (x) { return dataOf(typeof x === 'string' ? Store.project(x) : x); },
+    cells: function (projectId) {
+      if (!view || view.destroyed || !view.cells || (projectId && projectId !== view.projectId)) return null;
+      return { w: view.w, h: view.h, cells: view.cells, done: view.bits ? view.bits.bytes : null };
+    },
+    repaint: function (projectId, o) {
+      if (!view || (projectId && projectId !== view.projectId)) return;
+      if (o && o.cells) forgetCaches();
+      else view.stats = null;
+      if (C) C.render();
+    },
+    centerOn: function (x, y) {
+      var id = screenProjectId();
+      if (!id) return;
+      setCrosshair(clampInt(x, 0, Math.max(0, view.w - 1), 0), clampInt(y, 0, Math.max(0, view.h - 1), 0));
+      saveViewState(id, { cx: view.cx, cy: view.cy });
+      if (sm.chart) sm.chart.centerOn(view.cx, view.cy, 16);
+    },
+    openSheet: function (name, o) {
+      var id = screenProjectId() || (o && o.projectId);
+      if (!id) return false;
+      var map = {
+        chart: openChartSheet, floss: openFlossSheet, fabric: openFabricSheet, pages: openPagesSheet,
+        parking: openParkingSheet, rows: openRowsSheet, find: openFindSheet, read: reopenRead
+      };
+      if (name === 'colour') { openColourEditor(id, clampInt(o && o.index, -1, 9999, -1)); return true; }
+      if (!map[name]) return false;
+      map[name](id);
+      return true;
+    },
+    stitchMode: function () {
+      return {
+        isOn: !!(C && C.workMode && C.workMode.isOn && C.workMode.isOn()),
+        open: function () { if (C && C.workMode) C.workMode.open(); },
+        close: function () { if (C && C.workMode) C.workMode.close(); }
+      };
+    },
+    picture: function (project, o) { return stitchedPicture(project, o); },
+    onMarked: function (fn) {
+      if (typeof fn !== 'function') return function () {};
+      markListeners.push(fn);
+      return function () {
+        var i = markListeners.indexOf(fn);
+        if (i >= 0) markListeners.splice(i, 1);
+      };
+    },
     __test: {
+      gridCheckOf: function (res, ctx) { if (ctx) useCtx(ctx); return gridCheckOf(res); },
+      gridSourceCheck: function (res, ctx) { if (ctx) useCtx(ctx); return gridSourceCheck(res); },
+      keepReadFields: keepReadFields,
+      letterPalette: letterPalette,
+      statsOf: statsOf,
+      pctOf: pctOf,
+      liveCheckOf: function (data) { view = view || null; return liveCheckOf(data); },
+      readInfo: readInfo,
+      stitchModeSpec: STITCH_MODE,
+      stitchModeReadout: function (p) {
+        var d = dataOf(p);
+        if (!view || view.projectId !== p.id) return null;
+        return stitchModeReadout(p, d);
+      },
+      view: function () { return view; },
+      markCellList: markCellList,
+      markPageDone: markPageDone,
+      openFindSheet: openFindSheet,
+      openParkingSheet: openParkingSheet,
+      openResolveSheet: openResolveSheet,
+      openGridCheck: openGridCheck,
+      pageLine: pageLine,
+      blockScope: function (v) { if (v === 'all' || v === 'colour') blockScope = v; return blockScope; },
+      stitched: function () { return view && view.stitched ? view.stitched : null; },
+      runGridBeta: runGridBeta,
+      applyGrid: applyGrid,
+      /** Pure checks of the wave K app logic -> [{ name, ok, got }] (for test/xstitch.gallery.html). */
+      selfCheck: function () {
+        var out = [];
+        function t(name, ok, got) { out.push({ name: name, ok: !!ok, got: got }); }
+        var res = { ok: true, filled: 4, palette: [{ code: '310', hex: '000000' }, { name: 'DMC 349 or DMC 3843 (not told apart)', hex: 'cc6633', unresolved: [0, 1] }],
+          check: { verdict: 'exact', rows: [] }, unresolved: [{ palette: 1, ink: 'cc6633', cells: 100, candidates: [0, 1], expected: [176, 4824], why: 'shared-ink' }] };
+        var gc = gridCheckOf(res);
+        t('an unresolved class makes the grid check off', gc && gc.verdict === 'off', gc && gc.verdict);
+        t('the unresolved class is a row of its own, verdict off', gc && gc.rows[0] && gc.rows[0].verdict === 'off' && gc.rows[0].read === 100, gc && gc.rows[0]);
+        t('the summary says how many stitches have no key colour', gc && /^100 stitches could not be given a key colour/.test(gc.summary), gc && gc.summary);
+        var gs = gridSourceCheck(res);
+        t('source.check keeps the off verdict', gs && gs.verdict === 'off' && gs.off >= 1, gs);
+        var pe = keepReadFields({ code: '', name: '' }, { keyCount: 176, glyph: { clean: true }, unresolved: [0, 1], name: 'X (not told apart)' });
+        t('keepReadFields keeps keyCount, glyph and unresolved', pe.keyCount === 176 && pe.glyph && pe.unresolved.length === 2, pe);
+        var pal = letterPalette([{ hex: '000000', stitchCount: 9 }, { hex: 'ff0000', stitchCount: 5 }, { hex: '00ff00', stitchCount: 3, unresolved: [0] }]);
+        t('an unresolved colour gets the symbol "?"', pal[2].symbol === '?', pal[2].symbol);
+        t('the other colours get distinct symbols', pal[0].symbol && pal[1].symbol && pal[0].symbol !== pal[1].symbol, pal.map(function (e) { return e.symbol; }));
+        var d = X.normalize({ v: 1, palette: [{ code: '310', hex: '000000', keyCount: 4 }, { code: '321', hex: 'ff0000', keyCount: 7 }],
+          chart: { w: 2, h: 2, cells: X.packCells([0, 0, 0, 0], 2, 2), part: [], back: [], knots: [] }, progress: { mode: 'cells', keyDone: { 1: 3 } } }, null);
+        var st = statsOf(d);
+        t('one total: a colour with no squares is counted from the key', st.total === 11 && st.done === 3 && st.byColor[1].fromKey, [st.total, st.done]);
+        if (typeof X.totals === 'function') t('statsOf agrees with XStitch.totals', X.totals(d).total === st.total, X.totals(d).total);
+        t('pctOf under 1% keeps decimals', /^0\.\d+%$/.test(pctOf(20, 64512)), pctOf(20, 64512));
+        var row = { y: 1, rtl: false, runs: [{ p: 0, n: 3, x: 2, done: 3 }, { p: -1, n: 2, x: 5, done: 0 }, { p: 1, n: 2, x: 7, done: 1 }] };
+        t('a row with a part-done run is not done', rowDoneByRuns(row) === false);
+        t('a row\'s squares come from its runs', JSON.stringify(rowCellsByRuns(row, 10)) === JSON.stringify([12, 13, 14, 17, 18]), rowCellsByRuns(row, 10));
+        var rtl = { y: 0, rtl: true, runs: [{ p: 0, n: 2, x: 4, done: 2 }] };
+        t('right-to-left runs walk left', JSON.stringify(rowCellsByRuns(rtl, 10)) === '[4,3]' && rowDoneByRuns(rtl) === true);
+        t('runs without done counts fall back', rowDoneByRuns({ runs: [{ p: 0, n: 2, x: 0 }] }) === null);
+        var kr = { ok: true, entries: [
+          { code: '310', name: 'Black', hex: '000000', read: { status: 'exact', text: '310', candidates: [] } },
+          { code: null, hex: 'aa0000', read: { status: 'partial', text: '3?1', candidates: ['321', '351'] } },
+          { code: null, hex: null, read: { status: 'blank', text: '', candidates: [] } }] };
+        var k0 = keyEntriesFrom(kr, {});
+        t('a partial row\'s first candidate is never saved', k0.entries.length === 1 && k0.left === 2, k0);
+        var k1 = keyEntriesFrom(kr, { 1: '321' });
+        t('a confirmed candidate is kept with the table name', k1.entries.length === 2 && k1.entries[1].code === '321' && !!k1.entries[1].name, k1.entries[1]);
+        t('a code that is not in the DMC list is refused', confirmCode('99999') === null && !!confirmCode('DMC 310'));
+        var s = pdfLookScale({ w: 612, h: 792 });
+        t('a busy page is drawn about 2,000 px wide', Math.abs(612 * s - 2000) < 2, Math.round(612 * s));
+        t('Stitch mode is registered on def.workMode', def.workMode === STITCH_MODE && typeof STITCH_MODE.surface === 'function');
+        return out;
+      },
+      /* xs-audit additions */
+      photoReplaceText: photoReplaceText,
+      tilePages: tilePages,
+      looksLikeSymbolSoup: looksLikeSymbolSoup,
+      cleanKeyNames: cleanKeyNames,
+      reletterReason: reletterReason,
+      reletterSymbols: reletterSymbols,
+      openFlossSheet: openFlossSheet,
+      openKeyReadSheet: openKeyReadSheet,
+      keyEntriesFrom: keyEntriesFrom,
+      confirmCode: confirmCode,
+      keyReadAvailable: keyReadAvailable,
+      pdfLookScale: pdfLookScale,
+      rowsOptsScoped: rowsOptsScoped,
+      rowDoneByRuns: rowDoneByRuns,
+      rowCellsByRuns: rowCellsByRuns,
       readerAvailable: readerAvailable,
       isImageFile: isImageFile,
       importAcceptList: importAcceptList,

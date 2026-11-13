@@ -1,0 +1,239 @@
+/* Thready or Not — css/knitting.css
+   Wave K (knit-ui): what the knitter sees on the counter, from js/app-knitting.js
+   (docs/wave-k/api/knit-ui.md §4). Theme variables only. These nodes live in
+   js/app.js's .knit-extra row under the pattern line and are cloned into the
+   working mode's HUD (.work-hint.knit-extra), so every rule here works in both. */
+
+/* ---- P1: the stretch card ---- */
+.knit-stretch {
+  flex: 1 1 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  border: 2px solid var(--accent);
+  background: var(--surface);
+  color: var(--text);
+}
+.knit-stretch-planned, .knit-stretch-ended { border-style: dashed; }
+.knit-stretch-title {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 16px;
+  line-height: 1.2;
+}
+.knit-stretch-sub { font-size: 13px; color: var(--text-muted); line-height: 1.3; }
+.knit-stretch-btns { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 2px; }
+.knit-stretch-btns .btn { min-height: 40px; padding: 6px 12px; font-size: 14px; }
+.knit-stretch-btns .knit-stretch-go {
+  flex: 1 1 100%;
+  min-height: 52px;
+  font-size: 17px;
+  font-weight: 800;
+}
+
+/* the stretch list sheet */
+.knit-stretch-item {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.knit-stretch-item .btn { align-self: flex-start; }
+.knit-stretch-where { font-weight: 700; }
+.knit-stretch-line { font-size: 13px; color: var(--text-muted); }
+
+/* P10: I measured */
+.knit-measure-row { align-items: center; gap: 8px; }
+.knit-measure-input { width: 7em; font-size: 20px; }
+.knit-measure-list { margin: 8px 0; }
+.knit-measure-item { font-size: 13px; color: var(--text-muted); }
+
+/* ---- P2: the resolved row, the repeat sentence under it ---- */
+.knit-via {
+  display: block;
+  margin-top: 3px;
+  font-size: 12px;
+  line-height: 1.3;
+  color: var(--text-muted);
+  font-style: italic;
+}
+.knit-via::before { content: "from: "; font-style: normal; }
+.knit-rep-tag { font-weight: 700; }
+
+/* ---- P3: the stacked panels chip ---- */
+.knit-panels-chip { font-variant-numeric: tabular-nums; }
+
+/* ---- P11: colours this row ---- */
+.knit-colours {
+  flex: 1 1 100%;
+  font-size: 13px;
+  line-height: 1.3;
+  color: var(--text);
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface);
+}
+.knit-colour-runs { font-weight: 800; font-variant-numeric: tabular-nums; }
+.knit-colour-more { color: var(--text-muted); }
+
+/* ---- P6: the shaping card ---- */
+.knit-shaping {
+  flex: 1 1 100%;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--primary);
+  background: var(--surface);
+  font-size: 13px;
+  line-height: 1.35;
+}
+.knit-shaping-title { font-weight: 800; }
+.knit-shaping-line { color: var(--text-muted); }
+.knit-shaping-line.on { color: var(--text); font-weight: 700; }
+.knit-shaping-count { font-size: 12px; color: var(--text-muted); }
+
+/* ---- P15 suggestion, P16 terms, P19 note, P14 clicker ---- */
+.knit-calc {
+  flex: 1 1 100%;
+  font-size: 13px;
+  line-height: 1.35;
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px dashed var(--border);
+  background: var(--surface);
+  color: var(--text);
+}
+.knit-calc-tag { color: var(--text-muted); }
+.knit-calc-text { font-weight: 800; }
+.knit-terms-line { font-size: 13px; color: var(--text-muted); margin-bottom: 8px; }
+.knit-note-area { width: 100%; }
+.knit-clicker { display: flex; flex-direction: column; gap: 6px; }
+.knit-clicker-row { align-items: center; gap: 8px; flex-wrap: wrap; }
+.knit-clicker-label { min-width: 6.5em; font-weight: 700; }
+.knit-clicker-key {
+  min-width: 6em;
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 13px;
+}
+
+/* ---- P4: the chart strip (working mode) and the chart sheet ---- */
+.knit-chart-strip {
+  display: block;
+  flex: 1 1 100%;
+  width: 100%;
+  max-height: 64px;
+}
+/* on the counter the sheet shows the chart; the strip is for working mode */
+.knit-extra:not(.work-hint) > .knit-chart-strip { display: none; }
+.knit-chart-strip-sheet { max-height: 220px; margin: 8px 0; }
+.knit-chart-strip .kcs-cell { fill: var(--surface); stroke: var(--border); stroke-width: 0.6; }
+.knit-chart-strip .kcs-sym { fill: var(--border); }
+.knit-chart-strip .kcs-none { fill: var(--text-muted); opacity: 0.35; }
+.knit-chart-strip .kcs-unk { fill: var(--danger); opacity: 0.45; }
+.knit-chart-strip .kcs-c0 { fill: var(--surface); }
+.knit-chart-strip .kcs-c1 { fill: var(--text); }
+.knit-chart-strip .kcs-c2 { fill: var(--accent); }
+.knit-chart-strip .kcs-c3 { fill: var(--primary); }
+.knit-chart-strip .kcs-done { opacity: 0.45; }
+.knit-chart-strip .kcs-band { fill: none; stroke: var(--accent); stroke-width: 1.4; }
+
+.knit-chart-wrap {
+  overflow: auto;
+  max-height: 60vh;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  -webkit-overflow-scrolling: touch;
+}
+.knit-chart-canvas { display: block; width: 100%; height: auto; touch-action: manipulation; }
+.knit-chart-canvas:focus-visible { outline: var(--tap-border); outline-offset: -2px; }
+.knit-chart-note { margin: 4px 0; }
+.knit-cell-pop {
+  margin-top: 6px;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  border: 1px solid var(--accent);
+  font-size: 14px;
+}
+.knit-cell-pop[hidden] { display: none; }
+.knit-calib-bar { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.knit-calib-bar .btn { align-self: flex-start; }
+.knit-calib-form { gap: 8px; flex-wrap: wrap; }
+.knit-calib-form input { width: 6em; }
+.knit-calib-form[hidden] { display: none; }
+
+/* ---- P11 yarn colours from the key ---- */
+.knit-yarn-chip { display: inline-flex; align-items: center; gap: 4px; }
+.knit-yarn-sw {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+}
+
+/* ---- P12 mirrored rows ---- */
+.knit-mirror-chip { border-style: dashed; }
+.knit-mirror-warn { border-color: var(--danger); }
+.knit-mirror-list { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+.knit-mirror-row { padding: 6px 0; border-bottom: 1px solid var(--border); }
+.knit-mirror-badge {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+}
+.knit-mirror-row.done .knit-mirror-badge { border-color: var(--primary); color: var(--text); }
+.knit-mirror-row.unsure .knit-mirror-badge { border-color: var(--danger); color: var(--danger); }
+.knit-mirror-to { margin-top: 2px; }
+.knit-mirror-from { font-size: 12px; color: var(--text-muted); }
+
+/* ---- P20 materials ---- */
+.knit-mat-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+}
+.knit-mat-row input { width: 22px; height: 22px; margin-top: 2px; flex: none; }
+.knit-mat-text { display: flex; flex-direction: column; }
+.knit-mat-main { font-weight: 700; }
+.knit-mat-sub { font-size: 13px; color: var(--text-muted); }
+.knit-mat-need { margin: 10px 0 4px; font-weight: 700; }
+
+/* ---- P17 schematic ---- */
+.knit-schematic-part { margin-bottom: 12px; }
+.knit-schematic { display: block; width: 100%; max-width: 420px; height: auto; margin: 4px auto; }
+.knit-schematic .ks-shape { fill: var(--surface); stroke: var(--primary); stroke-width: 2; }
+.knit-schematic .ks-label { fill: var(--text); font-size: 11px; font-family: var(--font-body); }
+.knit-schematic .ks-warn { fill: var(--danger); font-weight: 700; }
+
+/* ---- P9 markers ---- */
+.knit-marked-st { border-style: double; }
+.knit-seg-st { color: var(--accent); }
+.knit-marker-moved { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+
+/* phone, short screen */
+@media (max-height: 700px) {
+  .knit-stretch { padding: 6px 10px; }
+  .knit-stretch-btns .knit-stretch-go { min-height: 44px; font-size: 16px; }
+  .knit-stretch-btns .btn { min-height: 36px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .knit-stretch, .knit-colours, .knit-shaping { transition: none; }
+}

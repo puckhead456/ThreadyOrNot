@@ -1,0 +1,444 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Working mode (WorkMode) tests + demo craft</title>
+<link rel="stylesheet" href="../css/app.css">
+<link rel="stylesheet" href="../css/themes.css">
+<style>
+  .t-page { font: 14px/1.4 Menlo, Consolas, monospace; background:#111; color:#eee; padding:16px; min-height:100vh; }
+  .pass { color:#7bd389; }
+  .fail { color:#ff6b6b; background:#2a1414; }
+  .group { margin-top:18px; font-weight:bold; color:#9cf; border-bottom:1px solid #333; padding-bottom:4px; }
+  #summary { margin-top:20px; font-size:18px; font-weight:bold; }
+  #summary.ok { color:#7bd389; }
+  #summary.bad { color:#ff6b6b; }
+  .note { color:#aaa; }
+  pre.copy { background:#1b1b1b; color:#ddd; padding:10px; overflow:auto; font-size:12px; }
+</style>
+</head>
+<body>
+<div class="t-page">
+<h1>WorkMode — the shared working mode (wave K)</h1>
+<p class="note">
+  <code>js/workmode.js</code> alone (no app.js, no Store): the pure key map and count policy, then a
+  session driven on a demo craft surface with synthetic pointer and key events. The demo craft at
+  the bottom is the one to copy for cross-stitch and sewing (docs/wave-k/api/shell-ui.md §1).
+</p>
+<p><button type="button" id="demo-open" class="btn primary">⤢ Open the demo craft (after the tests)</button>
+  <select id="demo-theme" aria-label="Theme">
+    <option value="stardew-spring">Stardew Spring</option>
+    <option value="stardew-night">Stardew Night</option>
+    <option value="dragon-pixel">Pixel Wyrm</option>
+    <option value="dragon-fury">Dragon Fury</option>
+  </select></p>
+<div id="out"></div>
+<div id="summary">running…</div>
+<h2>Copy this: the demo craft's spec</h2>
+<pre class="copy" id="demo-src"></pre>
+</div>
+
+<!-- the demo craft's screen: a stand-in for #screen-craft -->
+<section class="screen" id="demo-screen" hidden></section>
+<div id="live" class="sr-only" aria-live="polite"></div>
+<input id="t-text" type="text" aria-label="a text field" style="position:absolute;left:-9999px">
+
+<script src="../js/workmode.js"></script>
+<script>
+'use strict';
+
+var out = document.getElementById('out');
+var passed = 0, failed = 0;
+function log(ok, label, detail) {
+  if (ok) passed++; else failed++;
+  var line = (ok ? 'PASS' : 'FAIL') + ' - ' + label + (detail ? '  (' + detail + ')' : '');
+  var div = document.createElement('div');
+  div.className = ok ? 'pass' : 'fail';
+  div.textContent = line;
+  out.appendChild(div);
+  if (ok) console.log(line); else console.error(line);
+}
+function group(t) { var d = document.createElement('div'); d.className = 'group'; d.textContent = t; out.appendChild(d); }
+function eq(a, b, label) {
+  var ok = JSON.stringify(a) === JSON.stringify(b);
+  log(ok, label, ok ? '' : 'expected ' + JSON.stringify(b) + ' got ' + JSON.stringify(a));
+}
+function ok(c, label, d) { log(!!c, label, c ? '' : d); }
+function finish() {
+  var el = document.getElementById('summary');
+  el.textContent = passed + ' passed, ' + failed + ' failed';
+  el.className = failed ? 'bad' : 'ok';
+}
+function key(k, opts, target) {
+  opts = opts || {};
+  var e = new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true, repeat: !!opts.repeat, ctrlKey: !!opts.ctrl });
+  (target || document.body).dispatchEvent(e);
+  return e;
+}
+function ptr(node, type, x, y, id) {
+  var e;
+  try {
+    e = new PointerEvent(type, { bubbles: true, cancelable: true, clientX: x, clientY: y, pointerId: id || 1, button: 0, isPrimary: true });
+  } catch (err) {
+    e = new MouseEvent(type, { bubbles: true, cancelable: true, clientX: x, clientY: y });
+    e.pointerId = id || 1;
+  }
+  node.dispatchEvent(e);
+}
+function tick(ms) { return new Promise(function (r) { setTimeout(r, ms || 0); }); }
+
+/* ------------------------------------------------------------------ *
+ * The demo craft: a 12 × 8 grid of stitches on a canvas, in colours.
+ * primary marks the next stitch, back / forward change colour, Undo
+ * takes the last mark back. Everything a real craft needs, and nothing
+ * else: COPY FROM HERE.
+ * ------------------------------------------------------------------ */
+var demo = {
+  marked: 0, total: 96, colour: 0, colours: ['DMC 310', 'DMC 321', 'DMC 699'], history: [], awake: false,
+  calls: { primary: 0, forward: 0, back: 0, undo: 0, open: 0, close: 0, h: 0, destroy: 0, insets: 0 }
+};
+
+function demoSpec() {
+  return {
+    label: 'Stitch mode',
+    backTo: 'the chart',
+    // 1. the surface: paint whatever the craft is (a canvas here); keep a handle to redraw
+    surface: function (node, api) {
+      var c = document.createElement('canvas');
+      c.className = 'demo-canvas';
+      c.style.cssText = 'position:absolute;inset:0;width:100%;height:100%';
+      c.setAttribute('aria-hidden', 'true');
+      node.appendChild(c);
+      var ins = { top: 0, right: 0, bottom: 0, left: 0 };
+      function draw() {
+        var r = node.getBoundingClientRect();
+        c.width = Math.max(1, Math.round(r.width));
+        c.height = Math.max(1, Math.round(r.height));
+        var g = c.getContext('2d');
+        var w = c.width - ins.left - ins.right, h = c.height - ins.top - ins.bottom;
+        var cell = Math.max(4, Math.floor(Math.min(w / 12, h / 8)));
+        var ox = ins.left + (w - cell * 12) / 2, oy = ins.top + (h - cell * 8) / 2;
+        for (var i = 0; i < 96; i++) {
+          g.fillStyle = i < demo.marked ? '#ffffff' : 'rgba(255,255,255,0.25)';
+          g.fillRect(ox + (i % 12) * cell + 1, oy + Math.floor(i / 12) * cell + 1, cell - 2, cell - 2);
+        }
+      }
+      demo.redraw = draw;
+      draw();
+      return {
+        insets: function (i) { ins = i; demo.calls.insets++; draw(); },   // the free area the HUD leaves
+        resize: draw,
+        destroy: function () { demo.calls.destroy++; demo.redraw = null; }
+      };
+    },
+    // 2. the actions
+    primary: { label: 'Mark a stitch', run: function (api) {
+      if (demo.marked >= demo.total) return;
+      demo.marked++;
+      demo.history.push(1);
+      demo.calls.primary++;
+      api.counted({ n: demo.marked, total: demo.total, unit: 'stitch', label: demo.colours[demo.colour] });
+      if (demo.redraw) demo.redraw();
+      api.refresh();
+    } },
+    forward: { label: 'Next colour', glyph: '›', word: 'Colour', run: function (api) {
+      demo.colour = (demo.colour + 1) % demo.colours.length; demo.calls.forward++; api.refresh();
+    } },
+    back: { label: 'Previous colour', glyph: '‹', run: function (api) {
+      demo.colour = (demo.colour + demo.colours.length - 1) % demo.colours.length; demo.calls.back++; api.refresh();
+    } },
+    undo: { label: 'Undo last mark', run: function (api) {
+      if (!demo.history.length) return;
+      demo.history.pop(); demo.marked--; demo.calls.undo++;
+      if (demo.redraw) demo.redraw();
+      api.refresh();
+    }, enabled: function () { return demo.history.length > 0; } },
+    secondary: [{ id: 'park', side: 'start', glyph: 'P', label: 'Park this colour', run: function () {} }],
+    // 3. what the HUD says
+    readout: function () {
+      return {
+        title: 'Demo sampler',
+        cells: [
+          { cap: 'STITCHES', big: String(demo.marked), of: '/ ' + demo.total, sub: demo.colours[demo.colour] },
+          { cap: 'BLOCK', big: String(Math.floor(demo.marked / 12) + 1), of: '/ 8' }
+        ],
+        line: { tag: 'ROW ' + (Math.floor(demo.marked / 12) + 1), text: '12 × ' + demo.colours[demo.colour] },
+        hints: demo.marked >= 50 ? ['Half way'] : [],
+        next: { tag: 'Next', text: demo.colours[(demo.colour + 1) % demo.colours.length] },
+        tip: demo.marked ? null : 'Tap anywhere to mark · ‹ › change colour',
+        say: demo.marked + ' of ' + demo.total + ' stitches'
+      };
+    },
+    panel: function (body) {
+      var p = document.createElement('p');
+      p.textContent = 'The craft’s own options go here.';
+      body.appendChild(p);
+    },
+    keys: { h: function () { demo.calls.h++; } },
+    onOpen: function () { demo.calls.open++; },
+    onClose: function () { demo.calls.close++; }
+  };
+}
+/* ------------------------- COPY TO HERE ---------------------------- */
+document.getElementById('demo-src').textContent = String(demoSpec);
+
+var said = [];
+var remembered = null;
+var blocked = false;
+var awakeOn = false;
+var fbs = [];
+var host = document.getElementById('demo-screen');
+var env = {
+  remember: function (on) { remembered = on; },
+  announce: function (t) { said.push(t); document.getElementById('live').textContent = t; },
+  fb: function (k) { fbs.push(k); },
+  blocked: function () { return blocked; },
+  wake: { supported: true, isOn: function () { return awakeOn; }, toggle: function () { awakeOn = !awakeOn; return awakeOn; } },
+  render: function () { host.hidden = false; session.sync(remembered); }
+};
+var session = WorkMode.create(host, demoSpec(), env);
+
+(async function run() {
+  group('keyAction: the keyboard and page-turner pedal map');
+  eq(WorkMode.keyAction({ key: ' ' }), 'primary', 'Space → primary');
+  eq(WorkMode.keyAction({ key: 'Enter' }), 'primary', 'Enter → primary');
+  eq(WorkMode.keyAction({ key: 'Spacebar' }), 'primary', 'old Spacebar → primary');
+  eq(WorkMode.keyAction({ key: 'ArrowUp' }), 'forward', 'ArrowUp → forward');
+  eq(WorkMode.keyAction({ key: 'ArrowRight' }), 'forward', 'ArrowRight → forward');
+  eq(WorkMode.keyAction({ key: 'PageDown' }), 'forward', 'PageDown (pedal) → forward');
+  eq(WorkMode.keyAction({ key: 'ArrowDown' }), 'back', 'ArrowDown → back');
+  eq(WorkMode.keyAction({ key: 'ArrowLeft' }), 'back', 'ArrowLeft → back');
+  eq(WorkMode.keyAction({ key: 'PageUp' }), 'back', 'PageUp (pedal) → back');
+  eq(WorkMode.keyAction({ key: 'Escape' }), 'close', 'Escape → close');
+  eq(WorkMode.keyAction({ key: 'a' }), null, 'a letter → nothing');
+
+  group('countPolicy: milestones only, the same in every craft');
+  eq(WorkMode.countPolicy({ n: 7, total: 24 }), { say: null, fb: 'tap' }, 'a plain stitch says nothing');
+  eq(WorkMode.countPolicy({ n: 24, total: 24 }).say, '24 of 24 stitches', 'the total is said');
+  eq(WorkMode.countPolicy({ n: 50 }).say, '50 stitches', 'every 50th with no grouping');
+  eq(WorkMode.countPolicy({ n: 100, total: 12711, label: 'DMC 310' }).say, 'DMC 310: 100 of 12,711 stitches', 'every 50th with a label and a total, thousands');
+  eq(WorkMode.countPolicy({ n: 50, groupSize: 10 }).say, null, 'no 50th when a grouping marks the count');
+  eq(WorkMode.countPolicy({ n: 100, total: 12711 }).say, '100 of 12,711 stitches', 'cross-stitch: 100 is a 50th too (not a separate 100 cadence)');
+  eq(WorkMode.countPolicy({ kind: 'row', say: 'Row 5 done' }), { say: 'Row 5 done', fb: 'row' }, 'a row milestone speaks and buzzes row');
+  eq(WorkMode.countPolicy({ kind: 'done', label: 'DMC 310' }), { say: 'DMC 310 done', fb: 'done' }, 'a colour done');
+  eq(WorkMode.countPolicy({ kind: 'group', say: 'Block 3 done' }).fb, 'group', 'a group buzz');
+  eq(WorkMode.countPolicy({ kind: 'undo' }), { say: null, fb: 'undo' }, 'undo says nothing by itself');
+  eq(WorkMode.countPolicy({ n: 5, total: 6, unit: 'step' }).say, null, 'step 5 of 6: the craft says "Step 5 of 6" through kind: row');
+  eq(WorkMode.countPolicy({ n: 6, total: 6, unit: 'step' }).say, '6 of 6 steps', 'the last step is said');
+  eq(WorkMode.countPolicy({ n: 4, total: 4, unit: 'piece' }).say, '4 of 4 pieces', 'pieces');
+  eq(WorkMode.plural('stitch'), 'stitches', 'plural stitch');
+  eq(WorkMode.plural('cross'), 'crosses', 'plural cross');
+  eq(WorkMode.plural('row'), 'rows', 'plural row');
+  eq(WorkMode.plural('assembly'), 'assemblies', 'plural assembly');
+
+  group('a session: open, the surface and the HUD');
+  ok(!host.classList.contains('work-mode'), 'closed to begin with');
+  session.openUser();
+  await tick(20);
+  ok(host.classList.contains('work-mode'), 'open: the host wears .work-mode');
+  eq(remembered, true, 'open remembers the mode (env.remember(true))');
+  eq(fbs[fbs.length - 1], 'tap', 'open buzzes a tap');
+  eq(said[said.length - 1], 'Stitch mode. 0 of 96 stitches', 'open announces the label and where you are');
+  var hud = host.querySelector('.work-hud');
+  ok(hud && !hud.hidden, 'the HUD is shown');
+  var surf = host.querySelector('.work-surface');
+  ok(!!surf, 'the craft surface is mounted');
+  eq(surf.getAttribute('role'), 'button', 'the surface is a button for screen readers');
+  eq(surf.getAttribute('aria-label'), 'Mark a stitch', 'named by primary.label');
+  ok(surf.querySelector('canvas.demo-canvas'), 'the craft painted into it');
+  eq(document.activeElement, surf, 'focus goes to the surface');
+  eq(demo.calls.open, 1, 'onOpen ran once');
+  eq(host.querySelector('.work-title').textContent, 'Demo sampler', 'the title from readout()');
+  var bigs = Array.prototype.map.call(host.querySelectorAll('.work-big'), function (b) { return b.textContent; });
+  eq(bigs, ['0', '1'], 'the big numbers');
+  eq(host.querySelector('.work-of').textContent, '/ 96', 'the "of" text');
+  eq(host.querySelector('.work-line-tag').textContent, 'ROW 1', 'the line tag');
+  ok(!host.querySelector('.work-tip').hidden, 'the first-tap tip shows');
+  eq(host.querySelector('.work-next-text').textContent, 'DMC 321', 'the next line');
+  var btnLabels = Array.prototype.map.call(host.querySelectorAll('.work-btns .work-btn'), function (b) { return b.getAttribute('aria-label'); });
+  eq(btnLabels, ['Park this colour', 'Undo last mark', 'Previous colour', 'Next colour'], 'corner buttons: secondary, undo | back, forward');
+  ok(host.querySelector('.work-btns .work-accent'), 'forward is the accent button');
+  ok(host.querySelector('.work-undo').disabled, 'Undo is disabled with nothing to undo');
+  eq(host.querySelector('.work-close').getAttribute('aria-label'), 'Close stitch mode', 'the ✕ is named');
+
+  group('the surface tap: press and release counts, a drag never does');
+  var r = surf.getBoundingClientRect();
+  var cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+  ptr(surf, 'pointerdown', cx, cy); ptr(surf, 'pointerup', cx + 4, cy + 3);
+  eq(demo.marked, 1, 'a tap marks a stitch');
+  ptr(surf, 'pointerdown', cx, cy); ptr(surf, 'pointermove', cx + 40, cy); ptr(surf, 'pointerup', cx + 40, cy);
+  eq(demo.marked, 1, 'a 40 px drag does not');
+  ptr(surf, 'pointerdown', cx, cy); ptr(surf, 'pointermove', cx + 11, cy); ptr(surf, 'pointerup', cx + 11, cy);
+  eq(demo.marked, 2, 'within the 12 px tolerance it does');
+  eq(host.querySelector('.work-big').textContent, '2', 'the readout repainted');
+  ok(host.querySelector('.work-tip').hidden, 'the tip goes once counting starts');
+  ok(!host.querySelector('.work-undo').disabled, 'Undo is enabled now');
+
+  group('keys: Space, the arrows, the pedal, Escape, and the guards');
+  surf.blur();
+  key(' ');
+  eq(demo.marked, 3, 'Space marks');
+  key('Enter');
+  eq(demo.marked, 4, 'Enter marks');
+  key(' ', { repeat: true });
+  eq(demo.marked, 4, 'a held-down repeat does not run away');
+  key('PageDown');
+  eq(demo.colour, 1, 'PageDown (pedal) → forward');
+  key('ArrowRight');
+  eq(demo.colour, 2, 'ArrowRight → forward');
+  key('PageUp');
+  eq(demo.colour, 1, 'PageUp → back');
+  key('h');
+  eq(demo.calls.h, 1, 'a craft key (h) runs its handler');
+  key(' ', { ctrl: true });
+  eq(demo.marked, 4, 'Ctrl+Space is not ours');
+  blocked = true;
+  key(' ');
+  eq(demo.marked, 4, 'nothing while a sheet or tour is up');
+  blocked = false;
+  var tf = document.getElementById('t-text');
+  tf.focus();
+  key(' ', null, tf);
+  eq(demo.marked, 4, 'nothing from a text field');
+  tf.blur();
+  host.querySelector('.work-undo').focus();
+  key('Enter', null, host.querySelector('.work-undo'));
+  eq(demo.marked, 4, 'Enter on a focused control is the control’s (not a stitch)');
+  host.querySelector('.work-undo').click();
+  eq(demo.marked, 3, 'the Undo button undoes');
+  surf.focus();
+  var ke = new KeyboardEvent('keydown', { key: ' ', bubbles: true, cancelable: true });
+  surf.dispatchEvent(ke);
+  eq(demo.marked, 4, 'Space on the focused surface marks once (not twice)');
+
+  group('Options: the panel, ☀ Keep awake, Escape folds it first');
+  host.querySelector('.work-more').click();
+  var panel = host.querySelector('.work-panel');
+  ok(!panel.hidden, 'Options opens the panel');
+  eq(host.querySelector('.work-more').getAttribute('aria-expanded'), 'true', 'aria-expanded');
+  ok(/own options/.test(panel.textContent), 'the craft’s panel content');
+  var aw = panel.querySelector('.work-awake');
+  ok(aw, 'the shell adds Keep awake');
+  eq(aw.getAttribute('aria-pressed'), 'false', 'Keep awake: off');
+  aw.click();
+  eq(aw.getAttribute('aria-pressed'), 'true', 'Keep awake toggles (aria-pressed true)');
+  eq(awakeOn, true, 'through env.wake.toggle');
+  key('ArrowRight', null, aw);
+  eq(demo.colour, 1, 'arrows do nothing while the panel is open');
+  ptr(host.querySelector('.work-scrim'), 'pointerdown', 5, 5);
+  key('Escape');
+  ok(panel.hidden, 'Escape folds the panel');
+  ok(host.classList.contains('work-mode'), '… and does not close the mode');
+
+  group('insets: the free area the HUD leaves');
+  var ins = session.measure(true);
+  ok(ins && ins.top > 40 && ins.bottom > 40, 'portrait: top and bottom insets clear the readouts and buttons', JSON.stringify(ins));
+  ok(demo.calls.insets >= 1, 'the surface heard about them');
+
+  group('close: Escape, remembered off, focus back');
+  key('Escape');
+  await tick(10);
+  ok(!host.classList.contains('work-mode'), 'Escape closes the mode');
+  eq(remembered, false, 'closing forgets it');
+  eq(said[said.length - 1], 'Back to the chart. 4 of 96 stitches', 'close announces');
+  ok(!host.querySelector('.work-surface'), 'the surface is gone');
+  eq(demo.calls.destroy, 1, 'the craft’s destroy ran');
+  eq(demo.calls.close, 1, 'onClose ran');
+  key(' ');
+  eq(demo.marked, 4, 'keys are inert once closed');
+
+  group('sync: a remembered mode comes back with no side effects');
+  var nSaid = said.length;
+  session.sync(true);
+  ok(host.classList.contains('work-mode'), 'sync(true) opens');
+  eq(said.length, nSaid, 'sync says nothing');
+  eq(demo.calls.open, 2, 'onOpen');
+  host.hidden = true;
+  key(' ');
+  eq(demo.marked, 4, 'a hidden host hears no keys');
+  host.hidden = false;
+  session.sync(false);
+  ok(!host.classList.contains('work-mode'), 'sync(false) closes');
+  eq(remembered, false, 'sync never touches the remembered value');
+
+  group('surfaceUnderHud: the surface fills the screen, the HUD floats on scrims');
+  ok(!host.classList.contains('work-under-hud'), 'the default spec never gets .work-under-hud');
+  var host3 = document.createElement('section');
+  host3.className = 'screen';
+  host3.style.cssText = 'position:fixed;left:0;top:0;width:375px;height:812px;';
+  document.body.appendChild(host3);
+  var gotIns = [];
+  var s3 = WorkMode.create(host3, {
+    surfaceUnderHud: true,
+    surface: function () { return { insets: function (i) { gotIns.push(i); } }; },
+    primary: { label: 'Mark', run: function () {} },
+    undo: { run: function () {} },
+    back: { label: 'Prev', run: function () {} },
+    forward: { label: 'Next', run: function () {} },
+    readout: function () { return { title: 'Chart', cells: [{ cap: 'STITCHES', big: '3', of: '/ 12,711' }], next: { tag: 'Next', text: 'block 15,25' } }; }
+  }, { blocked: function () { return false; } });
+  s3.sync(true);
+  ok(host3.classList.contains('work-under-hud'), 'the host wears .work-under-hud');
+  eq(s3.api.underHud(), true, 'api.underHud() says so');
+  var sr = host3.querySelector('.work-surface').getBoundingClientRect();
+  eq([Math.round(sr.width), Math.round(sr.height)], [375, 812], 'the surface is the whole 375 × 812 screen (100%, not the free area)');
+  var stackBg = getComputedStyle(host3.querySelector('.work-stack')).backgroundColor;
+  ok(stackBg && stackBg !== 'rgba(0, 0, 0, 0)' && stackBg !== 'transparent', 'the readout stack has a scrim', stackBg);
+  var ins3 = s3.measure(true);
+  ok(ins3 && ins3.top > 40 && ins3.bottom > 40, 'api.insets() still reports the free rectangle', JSON.stringify(ins3));
+  ok(gotIns.length >= 1, 'the surface hears the insets, to keep the current stitch out from under the HUD');
+  var freeShare = (375 - ins3.left - ins3.right) * (812 - ins3.top - ins3.bottom) / (375 * 812);
+  ok(freeShare > 0.25 && freeShare < 1, 'the free area is a share of the screen (' + Math.round(freeShare * 100) + '%), the drawable area all of it');
+  s3.sync(false);
+  ok(!host3.classList.contains('work-under-hud'), 'closing removes the class');
+  s3.destroy();
+  host3.parentNode.removeChild(host3);
+  var host4 = document.createElement('section');
+  document.body.appendChild(host4);
+  var s4 = WorkMode.create(host4, { adopt: true, surfaceUnderHud: true, rectNode: function () { return host4; } }, {});
+  s4.sync(true);
+  ok(!host4.classList.contains('work-under-hud') && s4.api.underHud() === false, 'an adopted surface (the counter) ignores it: crochet and knitting unchanged');
+  s4.destroy();
+  host4.parentNode.removeChild(host4);
+
+  group('a spec with no back / forward / undo still works');
+  var host2 = document.createElement('section');
+  host2.className = 'screen';
+  document.body.appendChild(host2);
+  var hits = 0;
+  var s2 = WorkMode.create(host2, { primary: { label: 'Step done', run: function () { hits++; } },
+    readout: function () { return { title: 'Steps', line: { tag: 'STEP 4', text: 'Sew the side seams' } }; } },
+    { blocked: function () { return false; } });
+  s2.sync(true);
+  eq(host2.querySelectorAll('.work-btns .work-btn').length, 0, 'no corner buttons');
+  key('ArrowRight');
+  eq(hits, 1, 'forward defaults to primary (a pedal turns the step)');
+  key('ArrowLeft');
+  eq(hits, 1, 'no back: ArrowLeft does nothing');
+  eq(host2.querySelector('.work-line-text').textContent, 'Sew the side seams', 'the big line');
+  ok(host2.querySelector('.work-panel'), 'Options exists');
+  s2.setPanel(true);
+  ok(!host2.querySelector('.work-awake'), 'no Keep awake when the device cannot');
+  s2.setPanel(false);
+  s2.destroy();
+  ok(!host2.querySelector('.work-hud'), 'destroy removes the HUD');
+  host2.parentNode.removeChild(host2);
+
+  host.hidden = true;
+  finish();
+})().catch(function (e) { log(false, 'threw: ' + (e && e.stack || e)); finish(); });
+
+document.getElementById('demo-open').addEventListener('click', function () {
+  host.hidden = false;
+  session.openUser();
+});
+document.getElementById('demo-theme').addEventListener('change', function (e) {
+  document.documentElement.setAttribute('data-theme', e.target.value);
+});
+// after the tests: leaving the demo with ✕ hides the stand-in screen again
+var _render = env.render;
+env.render = function () { _render(); if (!remembered && document.getElementById('summary').className) host.hidden = true; };
+</script>
+</body>
+</html>

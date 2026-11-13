@@ -18,7 +18,7 @@
                                  "clear the service worker" ritual, ever
      any host    /tmp-pdf/ /test/  never touched by the cache at all
 */
-const CACHE_VERSION = 'h5b2aa13c0d';
+const CACHE_VERSION = 'h9ab0f08b28';
 const CACHE_NAME = 'stitchkeeper-' + CACHE_VERSION;
 
 const PRECACHE_URLS = [
@@ -28,7 +28,10 @@ const PRECACHE_URLS = [
   './css/app.css',
   './css/themes.css',
   './css/xstitch.css',
+  './css/xstitch-extras.css',
   './css/sewing.css',
+  './css/sewing-extras.css',
+  './css/knitting.css',
   './js/themes.js',
   './js/patterns.js',
   './js/knits.js',
@@ -47,14 +50,28 @@ const PRECACHE_URLS = [
   // its own cache.add above and the rest of the install carries on.
   './js/blobstore.js',
   './js/zip.js',
+  // wave K: the shell's shared surfaces (working mode, check sheet, share card, page viewer)
+  './js/workmode.js',
+  './js/checksheet.js',
+  './js/sharecard.js',
+  './js/pageviewer.js',
+  // the text reader's small loader; its engine under js/vendor/tesseract/ is an
+  // opt-in download kept in its own thready-ocr-* cache, never precached here
+  './js/ocr.js',
   './js/xstitch.js',
   './js/xstitch-photo.js',
   './js/xstitch-read.js',
+  './js/xstitch-render.js',
+  './js/xstitch-keyread.js',
   './js/sewing.js',
+  './js/sew-figures.js',
+  './js/sew-quilt.js',
   './js/app.js',
   './js/app-knitting.js',
   './js/app-xstitch.js',
+  './js/app-xstitch-extras.js',
   './js/app-sewing.js',
+  './js/app-sewing-extras.js',
   './icons/icon-192.png',
   './icons/icon-512.png',
   './icons/apple-touch-icon.png',
@@ -142,8 +159,22 @@ function cacheablePath(pathname) {
   return false;
 }
 
+/* Wave K: the opt-in text reader (js/ocr.js) keeps its engine in its own
+   Cache Storage buckets, `thready-ocr-*`, downloaded once when the maker taps
+   Download. They are the maker's, not the shell's: no deploy and no dev
+   reload may delete them (only Settings → Remove does, through Ocr.remove). */
+const KEEP_CACHE_RE = /^thready-ocr-/;
+
+/** Should `activate` delete this cache? Pure, for test/sw.test.html. */
+function swShouldDelete(name, dev) {
+  if (KEEP_CACHE_RE.test(String(name))) return false;
+  const isDev = typeof dev === 'boolean' ? dev : IS_DEV;
+  return isDev || name !== CACHE_NAME;
+}
+
 // Exposed for the manual/unit check in test/sw.test.html (harmless otherwise).
 self.swPolicy = swPolicy;
+self.swShouldDelete = swShouldDelete;
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
@@ -172,10 +203,11 @@ self.addEventListener('activate', (event) => {
     (async () => {
       const names = await caches.keys();
       // Dev throws everything away, so a cache left over from testing a
-      // production build can never serve a stale file on localhost.
+      // production build can never serve a stale file on localhost — except
+      // the downloaded text reader (thready-ocr-*), anywhere.
       await Promise.all(
         names
-          .filter((name) => IS_DEV || name !== CACHE_NAME)
+          .filter((name) => swShouldDelete(name))
           .map((name) => caches.delete(name))
       );
       await self.clients.claim();

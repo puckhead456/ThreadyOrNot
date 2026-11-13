@@ -29,6 +29,7 @@
 
 <script src="../js/patterns.js"></script>
 <script src="../js/store.js"></script>
+<script src="../js/blobstore.js"></script>
 <script>
 'use strict';
 
@@ -1566,14 +1567,598 @@ group('Wave H. One parser per craft (Store.registerCraftParser / parserFor)');
 wipe();
 try { window.localStorage.removeItem(K + '.preimport'); } catch (e) { /* ignore */ }
 
+/* ====================================================================== *
+ * Wave K (shell-data, docs/wave-k/api/shell-data.md): heavy craft data off
+ * localStorage, diff undo, the failure paths, count events, sessions, pace,
+ * goals, the mark log, step edits and notes, the profile. Async; runs after
+ * the synchronous groups above, on the same private key.
+ * ====================================================================== */
+
+function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+function diskProject(id) {
+  var raw = JSON.parse(window.localStorage.getItem(Store.KEY));
+  return raw.projects.filter(function (p) { return p.id === id; })[0] || null;
+}
+
+function bigString(n, seed) {
+  var chunk = '';
+  for (var i = 0; i < 997; i++) chunk += String.fromCharCode(65 + ((i * 7 + seed * 5 + (i >> 3)) % 26));
+  var s = '';
+  while (s.length < n) s += chunk;
+  return s.slice(0, n);
+}
+
+function flipAt(s, i) {
+  var at = (i * 37) % s.length;
+  return s.slice(0, at) + (s.charAt(at) === 'Z' ? 'Y' : 'Z') + s.slice(at + 1);
+}
+
+var HEAVY_NORMALIZE_CALLS = 0;
+
+function heavyCraftDef(id, minBytes, noHeavy) {
+  var def = {
+    id: id,
+    normalize: function (raw) {
+      HEAVY_NORMALIZE_CALLS++;
+      var d = raw && typeof raw === 'object' ? raw : {};
+      var grid = d.grid && typeof d.grid === 'object' ? d.grid : {};
+      var pr = d.progress && typeof d.progress === 'object' ? d.progress : {};
+      // Like XStitch.normalize: a missing grid comes back EMPTY, so running this
+      // on half a craftData would lose the chart.
+      return {
+        grid: { w: grid.w || 0, cells: typeof grid.cells === 'string' ? grid.cells : 'EMPTY' },
+        progress: { done: typeof pr.done === 'string' ? pr.done : '', count: pr.count || 0 },
+        view: d.view === undefined ? null : d.view
+      };
+    },
+    summary: function (p) {
+      var cd = p.craftData || {};
+      return 'grid ' + (cd.grid && cd.grid.cells ? cd.grid.cells.length : 0) + ' · ' + ((cd.progress && cd.progress.count) || 0) + ' done';
+    }
+  };
+  if (!noHeavy) def.heavy = { fields: ['grid.cells', 'progress.done'], minBytes: minBytes || 2000 };
+  return def;
+}
+
+function waveK() {
+  var B = window.BlobStore;
+  if (!B || !B.available()) {
+    skip('wave K heavy craft data', 'IndexedDB is not available in this browser');
+    return Promise.resolve();
+  }
+  var ids = [];
+  var events = [];
+  fresh();
+  Store.registerCraft(heavyCraftDef('zzheavy'));
+  var unsubH = Store.onHeavy(function (e) { events.push(e); });
+  var cells0 = bigString(50000, 1);
+  var done0 = bigString(3000, 2);
+  var p = Store.createProject({
+    name: 'K heavy', craft: 'zzheavy',
+    craftData: { grid: { w: 100, cells: cells0 }, progress: { done: done0, count: 0 } }
+  });
+  ids.push(p.id);
+  var c2, c3, savedDone, doneKey;
+
+  group('wave K 1. Heavy fields move off localStorage, lazily and verified');
+  assertEqual(Store.heavyState(p.id), 'ready', 'an opted-in project is ready from the start');
+  assertEqual(Store.flush().ok, true, 'the first save works');
+  var d0 = diskProject(p.id);
+  assertEqual(d0.craftData.grid.cells.length, 50000,
+    'until the first move has landed the field is still inline (it is never only in memory)');
+  assertTrue(!d0.heavy, 'and there is no side table yet');
+
+  return Store.heavyIdle().then(function () {
+    var f = {};
+    Store.heavyInfo(p.id).fields.forEach(function (x) { f[x.path] = x; });
+    assertEqual(f['grid.cells'] && f['grid.cells'].where, 'idb', 'cells (50 KB) now live in IndexedDB');
+    assertEqual(f['progress.done'] && f['progress.done'].where, 'idb', 'and done (3 KB, over the 2 KB bar) too');
+    var d1 = diskProject(p.id);
+    assertTrue(d1.craftData.grid && d1.craftData.grid.cells === undefined, 'localStorage holds the project without the cells');
+    assertTrue(!!(d1.heavy && d1.heavy.fields['grid.cells']), 'and a side table pointing at them');
+    assertEqual(d1.heavy.summary, 'grid 50000 · 0 done', 'with the home-card line written while it was whole');
+    var lsLen = window.localStorage.getItem(Store.KEY).length;
+    assertTrue(lsLen < 12000, 'the whole localStorage state is small now', lsLen + ' chars');
+    assertEqual(Store.project(p.id).craftData.grid.cells, cells0, 'in memory the craft still sees its whole craftData');
+    assertTrue(events.some(function (e) { return e.type === 'committed' && e.projectId === p.id; }), 'onHeavy reported the commit');
+    return B.getText(d1.heavy.fields['grid.cells'].key);
+  }).then(function (txt) {
+    assertEqual(txt === cells0, true, 'the blob holds the cells exactly');
+
+    group('wave K 2. A reload loads them on demand, and never normalises half a craftData');
+    HEAVY_NORMALIZE_CALLS = 0;
+    Store.__setKeyForTests(K);
+    var q = Store.project(p.id);
+    assertEqual(Store.heavyState(p.id), 'unloaded', 'after a reload the project is unloaded');
+    assertEqual(HEAVY_NORMALIZE_CALLS, 0, 'its craft normalize did not run on the half craftData');
+    assertTrue(q.craftData.grid.cells === undefined, 'the cells are not in memory yet');
+    assertEqual(Store.updateCraftData(p.id, { view: 1 }), null, 'updateCraftData refuses an unloaded project (it would save the half)');
+    assertEqual(Store.summaryFor(q), 'grid 50000 · 0 done', 'the home card shows the stored line meanwhile');
+    Store.flush();
+    assertTrue(!!diskProject(p.id).heavy.fields['grid.cells'].key, 'a save while unloaded keeps the side table');
+    return Store.whenReady(p.id);
+  }).then(function (st) {
+    assertEqual(st, 'ready', 'whenReady loads the fields');
+    var q = Store.project(p.id);
+    assertEqual(q.craftData.grid.cells === cells0, true, 'cells came back whole');
+    assertEqual(q.craftData.progress.done === done0, true, 'done came back whole');
+    assertEqual(HEAVY_NORMALIZE_CALLS, 1, 'normalize ran once, on the whole craftData');
+    Store.flush();
+    return Store.heavyIdle();
+  }).then(function () {
+    assertEqual(Store.heavyInfo(p.id).stats.commits, 0, 'loading writes nothing back (the loaded values count as committed)');
+
+    group('wave K 3. A change is a new revision; disk never mixes two versions; old revisions go');
+    var k1 = diskProject(p.id).heavy.fields['grid.cells'].key;
+    var cells1 = bigString(50000, 3);
+    Store.updateCraftData(p.id, function (cd) { cd.grid.cells = cells1; cd.progress.count = 1; });
+    Store.flush();
+    var mid = diskProject(p.id);
+    assertEqual(mid.heavy.fields['grid.cells'].key, k1, 'while the new cells are in flight localStorage still points at the committed ones');
+    assertEqual(mid.craftData.progress.count, 0, 'with the light part that matches them (a crash now reloads one whole older version)');
+    return Store.heavyIdle().then(function () {
+      Store.flush();
+      var k2 = diskProject(p.id).heavy.fields['grid.cells'].key;
+      assertTrue(k2 !== k1, 'the commit moved localStorage to the new revision');
+      assertEqual(diskProject(p.id).craftData.progress.count, 1, 'together with its light part');
+      Store.updateCraftData(p.id, function (cd) { cd.grid.cells = bigString(50000, 4); cd.progress.count = 2; });
+      Store.flush();
+      return Store.heavyIdle().then(function () { Store.flush(); return sleep(150); }).then(function () {
+        return B.keys('p:' + p.id + ':heavy:grid.cells:');
+      }).then(function (keys) {
+        var k3 = diskProject(p.id).heavy.fields['grid.cells'].key;
+        assertTrue(keys.indexOf(k3) >= 0 && keys.indexOf(k2) >= 0, 'the current revision and the one before it are kept (a second tab may still read it)');
+        assertTrue(keys.indexOf(k1) === -1, 'older revisions are deleted', keys.join(', '));
+      });
+    });
+  }).then(function () {
+    group('wave K 4. Undo keeps diffs, not copies');
+    Store.clearUndo();
+    var vals = [Store.project(p.id).craftData.progress.done];
+    for (var i = 0; i < 30; i++) {
+      (function (n) {
+        Store.updateCraftData(p.id, function (cd) { cd.progress.done = flipAt(cd.progress.done, n); cd.progress.count++; });
+      })(i);
+      vals.push(Store.project(p.id).craftData.progress.done);
+    }
+    var bytes = Store.undoBytes();
+    assertTrue(bytes < 30 * 1500, 'thirty undo steps on a 50 KB + 3 KB craftData hold ' + bytes + ' bytes (a copy each would be about 1.6 MB)');
+    var entries = Store.__heavy.undoEntries().filter(function (e) { return e.id === p.id; });
+    assertEqual(entries.length, 30, 'all thirty are kept');
+    assertTrue(entries.slice(0, -1).every(function (e) { return e.heavy && e.heavy['progress.done'].d; }),
+      'every step but the newest holds the bitmap as a diff');
+    var live = Store.project(p.id).craftData.grid.cells;
+    assertTrue(entries.every(function (e) { return e.heavy['grid.cells'].v === live; }), 'and the unchanged cells as the one shared string');
+    var okAll = true;
+    for (var u = 30; u > 25; u--) {
+      Store.undo();
+      if (Store.project(p.id).craftData.progress.done !== vals[u - 1]) okAll = false;
+    }
+    assertTrue(okAll, 'five undos give back exactly the five earlier bitmaps');
+    assertEqual(Store.project(p.id).craftData.progress.count, 2 + 25, 'with the light part that went with each');
+    Store.updateCraftData(p.id, function (cd) { cd.progress.done = bigString(3000, 9); }, { undo: false });
+    assertTrue(Store.undo(), 'after a write with no undo step moved the bitmap, Undo still works');
+    assertEqual(Store.project(p.id).craftData.progress.done === vals[24], true, 'and restores the right bitmap (its diff was re-anchored)');
+    var pr = Store.project(p.id);
+    pr.craftData.progress.done = bigString(3000, 11);   // behind the store's back
+    var before = pr.craftData.progress.done;
+    assertEqual(Store.undo(), false, 'a diff that no longer fits what is live refuses the step');
+    assertEqual(Store.project(p.id).craftData.progress.done === before, true, 'and leaves the data exactly as it was (never a wrong chart)');
+    Store.updateCraftData(p.id, function (cd) { cd.progress.done = done0; cd.progress.count = 2; });
+    Store.flush();
+    return Store.heavyIdle();
+  }).then(function () {
+    group('wave K 5a. Failures: IndexedDB full on the first move');
+    events.length = 0;
+    B._failWritesForTests({ error: 'QuotaExceededError' });
+    var pq = Store.createProject({ name: 'K quota', craft: 'zzheavy', craftData: { grid: { w: 1, cells: bigString(20000, 4) }, progress: { done: '', count: 0 } } });
+    ids.push(pq.id);
+    Store.flush();
+    return Store.heavyIdle().then(function () {
+      assertTrue(events.some(function (e) { return e.projectId === pq.id && e.type === 'failed' && e.error === 'QuotaExceededError'; }),
+        'a refused first move is reported (onHeavy failed, QuotaExceededError)');
+      assertEqual(Store.heavyInfo(pq.id).fields[0].where, 'inline', 'and the field simply stays inline');
+      Store.flush();
+      assertEqual(diskProject(pq.id).craftData.grid.cells.length, 20000, 'whole in localStorage: nothing lost');
+      assertEqual(Store.heavyLastError() && Store.heavyLastError().error, 'QuotaExceededError', 'heavyLastError keeps the reason');
+      assertEqual(Store.saveFailed(), false, 'and nothing is unsaved, so the "not saved" banner stays down');
+
+      group('wave K 5b. Failures: an update IndexedDB refuses goes back inline');
+      events.length = 0;
+      B._failWritesForTests({ error: 'UnknownError' });
+      c2 = bigString(50000, 5);
+      Store.updateCraftData(p.id, function (cd) { cd.grid.cells = c2; });
+      Store.flush();
+      return Store.heavyIdle();
+    }).then(function () {
+      assertTrue(events.some(function (e) { return e.projectId === p.id && e.type === 'inlined'; }), 'onHeavy says "inlined"');
+      Store.flush();
+      var d = diskProject(p.id);
+      assertEqual(d.craftData.grid.cells === c2, true, 'the newest cells are in localStorage, not lost');
+      assertTrue(!d.heavy || !d.heavy.fields['grid.cells'], 'and the side table no longer claims them');
+      assertTrue(!!(d.heavy && d.heavy.fields['progress.done']), 'the field that did not change stays in IndexedDB');
+
+      group('wave K 5c. Failures: a missing blob');
+      doneKey = d.heavy.fields['progress.done'].key;
+      return B.getText(doneKey);
+    }).then(function (saved) {
+      savedDone = saved;
+      return B['delete'](doneKey);
+    }).then(function () {
+      events.length = 0;
+      Store.__setKeyForTests(K);
+      return Store.whenReady(p.id);
+    }).then(function (st) {
+      assertEqual(st, 'missing', 'a blob that is gone makes the project "missing", never an empty chart');
+      assertEqual((Store.heavyInfo(p.id).missing || []).length, 1, 'heavyInfo names the missing key');
+      assertTrue(events.some(function (e) { return e.type === 'missing' && e.projectId === p.id; }), 'onHeavy reported it');
+      assertEqual(Store.updateCraftData(p.id, { view: 2 }), null, 'writes are refused');
+      assertEqual(Store.summaryFor(Store.project(p.id)).indexOf('grid'), 0, 'the home card keeps the stored line');
+      Store.flush();
+      assertEqual(diskProject(p.id).heavy.fields['progress.done'].key, doneKey, 'saving keeps the side table, so the data can still come back');
+      return B.put(doneKey, savedDone);
+    }).then(function () {
+      return Store.whenReady(p.id);
+    }).then(function (st) {
+      assertEqual(st, 'ready', 'once the blob is back, the project loads');
+      assertEqual(Store.project(p.id).craftData.grid.cells === c2, true, 'whole');
+      Store.flush();
+      return Store.heavyIdle();
+    }).then(function () {
+      Store.flush();
+
+      group('wave K 5d. Failures: a second tab');
+      var raw = JSON.parse(window.localStorage.getItem(Store.KEY));
+      raw.writerId = 'other-tab';
+      raw.revision += 5;
+      raw.projects.filter(function (x) { return x.id === p.id; })[0].notes = 'written by the other tab';
+      window.dispatchEvent(new StorageEvent('storage', { key: Store.KEY, newValue: JSON.stringify(raw) }));
+      var q = Store.project(p.id);
+      assertEqual(q.notes, 'written by the other tab', "a second tab's save is adopted");
+      assertEqual(Store.heavyState(p.id), 'ready', 'with the same heavy revisions it stays loaded');
+      assertEqual(q.craftData.grid.cells === c2, true, 'and keeps its cells in memory');
+      c3 = bigString(50000, 6);
+      var newKey = 'p:' + p.id + ':heavy:grid.cells:othertab';
+      return B.put(newKey, c3).then(function () {
+        var raw2 = JSON.parse(window.localStorage.getItem(Store.KEY));
+        raw2.writerId = 'other-tab';
+        raw2.revision += 9;
+        raw2.projects.filter(function (x) { return x.id === p.id; })[0].heavy.fields['grid.cells'] =
+          { key: newKey, rev: 'othertab', bytes: c3.length, t: 's' };
+        window.dispatchEvent(new StorageEvent('storage', { key: Store.KEY, newValue: JSON.stringify(raw2) }));
+        assertEqual(Store.heavyState(p.id), 'unloaded', 'when the other tab moved the cells on, this tab reloads them');
+        return Store.whenReady(p.id);
+      });
+    }).then(function (st) {
+      assertEqual(st === 'ready' && Store.project(p.id).craftData.grid.cells === c3, true, "and gets the other tab's cells");
+
+      group('wave K 5e. Failures: an interrupted write');
+      var count0 = Store.project(p.id).craftData.progress.count;
+      B._failWritesForTests({ error: 'AbortError' });
+      Store.updateCraftData(p.id, function (cd) { cd.grid.cells = bigString(50000, 7); cd.progress.count = 99; });
+      Store.flush();
+      var dd = diskProject(p.id);
+      assertEqual(dd.craftData.progress.count, count0, 'mid-write, localStorage still holds the last whole version');
+      // the tab dies here: a reload while the transaction is still open
+      Store.__setKeyForTests(K);
+      return Store.whenReady(p.id);
+    }).then(function (st) {
+      assertEqual(st, 'ready', 'after the crash the project loads');
+      assertEqual(Store.project(p.id).craftData.grid.cells === c3, true, 'with the last committed cells, whole');
+      B._failWritesForTests(null);
+
+      group('wave K 5f. Failures: a full localStorage moves opted-in fields out and tries again');
+      Store.registerCraft(heavyCraftDef('zzheavy2', 10000000));
+      var big = Store.createProject({ name: 'K full', craft: 'zzheavy2', craftData: { grid: { w: 1, cells: bigString(30000, 8) }, progress: { done: '', count: 0 } } });
+      ids.push(big.id);
+      var limit = window.localStorage.getItem(Store.KEY).length + 20000;
+      var errs = [];
+      var unE = Store.onStorageError(function (e) { errs.push(e); });
+      stubSetItem(function (k, v) {
+        if (k === Store.KEY && v.length > limit) {
+          var e = new Error('full'); e.name = 'QuotaExceededError'; throw e;
+        }
+        return origSetItem.call(this, k, v);
+      });
+      var res = Store.flush();
+      assertEqual(res.ok, false, 'the write fails (quota)');
+      assertEqual(res.rescuing, true, 'and the store starts moving the opted-in fields out');
+      assertTrue(errs.length > 0 && errs[0].kind === 'quota', 'loud: onStorageError fired with kind quota');
+      return Store.heavyIdle().then(function () {
+        Store.flush();
+        unstubSetItem();
+        unE();
+        assertEqual(Store.saveFailed(), false, 'after the move the retry worked, and the failure cleared');
+        assertEqual(Store.heavyInfo(big.id).fields[0].where, 'idb', 'the 30 KB field went to IndexedDB below its own bar');
+      }, function (e) { unstubSetItem(); throw e; });
+    }).then(function () {
+      group('wave K 6. Backups: ready projects go out inline, unloaded ones keep their table');
+      var ex = JSON.parse(Store.exportJSON());
+      var ep = ex.projects.filter(function (x) { return x.id === p.id; })[0];
+      assertEqual(ep.craftData.grid.cells === Store.project(p.id).craftData.grid.cells, true, 'exportJSON writes a ready project inline');
+      assertTrue(!ep.heavy, 'with no side table');
+      var one = JSON.parse(Store.exportProjectJSON(p.id)).projects[0];
+      assertEqual(one.craftData.grid.cells.length, 50000, 'a one-project file too');
+      Store.flush();
+      return Store.heavyIdle().then(function () {
+        Store.flush();
+        Store.__setKeyForTests(K);
+        var ex2 = JSON.parse(Store.exportJSON());
+        var ep2 = ex2.projects.filter(function (x) { return x.id === p.id; })[0];
+        assertTrue(!!ep2.heavy && ep2.craftData.grid.cells === undefined, 'an unloaded project keeps its side table in a plain JSON export (hydrateAll first for a whole file)');
+        return Store.hydrateAll();
+      }).then(function () {
+        var ep3 = JSON.parse(Store.exportJSON()).projects.filter(function (x) { return x.id === p.id; })[0];
+        assertTrue(!ep3.heavy && ep3.craftData.grid.cells.length === 50000, 'after hydrateAll the export is whole');
+      });
+    }).then(function () {
+      return measureBig(B, ids);
+    }).then(function () {
+      return countsAndSessions(B, ids);
+    }).then(function () {
+      unsubH();
+      B._failWritesForTests(null);
+      return Promise.all(ids.map(function (id) { return B.deletePrefix('p:' + id + ':'); }));
+    });
+  });
+}
+
+/* ---- measured on a 250,000-cell chart ---------------------------------- */
+
+function median(xs) { var s = xs.slice().sort(function (a, b) { return a - b; }); return s[Math.floor(s.length / 2)]; }
+
+function measureBig(B, ids) {
+  group('wave K 7. Measured on a 250,000-cell chart (533 KB of cells, a 41,668-character bitmap)');
+  Store.registerCraft(heavyCraftDef('zzbig', 32768));
+  Store.registerCraft(heavyCraftDef('zzbigplain', 0, true));
+  var cells = bigString(533000, 3);
+  var bits = bigString(41668, 5);
+  function cd() { return { grid: { w: 500, cells: cells }, progress: { done: bits, count: 0 } }; }
+  // the craft's own cost of a tap (flipping one bit of the bitmap), measured alone
+  // (performance.now() is coarse in a frame, so each figure is a 50-tap total / 50)
+  var s = bits;
+  var tf = performance.now();
+  for (var i = 0; i < 50; i++) s = flipAt(s, i);
+  var flipT = [(performance.now() - tf) / 50];
+  function taps(id) {
+    var t0 = performance.now();
+    for (var j = 0; j < 50; j++) {
+      (function (n) {
+        Store.updateCraftData(id, function (c) { c.progress.done = flipAt(c.progress.done, n); c.progress.count++; });
+      })(j);
+    }
+    return [(performance.now() - t0) / 50];
+  }
+  var plain = Store.createProject({ name: 'K 250k plain', craft: 'zzbigplain', craftData: cd() });
+  ids.push(plain.id);
+  Store.flush();
+  Store.clearUndo();
+  var tPlain = taps(plain.id);
+  var bytesPlain = Store.undoBytes();
+  var depthPlain = Store.__heavy.undoEntries().length;
+  Store.deleteProject(plain.id);
+  Store.clearUndo();
+  Store.flush();
+
+  var heavy = Store.createProject({ name: 'K 250k heavy', craft: 'zzbig', craftData: cd() });
+  ids.push(heavy.id);
+  var m0 = performance.now();
+  Store.flush();
+  return Store.heavyIdle().then(function () {
+    var migMs = performance.now() - m0;
+    var st = Store.heavyInfo(heavy.id).stats;
+    Store.flush();
+    var lsAfter = window.localStorage.getItem(Store.KEY).length;
+    Store.clearUndo();
+    var tHeavy = taps(heavy.id);
+    var bytesHeavy = Store.undoBytes();
+    var depthHeavy = Store.__heavy.undoEntries().length;
+    var flipMed = median(flipT);
+    log(true, 'measured: per tap updateCraftData (mean of 50), ' + median(tPlain).toFixed(3) + ' ms not opted in vs ' +
+      median(tHeavy).toFixed(3) + ' ms opted in (the craft\'s own bit flip alone: ' + flipMed.toFixed(3) + ' ms)');
+    log(true, 'measured: undo memory after 50 taps, ' + bytesPlain + ' bytes in ' + depthPlain + ' steps not opted in vs ' +
+      bytesHeavy + ' bytes in ' + depthHeavy + ' steps opted in');
+    log(true, 'measured: first move of the 533 KB + 42 KB fields to IndexedDB, ' + migMs.toFixed(1) +
+      ' ms from save to committed (transaction + read-back ' + st.lastCommitMs.toFixed(1) + ' ms); localStorage state ' + lsAfter + ' chars after');
+    assertTrue(depthHeavy === 50, 'opted in, all 50 undo steps are kept (not opted in: ' + depthPlain + ', the 2 MB cap)');
+    assertTrue((bytesHeavy / depthHeavy) * 50 < bytesPlain / depthPlain, 'and each step holds under a fiftieth of the bytes of a copy',
+      Math.round(bytesHeavy / depthHeavy) + ' vs ' + Math.round(bytesPlain / depthPlain));
+    assertTrue(median(tHeavy) - flipMed < 1, 'store work per tap opted in is under 1 ms', (median(tHeavy) - flipMed).toFixed(3) + ' ms');
+    assertTrue(median(tHeavy) < median(tPlain), 'and cheaper than the full copy it replaces');
+    var okU = true;
+    var want = [];
+    for (var k = 0; k < 3; k++) { Store.undo(); }
+    var cdNow = Store.project(heavy.id).craftData.progress.done;
+    var exp = bits;
+    for (var n = 0; n < 47; n++) exp = flipAt(exp, n);
+    assertEqual(cdNow === exp, true, 'three undos on the big chart land on exactly the bitmap of tap 47');
+    Store.flush();
+    return Store.heavyIdle();
+  }).then(function () {
+    Store.flush();
+    Store.__setKeyForTests(K);
+    var r0 = performance.now();
+    return Store.whenReady(heavy.id).then(function (stt) {
+      log(true, 'measured: loading the 250,000-cell chart back after a reload, ' + (performance.now() - r0).toFixed(1) + ' ms (' + stt + ')');
+      assertEqual(Store.project(heavy.id).craftData.grid.cells.length, 533000, 'and it is whole');
+    });
+  });
+}
+
+/* ---- count events, sessions, pace, goals, mark log, steps, profile ------ */
+
+function countsAndSessions(B, ids) {
+  group('wave K 8. Count events (one store-side event per counted action)');
+  var seen = [];
+  var unC = Store.onCount(function (e) { seen.push(e); });
+  var c = Store.createProject({ name: 'K count' });
+  ids.push(c.id);
+  assertTrue(!('activity' in Store.project(c.id)), 'a project nothing was counted in has no activity (old projects simply have none)');
+  Store.tapStitch(c.id, c.parts[0].id);
+  assertEqual(seen.length, 1, 'a crochet stitch tap raises one count event');
+  assertEqual([seen[0].origin, seen[0].unit, seen[0].n, seen[0].part], ['counter', 'stitch', 1, 'Main'],
+    "origin 'counter' (app.js announces these itself), unit stitch, n 1, the part");
+  Store.tapRow(c.id, c.parts[0].id);
+  assertEqual(seen[1] && seen[1].unit, 'row', 'a row raises a row event');
+  var act = Store.activity(c.id);
+  assertEqual([act.sessions.length, act.total.stitch, act.total.row], [1, 1, 1], 'both land in one session and the totals');
+  Store.undo();
+  assertEqual(Store.activity(c.id).total.row, undefined, 'Undo takes the row back out of the log too (it rides in the same snapshot)');
+  var ev = Store.counted({ projectId: c.id, n: 5, unit: 'Stitch', part: 'DMC 310', total: 100 });
+  assertEqual([ev.origin, ev.unit, ev.n, ev.total, ev.part], ['craft', 'stitch', 5, 100, 'DMC 310'], 'Store.counted normalises a craft event');
+  assertEqual(ev.session.c.stitch, 6, 'and reports the open session');
+  assertEqual(seen[seen.length - 1], ev, 'onCount subscribers get the same event');
+  Store.counted({ projectId: c.id, n: -2, unit: 'stitch', part: 'DMC 310' });
+  assertEqual(Store.activity(c.id).sessions[0].by['DMC 310'].stitch, 3, 'a negative count (an unmark) comes off the open session, by part');
+  assertEqual(Store.counted({}), null, 'junk is null');
+  assertEqual(Store.counted({ projectId: c.id, n: 0, unit: 'stitch' }), null, 'n 0 is null');
+  assertEqual(Store.counted({ projectId: 'nope', n: 1 }), null, 'an unknown project is null');
+  Store.counted({ projectId: c.id, n: 1, unit: 'stitch', at: Date.now() + 11 * 60000 });
+  assertEqual(Store.activity(c.id).sessions.length, 2, 'a count more than 10 minutes after the last one opens a new session');
+  // cheap on the tap path
+  var t0 = performance.now();
+  for (var i = 0; i < 2000; i++) Store.counted({ projectId: c.id, n: 1, unit: 'stitch', part: 'DMC 310', total: 100 });
+  var per = (performance.now() - t0) / 2000;
+  log(true, 'measured: Store.counted, ' + (per * 1000).toFixed(1) + ' µs per event (2,000 events)');
+  assertTrue(per < 1, 'a count event costs well under 1 ms', per.toFixed(4) + ' ms');
+  unC();
+
+  group('wave K 9. Sessions are bounded; pace, streak and a ≈ finish come from them');
+  var b = Store.createProject({ name: 'K bound' });
+  ids.push(b.id);
+  var base = Date.now() - 400 * 86400000;
+  for (var s = 0; s < 260; s++) Store.counted({ projectId: b.id, n: 3, unit: 'stitch', at: base + s * 36 * 3600000 });
+  var ab = Store.activity(b.id);
+  assertEqual(ab.sessions.length, 200, 'at most 200 sessions are kept');
+  assertEqual(ab.total.stitch, 780, 'the totals still count every one');
+  var pc = Store.createProject({ name: 'K pace' });
+  ids.push(pc.id);
+  var day = 86400000;
+  var today10 = new Date(); today10.setHours(10, 0, 0, 0);
+  var t10 = Math.min(today10.getTime(), Date.now() - 31 * 60000);
+  for (var d = 5; d >= 0; d--) {
+    var st = t10 - d * day;
+    // six counts of 50, six minutes apart: one 30-minute session of 300
+    for (var e5 = 0; e5 < 6; e5++) Store.counted({ projectId: pc.id, n: 50, unit: 'stitch', at: st + e5 * 6 * 60000 });
+  }
+  var pz = Store.pace(pc.id, { remaining: 3000 });
+  assertEqual(pz.sessions, 6, 'six sessions, one a day');
+  assertTrue(pz.perHour === 600, 'perHour from the sessions (300 in 30 minutes = 600)', String(pz.perHour));
+  assertEqual(pz.perDay, 300, 'perDay over the days worked');
+  assertEqual(pz.streak, 6, 'a six-day streak ending today');
+  assertTrue(!!(pz.finish && pz.finish.low <= pz.finish.high && pz.finish.approx), 'a ≈ finish range with remaining work and five or more sessions');
+  assertTrue(Math.abs((pz.finish.low - Date.now()) / day - 10) < 1.5, 'about ten days for 3,000 at 300 a day', String((pz.finish.low - Date.now()) / day));
+  assertEqual(Store.pace(c.id, { remaining: 3000 }).finish, null, 'with fewer than five sessions there is no finish date (no invented estimate)');
+  var g = Store.setGoal(pc.id, { kind: 'perDay', unit: 'stitch', n: 500, label: '500 a day' });
+  var gs = Store.goalStatus(pc.id);
+  assertEqual([gs.length, gs[0].done, gs[0].target, gs[0].met], [1, 300, 500, false], 'a per-day goal reads today\'s count');
+  Store.setGoal(pc.id, { kind: 'byDate', unit: 'stitch', until: Date.now() + 10 * day, label: 'by the 22nd' });
+  var gs2 = Store.goalStatus(pc.id, { remaining: 1000 });
+  assertEqual(gs2[1].perDayNeeded, 100, 'a by-date goal says how many a day it needs');
+  assertTrue(Store.removeGoal(pc.id, g.id) && Store.goalStatus(pc.id).length === 1, 'goals can be removed');
+  assertEqual(Store.setGoal(pc.id, { kind: 'perDay', n: 0 }), null, 'a goal with no number is refused');
+  Store.flush();
+  Store.__setKeyForTests(K);
+  assertEqual(Store.activity(pc.id).sessions.length, 6, 'the log survives a reload');
+  assertEqual(Store.project(pc.id).goals.length, 1, 'so do the goals');
+  assertTrue(JSON.parse(Store.exportJSON()).projects.some(function (x) { return x.id === pc.id && x.activity && x.activity.sessions.length === 6; }),
+    'and the backup carries the log');
+
+  group('wave K 10. Mark log for the time-lapse (BlobStore, varint deltas)');
+  var enc = Store.__heavy.encodeMarks(1700000000000, [5, 1, 900, 1, 3, 0, 250000, 1]);
+  var dec = Store.__heavy.decodeMarks(enc);
+  assertEqual(dec, { at: 1700000000000, marks: [[5, 1], [900, 1], [3, 0], [250000, 1]] }, 'encode / decode round trip, backwards deltas included');
+  assertTrue(enc.length <= 16, 'four marks in ' + enc.length + ' bytes');
+  Store.logMarks(pc.id, [[5, 1], [6, 1], [5, 0]]);
+  return Store.flushMarks(pc.id).then(function (n) {
+    assertEqual(n, 3, 'flushMarks writes the buffered marks as one chunk');
+    Store.logMarks(pc.id, [[7, 1], [1000, 1]]);
+    return Store.readMarks(pc.id);
+  }).then(function (chunks) {
+    assertEqual(chunks.length, 2, 'readMarks flushes what is buffered and gives every chunk in order');
+    var bits = {};
+    chunks.forEach(function (ch) { ch.marks.forEach(function (m) { if (m[1]) bits[m[0]] = 1; else delete bits[m[0]]; }); });
+    assertEqual(Object.keys(bits).sort(), ['1000', '6', '7'], 'replaying the log reproduces the done set');
+    return B.keys('p:' + pc.id + ':marks:');
+  }).then(function (keys) {
+    assertEqual(keys.length, 2, 'chunks live under p:<id>:marks:<n>, so backups, Keep both and the sweep find them');
+
+    group('wave K 11. Step edits and notes keyed by the printed text');
+    var texts = ['Sew the side seams.', 'Press.', 'Press.'];
+    var keys2 = Store.stepKeys(texts);
+    assertTrue(keys2[1] !== keys2[2] && keys2[2] === keys2[1] + '~2', 'a repeated step text gets ~2');
+    assertEqual(Store.stepKey('Sew  the SIDE-seams'), Store.stepKey('sew the side seams.'), 'case, spacing and punctuation do not change the key');
+    var sp = Store.createProject({ name: 'K steps' });
+    ids.push(sp.id);
+    Store.setStepEdit(sp.id, keys2[0], 'Sew the side seams with a 1 cm allowance.');
+    Store.setStepNote(sp.id, keys2[1], 'used 1 cm here');
+    var ov = Store.applyStepOverlay(sp.id, texts);
+    assertEqual([ov.rows[0].edited, ov.rows[0].text, ov.rows[0].printed], [true, 'Sew the side seams with a 1 cm allowance.', 'Sew the side seams.'],
+      'an edit replaces the text and keeps the printed one');
+    assertEqual([ov.rows[1].note, ov.rows[2].note], ['used 1 cm here', ''], 'a note sits on its own step only');
+    var again = Store.applyStepOverlay(sp.id, ['Sew the side seams.', 'Press.', 'Press.']);
+    assertEqual(again.rows[0].edited && again.rows[1].note === 'used 1 cm here', true, 'a re-import of the same PDF finds the same keys');
+    var gone = Store.applyStepOverlay(sp.id, ['Press.', 'Press.']);
+    assertEqual(gone.orphans.map(function (o) { return o.key; }), [keys2[0]], 'an edit whose step is gone is an orphan, not dropped');
+    Store.undo();
+    assertEqual(Store.applyStepOverlay(sp.id, texts).rows[1].note, '', 'Undo takes a note back');
+    Store.setStepEdit(sp.id, keys2[0], '');
+    assertTrue(!('overlay' in Store.project(sp.id)), 'clearing the last edit removes the overlay');
+    assertEqual(Store.setStepEdit(sp.id, 'not a key', 'x'), null, 'a malformed key is refused');
+
+    group('wave K 12. The profile: measurements, units, floss and fabric stashes');
+    fresh();
+    assertTrue(!('profile' in Store.settings()), 'a fresh install has no profile in its settings (present once used)');
+    Store.setMeasurement('bust', 97, 'cm');
+    Store.setMeasurement('waist', 31, 'in');
+    Store.setMeasurement('hip', 1040, 'mm');
+    assertEqual(Store.measurement('bust', 'in'), 38.189, 'a measurement converts on the way out (97 cm = 38.189 in)');
+    assertEqual(Store.measurement('waist'), 31, 'and keeps its own unit');
+    assertEqual(Store.profile().measurements.hip, { value: 104, unit: 'cm', at: Store.profile().measurements.hip.at }, 'mm is stored as cm');
+    assertEqual(Store.setMeasurement('bust', -3, 'cm'), null, 'a nonsense value is refused');
+    assertEqual(Store.convertLength(1, 'in', 'mm'), 25.4, 'convertLength');
+    Store.setFlossOwned('DMC', '310', 2);
+    Store.setFlossOwned('dmc', '3843', 1.5, 'half used');
+    assertEqual(Store.flossOwned('dmc', '310'), 2, 'floss by brand and code (brand case does not matter)');
+    assertEqual(Store.adjustFloss('dmc', '310', -5), 0, 'adjustFloss never goes below 0');
+    assertEqual(Store.flossStash().map(function (r) { return r.code + ':' + r.owned; }), ['3843:1.5'], 'and a row at 0 is removed');
+    Store.setFlossOwned('dmc', '310', 3);
+    var alloc = Store.flossAllocation([
+      { projectId: 'a', needs: { DMC: { '310': 2 } } },
+      { projectId: 'b', needs: { dmc: { '310': 2, '3843': 1 } } }
+    ]);
+    assertEqual([alloc.a.dmc['310'].allocated, alloc.b.dmc['310'].allocated, alloc.b.dmc['310'].short, alloc.b.dmc['3843'].allocated],
+      [2, 1, 1, 1], 'allocation gives the first project what it needs, the next what is left');
+    var f = Store.addFabric({ kind: 'aida', count: 14, color: 'White', w: 50, h: 50, unit: 'cm' });
+    Store.updateFabric(f.id, { qty: 3 });
+    assertEqual(Store.fabricStash()[0].qty, 3, 'fabric pieces can be added and updated');
+    Store.setCraftHooks('zzheavy', { settings: { defaults: { count: 14 }, normalize: function (r) { r.count = Math.max(1, Math.min(40, r.count || 14)); return r; } } });
+    assertEqual(Store.craftSettings('zzheavy').count, 14, 'a craft\'s registered defaults fill its settings bag');
+    Store.setCraftSettings('zzheavy', { count: 99 });
+    assertEqual(Store.craftSettings('zzheavy').count, 40, 'and its normalize repairs what is stored');
+    Store.flush();
+    Store.__setKeyForTests(K);
+    assertEqual([Store.measurement('bust'), Store.flossOwned('dmc', '310'), Store.fabricStash().length, Store.craftSettings('zzheavy').count],
+      [97, 3, 1, 40], 'the profile and craft settings survive a reload');
+    assertTrue(Store.removeFabric(f.id) && Store.removeMeasurement('bust'), 'and can be removed');
+    return Store.storageUsage();
+  }).then(function (u) {
+    assertTrue(u && typeof u.localBytes === 'number' && typeof u.heavyBytes === 'number', 'storageUsage reports localStorage and heavy bytes');
+  });
+}
+
 var summaryEl = document.getElementById('summary');
 
 Store.requestPersist().then(function (granted) {
   log(typeof granted === 'boolean', 'requestPersist() resolves to a boolean', 'got ' + JSON.stringify(granted));
   log(typeof Store.settings().persistGranted === 'boolean', 'and records the answer in settings');
-  finish();
 }, function () {
   log(false, 'requestPersist() never rejects');
+}).then(function () {
+  return waveK();
+}).then(finish, function (err) {
+  log(false, 'wave K: unexpected rejection', String(err && err.stack ? err.stack : err));
   finish();
 });
 

@@ -31,6 +31,7 @@
 
 <script src="../js/patterns.js"></script>
 <script src="../js/knits.js"></script>
+<script src="../js/diagram-geo.js"></script>
 <script src="../js/store.js"></script>
 <script>
 'use strict';
@@ -711,7 +712,7 @@ var CHART_TEXT = fixture('chart', [
 var chp = knitProject('Chart', [{ name: 'Shawl', patternText: CHART_TEXT }]);
 Store.jumpToRow(chp.id, chp.parts[0].id, 7);
 var chi = Store.chartInfo(Store.part(Store.project(chp.id), chp.parts[0].id));
-eq([chi.name, chi.row, chi.of, chi.page, chi.text], ['Chart A', 7, 7, null, null], 'no pages kept: "chart row 7 of 7" from the lines alone');
+eq([chi.name, chi.row, chi.of, chi.page, chi.text], ['Chart A', 7, null, null, null], 'no pages kept: "chart row 7", length unknown (wave K audit: one row named says nothing of the length; it said "of 7")');
 Store.setChartPages(chp.id, [{ page: 4, name: 'Chart A', chart: { name: 'A', rows: 16, cols: 10, cells: [['k']] } }, { page: 0, name: 'bad' }]);
 eq(Store.chartPages(chp.id).length, 1, 'setChartPages keeps real pages only');
 chi = Store.chartInfo(Store.part(Store.project(chp.id), chp.parts[0].id));
@@ -1037,6 +1038,9 @@ if (!window.Knits || typeof Knits.parse !== 'function') {
   var FUR = 'Start with 120 sts.\nKnit even until Body from Sleeve divide measures 12".\nNext rnd: *K1tbl, p1; rep from * around.\nRep last rnd for a further 2" [5 cm].';
   var fu = knitProject('Further', [{ name: 'Body', patternText: FUR }]);
   Store.setGauge(fu.id, { sts: 12, rows: 17, over: 4, unit: 'in' });
+  // (wave K: a project saved before stretch phases keeps the old numbering;
+  // group 19 asserts the same line with the stretch ended by the knitter)
+  if (Store.setRowPhases) Store.setRowPhases(fu.id, false);
   Store.jumpToRow(fu.id, fu.parts[0].id, 3);
   var fui = Store.untilInfo(Store.part(Store.project(fu.id), fu.parts[0].id));
   eq(fui && [fui.value, fui.rows, fui.fromRow, fui.targetRow], [2, 9, 1, 10], '"for a further 2"" counts its ≈ 9 rounds from where the rib began (≈ round 10, not 9)');
@@ -1157,6 +1161,550 @@ group('16. knit-qa-2: batch 2 (Patons cables, Sandnes, Cabled Yoke, older books)
   var shp2 = Store.partShape(Store.part(Store.project(TY.id), TY.parts[0].id));
   eq([shp2.upsideDown, shp2.upsideDownSource], [true, 'text'], 'partShape reads "pick up … around top edge" as worked bottom-up (the viewer said "Auto — top-down")');
   Store.registerCraftParser('knitting', FakeKnits);
+})();
+
+/* ====================================================================== */
+
+group('17. wave K (knit-store) P3: panels that keep running');
+
+(function () {
+  Store.registerCraftParser('knitting', FakeKnits);
+  var PT = fixture('panels-running', [
+    L(0, 'Start with 40 sts.', { kind: 'setup', count: 40 }),
+    L(1, '1st row: (RS). P2. Work 1st row of Panel A. P2. Work 1st row of Panel B. P2. Work 1st row of Panel C.', { count: 40,
+      chart: { name: 'Panel A', row: 1, also: [{ name: 'Panel B', row: 1 }, { name: 'Panel C', row: 1 }] } }),
+    L(2, '2nd row: K2. Work 2nd row of Panel A. K2. Work 2nd row of Panel B. K2. Work 2nd row of Panel C.', { count: 40,
+      chart: { name: 'Panel A', row: 2, also: [{ name: 'Panel B', row: 2 }, { name: 'Panel C', row: 2 }] } }),
+    L(null, 'Cont in pat until work measures 10 in, ending on a WS row.', { kind: 'repeat', repeatOf: [1, 2], repeatFrom: 3,
+      until: { kind: 'length', value: 10, unit: 'in', endOn: 'ws' } }),
+    L(3, 'Shape top: Keeping cont of pat, cast off 3 sts beg next 2 rows. 34 sts.', { rowEnd: 4, count: 34, prevCount: 40, approxRow: true }),
+    L(5, 'Next row: K1. Purl to last st. K1.', { count: 34, approxRow: true })
+  ]);
+  var pp = knitProject('Panels running', [{ name: 'Back', patternText: PT }]);
+  Store.setChartPages(pp.id, [
+    { page: 3, name: 'Panel A', noImage: true, chart: { name: 'Panel A', rows: 6, cells: null } },
+    { page: 3, name: 'Panel B', noImage: true, chart: { name: 'Panel B', rows: 4, cells: null } }
+  ], { undo: false });
+  function part() { return Store.part(Store.project(pp.id), pp.parts[0].id); }
+  function chip(row) {
+    Store.jumpToRow(pp.id, pp.parts[0].id, row);
+    var ci = Store.chartInfo(part());
+    return ci && ci.panels ? ci.panels.map(function (p) { return p.name + ' ' + p.row + '/' + p.of; }).join(' · ') : (ci ? ci.name + ' ' + ci.row + '/' + ci.of : null);
+  }
+  eq(chip(1), 'Panel A 1/6 · Panel B 1/4 · Panel C 1/null', 'row 1 places three panels: every one is listed; Panel C\'s length is unknown (null, never a number)');
+  eq(chip(2), 'Panel A 2/6 · Panel B 2/4 · Panel C 2/null', 'row 2: its own panel rows');
+  eq(chip(9), 'Panel A 3/6 · Panel B 1/4 · Panel C null/null', 'row 9 inside "Cont in pat until…": A row 3, B row 1 (they kept running), C row unknown (it said row 1 of 28 before)');
+  Store.jumpToRow(pp.id, pp.parts[0].id, 9);
+  var ci9 = Store.chartInfo(part());
+  eq([ci9.continued, ci9.name, ci9.row, ci9.of], [true, 'Panel A', 3, 6], 'the chip\'s own fields are the first panel\'s, flagged continued');
+  eq(chip(25), 'Panel A 1/6 · Panel B 1/4 · Panel C null/null', 'row 25 = 1 + LCM(6, 4): A and B are back on row 1 together');
+  // a panel name with no chart of that name never borrows the only chart there is (E3)
+  var one = fixture('one-chart', [
+    L(1, '1st row: Work 1st row of Panel Pat C.', { chart: { name: 'Panel Pat C', row: 1 } }),
+    L(null, 'Cont in pat until work measures 5 in.', { until: { kind: 'length', value: 5, unit: 'in' } })
+  ]);
+  var op = knitProject('One chart', [{ name: 'Back', patternText: one }]);
+  Store.setChartPages(op.id, [{ page: 4, name: 'PANEL PAT B', noImage: true, chart: { name: 'PANEL PAT B', rows: 28, cells: null } }], { undo: false });
+  var oc = Store.chartInfo(Store.project(op.id).parts[0]);
+  eq([oc && oc.name, oc && oc.of, oc && oc.page], ['Panel Pat C', null, null], 'Panel Pat C does not bind to the page\'s only chart (Panel Pat B, 28 rows): "of" unknown, no page (E3)');
+  // the cable ring follows the running panels
+  var CR = fixture('panel-cables', [
+    L(1, '1st row: Work 1st row of Panel Q.', { chart: { name: 'Panel Q', row: 1 } }),
+    L(2, '2nd row: Work 2nd row of Panel Q.', { chart: { name: 'Panel Q', row: 2 } }),
+    L(null, 'Cont in pat until work measures 5 in.', { kind: 'repeat', repeatOf: [1, 2], repeatFrom: 3, until: { kind: 'length', value: 5, unit: 'in' } })
+  ]);
+  var crq = knitProject('Panel cables', [{ name: 'Back', patternText: CR }]);
+  Store.setChartPages(crq.id, [{ page: 2, name: 'Panel Q', noImage: true, chart: { name: 'Panel Q', rows: 8, cells: null } }], { undo: false });
+  Store.jumpToRow(crq.id, crq.parts[0].id, 11);
+  var cq = Store.chartInfo(Store.part(Store.project(crq.id), crq.parts[0].id));
+  eq([cq && cq.row, cq && cq.of], [3, 8], 'one running panel: row 11 is Panel Q row 3 of 8');
+  // crochet never runs panels
+  var cro = Store.createProject({ name: 'Croc panels' });
+  Store.updatePart(cro.id, cro.parts[0].id, { patternText: 'R1: 6 sc in MR. (6)' });
+  eq(Store.chartInfo(Store.project(cro.id).parts[0]), null, 'crochet: no chart chip at all');
+})();
+
+group('18. wave K (knit-store) P2: "this row" resolves the repeat');
+
+(function () {
+  Store.registerCraftParser('knitting', FakeKnits);
+  var SL = fixture('sleeve-reps', [
+    L(0, 'Pick up and knit 2 sts. 48 sts.', { kind: 'setup', count: 48 }),
+    L(1, 'Rnds 1-13: Knit.', { rowEnd: 13, count: 48 }),
+    L(14, 'Next rnd: K2tog. Knit to last 2 sts. ssk. 46 sts.', { count: 46 }),
+    L(null, 'Knit 5 rnds even.', { kind: 'repeat', repeatOf: [14], repeatFrom: 15, repeatTo: 19, until: { kind: 'rows', value: 5, unit: 'rnds' } }),
+    L(null, 'Rep last 6 rnds 8 times more. 30 sts.', { kind: 'repeat', repeatOf: [14, 15, 16, 17, 18, 19], repeatFrom: 20, repeatTo: 67, repeatTimes: 9 }),
+    L(68, '3rd rnd: As 14th rnd.', { repeatOf: [14], repeatFrom: 68, repeatTo: 68 })
+  ], 'rounds');
+  var sp2 = knitProject('Sleeve reps', [{ name: 'Sleeve', patternText: SL }]);
+  var sl = Store.project(sp2.id).parts[0];
+  function li(row) { var x = Store.lineInfo(sl, row); return x ? [x.shown.text.slice(0, 9), x.via ? x.via.text.slice(0, 8) : null, x.k, x.n, x.cycle, x.of] : null; }
+  eq(li(20), ['Next rnd:', 'Rep last', 1, 6, 2, 9], 'rnd 20 under "Rep last 6 rnds 8 times more" is the decrease round: rnd 1 of 6, working 2 of 9');
+  eq(li(21), ['Knit 5 rn', 'Rep last', 2, 6, 2, 9], 'rnd 21 is a "knit 5 rnds even" round (a counted span, not a back-reference)');
+  eq(li(25)[0], 'Knit 5 rn', 'rnd 25 knit');
+  eq(li(26), ['Next rnd:', 'Rep last', 1, 6, 3, 9], 'rnd 26 decreases again: working 3 of 9');
+  eq(li(67), ['Knit 5 rn', 'Rep last', 6, 6, 9, 9], 'rnd 67 ends working 9 of 9');
+  eq(li(14), ['Next rnd:', null, null, null, null, null], 'a written row resolves to itself: via null');
+  eq(li(16), ['Knit 5 rn', null, null, null, null, null], '"Knit 5 rnds even" is shown as written (its repeatOf is not a "rep" sentence)');
+  eq(li(68)[0], 'Next rnd:', '"As 14th rnd" shows the 14th round\'s words');
+  // when unsure: exactly today's sentence
+  var UN = fixture('unsure-reps', [
+    L(1, 'Row 1: Knit.', {}),
+    L(null, 'Rep last 2 rows to end.', { kind: 'repeat', repeatOf: [1, 'x'], repeatFrom: 2 })
+  ]);
+  var up = knitProject('Unsure reps', [{ name: 'Back', patternText: UN }]);
+  var ux = Store.lineInfo(Store.project(up.id).parts[0], 4);
+  eq(ux && [ux.shown === ux.line, ux.via], [true, null], 'a repeat the store cannot read keeps today\'s sentence (shown = line, via null)');
+  // crochet: never resolved
+  var cr = Store.createProject({ name: 'Croc reps' });
+  Store.updatePart(cr.id, cr.parts[0].id, { patternText: 'Row 1: 10 sc. (10)\nRow 2: 10 sc. (10)\nRep last 2 rows 3 times more.' });
+  var cx = Store.lineInfo(Store.project(cr.id).parts[0], 4);
+  eq(cx && [cx.shown === cx.line, cx.via], [true, null], 'crochet is untouched: shown = line, via null');
+})();
+
+group('20. wave K (knit-store) P10: "I measured"');
+
+(function () {
+  Store.registerCraftParser('knitting', FakeKnits);
+  var SV = fixture('measure-sleeve', [
+    L(0, 'Pick up 48 sts.', { kind: 'setup', count: 48 }),
+    L(1, 'Knit even in rnds until work from sleeve divide measures 3 in.', { kind: 'repeat', rowEnd: 13, until: { kind: 'length', value: 3, unit: 'in' } }),
+    L(14, 'Next rnd: K2tog. Knit to last 2 sts. ssk. 46 sts.', { count: 46, approxRow: true })
+  ], 'rounds');
+  var mp = knitProject('Measure', [{ name: 'Sleeve', patternText: SV }]);
+  Store.setGauge(mp.id, { sts: 12, rows: 17, over: 4, unit: 'in' });
+  var id = mp.id, pid = mp.parts[0].id;
+  function prt() { return Store.part(Store.project(id), pid); }
+  Store.jumpToRow(id, pid, 5);
+  var est = Store.stretchInfo(prt());
+  eq(est && est.estimate && est.estimate.end, 13, 'pattern gauge 17 rows / 4 in: 3 in ≈ 13 rounds (a hint)');
+  Store.useStretchEstimate(id, pid);
+  eq(Store.lineForRow(prt(), 14).text.slice(0, 8), 'Next rnd', 'after "Use" the decrease round is round 14');
+  Store.jumpToRow(id, pid, 16);
+  var mi = Store.addMeasurement(id, pid, 3, 'in');
+  eq(mi && [mi.rowsPerUnit, mi.endRow, mi.replanned, mi.atLength], [5, 15, true, true], '"I measured 3 in" after 15 rounds: 5 rounds per inch, the stretch ends on round 15');
+  eq(Store.lineForRow(prt(), 16).text.slice(0, 8), 'Next rnd', 'the decrease round is now round 16, not 14');
+  eq(mi.gaugeOffer && [mi.gaugeOffer.rows, mi.gaugeOffer.over, mi.gaugeOffer.was], [20, 4, 17], 'a gauge offer: 20 rows / 4 in (was 17), never applied by itself');
+  eq(Store.gaugeOf(id).swatch.rows, null, '... the swatch is untouched');
+  Store.undo();
+  eq(Store.lineForRow(prt(), 14).text.slice(0, 8), 'Next rnd', 'one Undo takes the measurement and the re-plan back');
+  eq((prt().measures || []).length, 0, '... and the measurement');
+})();
+
+group('21. wave K (knit-store) P9: markers that move');
+
+(function () {
+  Store.registerCraftParser('knitting', FakeKnits);
+  var NK = fixture('moving-markers', [
+    L(0, 'Cast on 12 sts.', { kind: 'setup', count: 12 }),
+    L(1, '1st row: (RS). K2. PM. K2. PM. K4. PM. K2. PM. K2.', { count: 12, side: 'rs',
+      markers: [{ name: 'm1', at: 2 }, { name: 'm2', at: 4 }, { name: 'm3', at: 8 }, { name: 'm4', at: 10 }] }),
+    L(2, '2nd row: Purl.', { count: 12 }),
+    L(3, '3rd row: K2. *M1. SM. K2. SM. M1.** K4. Rep from * to ** once more. K2. 16 sts.', { count: 16 }),
+    L(4, '4th row: Purl.', { count: 16 }),
+    L(5, '5th row: K1. M1. Knit to end. 17 sts.', { count: 17 })
+  ]);
+  var mp = knitProject('Moving markers', [{ name: 'Neck', patternText: NK }]);
+  function mi(row) { Store.jumpToRow(mp.id, mp.parts[0].id, row); return Store.markerInfo(Store.part(Store.project(mp.id), mp.parts[0].id)); }
+  eq(mi(2).segments, [2, 2, 4, 2, 2], 'row 2: the markers as placed (12 sts)');
+  var r3 = mi(3);
+  eq([r3.segments, r3.moved, r3.shifted], [[3, 2, 6, 2, 3], true, false], 'row 3 "M1. SM. K2. SM. M1.": each increase goes to its own side of the marker: 3|2|6|2|3 (it said "set on a 12-st row")');
+  eq(mi(4).segments, [3, 2, 6, 2, 3], 'row 4 (purl) keeps them');
+  var r5 = mi(5);
+  eq([r5.segments, r5.unplaced, r5.shifted], [null, true, true], 'row 5: an increase not beside a marker cannot be placed: no numbers, the honest message stays (E5)');
+  // marked stitches: "inc 1 st at each side of marked sts"
+  var MS = fixture('marked-sts', [
+    L(0, 'Cast on 20 sts.', { kind: 'setup', count: 20 }),
+    L(1, 'Rnd 1: Knit.', { count: 20 }),
+    L(null, 'Insert markers around 2 sts for raglan: count 4 sts, insert marker around next st, count 9 sts, insert marker around next st.',
+      { markers: [{ name: 'r1', at: 4 }, { name: 'r2', at: 14 }] }),
+    L(2, 'Rnd 2: Knit and inc 1 st at each side of marked sts = 4 sts inc. 24 sts.', { count: 24 })
+  ], 'rounds');
+  var sp = knitProject('Marked sts', [{ name: 'Yoke', patternText: MS }]);
+  Store.jumpToRow(sp.id, sp.parts[0].id, 2);
+  var sm = Store.markerInfo(Store.part(Store.project(sp.id), sp.parts[0].id));
+  eq([sm.markers.map(function (m) { return m.kind; }), sm.marked, sm.plain, sm.moved], [['stitch', 'stitch'], true, [5, 11, 6], true],
+    'markers AROUND a stitch are marked stitches; rnd 2 adds one each side of each: 4|●|9|●|5 becomes 5 | ● | 11 | ● | 6');
+  // carried into the next part of the same piece
+  var C2 = fixture('carried-next', [
+    L(0, 'Start with 16 sts.', { kind: 'setup', count: 16 }),
+    L(1, 'Rnd 1: Knit.', { count: 16 })
+  ], 'rounds');
+  var cp = knitProject('Carried', [{ name: 'Neck', patternText: NK, targetRows: 4 }, { name: 'Yoke', patternText: C2 }]);
+  var yk = Store.project(cp.id).parts[1];
+  var cmi = Store.markerInfo(yk);
+  eq([cmi.source, cmi.from, cmi.segments], ['carried', 'Neck', [3, 2, 6, 2, 3]], 'the yoke rounds start with the neck rows\' markers where they ended (3|2|6|2|3 on 16 sts)');
+})();
+
+group('26. wave K (knit-store): the reader\'s plainRows and a set-up line that opens a stretch');
+
+(function () {
+  Store.registerCraftParser('knitting', FakeKnits);
+  var PR = fixture('plain-rows', [
+    L(0, 'Start with 48 sts.', { kind: 'setup', count: 48 }),
+    L(1, 'Next rnd: K2tog. Knit to last 2 sts. ssk. 46 sts.', { count: 46 }),
+    L(null, 'Rep these rnds 5 times even.', { kind: 'repeat', repeatOf: [1], repeatFrom: 2, repeatTo: 6, plainRows: true, count: 46 })
+  ], 'rounds');
+  var pp = knitProject('Plain rows', [{ name: 'Sleeve', patternText: PR }]);
+  var x = Store.lineInfo(Store.project(pp.id).parts[0], 3);
+  eq(x && [x.shown === x.line, x.via], [true, null], 'a plainRows line is shown as written even with a back-reference on it (never the decrease round)');
+  var WI = fixture('setup-within', [
+    L(0, 'CO 124 sts. Join. Work in rib for 3/4 in.', { kind: 'setup', count: 124,
+      stretch: { id: 1, open: true, within: true, count: 124, text: 'Work in rib for 3/4 in.', ends: { kind: 'length', value: 0.75, unit: 'in' } },
+      until: { kind: 'length', value: 0.75, unit: 'in' } }),
+    L(1, 'Inc. Rnd: inc 20 sts evenly. 144 sts.', { count: 144, approxRow: true })
+  ], 'rounds');
+  var wp = knitProject('Setup within', [{ name: 'Hat', patternText: WI }]);
+  var wpp = function () { return Store.part(Store.project(wp.id), wp.parts[0].id); };
+  var ws = Store.stretchInfo(Store.project(wp.id).parts[0], 1);
+  eq(ws && [ws.state, ws.start, ws.count, ws.line.text], ['open', 1, 124, 'Work in rib for 3/4 in.'], 'a set-up line that casts on and then works a length: the cast-on stays row 0, the rib is a stretch from row 1');
+  Store.jumpToRow(wp.id, wp.parts[0].id, 6);
+  Store.endStretch(wp.id, wp.parts[0].id);
+  eq([Store.lineForRow(wpp(), 6).text.slice(0, 7), Store.targetFor(wpp(), 6)], ['Inc. Rn', 144], 'after 5 rib rounds the increase round is round 6');
+})();
+
+group('27. wave K (knit-store) audit round: "not sure" beats a confident wrong row, side, chart row or count');
+
+(function () {
+  Store.registerCraftParser('knitting', FakeKnits);
+  // a lone BOR marker on a decrease round: nothing to vouch for, no "Markers set on a 48-st row"
+  var BO = fixture('lone-bor', [
+    L(0, 'Pick up 48 sts. PM for beg of rnd.', { kind: 'setup', count: 48, markers: [{ name: 'BOR', at: 0 }] }),
+    L(1, 'Next rnd: K2tog. Knit to last 2 sts. ssk. 46 sts.', { count: 46 })
+  ], 'rounds');
+  var bo = knitProject('Lone BOR', [{ name: 'Sleeve', patternText: BO }]);
+  var bom = Store.markerInfo(Store.project(bo.id).parts[0]);
+  eq([bom.markers.length, bom.shifted], [1, false], 'a lone BOR marker is never "set on a 48-st row · this row makes 46" (audit: Bernat sleeves)');
+  // (1) lineInfo: "every other rnd" names one round; the plain round between is not a written row
+  var EO = fixture('every-other', [
+    L(0, 'CO 28 sts.', { kind: 'setup', count: 28 }),
+    L(1, 'Next rnd *K1, pm, k12, pm, k1; rep from * once more.', { count: 28 }),
+    L(2, 'Inc rnd *Knit to m, M1, sl m, knit to m, sl m, M1; rep from * once more, knit to end.', { count: 32 }),
+    L(null, 'Cont in St st, rep Inc rnd every other rnd 7 more times. 60 sts.', { kind: 'repeat', repeatOf: [1, 2], repeatFrom: 3, repeatTo: 16, count: 60 })
+  ], 'rounds');
+  var eo = knitProject('Every other', [{ name: 'Toe', patternText: EO }]);
+  var x3 = Store.lineInfo(Store.project(eo.id).parts[0], 3);
+  eq([x3.shown === x3.line, x3.via, x3.unsure], [true, null, true], 'TT toe: "rep Inc rnd every other rnd" is never resolved to the marker set-up round: the sentence, unsure');
+  var BR = fixture('rep-last-every-other', [
+    L(1, '1st rnd: Knit.', { count: 80 }),
+    L(2, '2nd rnd: Knit to next marker. *M1. SM. K2. SM. M1.** Knit to end of rnd. 88 sts.', { count: 88 }),
+    L(null, 'Rep last 2 rnds, inc 8 sts every other rnd 15 times more. 208 sts.', { kind: 'repeat', repeatOf: [1, 2], repeatFrom: 3, repeatTo: 32, count: 208 })
+  ], 'rounds');
+  var br = knitProject('Rep last every other', [{ name: 'Yoke', patternText: BR }]);
+  var b20 = Store.lineInfo(Store.project(br.id).parts[0], 20);
+  eq([b20.shown.text.slice(0, 7), b20.unsure], ['2nd rnd', false], 'Bernat B10 "Rep last 2 rnds, inc … every other rnd" still resolves (it says which rows)');
+  // (1b) a "Cont in pat … same length as Back" stretch with one back-referenced row
+  var CE = fixture('cont-even-stretch', [
+    L(1, '1st row: (RS). P2. K2.', { count: 93, side: 'rs' }),
+    L(2, '2nd row: K2. P2.', { count: 93 }),
+    L(3, '3rd row: P2. K2.', { count: 93 }),
+    L(4, '4th row: K2. P2.', { count: 93 }),
+    L(null, 'Cont even in pat until work from beg measures same length as Back, ending on a WS row.', { kind: 'repeat', repeatOf: [4], repeatFrom: 5, until: { kind: 'length', value: 17, unit: 'in', endOn: 'ws' } }),
+    L(5, 'Shape raglans: Keeping cont of pat, cast off 2 sts beg next 2 rows. 89 sts.', { rowEnd: 6, count: 89, prevCount: 93, approxRow: true })
+  ]);
+  var ce = knitProject('Cont even', [{ name: 'Front', patternText: CE }]);
+  var cid = ce.id, cpid = ce.parts[0].id;
+  function cp() { return Store.part(Store.project(cid), cpid); }
+  var x9 = Store.lineInfo(cp(), 9);
+  eq([x9.shown === x9.line, /^Cont even/.test(x9.shown.text), x9.unsure], [true, true, true], 'boyfriend F17: the stretch is shown as its own sentence on every row, never "4th row" (unsure)');
+  // (3) side inside a stretch: parity from the last stated tag
+  Store.jumpToRow(cid, cpid, 9);
+  eq(Store.sideInfo(cp()).side, 'rs', 'row 9 inside the stretch is RS (parity from "1st row: (RS)"), not "RS?"');
+  // (5) a part with no target gets one when its last stretch ends: its last written row
+  Store.jumpToRow(cid, cpid, 21);
+  Store.endStretch(cid, cpid);
+  eq(cp().targetRows, 22, 'after "I\'m at the length" at row 20 the part ends on row 22 (the raglans): it can finish');
+  // (3) side carried into "Front (continued)" from the last row of the Front
+  var FC = fixture('front-continued', [
+    L(0, 'Start with 89 sts.', { kind: 'setup', count: 89 }),
+    L(1, '1st row: K2. ssk. Pat to last 4 sts. K2tog. K2.', { count: 87 }),
+    L(2, '2nd row: P2. P2tog. Pat to last 4 sts. P2togtbl. P2.', { count: 85 })
+  ]);
+  var np = Store.addPart(cid, { name: 'Front (continued)' });
+  Store.updatePart(cid, np.id, { patternText: FC });
+  var fcp = Store.part(Store.project(cid), np.id);
+  eq([Store.patternSideAt(fcp, 1).side, Store.patternSideAt(fcp, 2).side], ['rs', 'ws'], 'Front (continued) carries the Front\'s parity: row 1 RS (the Front ended on a WS row), row 2 WS');
+  // (3) "With RS facing, … join yarn" is a RS row whatever the parity says
+  var JY = fixture('join-yarn', [
+    L(1, 'Next row: (RS). Pat 10 sts. Turn.', { side: 'rs', count: 10 }),
+    L(2, 'Next row: Pat to end.', { count: 10 }),
+    L(3, 'With RS facing, slip center 21 sts onto a st holder. Join yarn to rem sts and pat to end.', { count: 10, side: 'ws' })
+  ]);
+  var jy = knitProject('Join yarn', [{ name: 'Shape Neck', patternText: JY }]);
+  eq(Store.patternSideAt(Store.project(jy.id).parts[0], 3).side, 'rs', '"With RS facing … join yarn" is a RS row (it said WS by parity)');
+  var RJ = fixture('rejoin', [
+    L(1, '1st row: (RS). K2. ssk. Pat across next 7 sts. Turn. Leave rem sts on a st holder.', { side: 'rs', count: 10 }),
+    L(2, 'Next row: (WS). P4.', { side: 'ws', count: 4 }),
+    L(3, 'Next row: K2. ssk.', { count: 3 }),
+    L(4, 'Next row: P3. Fasten off.', { count: 3 }),
+    L(5, 'Join yarn to rem sts. Pat to last 4 sts. K2tog. K2.', { count: 10 })
+  ]);
+  var rj = knitProject('Rejoin', [{ name: 'Shape Neck', patternText: RJ }]);
+  eq(Store.patternSideAt(Store.project(rj.id).parts[0], 5).side, 'rs', '"Join yarn to rem sts" starts the second side on the side the first began (RS), not by parity (WS)');
+  // (4) the cable ring follows written panels inside a stretch (real reader)
+  Store.registerCraftParser('knitting', 'Knits');
+  if (window.Knits && Knits.parse) {
+    var PS = ['Start with 13 sts.',
+      '1st row: (RS). P2. Work 1st row of Panel Pat C. P2.',
+      '2nd row: K2. Work 2nd row of Panel Pat C. K2.',
+      'Cont in pat until work measures 10 in, ending on a WS row.',
+      'Panel Pat C (worked over 9 sts): 1st row: (RS). Knit. | 2nd and every alt row: Purl. | 3rd row: C6F. K3. | 5th and 7th rows: Knit. | 9th row: K3. C6B. | 11th row: Knit. | 12th row: Purl. | These 12 rows form Panel Pat C.'].join('\n');
+    var psp = knitProject('Panel stretch', [{ name: 'Back', patternText: PS }]);
+    var ringAt = function (r) { Store.jumpToRow(psp.id, psp.parts[0].id, r); var c = Store.cableInfo(Store.part(Store.project(psp.id), psp.parts[0].id)); return c ? c.inRows : null; };
+    eq([ringAt(8), ringAt(9), ringAt(10), ringAt(15)], [1, 0, 5, 0], 'inside the stretch the ring follows Panel C (crosses on panel rows 3 and 9): rows 8-10 "in 1, now, in 5", row 15 crosses (it said "in 1" on every row)');
+  }
+  Store.registerCraftParser('knitting', FakeKnits);
+  // (2) chart rows: enumerated lines, a row past the chart, an end condition
+  var CR = fixture('chart-rows-audit', [
+    L(15, 'Row 15 and all following odd-numbered rows: Knit. See Chart B.', { rowEnd: 21, rowList: [15, 17, 19, 21], chart: { name: 'B', row: 15 } }),
+    L(38, 'Rows 38 and 40: Work Chart C.', { rowEnd: 40, rowList: [38, 40], chart: { name: 'C', row: 38 } }),
+    L(63, 'Rows 63-66: Work Chart D.', { rowEnd: 66, chart: { name: 'D', row: 63 } })
+  ]);
+  var crp = knitProject('Chart rows audit', [{ name: 'Shawl', patternText: CR }]);
+  Store.setChartPages(crp.id, [
+    { page: 3, name: 'Chart B', noImage: true, chart: { name: 'Chart B', rows: 36, cells: null } },
+    { page: 4, name: 'Chart C', noImage: true, chart: { name: 'Chart C', rows: 40, cells: null } },
+    { page: 5, name: 'Chart D', noImage: true, chart: { name: 'Chart D', rows: 64, cells: null } }], { undo: false });
+  function crow(r) { Store.jumpToRow(crp.id, crp.parts[0].id, r); var c = Store.chartInfo(Store.part(Store.project(crp.id), crp.parts[0].id)); return c ? [c.name, c.row, c.of] : null; }
+  eq(crow(17), ['Chart B', 17, 36], '"Row 15 and all following odd rows": row 17 is chart row 17 (it said 15)');
+  eq(crow(40), ['Chart C', 40, 40], '"Rows 38 and 40": row 40 is chart row 40 (it said 38)');
+  eq(crow(65), ['Chart D', null, 64], 'a row past the chart\'s 64 rows is not a chart row: unknown, never "row 65 of 64"');
+  var EN = fixture('ending-with', [
+    L(1, 'Foot: Work even in patt until foot measures 7 in, ending with chart Rnd 10.', { until: { kind: 'length', value: 7, unit: 'in' }, chart: { name: null, row: 10 } })
+  ], 'rounds');
+  var en = knitProject('Ending with', [{ name: 'Foot', patternText: EN }]);
+  Store.jumpToRow(en.id, en.parts[0].id, 4);
+  eq(Store.chartInfo(Store.part(Store.project(en.id), en.parts[0].id)), null, '"… ending with chart Rnd 10" names an end, not the row being worked: no "Chart · row 10 of 10"');
+  var EV = fixture('even-through', [
+    L(1, 'Next rnd: Knit.', {}),
+    L(2, 'Work even through Row 11 of Foot chart.', { rowEnd: 12, chart: { name: 'Foot', row: 1, rowEnd: 11 } })
+  ], 'rounds');
+  var ev = knitProject('Even through', [{ name: 'Leg', patternText: EV }]);
+  Store.jumpToRow(ev.id, ev.parts[0].id, 5);
+  var evc = Store.chartInfo(Store.part(Store.project(ev.id), ev.parts[0].id));
+  eq(evc && [evc.name, evc.row, evc.unknown], ['Foot', null, true], '"Work even through Row 11 of Foot chart" carries the chart on: the row is unknown (it restarted at row 1)');
+  // (6) a set-up line that IS the stretch (boyfriend Sleeves' 2½" rib)
+  var SU = fixture('setup-is-stretch', [
+    L(0, 'With smaller needles, cast on 35 sts.', { kind: 'setup', count: 35 }),
+    L(0, 'Work 2½" in Twisted Ribbing, ending on a 2nd row and inc 2 sts evenly across last row. 37 sts.', { kind: 'setup', count: 37,
+      stretch: { id: 1, open: true, within: false, count: 35 }, until: { kind: 'length', value: 2.5, unit: 'in' } }),
+    L(1, '1st row: (RS). P2. Work 1st row of Panel A.', { count: 37, side: 'rs' })
+  ]);
+  var su = knitProject('Setup stretch', [{ name: 'Sleeves', patternText: SU }]);
+  var ss = Store.stretchInfo(Store.project(su.id).parts[0], 1);
+  eq(ss && [ss.state, ss.start, ss.count], ['open', 1, 35], 'the 2½" rib on a set-up line is a stretch from row 1 on 35 sts (it never appeared)');
+  // (3) a part that only speaks of rounds has no RS/WS chip
+  var RO = fixture('rounds-only', [
+    L(0, 'Start with 68 sts.', { kind: 'setup', count: 68 }),
+    L(1, 'Next rnd K1, work Row 1 of Foot chart over 32 sts, knit to end.', { count: 68 })
+  ], 'rows');
+  var ro = knitProject('Rounds only', [{ name: 'Foot', patternText: RO }]);
+  eq(Store.sideInfo(Store.project(ro.id).parts[0]).inRound, true, 'E13: a part whose rows are all "Next rnd …" is in the round (no "RS?")');
+})();
+
+group('25. wave K (knit-store) Store.tapStitches: a repeat per tap, one undo step');
+
+(function () {
+  Store.registerCraftParser('knitting', FakeKnits);
+  var TS = fixture('tap-stitches', [
+    L(1, 'Row 1: *K3, p2; rep from * to end. (12 sts)', { count: 12 }),
+    L(2, 'Row 2: Knit. (12 sts)', { count: 12 })
+  ]);
+  var tp = knitProject('Tap stitches', [{ name: 'Back', patternText: TS }]);
+  var id = tp.id, pid = tp.parts[0].id;
+  function prt() { return Store.part(Store.project(id), pid); }
+  var counts = [];
+  var off = Store.onCount ? Store.onCount(function (ev) { counts.push(ev.n); }) : null;
+  var r1 = Store.tapStitches(id, pid, 5);
+  eq([r1.event === 'stitch' || r1.event === 'group', r1.n, prt().stitch], [true, 5, 5], 'tapStitches(5): 5 stitches');
+  eq(counts, [5], '... one count event of 5');
+  Store.undo();
+  eq(prt().stitch, 0, '... one Undo takes all 5 back');
+  Store.tapStitches(id, pid, 5);
+  Store.tapStitches(id, pid, 5);
+  var r3 = Store.tapStitches(id, pid, 5);
+  eq([r3.event, r3.n, prt().row, prt().stitch], ['rowAuto', 2, 1, 0], 'a run past the row\'s 12 is clamped to the 2 left and completes the row');
+  Store.updatePart(id, pid, { alerts: [3] });
+  var r4 = Store.tapStitches(id, pid, 4);
+  eq([r4.event, r4.stitch], ['alert', 3], 'a stitch alert inside the run is reported');
+  if (off) off();
+  // crochet: the same one-step behaviour, tapStitch untouched
+  var cr = Store.createProject({ name: 'Croc tap stitches' });
+  Store.updatePart(cr.id, cr.parts[0].id, { patternText: 'Rnd 1: 6 sc in MR. (6)' });
+  var c1 = Store.tapStitch(cr.id, cr.parts[0].id);
+  eq([c1.event, Store.project(cr.id).parts[0].stitch], ['stitch', 1], 'tapStitch is unchanged (crochet)');
+  eq(Store.tapStitches('nope', 'nope', 3).event, 'none', 'an unknown part does nothing');
+})();
+
+group('24. wave K (knit-store) P7: a book pattern keeps only its own charts');
+
+(function () {
+  Store.registerCraftParser('knitting', 'Knits');
+  if (!window.Knits || typeof Knits.bookPatterns !== 'function') { log(true, 'Knits.bookPatterns not there: skipped'); Store.registerCraftParser('knitting', FakeKnits); return; }
+  var BOOK = ['Contents', 'Sock One ........ 2', 'Sock Two ........ 3', '=== PAGE 2 ===', 'Sock One', 'Sizes: S (M, L)',
+    'LEG', 'CO 56 (64, 72) sts.', 'Rnd 1: Work Rnd 1 of Leg chart.', 'Rnd 2: Knit.',
+    '=== PAGE 3 ===', 'Sock Two', 'FOOT', 'CO 60 sts.', 'Rnd 1: Work Rnd 1 of Leg chart.', 'Rnd 2: Knit.'].join('\n');
+  var bp = Knits.bookPatterns(BOOK);
+  var secs = Store.splitSections(BOOK, 'knitting').filter(function (s) { return s.group === 'Sock Two'; });
+  var p = Store.createProject({ name: 'Book charts', craft: 'knitting' });
+  Store.importPatternSections(p.id, secs, { mode: 'parts', text: BOOK });
+  var pp = Store.project(p.id).craftData.patternPages;
+  ok(bp && pp && pp.length === 1 && pp[0].name === 'Sock Two', 'the import remembers Sock Two\'s own pages', JSON.stringify(pp));
+  Store.setChartPages(p.id, [
+    { page: 2, name: 'Leg', noImage: true, chart: { name: 'Leg', rows: 10, cells: null } },
+    { page: 3, name: 'Leg', noImage: true, chart: { name: 'Leg', rows: 12, cells: null } }
+  ], { undo: false });
+  eq(Store.chartPages(p.id).map(function (c) { return c.page; }), pp && pp.length ? [3] : [2, 3], 'only the chart on Sock Two\'s pages attaches (Sock One\'s "Leg" chart on p2 does not, E12)');
+  Store.registerCraftParser('knitting', FakeKnits);
+})();
+
+group('23. wave K (knit-store) P5: rows counted from charts');
+
+(function () {
+  Store.registerCraftParser('knitting', FakeKnits);
+  var REAL = window.KnitChart;
+  // a 4-row chart over a 6-st repeat: rows 2 and 4 decrease 1 per repeat; row 3 has an unknown cell
+  window.KnitChart = {
+    find: function (charts, name) { return charts.filter(function (c) { return /crown/i.test(c.name) && /crown/i.test(name); })[0] || null; },
+    rowInfo: function (chart, row) {
+      if (chart.unknownRow === row) return { consumes: 6, produces: 6, unknown: 1, text: null };
+      return { consumes: row === 3 ? 5 : (row > 2 ? 5 : 6), produces: row === 2 ? 5 : row === 4 ? 4 : (row === 3 ? 5 : 6), unknown: 0, text: 'k' };
+    },
+    rowText: function () { return 'k'; }
+  };
+  var CR = fixture('chart-rows', [
+    L(0, 'CO 36 sts. Join.', { kind: 'setup', count: 36 }),
+    L(null, 'Work 2 rnds even.', { kind: 'row', until: { kind: 'rows', value: 2, unit: 'rnds' } }),
+    L(null, 'Work Rows 1-4 of Crown chart-24 sts rem.', { count: 24, chart: { name: 'Crown', row: 1, rowEnd: 4 } }),
+    L(1, 'Next rnd: K2tog around. 12 sts.', { count: 12, approxRow: true })
+  ], 'rounds');
+  var cp = knitProject('Chart rows', [{ name: 'Crown', patternText: CR }]);
+  Store.setChartPages(cp.id, [{ page: 2, name: 'Crown', noImage: true, chart: { name: 'Crown', rows: 4, cols: 6, cells: [['k']] } }], { undo: false });
+  var prt = Store.project(cp.id).parts[0];
+  function t(r) { var l = Store.lineForRow(Store.project(cp.id).parts[0], r); return l ? l.text.slice(0, 10) : null; }
+  eq([t(1), t(2), t(3), t(6), t(7)], ['Work 2 rnd', 'Work 2 rnd', 'Work Rows ', 'Work Rows ', 'Next rnd: '], '"Work 2 rnds even" = rnds 1-2, the chart = rnds 3-6, the next round is 7');
+  var cnt = [3, 4, 5, 6].map(function (r) { return Store.targetFor(Store.project(cp.id).parts[0], r); });
+  eq(cnt, [36, 30, 30, 24], 'counts from the chart: 36, 30 (row 2 -1 per repeat), 30, 24');
+  Store.jumpToRow(cp.id, prt.id, 5);
+  var ci = Store.chartInfo(Store.part(Store.project(cp.id), prt.id));
+  eq([ci && ci.name, ci && ci.row, ci && ci.of], ['Crown', 3, 4], 'rnd 5 is Crown chart row 3 of 4');
+  // an unknown cell: that row and every row after it have no count
+  Store.setChartPages(cp.id, [{ page: 2, name: 'Crown', noImage: true, chart: { name: 'Crown', rows: 4, cols: 6, cells: [['k']], unknownRow: 3 } }], { undo: false });
+  var cnt2 = [3, 4, 5, 6].map(function (r) { return Store.targetFor(Store.project(cp.id).parts[0], r); });
+  eq(cnt2, [36, 30, null, 24], 'a chart row with an unknown cell has no count (the line\'s printed 24 still ends the block)');
+  window.KnitChart = REAL;
+})();
+
+group('22. wave K (knit-store glue for knit-3d K3): chart colours on the 3D rounds');
+
+(function () {
+  Store.registerCraftParser('knitting', FakeKnits);
+  if (!window.DiagramGeo || typeof DiagramGeo.applyChart !== 'function') { log(true, 'DiagramGeo.applyChart not loaded: skipped'); return; }
+  var REAL = window.KnitChart;
+  window.KnitChart = {
+    find: function (charts, name) { return charts.filter(function (c) { return /colour/i.test(c.name) && /colour/i.test(name); })[0] || null; },
+    rowCells: function (chart, row) {
+      var out = [];
+      for (var i = 0; i < 4; i++) out.push({ stitch: 'k', consumes: 1, produces: 1, color: (i + row) % 2 ? 'CC' : 'MC', text: 'k' });
+      return out;
+    },
+    rowText: function () { return 'k4'; }
+  };
+  var CT = fixture('colour-chart', [
+    L(0, 'Cast on 8 sts. Join.', { kind: 'setup', count: 8 }),
+    L(1, 'Rnds 1-2: Work Colour chart. (8 sts)', { rowEnd: 2, count: 8, chart: { name: 'Colour chart', row: 1, rowEnd: 2 } })
+  ], 'rounds');
+  var cp = knitProject('Colour chart', [{ name: 'Leg', patternText: CT }]);
+  var proj = Store.project(cp.id);
+  proj.yarnColors = { '*': '#eeeeee', MC: '#112233', CC: '#ddcc00' };
+  Store.setChartPages(cp.id, [{ page: 5, name: 'Colour chart', noImage: true,
+    chart: { name: 'Colour chart', rows: 2, cols: 4, cells: [['a', 'b', 'a', 'b'], ['b', 'a', 'b', 'a']],
+      legend: [{ sym: 'a', color: '#112233', meaning: 'MC' }, { sym: 'b', color: '#ddcc00', meaning: 'CC' }] } }], { undo: false });
+  Store.jumpToRow(cp.id, cp.parts[0].id, 2);
+  var m = Store.diagramModel(Store.part(Store.project(cp.id), cp.parts[0].id), Store.project(cp.id));
+  var r1 = m && m.rounds ? m.rounds.filter(function (r) { return r.row === 1; })[0] : null;
+  var cs = r1 ? r1.stitches.map(function (s) { return s.c || null; }) : null;
+  ok(cs && cs.indexOf('#112233') >= 0 && cs.indexOf('#ddcc00') >= 0, 'round 1 of a colour chart carries MC and CC on its stitch records', JSON.stringify(cs));
+  window.KnitChart = REAL;
+  // crochet: no chart colour, ever
+  var cro = Store.createProject({ name: 'Croc colours' });
+  Store.updatePart(cro.id, cro.parts[0].id, { patternText: 'Rnd 1: 6 sc in MR. (6)\nRnd 2: inc around. (12)' });
+  var cm = Store.diagramModel(Store.project(cro.id).parts[0], Store.project(cro.id));
+  ok(cm && cm.rounds.every(function (r) { return !r.chartColored; }), 'a crochet model is never chart-coloured');
+})();
+
+group('19. wave K (knit-store) P1: stretch phases');
+
+(function () {
+  Store.registerCraftParser('knitting', FakeKnits);
+  // the boyfriend Front in miniature: the parser numbers the raglans 5-6 BEFORE the stretch that precedes them (E1)
+  var FR = fixture('stretch-front', [
+    L(0, 'Start with 93 sts.', { kind: 'setup', count: 93 }),
+    L(1, '1st row: (RS). P2. K2.', { count: 93, side: 'rs' }),
+    L(2, '2nd row: K2. P2.', { count: 93 }),
+    L(3, '3rd row: P2. K2.', { count: 93 }),
+    L(4, '4th row: K2. P2.', { count: 93 }),
+    L(null, 'Cont even in pat until work measures same length as Back, ending on a WS row.', { kind: 'repeat', repeatOf: [4], repeatFrom: 7 }),
+    L(5, 'Shape raglans: Keeping cont of pat, cast off 2 sts beg next 2 rows. 89 sts rem.', { rowEnd: 6, count: 89, prevCount: 93 }),
+    L(7, 'Next row: K3. Pat to last 3 sts. K3.', { count: 89 })
+  ]);
+  var fp = knitProject('Stretch front', [{ name: 'Front', patternText: FR }]);
+  var pid = fp.id, prid = fp.parts[0].id;
+  function prt() { return Store.part(Store.project(pid), prid); }
+  function txt(row) { var l = Store.lineForRow(prt(), row); return l ? l.text.slice(0, 12) : null; }
+  eq(Store.project(pid).rowPhases, true, 'a new knitting project has rowPhases');
+  eq([txt(4), txt(5), txt(6), txt(60)], ['4th row: K2.', 'Cont even in', 'Cont even in', 'Cont even in'], 'row 5 is the open stretch (not the raglans) and so is every row after it');
+  eq([Store.targetFor(prt(), 5), Store.targetFor(prt(), 60)], [93, 93], 'the stretch keeps the count before it (93)');
+  Store.jumpToRow(pid, prid, 9);
+  var si = Store.stretchInfo(prt());
+  eq(si && [si.state, si.start, si.end, si.row, si.of, si.count], ['open', 5, null, 5, null, 93], 'stretchInfo on row 9: open, from row 5, its 5th row, 93 sts');
+  eq(Store.stretchList(prt()).map(function (x) { return x.state; }), ['open'], 'stretchList');
+  var res = Store.endStretch(pid, prid);
+  eq(res && [res.event, res.start, res.end, res.rows], ['stretchEnd', 5, 8, 4], '"I\'m at the length" with 8 rows done: the stretch was rows 5-8');
+  eq([txt(8), txt(9), txt(10), txt(11)], ['Cont even in', 'Shape raglan', 'Shape raglan', 'Next row: K3'], 'rows 9-10 are the raglans, 11 the row after');
+  eq([Store.targetFor(prt(), 9), Store.targetFor(prt(), 10)], [null, 89], 'the raglan range prints 89 on its last row');
+  eq(prt().stretches && Object.keys(prt().stretches).length, 1, 'Part.stretches holds the end');
+  var h = Store.project(pid).history;
+  eq(h[h.length - 1].kind, 'stretchEnd', 'a history entry of kind stretchEnd');
+  Store.undo();
+  eq(txt(9), 'Cont even in', 'one Undo reopens it');
+  Store.redo && Store.redo();
+  // the save round trip keeps the phases and the end
+  Store.flush();
+  var raw = JSON.parse(localStorage.getItem(TEST_KEY));
+  var back = freshLoad(raw);
+  var p2 = Store.part(Store.project(pid), prid);
+  ok(Store.project(pid).rowPhases === true, 'rowPhases survives a reload');
+  eq(txt(9), Store.redo ? 'Shape raglan' : 'Cont even in', '... and so does the stretch end');
+  ok(Store.reopenStretch(pid, prid, Object.keys(p2.stretches || { x: 1 })[0]) !== null, 'reopenStretch runs');
+  // an older project (no rowPhases) keeps its absolute numbering exactly
+  var old = knitProject('Old front', [{ name: 'Front', patternText: FR }]);
+  Store.setRowPhases(old.id, false);
+  var op = Store.project(old.id).parts[0];
+  eq([Store.lineForRow(op, 5).text.slice(0, 12), Store.lineForRow(op, 7).text.slice(0, 12)], ['Shape raglan', 'Next row: K3'], 'a project without rowPhases: the old numbering, untouched');
+  // a length stretch: the gauge estimate is a hint until "Use"
+  var LN = fixture('stretch-length', [
+    L(0, 'Start with 40 sts.', { kind: 'setup', count: 40 }),
+    L(1, 'Row 1 (RS): Knit.', { count: 40, side: 'rs' }),
+    L(null, 'Work even in St st until piece measures 10 cm.', { until: { kind: 'length', value: 10, unit: 'cm' } }),
+    L(2, 'Next row: K2tog, knit to end. 39 sts.', { count: 39, approxRow: true })
+  ]);
+  var lp2 = knitProject('Stretch length', [{ name: 'Back', patternText: LN, targetRows: 2 }]);
+  Store.setGauge(lp2.id, { sts: 20, rows: 30, over: 10, unit: 'cm' });
+  Store.jumpToRow(lp2.id, lp2.parts[0].id, 4);
+  var lp = function () { return Store.part(Store.project(lp2.id), lp2.parts[0].id); };
+  var ls = Store.stretchInfo(lp());
+  eq(ls && [ls.state, ls.start, ls.estimate && ls.estimate.end, ls.estimate && ls.estimate.approx], ['open', 2, 30, true], '10 cm at 30 rows / 10 cm: ≈ ends on row 30 (from the cast-on), an estimate');
+  eq(Store.lineForRow(lp(), 40).text.slice(0, 9), 'Work even', 'the estimate is not a target: row 40 is still the stretch');
+  var used = Store.useStretchEstimate(lp2.id, lp2.parts[0].id);
+  eq(used && [used.state, used.end, used.of], ['planned', 30, 29], '"Use": the stretch is planned to end on row 30');
+  eq(Store.lineForRow(lp(), 31).text.slice(0, 9), 'Next row:', 'row 31 is the decrease row');
+  eq(Store.lineForRow(lp(), 31).approxRow, undefined, '... a row, not "≈ row"');
+  // crochet: none of it
+  var cro = Store.createProject({ name: 'Croc until' });
+  Store.updatePart(cro.id, cro.parts[0].id, { patternText: 'Row 1: 10 sc. (10)\nRep row 1 until piece measures 10 cm.\nRow 2: 9 sc. (9)' });
+  var cp0 = Store.project(cro.id);
+  eq([cp0.rowPhases, Store.stretchInfo(cp0.parts[0], 2), Store.endStretch(cro.id, cp0.parts[0].id)], [undefined, null, null], 'crochet: no rowPhases, no stretches, endStretch does nothing');
 })();
 
 Store.flush();
@@ -1287,21 +1835,19 @@ function runAppTests() {
         if (!tabs) return;
         eq(tabs.getAttribute('aria-label'), 'Patterns in this book', 'the tabs are "Patterns in this book"');
         var names = Array.prototype.map.call(tabs.querySelectorAll('.size-tab'), function (t) { return t.textContent; });
-        eq(names, ['Sock One', 'Sock Two · skipped'], 'only the first pattern is ticked to start with');
-        var tickLabel = dl.querySelector('.imp-size-tick .imp-targets-label');
-        eq(tickLabel && tickLabel.textContent, 'Import this pattern', '"Import this pattern"');
+        // wave K (shell-ui, E12): the open tab is the one pattern imported (single choice)
+        eq(names, ['Sock One', 'Sock Two'], 'every pattern of the book is listed');
+        var pk = dl.querySelector('[data-book-pick]');
+        eq(pk && pk.getAttribute('data-book-pick'), 'Sock One', 'the first pattern is the one to import');
         var chips = Array.prototype.map.call(dl.querySelectorAll('.size-chip'), function (b) { return b.textContent; });
-        eq(chips, ['S', 'M', 'L'], 'the size chips are the ticked pattern\'s own (S, M, L)');
-        // tick Sock Two, untick Sock One
+        eq(chips, ['S', 'M', 'L'], 'the size chips are the picked pattern\'s own (S, M, L)');
+        // pick Sock Two: its tab is the pattern imported (single choice)
         tabs.querySelectorAll('.size-tab')[1].click();
-        dl.querySelector('.imp-size-tick button').click();
-        dl.querySelector('.imp-size-tabs').querySelectorAll('.size-tab')[0].click();
-        dl.querySelector('.imp-size-tick button').click();
         return sleep(200).then(function () {
           var chips2 = Array.prototype.map.call(dl.querySelectorAll('.size-chip'), function (b) { return b.textContent; });
-          eq(chips2, ['5"', '6"', '7"', '8"', '9"', '10"'], 'ticking only Sock Two makes its six sizes the chips');
-          var t2 = Array.prototype.map.call(dl.querySelectorAll('.imp-size-tabs .size-tab'), function (t) { return t.textContent; });
-          eq(t2, ['Sock One · skipped', 'Sock Two'], '... and Sock One is skipped');
+          eq(chips2, ['5"', '6"', '7"', '8"', '9"', '10"'], 'picking Sock Two makes its six sizes the chips');
+          var pk2 = dl.querySelector('[data-book-pick]');
+          eq(pk2 && pk2.getAttribute('data-book-pick'), 'Sock Two', '... and Sock Two is the only pattern imported');
         });
       });
     }).then(function () {

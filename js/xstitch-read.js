@@ -58,7 +58,7 @@
 (function () {
 
   var W = typeof window !== 'undefined' ? window : self;
-  var VERSION = '1.0.0';
+  var VERSION = '2.0.0';
 
   /* largest picture handed to the core; bigger sources are drawn down */
   var MAX_PIXELS = 16000000;
@@ -204,7 +204,7 @@
      * component's box (plus whatever touches it), each edge then pulled in
      * past sparse furniture (ruler digits) and refined to a sub-pixel edge.
      */
-    function locate(d, w, h, ground, sizeHint) {
+    function locate(d, w, h, ground, sizeHint, mask) {
       var b = Math.max(1, Math.ceil(Math.max(w, h) / 450));
       var bw = Math.ceil(w / b), bh = Math.ceil(h / b);
       var cnt = new Uint16Array(bw * bh);
@@ -214,10 +214,17 @@
       var colBlk = new Int32Array(w);
       for (x = 0; x < w; x++) colBlk[x] = (x / b) | 0;
       var R0 = gr | 0, G0 = gg | 0, B0 = gb | 0;
+      /* the segmenter's verdict: what is surely not chart (a key panel, a
+         photo, text) reads as page ground here */
+      var mT = mask ? mask.T : 1, mCol = null;
+      if (mask) { mCol = new Int32Array(w); for (x = 0; x < w; x++) mCol[x] = (x / mT) | 0; }
+      function masked(xx, yy) { return mask && mask.m[((yy / mT) | 0) * mask.tw + mCol[xx]] === 1; }
       for (y = 0; y < h; y += st) {
         var row = ((y / b) | 0) * bw;
+        var mrow = mask ? ((y / mT) | 0) * mask.tw : 0;
         o = y * w * 4;
         for (x = 0; x < w; x += st, o += 4 * st) {
+          if (mask && mask.m[mrow + mCol[x]] === 1) continue;
           var e1 = d[o] - R0, e2 = d[o + 1] - G0, e3 = d[o + 2] - B0;
           if ((e1 < 0 ? -e1 : e1) + (e2 < 0 ? -e2 : e2) + (e3 < 0 ? -e3 : e3) > 30) cnt[row + colBlk[x]]++;
         }
@@ -314,6 +321,7 @@
       function onFrac(axis, pos, a0, a1) {
         var on = 0, tot = 0, t;
         for (t = a0; t < a1; t++) {
+          if (mask && (axis === 'x' ? masked(pos, t) : masked(t, pos))) { tot++; continue; }
           var oo = axis === 'x' ? (t * w + pos) * 4 : (pos * w + t) * 4;
           var df2 = Math.abs(d[oo] - gr) + Math.abs(d[oo + 1] - gg) + Math.abs(d[oo + 2] - gb);
           if (df2 > 30) on++;
@@ -372,6 +380,914 @@
         /* all four edges are solid steps from page to chart: sub-pixel exact */
         solid: solidEdges === 4
       };
+    }
+
+    /* ================================================================ *
+     * Page segmenter (wave K, R2): where does a consistent lattice
+     * actually exist, and what else is on the page
+     * ================================================================ */
+
+    var LAT_S = 0.3;   /* folded-variance share that makes a tile "lattice" */
+
+    /** smallest strong autocorrelation peak of a profile: { p, s } | null */
+    function acPeak(g, L, maxLag) {
+      var hw = Math.max(3, Math.round(maxLag)), i, t;
+      var cs = new Float64Array(L + 1);
+      for (i = 0; i < L; i++) cs[i + 1] = cs[i] + g[i];
+      var x = new Float32Array(L), r0 = 0;
+      for (i = 0; i < L; i++) {
+        var a = Math.max(0, i - hw), b = Math.min(L, i + hw + 1);
+        x[i] = g[i] - (cs[b] - cs[a]) / (b - a);
+        r0 += x[i] * x[i];
+      }
+      if (!(r0 > 1e-6)) return null;
+      var tmax = Math.min(maxLag, L - 3);
+      if (tmax < 4) return null;
+      var R = new Float32Array(tmax + 2);
+      for (t = 1; t <= tmax + 1 && t < L; t++) {
+        var s = 0;
+        for (i = 0; i + t < L; i++) s += x[i] * x[i + t];
+        R[t] = s / r0 * L / (L - t);
+      }
+      var best = 0, peaks = [];
+      for (t = 3; t <= tmax; t++) {
+        if (R[t] > R[t - 1] && R[t] >= R[t + 1] && R[t] > 0.15) { peaks.push(t); if (R[t] > best) best = R[t]; }
+      }
+      for (i = 0; i < peaks.length; i++) {
+        if (R[peaks[i]] < best * 0.6) continue;
+        var pk = peaks[i], y0 = R[pk - 1], y1 = R[pk], y2 = R[pk + 1], den = y0 - 2 * y1 + y2;
+        return { p: pk + (den < 0 ? clamp(0.5 * (y0 - y2) / den, -0.5, 0.5) : 0), s: R[pk] };
+      }
+      return null;
+    }
+
+    /**
+     * findSwatches(d, w, h, ground) -> { rows, box, size } | null
+     * A colour key: a column of solid swatches of one size, evenly spaced,
+     * each with text to its right.
+     */
+    function findSwatches(d, w, h, ground, exclude, dbg) {
+      var b = Math.max(2, Math.round(Math.min(w, h) / 450));
+      var bw = Math.floor(w / b), bh = Math.floor(h / b), nb = bw * bh;
+      if (bw < 8 || bh < 8) return null;
+      var col = new Int32Array(nb), uni = new Uint8Array(nb), i, x, y;
+      var gR = ground.r, gG = ground.g, gB = ground.b;
+      function px(xx, yy) { var o = (yy * w + xx) * 4; return (d[o] << 16) | (d[o + 1] << 8) | d[o + 2]; }
+      function l1(c1, c2) { return Math.abs((c1 >> 16) - (c2 >> 16)) + Math.abs(((c1 >> 8) & 255) - ((c2 >> 8) & 255)) + Math.abs((c1 & 255) - (c2 & 255)); }
+      for (y = 0; y < bh; y++) {
+        for (x = 0; x < bw; x++) {
+          var x0 = x * b, y0 = y * b, c = px(x0 + (b >> 1), y0 + (b >> 1));
+          var k = y * bw + x;
+          col[k] = c;
+          if (Math.abs((c >> 16) - gR) + Math.abs(((c >> 8) & 255) - gG) + Math.abs((c & 255) - gB) < 40) continue;
+          if (l1(c, px(x0, y0)) > 30 || l1(c, px(x0 + b - 1, y0)) > 30 || l1(c, px(x0, y0 + b - 1)) > 30 || l1(c, px(x0 + b - 1, y0 + b - 1)) > 30) continue;
+          uni[k] = 1;
+        }
+      }
+      var lab = new Int32Array(nb), stack = new Int32Array(nb), comps = [];
+      for (i = 0; i < nb; i++) {
+        if (!uni[i] || lab[i]) continue;
+        var id = comps.length + 1, seed = col[i], sp = 0;
+        var cmp = { n: 0, x0: bw, y0: bh, x1: -1, y1: -1 };
+        stack[sp++] = i; lab[i] = id;
+        while (sp) {
+          var p = stack[--sp], qx = p % bw, qy = (p / bw) | 0;
+          cmp.n++;
+          if (qx < cmp.x0) cmp.x0 = qx; if (qx > cmp.x1) cmp.x1 = qx;
+          if (qy < cmp.y0) cmp.y0 = qy; if (qy > cmp.y1) cmp.y1 = qy;
+          var nbr = [qx > 0 ? p - 1 : -1, qx < bw - 1 ? p + 1 : -1, qy > 0 ? p - bw : -1, qy < bh - 1 ? p + bw : -1];
+          for (var j = 0; j < 4; j++) {
+            var q = nbr[j];
+            if (q < 0 || !uni[q] || lab[q] || l1(col[q], seed) > 40) continue;
+            lab[q] = id; stack[sp++] = q;
+          }
+        }
+        comps.push(cmp);
+      }
+      /* swatch candidates */
+      var cand = [];
+      for (i = 0; i < comps.length; i++) {
+        var cc = comps[i], cw = cc.x1 - cc.x0 + 1, ch = cc.y1 - cc.y0 + 1;
+        if (exclude) {
+          var ecx = (cc.x0 + cc.x1 + 1) / 2 * b, ecy = (cc.y0 + cc.y1 + 1) / 2 * b;
+          if (ecx >= exclude.x && ecx <= exclude.x + exclude.w && ecy >= exclude.y && ecy <= exclude.y + exclude.h) continue;   /* inside the chart */
+        }
+        if (cw < 3 || ch < 3 || ch > bh / 6 || cw > bw / 5) continue;
+        var asp = cw / ch;
+        if (asp < 0.5 || asp > 3.2) continue;
+        if (cc.n < cw * ch * 0.55) continue;
+        cand.push({ x0: cc.x0, y0: cc.y0, x1: cc.x1, y1: cc.y1, w: cw, h: ch, xc: (cc.x0 + cc.x1) / 2, yc: (cc.y0 + cc.y1) / 2 });
+      }
+      if (dbg) dbg.cand = cand.length;
+      if (cand.length < 3) return null;
+      /* columns: same left edge, same size */
+      var runs = [];
+      for (i = 0; i < cand.length; i++) {
+        var a = cand[i], mem = [];
+        for (var j2 = 0; j2 < cand.length; j2++) {
+          var c2 = cand[j2];
+          if (Math.abs(c2.x0 - a.x0) <= Math.max(1, a.w * 0.2) && Math.abs(c2.h - a.h) <= Math.max(1, a.h * 0.35) && Math.abs(c2.w - a.w) <= Math.max(1, a.w * 0.35)) mem.push(c2);
+        }
+        if (mem.length < 3) continue;
+        mem.sort(function (u, v) { return u.yc - v.yc; });
+        /* the longest evenly spaced run */
+        var run = [mem[0]], bestRun = [mem[0]];
+        for (var m = 1; m < mem.length; m++) {
+          var gap = mem[m].yc - mem[m - 1].yc;
+          /* rows of a key have a gap between swatches; squares of a chart touch */
+          var ok = gap >= a.h * 0.95 && gap <= a.h * 3.5 && (run.length < 2 || Math.abs(gap - (run[1].yc - run[0].yc)) <= Math.max(2, a.h * 0.35));
+          if (ok) run.push(mem[m]); else run = [mem[m]];
+          if (run.length > bestRun.length) bestRun = run.slice();
+        }
+        if (bestRun.length >= 3) runs.push(bestRun);
+      }
+      runs.sort(function (u, v) { return v.length - u.length || u[0].x0 - v[0].x0 || u[0].y0 - v[0].y0; });
+      if (dbg) { dbg.runs = runs.length; dbg.fails = []; }
+      for (var ru = 0; ru < runs.length && ru < 30; ru++) { var got = keyRun(runs[ru]); if (got) return got; }
+      return null;
+      function keyRun(best) {
+      /* a key's swatches stand on the page: page ground just left of each
+         one (a chart's squares have more chart round them) */
+      var standalone = 0;
+      for (i = 0; i < best.length; i++) {
+        var sl = best[i], gN = 0, aN = 0;
+        var lx0 = Math.max(0, (sl.x0 - Math.max(2, Math.round(Math.min(sl.w, sl.h) * 0.6))) * b), lx1 = Math.max(0, sl.x0 * b - 2);
+        for (y = sl.y0 * b; y <= Math.min(h - 1, (sl.y1 + 1) * b - 1); y += 2) {
+          for (x = lx0; x < lx1; x += 2) {
+            var o3 = (y * w + x) * 4;
+            aN++;
+            if (Math.abs(d[o3] - gR) + Math.abs(d[o3 + 1] - gG) + Math.abs(d[o3 + 2] - gB) < 40) gN++;
+          }
+        }
+        var leftOk = aN && gN / aN >= 0.6;
+        /* or page between the swatch and its text */
+        var rx0 = (sl.x1 + 1) * b + 1, rx1 = Math.min(w, rx0 + Math.max(4, Math.round(Math.min(sl.w, sl.h) * b * 0.4))), rg = 0, ra = 0;
+        for (y = sl.y0 * b; y <= Math.min(h - 1, (sl.y1 + 1) * b - 1); y += 2) {
+          for (x = rx0; x < rx1; x += 2) {
+            var o5 = (y * w + x) * 4;
+            ra++;
+            if (Math.abs(d[o5] - gR) + Math.abs(d[o5 + 1] - gG) + Math.abs(d[o5 + 2] - gB) < 40) rg++;
+          }
+        }
+        if (leftOk || (ra && rg / ra >= 0.6)) standalone++;
+      }
+      if (standalone < Math.max(3, best.length * 0.7)) { if (dbg) dbg.fails.push('alone ' + standalone + '/' + best.length + ' at ' + best[0].x0 * b + ',' + best[0].y0 * b); return null; }
+      /* text to the right of each swatch */
+      var withText = 0, s0 = best[0];
+      for (i = 0; i < best.length; i++) {
+        var sw = best[i], on = 0, tot = 0;
+        var xa = (sw.x1 + 1) * b + Math.round(sw.w * b * 0.2), xb = Math.min(w, xa + sw.h * b * 10);
+        for (y = sw.y0 * b; y <= Math.min(h - 1, (sw.y1 + 1) * b - 1); y += 2) {
+          for (x = xa; x < xb; x += 2) {
+            var o2 = (y * w + x) * 4;
+            tot++;
+            if (Math.abs(d[o2] - gR) + Math.abs(d[o2 + 1] - gG) + Math.abs(d[o2 + 2] - gB) > 90) on++;
+          }
+        }
+        if (tot && on / tot > 0.02 && on / tot < 0.7) withText++;
+      }
+      if (withText < 3) { if (dbg) dbg.fails.push('text ' + withText + '/' + best.length + ' at ' + best[0].x0 * b + ',' + best[0].y0 * b); return null; }
+      var last = best[best.length - 1];
+      return {
+        rows: best.length,
+        box: { x: s0.x0 * b, y: s0.y0 * b, w: Math.min(w - s0.x0 * b, s0.w * b * 12), h: (last.y1 + 1 - s0.y0) * b },
+        size: s0.h * b
+      };
+      }
+    }
+
+    /**
+     * segment(d, w, h, ground) -> { T, tw, th, pitch, regions, chart, mask, kind }
+     * Tile map (T px tiles): per tile the column / row gradient profiles,
+     * page-ground share, how sharp its colour steps are. A global pitch from
+     * windowed autocorrelation (squares are square: x and y must agree);
+     * then each tile's lattice strength and phase from the Fourier
+     * coefficient of its 3 x 3 neighbourhood at that pitch. The chart is the
+     * largest phase-consistent lattice region (plus the flat fills it
+     * encloses); everything else is a key, a photo, text or other.
+     */
+    function segment(d, w, h, ground) {
+      /* a big picture is looked at half size (a square of 6 px stays 3) */
+      if (w * h <= 2500000) return segmentAt(d, w, h, ground, 1);
+      var w2 = w >> 1, h2 = h >> 1, d2 = new Uint8ClampedArray(w2 * h2 * 4);
+      for (var yy = 0; yy < h2; yy++) {
+        var oa = (2 * yy * w) * 4, ob = oa + w * 4, o2 = yy * w2 * 4;
+        for (var xx = 0; xx < w2; xx++, oa += 8, ob += 8, o2 += 4) {
+          d2[o2] = (d[oa] + d[oa + 4] + d[ob] + d[ob + 4] + 2) >> 2;
+          d2[o2 + 1] = (d[oa + 1] + d[oa + 5] + d[ob + 1] + d[ob + 5] + 2) >> 2;
+          d2[o2 + 2] = (d[oa + 2] + d[oa + 6] + d[ob + 2] + d[ob + 6] + 2) >> 2;
+          d2[o2 + 3] = 255;
+        }
+      }
+      return segmentAt(d2, w2, h2, ground, 2);
+    }
+
+    function segmentAt(d, w, h, ground, SC, Tforce) {
+      var T = Tforce || Math.max(12, Math.min(48, Math.round(Math.max(w, h) / 64)));
+      var tw = Math.ceil(w / T), th = Math.ceil(h / T), nt = tw * th;
+      var colX = new Float32Array(nt * T), rowY = new Float32Array(nt * T);
+      var ngN = new Float32Array(nt), pxN = new Float32Array(nt), stepN = new Float32Array(nt), midN = new Float32Array(nt);
+      var chrS = new Float32Array(nt);
+      var R0 = ground.r, G0 = ground.g, B0 = ground.b;
+      var tmA = now(), sy = w * h > 8e6 ? 2 : 1, x, y, t, i;
+      var tOfX = new Int32Array(w);
+      for (x = 0; x < w; x++) tOfX[x] = (x / T) | 0;
+      for (y = 1; y < h; y += sy) {
+        var ty = (y / T) | 0, rowT = ty * tw, yi = y - ty * T;
+        var o = (y * w + 1) * 4;
+        for (x = 1; x < w; x++, o += 4) {
+          var r = d[o], g = d[o + 1], bb = d[o + 2];
+          var dx = Math.abs(r - d[o - 4]) + Math.abs(g - d[o - 3]) + Math.abs(bb - d[o - 2]);
+          var ou = o - w * 4;
+          var dy = Math.abs(r - d[ou]) + Math.abs(g - d[ou + 1]) + Math.abs(bb - d[ou + 2]);
+          var tx = tOfX[x];
+          t = rowT + tx;
+          colX[t * T + x - tx * T] += dx;
+          rowY[t * T + yi] += dy;
+          pxN[t]++;
+          if (Math.abs(r - R0) + Math.abs(g - G0) + Math.abs(bb - B0) > 30) ngN[t]++;
+          if (dx > 12) { stepN[t]++; if (dx < 70) midN[t]++; }
+          var mx = r > g ? (r > bb ? r : bb) : (g > bb ? g : bb), mn = r < g ? (r < bb ? r : bb) : (g < bb ? g : bb);
+          chrS[t] += mx - mn;
+        }
+      }
+      var tm0 = now(), tms = {};
+      /* 1. the pitch: windows of B x B tiles */
+      var B = Math.max(3, Math.ceil(128 / T)), WL = B * T, lag = Math.min(80, Math.floor(WL / 2.2));
+      var Px = new Float32Array(WL), Py = new Float32Array(WL), votes = [];
+      var wstep = B, wx, wy, j;
+      for (wy = 0; wy + B <= th; wy += wstep) {
+        for (wx = 0; wx + B <= tw; wx += wstep) {
+          var ngs = 0, pxs = 0;
+          for (var a1 = 0; a1 < B; a1++) for (var a2 = 0; a2 < B; a2++) { t = (wy + a1) * tw + wx + a2; ngs += ngN[t]; pxs += pxN[t]; }
+          if (!pxs || ngs / pxs < 0.04) continue;
+          for (j = 0; j < WL; j++) { Px[j] = 0; Py[j] = 0; }
+          for (var a3 = 0; a3 < B; a3++) {
+            for (var a4 = 0; a4 < B; a4++) {
+              t = (wy + a3) * tw + wx + a4;
+              var ob = t * T;
+              for (j = 0; j < T; j++) { Px[a4 * T + j] += colX[ob + j]; Py[a3 * T + j] += rowY[ob + j]; }
+            }
+          }
+          var ax = acPeak(Px, WL, lag), ay = acPeak(Py, WL, lag);
+          if (!ax || !ay) continue;
+          var ratio = ax.p / ay.p, pp;
+          if (Math.abs(ratio - 1) < 0.06) pp = (ax.p + ay.p) / 2;
+          else if (Math.abs(ratio - 2) < 0.12 || Math.abs(ratio - 0.5) < 0.03) pp = Math.min(ax.p, ay.p);
+          else continue;
+          votes.push({ p: pp, w: Math.min(ax.s, ay.s) });
+        }
+      }
+      var res = { T: T, tw: tw, th: th, pitch: null, regions: [], chart: null, mask: null, key: null };
+      var acc = {}, bk = null, bv = 0;
+      for (i = 0; i < votes.length; i++) {
+        var key = Math.round(Math.log(votes[i].p) / 0.015);
+        acc[key] = (acc[key] || 0) + votes[i].w;
+      }
+      for (var kk in acc) {
+        if (!acc.hasOwnProperty(kk)) continue;
+        var kv = +kk, sc = acc[kv] + (acc[kv - 1] || 0) + (acc[kv + 1] || 0);
+        if (sc > bv) { bv = sc; bk = kv; }
+      }
+      var p0 = null;
+      if (bk !== null && bv >= 1.2) {
+        var sp = 0, sw2 = 0;
+        for (i = 0; i < votes.length; i++) {
+          var kq = Math.round(Math.log(votes[i].p) / 0.015);
+          if (Math.abs(kq - bk) <= 1) { sp += votes[i].p * votes[i].w; sw2 += votes[i].w; }
+        }
+        p0 = sp / sw2;
+        /* a tile neighbourhood must span a couple of squares */
+        if (!Tforce && p0 > T * 1.2) return segmentAt(d, w, h, ground, SC, Math.min(160, Math.ceil(p0)));
+      }
+      tms.pass = tm0 - tmA; tms.votes = now() - tm0;
+      /* 2. lattice strength per tile at the pitch (refined): the tile's 3 x 3
+         neighbourhood profile folded modulo the pitch. Whatever is drawn in
+         a square (grid lines, a symbol, a stitched X) repeats square after
+         square, so the folded profile keeps the variance; text, photos and
+         key tables do not repeat at this pitch and fold flat. */
+      var NB = 16, FXs = null, FYs = null, NXb = null, NYb = null;
+      var Sx1 = new Float32Array(nt), Sx2 = new Float32Array(nt), Sy1 = new Float32Array(nt), Sy2 = new Float32Array(nt);
+      var Nx1 = new Float32Array(nt), Ny1 = new Float32Array(nt);
+      for (t = 0; t < nt; t++) {
+        var obq = t * T;
+        for (j = 0; j < T; j++) {
+          var vx = colX[obq + j], vy = rowY[obq + j];
+          Sx1[t] += vx; Sx2[t] += vx * vx; Sy1[t] += vy; Sy2[t] += vy * vy;
+        }
+      }
+      function folds(p) {
+        NB = Math.max(6, Math.min(16, Math.round(p)));
+        FXs = new Float32Array(nt * NB); FYs = new Float32Array(nt * NB);
+        NXb = new Float32Array(nt * NB); NYb = new Float32Array(nt * NB);
+        var bx = new Int32Array(w), by = new Int32Array(h), q;
+        for (q = 0; q < w; q++) { var fq = q / p; bx[q] = Math.min(NB - 1, ((fq - Math.floor(fq)) * NB) | 0); }
+        for (q = 0; q < h; q++) { var fr = q / p; by[q] = Math.min(NB - 1, ((fr - Math.floor(fr)) * NB) | 0); }
+        for (var tt = 0; tt < nt; tt++) {
+          var tx2 = tt % tw, ty2 = (tt / tw) | 0, ob2 = tt * T, fb = tt * NB;
+          for (var jj = 0; jj < T; jj++) {
+            var X = tx2 * T + jj, Y = ty2 * T + jj;
+            if (X < w) { FXs[fb + bx[X]] += colX[ob2 + jj]; NXb[fb + bx[X]]++; }
+            if (Y < h) { FYs[fb + by[Y]] += rowY[ob2 + jj]; NYb[fb + by[Y]]++; }
+          }
+        }
+      }
+      var fsx = new Float64Array(16), fnx = new Float64Array(16), fsy = new Float64Array(16), fny = new Float64Array(16);
+      function win(tt, out) {
+        var tx3 = tt % tw, ty3 = (tt / tw) | 0, s1x = 0, s2x = 0, s1y = 0, s2y = 0, nx3 = 0, ny3 = 0, np = 0, b;
+        for (b = 0; b < NB; b++) { fsx[b] = 0; fnx[b] = 0; fsy[b] = 0; fny[b] = 0; }
+        for (var u = -1; u <= 1; u++) {
+          var Y2 = ty3 + u;
+          if (Y2 < 0 || Y2 >= th) continue;
+          for (var v = -1; v <= 1; v++) {
+            var X2 = tx3 + v;
+            if (X2 < 0 || X2 >= tw) continue;
+            var q2 = Y2 * tw + X2, fb2 = q2 * NB;
+            s1x += Sx1[q2]; s2x += Sx2[q2]; s1y += Sy1[q2]; s2y += Sy2[q2]; np += pxN[q2];
+            for (b = 0; b < NB; b++) { fsx[b] += FXs[fb2 + b]; fnx[b] += NXb[fb2 + b]; fsy[b] += FYs[fb2 + b]; fny[b] += NYb[fb2 + b]; }
+          }
+        }
+        for (b = 0; b < NB; b++) { nx3 += fnx[b]; ny3 += fny[b]; }
+        var mx2 = nx3 ? s1x / nx3 : 0, my2 = ny3 ? s1y / ny3 : 0, bvx = 0, bvy = 0;
+        for (b = 0; b < NB; b++) {
+          if (fnx[b]) { var ex2 = fsx[b] / fnx[b] - mx2; bvx += fnx[b] * ex2 * ex2; }
+          if (fny[b]) { var ey2 = fsy[b] / fny[b] - my2; bvy += fny[b] * ey2 * ey2; }
+        }
+        var tvx = s2x - nx3 * mx2 * mx2, tvy = s2y - ny3 * my2 * my2;
+        /* a random profile folds to about NB / N of its variance */
+        var bx0 = NB / Math.max(1, nx3 / 3), by0 = NB / Math.max(1, ny3 / 3);
+        out.sx = tvx > 0 ? clamp((bvx / tvx - bx0) / (1 - bx0), 0, 1) : 0;
+        out.sy = tvy > 0 ? clamp((bvy / tvy - by0) / (1 - by0), 0, 1) : 0;
+        out.e = np ? (s1x + s1y) / (2 * np) : 0;
+        return out;
+      }
+      var kind = new Uint8Array(nt);   /* 0 ground, 1 lattice, 2 flat, 3 other */
+      var SX = new Float32Array(nt), SY = new Float32Array(nt);
+      if (p0) {
+        var bestP = p0, bestS = -1, wo = {};
+        for (var kq2 = -3; kq2 <= 3; kq2++) {
+          var pc = p0 * (1 + kq2 * 0.006);
+          folds(pc);
+          var ssum = 0;
+          for (t = 0; t < nt; t += 3) { if (ngN[t] < pxN[t] * 0.04) continue; win(t, wo); ssum += wo.sx + wo.sy; }
+          if (ssum > bestS) { bestS = ssum; bestP = pc; }
+        }
+        folds(bestP);
+        res.pitch = bestP;
+      }
+      tms.folds = now() - tm0;
+      /* the picture against itself shifted by a whole square and by half
+         one: inside a chart a square looks like its neighbour far more often
+         than like the half-square next to it (runs of one colour, the same
+         symbol, the grid line on the grid line); text and photos do not care */
+      var dPx = new Float32Array(nt), dHx = new Float32Array(nt), dPy = new Float32Array(nt), dHy = new Float32Array(nt), dN = new Float32Array(nt);
+      if (res.pitch) {
+        /* the whole-square shift is sub-pixel (linear between two pixels) */
+        var P = Math.max(2, Math.floor(res.pitch)), fP = res.pitch - P, gP = 1 - fP, H = Math.max(1, Math.round(res.pitch / 2));
+        for (y = 0; y + P + 1 < h; y += 2) {
+          var rT = ((y / T) | 0) * tw;
+          for (x = 0; x + P + 1 < w; x += 2) {
+            var o0 = (y * w + x) * 4, oP = o0 + P * 4, oH = o0 + H * 4, oPy = o0 + P * w * 4, oHy = o0 + H * w * 4, oP2 = oPy + w * 4;
+            var r0 = d[o0], g0 = d[o0 + 1], b0 = d[o0 + 2];
+            var t2 = rT + tOfX[x];
+            dPx[t2] += Math.abs(r0 - gP * d[oP] - fP * d[oP + 4]) + Math.abs(g0 - gP * d[oP + 1] - fP * d[oP + 5]) + Math.abs(b0 - gP * d[oP + 2] - fP * d[oP + 6]);
+            dHx[t2] += Math.abs(r0 - d[oH]) + Math.abs(g0 - d[oH + 1]) + Math.abs(b0 - d[oH + 2]);
+            dPy[t2] += Math.abs(r0 - gP * d[oPy] - fP * d[oP2]) + Math.abs(g0 - gP * d[oPy + 1] - fP * d[oP2 + 1]) + Math.abs(b0 - gP * d[oPy + 2] - fP * d[oP2 + 2]);
+            dHy[t2] += Math.abs(r0 - d[oHy]) + Math.abs(g0 - d[oHy + 1]) + Math.abs(b0 - d[oHy + 2]);
+            dN[t2]++;
+          }
+        }
+      }
+      var SR = new Float32Array(nt);
+      function shiftRatio(tt) {
+        var tx4 = tt % tw, ty4 = (tt / tw) | 0, a = 0, bq = 0, c = 0, e = 0, n = 0;
+        for (var u = -1; u <= 1; u++) {
+          for (var v = -1; v <= 1; v++) {
+            var X3 = tx4 + v, Y3 = ty4 + u;
+            if (X3 < 0 || Y3 < 0 || X3 >= tw || Y3 >= th) continue;
+            var q9 = Y3 * tw + X3;
+            a += dPx[q9]; bq += dHx[q9]; c += dPy[q9]; e += dHy[q9]; n += dN[q9];
+          }
+        }
+        if (!n || bq / n < 4 || e / n < 4) return 9;
+        return Math.max(a / bq, c / e);
+      }
+      tms.shift = now() - tm0;
+      var wo2 = {};
+      for (t = 0; t < nt; t++) {
+        var share = pxN[t] ? ngN[t] / pxN[t] : 0, stepD = pxN[t] ? stepN[t] / pxN[t] : 0;
+        if (p0) { win(t, wo2); SX[t] = wo2.sx; SY[t] = wo2.sy; SR[t] = shiftRatio(t); }
+        if (share < 0.02 && stepD < 0.01) kind[t] = 0;
+        else if (p0 && wo2.e >= 2 && ((wo2.sx >= LAT_S && wo2.sy >= LAT_S) || SR[t] <= 0.65)) kind[t] = 1;
+        else if (share > 0.9 && stepD < 0.02) kind[t] = 2;
+        else kind[t] = 3;
+      }
+      res.tiles = { kind: kind, sx: SX, sy: SY, sr: SR };
+      /* 3. lattice regions: phase-consistent neighbours */
+      /* a bold 10-line or a centre line breaks the lattice locally: close
+         one-tile gaps (3 x 3 dilation, then erosion) before labelling */
+      var dil = new Uint8Array(nt), clo = new Uint8Array(nt);
+      for (t = 0; t < nt; t++) {
+        if (kind[t] !== 1) continue;
+        var cx0 = t % tw, cy0 = (t / tw) | 0;
+        for (var e1 = -1; e1 <= 1; e1++) for (var e2 = -1; e2 <= 1; e2++) {
+          var ex3 = cx0 + e2, ey3 = cy0 + e1;
+          if (ex3 >= 0 && ey3 >= 0 && ex3 < tw && ey3 < th) dil[ey3 * tw + ex3] = 1;
+        }
+      }
+      for (t = 0; t < nt; t++) {
+        if (!dil[t]) continue;
+        var cx1 = t % tw, cy1 = (t / tw) | 0, all = 1;
+        for (var e3 = -1; e3 <= 1 && all; e3++) for (var e4 = -1; e4 <= 1; e4++) {
+          var ex4 = cx1 + e4, ey4 = cy1 + e3;
+          if (ex4 >= 0 && ey4 >= 0 && ex4 < tw && ey4 < th && !dil[ey4 * tw + ex4]) { all = 0; break; }
+        }
+        if (all && kind[t] !== 0) clo[t] = 1;
+      }
+      for (t = 0; t < nt; t++) if (kind[t] === 1) clo[t] = 1;
+      var comp = new Int32Array(nt), stack = new Int32Array(nt), regs = [];
+      for (t = 0; t < nt; t++) {
+        if (!clo[t] || comp[t]) continue;
+        var cid = regs.length + 1, spn = 0, rg = { id: cid, lat: 0, n: 0, x0: tw, y0: th, x1: -1, y1: -1 };
+        stack[spn++] = t; comp[t] = cid;
+        while (spn) {
+          var q3 = stack[--spn], qx = q3 % tw, qy = (q3 / tw) | 0;
+          if (kind[q3] === 1) rg.lat++;
+          rg.n++;
+          if (qx < rg.x0) rg.x0 = qx; if (qx > rg.x1) rg.x1 = qx;
+          if (qy < rg.y0) rg.y0 = qy; if (qy > rg.y1) rg.y1 = qy;
+          var nb4 = [qx > 0 ? q3 - 1 : -1, qx < tw - 1 ? q3 + 1 : -1, qy > 0 ? q3 - tw : -1, qy < th - 1 ? q3 + tw : -1];
+          for (var z = 0; z < 4; z++) {
+            var q4 = nb4[z];
+            if (q4 < 0 || comp[q4] || !clo[q4]) continue;
+            comp[q4] = cid; stack[spn++] = q4;
+          }
+        }
+        regs.push(rg);
+      }
+      regs.sort(function (a, b2) { return b2.lat - a.lat || a.id - b2.id; });
+      /* flat fills join the lattice region they touch (largest first) */
+      for (var ri = 0; ri < regs.length; ri++) {
+        var R = regs[ri], spf = 0;
+        for (t = 0; t < nt; t++) if (comp[t] === R.id) stack[spf++] = t;
+        while (spf) {
+          var q5 = stack[--spf], q5x = q5 % tw, q5y = (q5 / tw) | 0;
+          var nb5 = [q5x > 0 ? q5 - 1 : -1, q5x < tw - 1 ? q5 + 1 : -1, q5y > 0 ? q5 - tw : -1, q5y < th - 1 ? q5 + tw : -1];
+          for (var z2 = 0; z2 < 4; z2++) {
+            var q6 = nb5[z2];
+            if (q6 < 0 || comp[q6] || kind[q6] !== 2) continue;
+            comp[q6] = R.id; stack[spf++] = q6; R.n++;
+            var q6x = q6 % tw, q6y = (q6 / tw) | 0;
+            if (q6x < R.x0) R.x0 = q6x; if (q6x > R.x1) R.x1 = q6x;
+            if (q6y < R.y0) R.y0 = q6y; if (q6y > R.y1) R.y1 = q6y;
+          }
+        }
+      }
+      var chart = regs.length && regs[0].lat >= 6 ? regs[0] : null;
+      /* the region's own edge squares are often sparse (a margin of empty
+         grid, a ragged design edge): grow each side while the strip outside
+         still looks like lattice and not like page, text or a key */
+      if (chart) {
+        var latish = function (tq) { return kind[tq] === 1 || kind[tq] === 2 || (kind[tq] !== 0 && (SR[tq] <= 0.9 || (SX[tq] >= 0.15 && SY[tq] >= 0.15))); };
+        var strip = function (side) {
+          var a = 0, n = 0, u;
+          if (side === 0 && chart.x0 > 0) { for (u = chart.y0; u <= chart.y1; u++) { n++; if (latish(u * tw + chart.x0 - 1)) a++; } }
+          if (side === 1 && chart.x1 < tw - 1) { for (u = chart.y0; u <= chart.y1; u++) { n++; if (latish(u * tw + chart.x1 + 1)) a++; } }
+          if (side === 2 && chart.y0 > 0) { for (u = chart.x0; u <= chart.x1; u++) { n++; if (latish((chart.y0 - 1) * tw + u)) a++; } }
+          if (side === 3 && chart.y1 < th - 1) { for (u = chart.x0; u <= chart.x1; u++) { n++; if (latish((chart.y1 + 1) * tw + u)) a++; } }
+          return n ? a / n : 0;
+        };
+        for (var side = 0; side < 4; side++) {
+          for (var gstep = 0; gstep < 3; gstep++) {
+            if (strip(side) < 0.6) break;
+            if (side === 0) chart.x0--; else if (side === 1) chart.x1++; else if (side === 2) chart.y0--; else chart.y1++;
+          }
+        }
+      }
+      function boxOf(rg2) {
+        var bx = rg2.x0 * T, by = rg2.y0 * T;
+        return { x: bx * SC, y: by * SC, w: (Math.min(w, (rg2.x1 + 1) * T) - bx) * SC, h: (Math.min(h, (rg2.y1 + 1) * T) - by) * SC };
+      }
+      var pitchF = res.pitch ? res.pitch * SC : null;
+      var regions = [];
+      for (ri = 0; ri < regs.length; ri++) {
+        if (regs[ri].lat < 6) continue;
+        var bxr = boxOf(regs[ri]);
+        regions.push({ kind: 'chart', box: bxr, tiles: regs[ri].n, score: Math.round(clamp(regs[ri].lat / 40, 0.3, 1) * 100) / 100,
+          pitch: pitchF ? { x: pitchF, y: pitchF } : null, chosen: regs[ri] === chart });
+      }
+      /* 4. everything else that is not page ground, outside the chart */
+      var inChart = function (qx2, qy2) { return chart && qx2 >= chart.x0 && qx2 <= chart.x1 && qy2 >= chart.y0 && qy2 <= chart.y1; };
+      var oc = new Int32Array(nt), others = [];
+      for (t = 0; t < nt; t++) {
+        if (kind[t] === 0 || oc[t] || (chart && comp[t] === chart.id) || inChart(t % tw, (t / tw) | 0)) continue;
+        var oid = others.length + 1, spo = 0, og = { n: 0, x0: tw, y0: th, x1: -1, y1: -1, mid: 0, step: 0, px: 0, ng: 0, chr: 0, lat: 0 };
+        stack[spo++] = t; oc[t] = oid;
+        while (spo) {
+          var q7 = stack[--spo], q7x = q7 % tw, q7y = (q7 / tw) | 0;
+          og.n++;
+          if (kind[q7] === 1) og.lat++;
+          og.mid += midN[q7]; og.step += stepN[q7]; og.px += pxN[q7]; og.ng += ngN[q7]; og.chr += chrS[q7];
+          if (q7x < og.x0) og.x0 = q7x; if (q7x > og.x1) og.x1 = q7x;
+          if (q7y < og.y0) og.y0 = q7y; if (q7y > og.y1) og.y1 = q7y;
+          for (var dyy = -1; dyy <= 1; dyy++) {
+            for (var dxx = -1; dxx <= 1; dxx++) {
+              var nx = q7x + dxx, ny = q7y + dyy;
+              if (nx < 0 || ny < 0 || nx >= tw || ny >= th) continue;
+              var q8 = ny * tw + nx;
+              if (kind[q8] === 0 || oc[q8] || (chart && comp[q8] === chart.id) || inChart(nx, ny)) continue;
+              oc[q8] = oid; stack[spo++] = q8;
+            }
+          }
+        }
+        others.push(og);
+      }
+      for (i = 0; i < others.length; i++) {
+        var og2 = others[i];
+        if (og2.n < 2) continue;
+        var midR = og2.step ? og2.mid / og2.step : 0, ngR = og2.px ? og2.ng / og2.px : 0;
+        var k2 = 'other';
+        if (og2.n >= 6 && midR > 0.45 && ngR > 0.5) k2 = 'photo';
+        else if (og2.step / Math.max(1, og2.px) > 0.04) k2 = 'text';
+        regions.push({ kind: k2, box: boxOf(og2), tiles: og2.n, score: Math.round(clamp(k2 === 'photo' ? midR : 0.6, 0, 1) * 100) / 100, pitch: null, chosen: false,
+          mid: Math.round(midR * 100) / 100 });
+      }
+      /* the mask: everything outside the chart region reads as page */
+      var mask = null;
+      if (chart) {
+        mask = new Uint8Array(nt);
+        for (t = 0; t < nt; t++) if (!inChart(t % tw, (t / tw) | 0)) mask[t] = 1;
+      }
+      regions.sort(function (a, b2) { return (b2.chosen ? 1 : 0) - (a.chosen ? 1 : 0) || b2.box.w * b2.box.h - a.box.w * a.box.h; });
+      for (i = 0; i < regions.length; i++) regions[i].id = 'r' + i;
+      res.regions = regions;
+      var cb = chart ? boxOf(chart) : null;
+      res.chart = chart ? { box: cb, lat: chart.lat, tiles: chart.n, cells: pitchF ? Math.round((cb.w / pitchF) * (cb.h / pitchF)) : 0 } : null;
+      res.mask = mask ? { T: T * SC, tw: tw, m: mask } : null;
+      res.pitch = pitchF;
+      res.T = T * SC;
+      tms.end = now() - tm0; res.tms = tms;
+      return res;
+    }
+
+    function boxIoU(a, b) {
+      var ix = Math.max(0, Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x));
+      var iy = Math.max(0, Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y));
+      var u = a.w * a.h + b.w * b.h - ix * iy;
+      return u > 0 ? ix * iy / u : 0;
+    }
+
+    /** intersection over the smaller box's area */
+    function boxOverlap(a, b) {
+      var ix = Math.max(0, Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x));
+      var iy = Math.max(0, Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y));
+      return (ix * iy) / Math.max(1, Math.min(a.w * a.h, b.w * b.h));
+    }
+
+    function evBad(se, kind) {
+      for (var i = 0; i < se.evidence.length; i++) if (se.evidence[i].kind === kind && se.evidence[i].ok === false) return true;
+      return false;
+    }
+
+    function hasPhoto(sg, a, c) {
+      for (var i = 0; i < sg.regions.length; i++) {
+        var r = sg.regions[i];
+        if (r.kind === 'photo' && r.tiles >= 12 && boxOverlap(r.box, c) < 0.3 && boxOverlap(r.box, a) > 0.5) return true;
+      }
+      return false;
+    }
+
+    /** share of box a covered by non-chart regions (text, photo, key) lying outside the chart box c */
+    function junkShare(sg, a, c) {
+      var s = 0;
+      for (var i = 0; i < sg.regions.length; i++) {
+        var r = sg.regions[i];
+        if (r.kind === 'chart' || boxOverlap(r.box, c) > 0.5) continue;
+        var ix = Math.max(0, Math.min(a.x + a.w, r.box.x + r.box.w) - Math.max(a.x, r.box.x));
+        var iy = Math.max(0, Math.min(a.y + a.h, r.box.y + r.box.h) - Math.max(a.y, r.box.y));
+        s += ix * iy;
+      }
+      return s / Math.max(1, a.w * a.h);
+    }
+
+    /** the tiles inside box a but outside box b: mostly not lattice? */
+    function cutIsNotLattice(sg, a, b) {
+      var T = sg.T, n = 0, lat = 0;
+      for (var ty = 0; ty < sg.th; ty++) {
+        var cy = (ty + 0.5) * T;
+        if (cy < a.y || cy > a.y + a.h) continue;
+        for (var tx = 0; tx < sg.tw; tx++) {
+          var cx = (tx + 0.5) * T;
+          if (cx < a.x || cx > a.x + a.w) continue;
+          if (cx >= b.x && cx <= b.x + b.w && cy >= b.y && cy <= b.y + b.h) continue;
+          var k = sg.tiles.kind[ty * sg.tw + tx];
+          if (k === 0) continue;
+          n++;
+          if (k === 1 || k === 2) lat++;   /* lattice, or a flat fill (fabric) */
+        }
+      }
+      return n > 0 && lat / n < 0.2;
+    }
+
+    var REGION_LABEL = { chart: 'chart', key: 'colour key', photo: 'picture', text: 'text', other: 'other' };
+
+    /** the regions as reported: the chart read (rect) first, then the rest */
+    function regionsOut(st, rect, pitch) {
+      var list = [], sg = st.seg, sw = st.swatches, i, keyed = false;
+      if (rect) list.push({ kind: 'chart', box: { x: rect.x, y: rect.y, w: rect.w, h: rect.h }, score: 1, pitch: pitch || null, chosen: true });
+      if (sg) {
+        for (i = 0; i < sg.regions.length; i++) {
+          var r = sg.regions[i];
+          if (r.chosen && rect) continue;
+          if (rect && boxOverlap(r.box, rect) > 0.5) continue;
+          var k = r.kind;
+          if (sw && k !== 'chart' && boxOverlap(sw.box, r.box) > 0.3) { k = 'key'; keyed = true; }
+          list.push({ kind: k, box: r.box, score: r.score, pitch: r.pitch || null, chosen: !rect && r.chosen });
+        }
+      }
+      if (sw && !keyed && (!rect || boxOverlap(sw.box, rect) < 0.3)) list.push({ kind: 'key', box: sw.box, score: 0.8, pitch: null, chosen: false });
+      for (i = 0; i < list.length; i++) { list[i].id = 'r' + i; list[i].label = REGION_LABEL[list[i].kind] || 'other'; }
+      return list;
+    }
+
+    /* ================================================================ *
+     * Honest size: the lattice's own evidence (wave K)
+     * ================================================================ */
+
+    function lumAt(d, w, h, x, y) {
+      x = x < 0 ? 0 : (x >= w ? w - 1 : x); y = y < 0 ? 0 : (y >= h ? h - 1 : y);
+      var o = (y * w + x) * 4;
+      return (d[o] * 77 + d[o + 1] * 150 + d[o + 2] * 29) >> 8;
+    }
+
+    /**
+     * lineInk(d, w, h, lat, n, m, axis, groundLum) -> Float32Array(n + 1)
+     * How much dark line each lattice line carries: the ink (under the page
+     * lightness) in a band +-15 % of a square round it, along the middle of
+     * up to 48 squares across. A bold 10-line carries clearly more.
+     */
+    function lineInk(d, w, h, lat, n, m, axis, gl, pq) {
+      var p = axis === 'x' ? lat.pitchX : lat.pitchY, q = axis === 'x' ? lat.pitchY : lat.pitchX;
+      var o0 = axis === 'x' ? lat.x0 : lat.y0, q0 = axis === 'x' ? lat.y0 : lat.x0;
+      var band = Math.max(1, Math.round(p * 0.15)), out = new Float32Array(n + 1);
+      var stp = Math.max(1, Math.floor(m / 48)), k, j, u, vals = [];
+      var off = Math.max(2, Math.round(p * 0.4));
+      for (k = 0; k <= n; k++) {
+        var c = Math.round(o0 + k * p - 0.5);
+        vals.length = 0;
+        for (j = 0; j < m; j += stp) {
+          var along = Math.floor(q0 + (j + 0.5) * q), best = 0;
+          /* only what is darker than the squares on both sides (and the
+             page) is line: a dark square next to the line is not line */
+          var refA = axis === 'x' ? lumAt(d, w, h, c - off, along) : lumAt(d, w, h, along, c - off);
+          var refB = axis === 'x' ? lumAt(d, w, h, c + off, along) : lumAt(d, w, h, along, c + off);
+          var ref = Math.min(gl, refA, refB) - 25;
+          for (u = c - band; u <= c + band; u++) {
+            var L = axis === 'x' ? lumAt(d, w, h, u, along) : lumAt(d, w, h, along, u);
+            if (L < ref) best += ref - L;
+          }
+          vals.push(best);
+        }
+        vals.sort(function (a, b) { return a - b; });
+        out[k] = vals.length ? vals[Math.min(vals.length - 1, Math.floor(vals.length * (pq || 0.5)))] : 0;
+      }
+      return out;
+    }
+
+    /** bold lines: { bold: [k], phase, share } | null */
+    function boldOf(ink, n) {
+      if (n < 12) return null;
+      var v = [], k;
+      for (k = 1; k < n; k++) v.push(ink[k]);
+      v.sort(function (a, b) { return a - b; });
+      var med = v[v.length >> 1];
+      var thr = Math.max(med * 1.5, med + 20);
+      var bold = [], cnt = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0], inner = 0;
+      for (k = 0; k <= n; k++) {
+        if (ink[k] < thr) continue;
+        bold.push(k);
+        if (k > 0 && k < n) { cnt[k % 10]++; inner++; }
+      }
+      if (inner < 2) return { bold: bold, phase: null, share: 0, med: med };
+      var bc = 0;
+      for (k = 1; k < 10; k++) if (cnt[k] > cnt[bc]) bc = k;
+      return { bold: bold, phase: bc, share: cnt[bc] / inner, med: med };
+    }
+
+    /** are the squares of columns (rows) [a, b) all page ground? */
+    function stripEmpty(d, w, h, lat, gw, gh, axis, a, b, ground) {
+      /* a centre arrow or a tick printed in the margin is allowed */
+      var other = axis === 'x' ? gh : gw, stp = Math.max(1, Math.floor(other / 60)), inked = 0, seen = 0;
+      for (var k = a; k < b; k++) {
+        for (var j = 0; j < other; j += stp) {
+          var cx = axis === 'x' ? k : j, cy = axis === 'x' ? j : k;
+          var X = Math.round(lat.x0 + (cx + 0.5) * lat.pitchX - 0.5), Y = Math.round(lat.y0 + (cy + 0.5) * lat.pitchY - 0.5);
+          if (X < 0 || Y < 0 || X >= w || Y >= h) continue;
+          var o = (Y * w + X) * 4;
+          seen++;
+          if (Math.abs(d[o] - ground.r) + Math.abs(d[o + 1] - ground.g) + Math.abs(d[o + 2] - ground.b) > 60) inked++;
+        }
+      }
+      return seen > 0 && inked <= 2 + seen * 0.01;
+    }
+
+    /**
+     * sizeEvidence(d, w, h, L, ground, declared, mayTrim) -> { evidence, verdict, factor, trimmed: L|null }
+     * The checks a size can get from the picture itself, each one plain:
+     * square squares, a grid that ends where the chart ends, bold 10-lines
+     * on multiples of 10 (from an edge or the centre). With no declared
+     * size, a gridded margin outside a bold frame (empty squares the
+     * publisher drew round the design) is trimmed off.
+     */
+    function sizeEvidence(d, w, h, L, ground, declared, mayTrim, sg, sw) {
+      var ev = [], lat = L.lat, gw = L.size.w, gh = L.size.h, factor = 1, trimmed = null, crossDbg = null;
+      var gl = (ground.r * 77 + ground.g * 150 + ground.b * 29) / 256;
+      function r1(v) { return Math.round(v * 10) / 10; }
+      /* bold lines and the frame */
+      var bx = null, by = null;
+      if (L.linesX || L.linesY || gw * gh <= 250000) {
+        bx = boldOf(lineInk(d, w, h, lat, gw, gh, 'x', gl), gw);
+        by = boldOf(lineInk(d, w, h, lat, gh, gw, 'y', gl), gh);
+      }
+      if (mayTrim && !declared && bx && by && bx.bold.length >= 3 && by.bold.length >= 3) {
+        var cut = { l: 0, r: 0, t: 0, b: 0 };
+        /* the frame: the innermost bold line within 4 squares of each edge
+           with only empty squares outside it (the outer edge itself may be
+           drawn bold too) */
+        var frameLo = function (b, n, axis) {
+          for (var q = b.bold.length - 1; q >= 0; q--) { var k = b.bold[q]; if (k >= 1 && k <= 4 && stripEmpty(d, w, h, lat, gw, gh, axis, 0, k, ground)) return k; }
+          return 0;
+        };
+        var frameHi = function (b, n, axis) {
+          for (var q = 0; q < b.bold.length; q++) { var k = b.bold[q]; if (k < n && n - k <= 4 && stripEmpty(d, w, h, lat, gw, gh, axis, k, n, ground)) return n - k; }
+          return 0;
+        };
+        cut.l = frameLo(bx, gw, 'x'); cut.r = frameHi(bx, gw, 'x');
+        cut.t = frameLo(by, gh, 'y'); cut.b = frameHi(by, gh, 'y');
+        /* a frame has two sides: an empty strip beyond a bold line on one side only is just empty chart */
+        var hasB = function (b, k) { return b.bold.indexOf(k) >= 0; };
+        if (!((cut.l || hasB(bx, 0)) && (cut.r || hasB(bx, gw)))) { cut.l = 0; cut.r = 0; }
+        if (!((cut.t || hasB(by, 0)) && (cut.b || hasB(by, gh)))) { cut.t = 0; cut.b = 0; }
+        /* a frame is drawn all round: at least three sides must show the empty margin */
+        var sides = (cut.l ? 1 : 0) + (cut.r ? 1 : 0) + (cut.t ? 1 : 0) + (cut.b ? 1 : 0);
+        if (sides >= 3 && gw - cut.l - cut.r >= 8 && gh - cut.t - cut.b >= 8) {
+          lat = { x0: lat.x0 + cut.l * lat.pitchX, y0: lat.y0 + cut.t * lat.pitchY, pitchX: lat.pitchX, pitchY: lat.pitchY };
+          gw = gw - cut.l - cut.r; gh = gh - cut.t - cut.b;
+          trimmed = { lat: lat, size: { w: gw, h: gh }, cut: cut };
+          var shiftB = function (b, c, n) { var o = { bold: [], phase: null, share: b.share }; for (var q = 0; q < b.bold.length; q++) { var v = b.bold[q] - c; if (v >= 0 && v <= n) o.bold.push(v); } o.phase = b.phase === null ? null : ((b.phase - c) % 10 + 10) % 10; return o; };
+          bx = shiftB(bx, cut.l, gw); by = shiftB(by, cut.t, gh);
+          ev.push({ kind: 'region', ok: true, detail: 'The grid has ' + (cut.l + cut.r) + ' empty column' + (cut.l + cut.r === 1 ? '' : 's') + ' and ' + (cut.t + cut.b) +
+            ' empty row' + (cut.t + cut.b === 1 ? '' : 's') + ' outside the thick frame round the design; they were left out.' });
+        }
+      }
+      /* square squares */
+      var ratio = lat.pitchX / lat.pitchY, sq = Math.abs(ratio - 1) <= 0.025;
+      ev.push({ kind: 'square', ok: sq, detail: sq ? 'The squares are square (' + r1(lat.pitchX) + ' x ' + r1(lat.pitchY) + ' pixels).'
+        : 'The squares are ' + r1(lat.pitchX) + ' x ' + r1(lat.pitchY) + ' pixels, not square: the box probably includes something that is not chart, or the size is wrong.' });
+      if (!sq) factor *= Math.abs(ratio - 1) > 0.06 ? 0.5 : 0.75;
+      /* the grid ends where the chart ends: no lattice line one square outside */
+      if (trimmed) {
+        ev.push({ kind: 'edges', ok: true, detail: 'Past the thick frame there are only empty squares.' });
+      } else if (L.linesX || L.linesY) {
+        var cont = [];
+        var probe = function (axis, k) {
+          var n = axis === 'x' ? gw : gh, m = axis === 'x' ? gh : gw;
+          var o0 = axis === 'x' ? lat.x0 : lat.y0, p = axis === 'x' ? lat.pitchX : lat.pitchY;
+          var at1 = function (kk) {
+            var pos1 = o0 + kk * p;
+            var lt1 = axis === 'x' ? { x0: pos1, y0: lat.y0, pitchX: p, pitchY: lat.pitchY } : { x0: lat.x0, y0: pos1, pitchX: lat.pitchX, pitchY: p };
+            /* a line over coloured squares is often not darker than them: judge by the clearer stretches */
+            return lineInk(d, w, h, lt1, 0, m, axis, gl, 0.8)[0];
+          };
+          var pos = o0 + k * p;
+          if (pos < 2 || pos > (axis === 'x' ? w : h) - 3) return false;
+          /* the line one square outside against the nearest inner line */
+          var ref = Math.max(at1(k < 0 ? 1 : n - 1), at1(k < 0 ? 2 : n - 2));
+          var at = at1(k);
+          return ref > 8 && at >= ref * 0.5;
+        };
+        if (L.linesX) { if (probe('x', -1)) cont.push('left'); if (probe('x', gw + 1)) cont.push('right'); }
+        if (L.linesY) { if (probe('y', -1)) cont.push('top'); if (probe('y', gh + 1)) cont.push('bottom'); }
+        ev.push({ kind: 'edges', ok: !cont.length, detail: !cont.length ? 'The grid lines stop at the edge of the chart.'
+          : 'The grid lines go on past the ' + cont.join(' and ') + ' edge: the chart may be bigger than the box read.' });
+        if (cont.length) factor *= 0.75;
+      } else {
+        ev.push({ kind: 'edges', ok: null, detail: 'There are no grid lines to say where the chart ends.' });
+      }
+      /* the outer rows and columns are crossed by the grid like the inner ones
+         (a caption or a ruler band read as squares is not) */
+      if ((L.linesX || L.linesY) && gw >= 8 && gh >= 8) {
+        var crossed = function (axis, k) {
+          /* along row (axis 'y') or column k: how many of the other axis's lines show */
+          var n2 = axis === 'y' ? gw : gh, hit = 0, tot = 0, stp2 = Math.max(1, Math.floor(n2 / 40));
+          for (var q2 = 1; q2 < n2; q2 += stp2) {
+            var lx = axis === 'y' ? Math.round(lat.x0 + q2 * lat.pitchX - 0.5) : Math.round(lat.x0 + (k + 0.5) * lat.pitchX - 0.5);
+            var ly = axis === 'y' ? Math.round(lat.y0 + (k + 0.5) * lat.pitchY - 0.5) : Math.round(lat.y0 + q2 * lat.pitchY - 0.5);
+            var best2 = 255;
+            for (var u2 = -1; u2 <= 1; u2++) best2 = Math.min(best2, axis === 'y' ? lumAt(d, w, h, lx + u2, ly) : lumAt(d, w, h, lx, ly + u2));
+            var midL = axis === 'y' ? lumAt(d, w, h, Math.round(lx + lat.pitchX / 2), ly) : lumAt(d, w, h, lx, Math.round(ly + lat.pitchY / 2));
+            tot++;
+            if (best2 < Math.min(gl, midL) - 12) hit++;
+          }
+          return tot ? hit / tot : 0;
+        };
+        /* rows are crossed by the vertical lines (found when linesX), columns by the horizontal ones */
+        var refY = Math.max(crossed('y', gh >> 1), crossed('y', gh >> 2), crossed('y', (gh * 3) >> 2));
+        var refX = Math.max(crossed('x', gw >> 1), crossed('x', gw >> 2), crossed('x', (gw * 3) >> 2));
+        var bare = [];
+        crossDbg = [refY, crossed('y', 0), crossed('y', 1), crossed('y', gh - 2), crossed('y', gh - 1), refX, crossed('x', 0), crossed('x', gw - 1)].map(function (v) { return Math.round(v * 100) / 100; });
+        if (L.linesX && refY >= 0.2) {
+          if (crossed('y', 0) < refY * 0.2 && crossed('y', 1) < refY * 0.2) bare.push('top');
+          if (crossed('y', gh - 1) < refY * 0.2 && crossed('y', gh - 2) < refY * 0.2) bare.push('bottom');
+        }
+        if (L.linesY && refX >= 0.2) {
+          if (crossed('x', 0) < refX * 0.2 && crossed('x', 1) < refX * 0.2) bare.push('left');
+          if (crossed('x', gw - 1) < refX * 0.2 && crossed('x', gw - 2) < refX * 0.2) bare.push('right');
+        }
+        if (bare.length) {
+          ev.push({ kind: 'edges', ok: false, detail: 'The ' + bare.join(' and ') + ' rows or columns read have no grid lines through them: they are probably text or margin, not chart.' });
+          factor *= 0.6;
+        }
+      }
+      /* a colour key or a photo the segmenter found, inside the box read */
+      var bxL = lat.x0, byL = lat.y0, bxR = lat.x0 + gw * lat.pitchX, byB = lat.y0 + gh * lat.pitchY;
+      var inBox = function (x, y) { return x >= bxL && x <= bxR && y >= byL && y <= byB; };
+      var junk = [];
+      if (sw && inBox(sw.box.x + sw.size / 2, sw.box.y + sw.box.h / 2)) junk.push('a colour key');
+      if (sg && sg.regions) {
+        for (var rq = 0; rq < sg.regions.length; rq++) {
+          var rg5 = sg.regions[rq];
+          /* a region that is the box itself is the chart seen softly, not something else */
+          var iou5 = boxIoU(rg5.box, { x: bxL, y: byL, w: bxR - bxL, h: byB - byL });
+          if (iou5 > 0.4) continue;
+          if (rg5.kind === 'photo' && rg5.tiles >= 12 && inBox(rg5.box.x + rg5.box.w / 2, rg5.box.y + rg5.box.h / 2)) { if (junk.indexOf('a picture') < 0) junk.push('a picture'); }
+          if (rg5.kind === 'text' && rg5.tiles >= 10 && sg.chart && boxOverlap(rg5.box, sg.chart.box) < 0.3 && inBox(rg5.box.x + rg5.box.w / 2, rg5.box.y + rg5.box.h / 2)) { if (junk.indexOf('text') < 0) junk.push('text'); }
+        }
+      }
+      if (junk.length) {
+        ev.push({ kind: 'region', ok: false, detail: 'The box read holds ' + junk.join(' and ') + ' as well as the chart: the chart is smaller than the box. Crop to the chart, or pick the chart region.' });
+        factor *= 0.5;
+      }
+      /* a block inside the box that the grid lines do not cross (a key panel
+         or a photo printed over the grid, a caption): not chart */
+      if ((L.linesX || L.linesY) && gw >= 12 && gh >= 12) {
+        var sx3 = Math.max(1, Math.floor(gw / 60)), sy3 = Math.max(1, Math.floor(gh / 60));
+        var nx3 = Math.ceil(gw / sx3), ny3 = Math.ceil(gh / sy3), un = new Uint8Array(nx3 * ny3);
+        var lineAt = function (x1, y1, x2, y2, x3, y3) {
+          var a = lumAt(d, w, h, x1, y1), b1 = lumAt(d, w, h, x2, y2), c1 = lumAt(d, w, h, x3, y3);
+          return Math.abs(a - b1) > 14 && Math.abs(a - c1) > 14 && (a - b1) * (a - c1) > 0;
+        };
+        for (var gy = 0; gy < ny3; gy++) {
+          for (var gx = 0; gx < nx3; gx++) {
+            var cxq = gx * sx3, cyq = gy * sy3, hitL = false, hitT = false;
+            var lxq = lat.x0 + cxq * lat.pitchX, tyq = lat.y0 + cyq * lat.pitchY;
+            var myq = Math.round(tyq + lat.pitchY * 0.5), mxq = Math.round(lxq + lat.pitchX * 0.5), o4 = Math.max(2, Math.round(lat.pitchX * 0.3));
+            for (var u3 = -1; u3 <= 1 && !hitL; u3++) { var X3 = Math.round(lxq - 0.5) + u3; hitL = lineAt(X3, myq, X3 - o4, myq, X3 + o4, myq); }
+            for (var u4 = -1; u4 <= 1 && !hitT; u4++) { var Y3 = Math.round(tyq - 0.5) + u4; hitT = lineAt(mxq, Y3, mxq, Y3 - o4, mxq, Y3 + o4); }
+            if (!hitL && !hitT) un[gy * nx3 + gx] = 1;
+          }
+        }
+        /* the biggest connected unlined block */
+        var seenU = new Uint8Array(un.length), bigU = 0, stkU = [];
+        for (var iu = 0; iu < un.length; iu++) {
+          if (!un[iu] || seenU[iu]) continue;
+          var nU = 0, ux0 = nx3, ux1 = -1, uy0 = ny3, uy1 = -1;
+          stkU.length = 0; stkU.push(iu); seenU[iu] = 1;
+          while (stkU.length) {
+            var pu = stkU.pop(), pux = pu % nx3, puy = (pu / nx3) | 0;
+            nU++;
+            if (pux < ux0) ux0 = pux; if (pux > ux1) ux1 = pux; if (puy < uy0) uy0 = puy; if (puy > uy1) uy1 = puy;
+            var nbU = [pux > 0 ? pu - 1 : -1, pux < nx3 - 1 ? pu + 1 : -1, puy > 0 ? pu - nx3 : -1, puy < ny3 - 1 ? pu + nx3 : -1];
+            for (var zu = 0; zu < 4; zu++) if (nbU[zu] >= 0 && un[nbU[zu]] && !seenU[nbU[zu]]) { seenU[nbU[zu]] = 1; stkU.push(nbU[zu]); }
+          }
+          if (ux1 - ux0 >= 3 && uy1 - uy0 >= 3 && nU > bigU) bigU = nU;
+        }
+        if (bigU / un.length >= 0.05) {
+          ev.push({ kind: 'region', ok: false, detail: 'About ' + Math.round(bigU / un.length * 100) + ' % of the box read is a block the grid lines do not cross (a key panel, a picture or text), not chart squares: the chart is probably smaller than the box.' });
+          factor *= 0.6;
+        }
+      }      /* bold 10-lines on multiples of 10 */
+      function phaseOk(b, n) {
+        if (!b || b.phase === null || b.share < 0.7) return null;
+        if (b.phase === 0 || b.phase === n % 10) return 'edge';
+        if (b.phase === Math.floor(n / 2) % 10 || b.phase === Math.ceil(n / 2) % 10) return 'centre';
+        return false;
+      }
+      var px = phaseOk(bx, gw), py = phaseOk(by, gh);
+      if (px === null && py === null) ev.push({ kind: 'bold10', ok: null, detail: 'No thicker every-10 lines to check the size against.' });
+      else if (px === false || py === false) {
+        var offX = px === false ? bx.phase : 0, offY = py === false ? by.phase : 0;
+        ev.push({ kind: 'bold10', ok: false, detail: 'The thicker every-10 lines start ' + (offX ? offX + ' square' + (offX === 1 ? '' : 's') + ' in from the left' : '') +
+          (offX && offY ? ' and ' : '') + (offY ? offY + ' square' + (offY === 1 ? '' : 's') + ' down from the top' : '') + ', not on a multiple of 10: the box may include squares that are not chart, or miss some.' });
+        factor *= 0.75;
+      } else {
+        ev.push({ kind: 'bold10', ok: true, detail: 'The thicker every-10 lines fall on multiples of 10 (counted from the ' + ((px || py) === 'centre' ? 'centre' : 'edge') + ').' });
+      }
+      var bad = 0, good = 0;
+      for (var i = 0; i < ev.length; i++) { if (ev[i].ok === false) bad++; else if (ev[i].ok === true && ev[i].kind !== 'region') good++; }
+      var dbgB = { bx: bx ? bx.bold.slice(0, 40) : null, by: by ? by.bold.slice(0, 40) : null, n: [gw, gh], cross: crossDbg, lines: [!!L.linesX, !!L.linesY] };
+      var bph = { x: bx && bx.phase !== null && bx.share >= 0.7 ? bx.phase : null, y: by && by.phase !== null && by.share >= 0.7 ? by.phase : null };
+      return { dbg: dbgB, boldPhase: bph, evidence: ev, verdict: declared ? (bad ? 'doubtful' : 'checked') : (bad ? 'doubtful' : 'consistent'), factor: factor, trimmed: trimmed, good: good };
     }
 
     /* ================================================================ *
@@ -1356,6 +2272,12 @@
         if (entries[j].count > 0) { keyTotal += entries[j].count; haveCounts++; }
       }
       var countsKnown = haveCounts > 0 && haveCounts === nUse;
+      /* some rows print a count and some do not (a key read from a picture
+         that missed a count): the counted rows are placed first, by count;
+         the rest then claim the nearest colours left over */
+      var noCount = 0;
+      for (j = 0; j < entries.length; j++) if (entries[j].use && entries[j].count === null) noCount++;
+      var mixed = haveCounts > 0 && noCount > 0;
       var fabricWant = countsKnown && keyTotal <= total ? total - keyTotal : -1;
 
       /* fabric candidates */
@@ -1386,7 +2308,7 @@
         var fab = fabCands[fc];
         var rows = [], cols = [];
         for (i = 0; i < k; i++) if (i !== fab && entryOf[i] < 0) rows.push(i);
-        for (j = 0; j < entries.length; j++) if (entries[j].use && !takenE[j]) cols.push(j);
+        for (j = 0; j < entries.length; j++) if (entries[j].use && !takenE[j] && (!mixed || entries[j].count !== null)) cols.push(j);
         var S = Math.max(rows.length, cols.length);
         var cost = 0, rowTo = null, C = null;
         /* fabric's own cost */
@@ -1463,6 +2385,45 @@
           else if (cnt !== null && (colour === null || cnt <= 0.1)) how[ci2] = 'count';
           else if (cnt !== null) how[ci2] = 'count+colour';
           else how[ci2] = 'colour';
+        }
+      }
+      if (mixed) {
+        var restC = [], restE = [];
+        for (i = 0; i < k; i++) if (i !== fabric && entryOf[i] < 0) restC.push(i);
+        var usedE = {};
+        for (i = 0; i < k; i++) if (entryOf[i] >= 0) usedE[entryOf[i]] = true;
+        for (j = 0; j < entries.length; j++) if (entries[j].use && entries[j].count === null && !usedE[j]) restE.push(j);
+        /* a leftover class right next to a placed one is that colour split by noise, not a key colour */
+        restC = restC.filter(function (ci5) {
+          for (var i6 = 0; i6 < k; i6++) {
+            if (entryOf[i6] < 0 || i6 === ci5) continue;
+            var a6 = cls[ci5].lab, b6 = cls[i6].lab, e6 = (a6[0] - b6[0]) * (a6[0] - b6[0]) + (a6[1] - b6[1]) * (a6[1] - b6[1]) + (a6[2] - b6[2]) * (a6[2] - b6[2]);
+            if (e6 < 36) return false;
+          }
+          return true;
+        });
+        if (restC.length && restE.length) {
+          var S2 = Math.max(restC.length, restE.length), C2 = new Float64Array(S2 * S2), D2 = new Float64Array(S2 * S2);
+          for (var r3 = 0; r3 < S2; r3++) {
+            for (var c5 = 0; c5 < S2; c5++) {
+              var v2 = 1e6, dd5 = null;
+              if (r3 < restC.length && c5 < restE.length) {
+                var en5 = entries[restE[c5]], cl5 = cls[restC[r3]];
+                dd5 = en5.lab ? de2000(cl5.lab[0], cl5.lab[1], cl5.lab[2], en5.lab[0], en5.lab[1], en5.lab[2]) : 50;
+                /* the bigger classes first: a speck should not take a key colour */
+                v2 = dd5 - Math.min(10, Math.log(1 + cl5.n));
+              } else v2 = 0;
+              C2[r3 * S2 + c5] = v2; D2[r3 * S2 + c5] = dd5 === null ? -1 : dd5;
+            }
+          }
+          var rt = hungarian(C2, S2);
+          for (r3 = 0; r3 < restC.length; r3++) {
+            var cE = rt[r3];
+            if (cE >= restE.length) continue;
+            entryOf[restC[r3]] = restE[cE];
+            dE[restC[r3]] = D2[r3 * S2 + cE] >= 0 ? D2[r3 * S2 + cE] : null;
+            how[restC[r3]] = 'colour';
+          }
         }
       }
       return { fabric: fabric, entry: entryOf, how: how, dE: dE, cost: best.cost };
@@ -1744,6 +2705,27 @@
       return b;
     }
 
+    /**
+     * flatSquares(smp, gw, gh, conf) -> boolean
+     * A chart is flat squares on a lattice: two neighbouring squares are
+     * either the same colour (within the picture's noise) or clearly
+     * different. A photo cut into squares is a smooth gradient: most
+     * neighbours differ by a little.
+     */
+    function flatSquares(smp, gw, gh, conf) {
+      if (!(conf >= 0.6)) return false;
+      var L = smp.lab, lo = Math.max(2.5, 2.5 * (smp.cellNoise || 0)), grad = 0, tot = 0;
+      var st = Math.max(1, Math.floor(gw * gh / 40000));
+      for (var i = 0; i < gw * gh - 1; i += st) {
+        if ((i + 1) % gw === 0) continue;
+        var e1 = L[i * 3] - L[i * 3 + 3], e2 = L[i * 3 + 1] - L[i * 3 + 4], e3 = L[i * 3 + 2] - L[i * 3 + 5];
+        var dd = Math.sqrt(e1 * e1 + e2 * e2 + e3 * e3);
+        tot++;
+        if (dd > lo && dd < 12) grad++;
+      }
+      return tot > 0 && grad / tot < 0.2;
+    }
+
     function readColour(d, w, h, lat, gw, gh, o, ring) {
       var n = gw * gh;
       var tA = now();
@@ -1758,7 +2740,9 @@
         var ec = o.entries[j2];
         if (ec.use && ec.count > 0 && (!minExp || ec.count < minExp)) minExp = ec.count;
       }
-      var cl = cluster(smp.lab, n, target, o.maxColors, smp.noise, minExp, smp.cellNoise);
+      /* a row with no printed count may be the smallest colour: no speck size can be assumed */
+      for (var j4 = 0; j4 < o.entries.length; j4++) if (o.entries[j4].use && o.entries[j4].count === null) minExp = 0;
+      var cl = cluster(smp.lab, n, target, o.maxColors || 256, smp.noise, minExp, smp.cellNoise);
       var tC = now();
       var res = matchAll(cl, gw, gh, o, n, nUse);
       if (nUse > 0) {
@@ -1956,6 +2940,52 @@
               st.rectFrom = 'lattice';
             } else {
               var rr = locate(d, w, h, st.ground, o.size);
+              /* the page segmenter: where a lattice really is, and what else is
+                 on the page (a key panel, a photo, text). When the box found
+                 above holds more than the lattice region, the rest is masked
+                 out and the box found again. */
+              if (o.segment !== false) {
+                var sg = segment(d, w, h, st.ground);
+                /* a key is looked for only where it can matter: no chart, or a box that holds more than the chart */
+                var needSw = !sg.chart || sg.chart.cells < 150 || !rr || rr.w * rr.h > sg.chart.box.w * sg.chart.box.h * 1.15;
+                for (var ri2 = 0; ri2 < sg.regions.length && !needSw; ri2++) if (sg.regions[ri2].kind === 'text' && sg.regions[ri2].tiles >= 8) needSw = true;
+                var swc = needSw ? findSwatches(d, w, h, st.ground, sg.chart && sg.chart.cells >= 150 ? sg.chart.box : null) : null;
+                st.seg = sg; st.swatches = swc;
+                var sc0 = sg.chart;
+                if (swc && sc0 && boxOverlap(swc.box, sc0.box) > 0.5) swc = st.swatches = null;
+                /* swatches no bigger than the chart's own squares are squares */
+                if (swc && (swc.size < 12 || (sg.pitch && swc.size < sg.pitch * 1.15))) swc = st.swatches = null;   /* chart squares, not swatches */
+                if (swc && (!sc0 || sc0.cells < 150) && (!rr || !sc0 || boxOverlap(swc.box, sc0.box) < 0.5)) {
+                  return done(fail('looks-like-a-key', 'This looks like a colour key (' + swc.rows + ' rows of colour swatches with text), not a chart. ' +
+                    'Add it as the key, and read the chart from a picture of the chart itself.', { regions: regionsOut(st, null) }));
+                }
+                st.segNote = 'swatches ' + JSON.stringify(swc) + ' ' + (sc0 ? ('lat ' + sc0.lat + ' seg ' + JSON.stringify(sc0.box) + ' J ' + (rr ? JSON.stringify({ x: Math.round(rr.x), y: Math.round(rr.y), w: Math.round(rr.w), h: Math.round(rr.h) }) : 'none')) : 'no chart region');
+                if (sc0 && sc0.lat >= 12) {
+                  var hT0 = sg.T / 2;
+                  st.rectS = { x: Math.max(0, sc0.box.x - hT0), y: Math.max(0, sc0.box.y - hT0), w: 0, h: 0 };
+                  st.rectS.w = Math.min(w, sc0.box.x + sc0.box.w + hT0) - st.rectS.x; st.rectS.h = Math.min(h, sc0.box.y + sc0.box.h + hT0) - st.rectS.y;
+                  if (rr) st.rectJ = rr;
+                }
+                if (sc0 && rr && sc0.lat >= 12) {
+                  var aJ = rr.w * rr.h, aS = sc0.box.w * sc0.box.h;
+                  if (aS >= aJ * 0.3 && aJ > aS * 1.15) {
+                    var rm = locate(d, w, h, st.ground, o.size, sg.mask);
+                    st.segNote += ' masked ' + (rm ? JSON.stringify({ x: Math.round(rm.x), y: Math.round(rm.y), w: Math.round(rm.w), h: Math.round(rm.h) }) + ' cutOk ' + cutIsNotLattice(sg, rr, rm) : 'none');
+                    /* what the mask took away must not be lattice itself (a
+                       chart edge the tiles missed, a ruler band glued on) */
+                    var aspOk = function (bx) { return !o.size || Math.abs((bx.w / bx.h) / (o.size.w / o.size.h) - 1) <= 0.06; };
+                    /* something real was left out: a key panel or a photo */
+                    var swIn = swc && swc.box.x + swc.size / 2 >= rr.x && swc.box.x + swc.size / 2 <= rr.x + rr.w && swc.box.y + swc.box.h / 2 >= rr.y && swc.box.y + swc.box.h / 2 <= rr.y + rr.h;
+                    var reason = swIn || hasPhoto(sg, rr, sc0.box) || junkShare(sg, rr, sc0.box) >= 0.08;
+                    if (reason && rm && rm.w * rm.h >= aS * 0.5 && (cutIsNotLattice(sg, rr, rm) || (st.segTentative = junkShare(sg, rr, sc0.box) >= 0.15)) && (aspOk(rm) || !aspOk(rr))) {
+                      st.rectJ = rr; rr = rm; st.segUsed = true;
+                      var hT = sg.T / 2;
+                      st.rectS = { x: Math.max(0, sc0.box.x - hT), y: Math.max(0, sc0.box.y - hT), w: 0, h: 0 };
+                      st.rectS.w = Math.min(w, sc0.box.x + sc0.box.w + hT) - st.rectS.x; st.rectS.h = Math.min(h, sc0.box.y + sc0.box.h + hT) - st.rectS.y;
+                    }
+                  }
+                }
+              }
               /* a full-bleed chart (no page around it): the whole picture */
               if (!rr || st.ground.share < 0.15) rr = { x: 0, y: 0, w: w, h: h, fill: 1, share: 1 };
               st.rect = rr;
@@ -1995,8 +3025,29 @@
               return done(fail('no-grid', 'I could not find a grid of squares in this picture. Try cropping to just the chart, or type the chart size.'));
             }
             if (st.aspectOff) L.conf = Math.round(L.conf * 0.6 * 100) / 100;
+            /* the lattice's own evidence for its size */
+            var sev = sizeEvidence(d, w, h, L, st.ground, !!o.size, !o.size && !o.lattice, st.seg, st.swatches);
+            /* the masked box cut a grid that goes on: the segmenter was wrong, use the plain box */
+            if ((st.rectS || st.rectJ) && st.rectFrom !== 'given' && !o.lattice && (evBad(sev, 'edges') || evBad(sev, 'square') || evBad(sev, 'region') || (st.segTentative && evBad(sev, 'bold10')))) {
+              /* every candidate box is judged by its own evidence; the one with
+                 the fewest objections wins (ties: the segmenter's first) */
+              var nBad = function (se2) { var b2 = 0; for (var q7 = 0; q7 < se2.evidence.length; q7++) if (se2.evidence[q7].ok === false) b2++; return b2; };
+              var bestBad = nBad(sev), alts = [st.rectS, st.rectJ];
+              for (var ai = 0; ai < alts.length; ai++) {
+                if (!alts[ai]) continue;
+                var LJ = findLattice(d, w, h, alts[ai], o.size, o.lattice, o.kind === 'detect');
+                if (!LJ.lat || Math.min(LJ.lat.pitchX, LJ.lat.pitchY) < 3) continue;
+                var sevJ = sizeEvidence(d, w, h, LJ, st.ground, !!o.size, !o.size && !o.lattice, st.seg, st.swatches);
+                if (nBad(sevJ) < bestBad) { L = LJ; sev = sevJ; bestBad = nBad(sevJ); st.segUsed = ai === 0 ? 'region' : false; }
+              }
+            }
+            if (sev.trimmed) { L.lat = sev.trimmed.lat; L.size = sev.trimmed.size; }
+            L.conf = Math.round(clamp(L.conf * sev.factor, 0, 1) * 100) / 100;
+            st.ev = sev;
+            for (var ei = 0; ei < sev.evidence.length; ei++) if (sev.evidence[ei].ok === false) st.warnings.push(sev.evidence[ei].detail);
             st.L = L;
             if (st.rectFrom !== 'given') st.rect = { x: L.lat.x0, y: L.lat.y0, w: L.lat.pitchX * L.size.w, h: L.lat.pitchY * L.size.h };
+            st.regions = regionsOut(st, st.rect, { x: L.lat.pitchX, y: L.lat.pitchY });
             mark('lattice');
             if (o.kind === 'detect') {
               /* a quick style look on a thinned sample */
@@ -2004,11 +3055,13 @@
                 ok: true, reason: null, message: null,
                 crop: st.rect, lattice: L.lat, size: L.size, sizeSource: L.sizeSource,
                 confidence: L.conf, alternatives: L.alternatives, style: 'unknown',
-                debug: { perX: L.perX, perY: L.perY, combX: L.combX, combY: L.combY, ground: st.ground }
+                regions: st.regions, sizeEvidence: sev.evidence, sizeVerdict: sev.verdict,
+                debug: { perX: L.perX, perY: L.perY, combX: L.combX, combY: L.combY, ground: st.ground, segUsed: !!st.segUsed, segNote: st.segNote || null, times: st.times, segT: st.seg ? st.seg.tms : null, bold: sev.dbg,
+                  segMs: st.seg && st.seg.tms ? Math.round(st.seg.tms.end) : null }
               };
               if (L.size.w * L.size.h <= 40000) {
                 var sm = sampleCells(d, w, h, L.lat, L.size.w, L.size.h, null);
-                var cq = cluster(sm.lab, L.size.w * L.size.h, 0, o.maxColors, sm.noise);
+                var cq = cluster(sm.lab, L.size.w * L.size.h, 0, o.maxColors || 60, sm.noise);
                 det.style = styleOf(sm, cq, L.size.w * L.size.h, L.lat);
               }
               return done(det);
@@ -2026,7 +3079,8 @@
             for (var e = 0; e < o.entries.length; e++) {
               if (o.entries[e].use) { nUse++; if (o.entries[e].count > 0) counted++; }
             }
-            st.counted = nUse > 0 && counted === nUse;
+            /* candidate lattices are judged by the rows that print a count */
+            st.counted = nUse > 0 && counted > 0;
             /* a read that already agrees with the key to a few stitches in a
                thousand is not second-guessed by nudged lattices */
             var keyTot = 0;
@@ -2095,8 +3149,9 @@
               if (o.entries[se].count > 0 && (!symMin || o.entries[se].count < symMin)) symMin = o.entries[se].count;
             }
             var cs = clusterShapes(sd.desc, sd.ink, n3, symN, symMin);
-            if (cs.k > Math.max(o.maxColors, 1)) {
-              return done(fail('too-many-colors', 'This chart seems to use ' + cs.k + ' different symbols, more than the ' + o.maxColors +
+            var symCap = o.maxColors || Math.max(60, symN + 10);
+            if (cs.k > symCap) {
+              return done(fail('too-many-colors', 'This chart seems to use ' + cs.k + ' different symbols, more than the ' + symCap +
                 ' I can sort out. Try a sharper or bigger picture.'));
             }
             var mm = matchByCount(cs.counts, cs.k, o.entries, o.assign);
@@ -2122,16 +3177,20 @@
               ok: true, mode: 'symbol', crop: st.rect, lattice: lat3, size: st.L.size, sizeSource: st.L.sizeSource,
               confidence: st.L.conf, alternatives: st.L.alternatives, style: 'symbols-bw',
               classOf: cells3, classes: classes3, fabricClass: -1, cellConf: conf3, lowCells: low3,
-              ground: st.ground, glyphSrc: true
+              ground: st.ground, glyphSrc: true,
+              regions: st.regions, sizeEvidence: st.ev ? st.ev.evidence : [], sizeVerdict: st.ev ? st.ev.verdict : null, boldPhase: st.ev ? st.ev.boldPhase : null
             });
           }
 
           case 'finish': {
             var b = st.best, gw4 = st.L.size.w, gh4 = st.L.size.h, n4 = gw4 * gh4;
-            if (b.cl.tooMany) {
-              return done(fail('too-many-colors', 'This picture has more than ' + o.maxColors + ' distinct colours, which is more than a chart' +
-                ' usually has. If it is a photo, use "turn a photo into a chart" instead.'));
-
+            /* many colours: a chart of flat squares on a clean lattice may have
+               them (a 150-colour photo-realistic chart); a photo does not sit
+               in flat squares. A cap the caller gave is a hard cap. */
+            var many = o.maxColors ? b.cl.tooMany : (b.cl.k > 60 && !flatSquares(b.smp, gw4, gh4, st.L.conf));
+            if (many) {
+              return done(fail('too-many-colors', 'This picture has more than ' + (o.maxColors || 60) + ' distinct colours' +
+                (o.maxColors ? ', more than you allowed' : ' and they do not sit in flat squares') + ', so it does not look like a chart. If it is a photo, use "turn a photo into a chart" instead.'));
             }
             var cf = confidences(b.smp.lab, n4, b.cl.cent, b.cl.k, b.cl.assign, b.smp.coh);
             var classes = [];
@@ -2160,7 +3219,8 @@
               confidence: st.L.conf, alternatives: st.L.alternatives, style: b.style,
               classOf: b.cl.assign, classes: classes, fabricClass: b.m.fabric,
               cellConf: cf.conf, lowCells: cf.low, ground: st.ground,
-              candidates: st.cands.length, candidateCost: b.cost, noise: b.smp.noise
+              candidates: st.cands.length, candidateCost: b.cost, noise: b.smp.noise,
+              regions: st.regions, sizeEvidence: st.ev ? st.ev.evidence : [], sizeVerdict: st.ev ? st.ev.verdict : null, boldPhase: st.ev ? st.ev.boldPhase : null
             });
           }
 
@@ -2175,7 +3235,7 @@
       createJob: createJob,
       /* exposed for tests */
       labOf: labOf, labToRgb: labToRgb, de2000: de2000,
-      groundOf: groundOf, locate: locate, axisProfile: axisProfile, periodOf: periodOf,
+      groundOf: groundOf, locate: locate, segment: segment, findSwatches: findSwatches, acPeak: acPeak, axisProfile: axisProfile, periodOf: periodOf,
       combFit: combFit, lineExtent: lineExtent, crossTrim: crossTrim, fitRun: fitRun, bestComb: bestComb, findLattice: findLattice, sampleCells: sampleCells, cluster: cluster,
       wholeSquare: wholeSquare, shiftDiff: shiftDiff, overSegment: overSegment,
       hungarian: hungarian, matchKey: matchKey, symbolDescriptors: symbolDescriptors,
@@ -2442,6 +3502,43 @@
     return k === 'cross' || k === 'full' || k === 'crosses';
   }
 
+  /**
+   * The key's printed symbols as ink maps (0..1 per pixel), for matching
+   * the squares of a black-and-white chart. Accepts { w, h, data: RGBA }
+   * or the xs-keyread Glyph { w, h, bits: base64, 1 bit per pixel,
+   * row-major, most significant bit first }. From opts.symbols
+   * ([{ entry, glyph }]) or, when absent, from key entries that carry a
+   * clean glyph.
+   */
+  function normSymbols(list, keyIn) {
+    var out = [];
+    function add(entry, g) {
+      if (!isObj(g) || !(g.w > 0 && g.h > 0) || !(entry >= 0)) return;
+      var n = g.w * g.h, ink = new Array(n), i;
+      if (g.data && g.data.length >= n * 4) {
+        for (i = 0; i < n; i++) {
+          var o = i * 4, a = g.data[o + 3] / 255;
+          var lum = ((g.data[o] * 77 + g.data[o + 1] * 150 + g.data[o + 2] * 29) >> 8) * a + 255 * (1 - a);
+          ink[i] = Math.max(0, Math.min(1, (200 - lum) / 120));
+        }
+      } else if (typeof g.bits === 'string' && typeof W.atob === 'function') {
+        var bin;
+        try { bin = W.atob(g.bits); } catch (e) { return; }
+        for (i = 0; i < n; i++) ink[i] = ((bin.charCodeAt(i >> 3) >> (7 - (i & 7))) & 1) ? 1 : 0;
+      } else return;
+      out.push({ entry: entry, w: g.w, h: g.h, ink: ink });
+    }
+    if (Array.isArray(list)) {
+      for (var j = 0; j < list.length; j++) if (isObj(list[j])) add(+list[j].entry, list[j].glyph || list[j]);
+    } else if (Array.isArray(keyIn)) {
+      for (var k = 0; k < keyIn.length; k++) {
+        var e = keyIn[k];
+        if (isObj(e) && isObj(e.glyph) && e.glyph.clean !== false) add(k, e.glyph);
+      }
+    }
+    return out.length ? out : null;
+  }
+
   function normOpts(raw, srcScale) {
     raw = isObj(raw) ? raw : {};
     var s = srcScale || 1;
@@ -2468,8 +3565,9 @@
       var use = isCrossEntry(e);
       var hx = use ? entryHex(e) : null;
       var cnt = e && (e.stitchCount !== undefined ? e.stitchCount : e.stitches);
-      cnt = numOr(cnt, 0);
-      entries.push({ lab: hx ? hexToLabMain(hx) : null, count: cnt > 0 ? Math.round(cnt) : 0, use: use });
+      /* null: the key prints no count for this row; 0: it prints 0 */
+      cnt = (cnt === undefined || cnt === null || cnt === '') ? null : numOr(cnt, null);
+      entries.push({ lab: hx ? hexToLabMain(hx) : null, count: cnt === null ? null : (cnt > 0 ? Math.round(cnt) : 0), use: use });
     }
     var fabric = 'auto', fabricLab = null;
     if (raw.fabric === 'none') fabric = 'none';
@@ -2490,13 +3588,23 @@
         else if (typeof v === 'string' && /^\d+$/.test(v)) assign[k] = +v;
       }
     }
-    var maxColors = Math.round(numOr(raw.maxColors, 60));
-    if (maxColors < 2) maxColors = 2;
-    if (maxColors > 256) maxColors = 256;
+    /* no cap given: decided by the evidence (a key's colour count, or flat
+       squares on a lattice); a number given is a hard cap */
+    var maxColors = null;
+    if (raw.maxColors !== undefined && raw.maxColors !== null && isFinite(+raw.maxColors)) {
+      maxColors = Math.round(numOr(raw.maxColors, 60));
+      if (maxColors < 2) maxColors = 2;
+      if (maxColors > 256) maxColors = 256;
+    }
+    var crop = scaleRect(raw.crop);
+    if (!crop && isObj(raw.region)) crop = scaleRect(isObj(raw.region.box) ? raw.region.box : raw.region);
     return {
-      crop: scaleRect(raw.crop), size: size, lattice: lattice, entries: entries,
+      crop: crop, size: size, lattice: lattice, entries: entries,
       fabric: fabric, fabricLab: fabricLab, mode: mode, maxColors: maxColors, assign: assign,
-      noWorker: !!raw.noWorker
+      noWorker: !!raw.noWorker, segment: raw.segment !== false,
+      rectify: raw.rectify === 'on' || raw.rectify === true ? 'on' : (raw.rectify === 'off' || raw.rectify === false ? 'off' : 'auto'),
+      flatten: raw.flatten === false ? false : (raw.flatten === true ? true : 'auto'),
+      symbols: normSymbols(raw.symbols, keyIn)
     };
   }
 
@@ -2512,6 +3620,18 @@
   function unscaleRect(r, s) {
     if (!r) return null;
     return { x: r.x / s, y: r.y / s, w: r.w / s, h: r.h / s };
+  }
+  function unscaleRegions(list, s) {
+    if (!Array.isArray(list)) return [];
+    return list.map(function (r) {
+      return { id: r.id, kind: r.kind, label: r.label, box: unscaleRect(r.box, s), score: r.score,
+        pitch: r.pitch ? { x: r.pitch.x / s, y: r.pitch.y / s } : null, chosen: !!r.chosen };
+    });
+  }
+  function chosenId(list) {
+    if (!Array.isArray(list)) return null;
+    for (var i = 0; i < list.length; i++) if (list[i].chosen) return list[i].id;
+    return null;
   }
   function unscaleLat(l, s) {
     if (!l) return null;
@@ -2671,6 +3791,7 @@
         if (core.mode === 'symbol' && !near) palette[pi].name = 'Symbol ' + (c + 1);
       }
       palOfClass.push(pi);
+      cl.palette = pi;
       if (core.mode === 'symbol' || cl.entry === null || cl.entry === undefined) {
         cl.glyph = glyphOf(px, k.rep, gw, core.lattice, core.size);
       }
@@ -2749,6 +3870,8 @@
       size: { w: gw, h: gh }, sizeSource: core.sizeSource, confidence: core.confidence,
       alternatives: core.alternatives || [], style: core.style || 'unknown',
       ms: 0,
+      regions: unscaleRegions(core.regions, s), region: chosenId(core.regions),
+      sizeEvidence: core.sizeEvidence || [], sizeVerdict: core.sizeVerdict || null, rectified: null, boldPhase: core.boldPhase || null,
       data: data, cells: cells, classes: classes, check: check,
       cellConf: core.cellConf, lowCells: core.lowCells, preview: preview,
       stats: {
@@ -2863,6 +3986,7 @@
       if (res && res.crop) f.crop = unscaleRect(res.crop, s);
       if (res && res.lattice) f.lattice = unscaleLat(res.lattice, s);
       if (res && res.size) f.size = res.size;
+      if (res && res.regions) f.regions = unscaleRegions(res.regions, s);
       f.ms = ms;
       return f;
     }
@@ -2872,6 +3996,8 @@
         crop: unscaleRect(res.crop, s), lattice: unscaleLat(res.lattice, s),
         size: res.size, sizeSource: res.sizeSource, confidence: res.confidence,
         alternatives: res.alternatives || [], style: res.style, ms: ms,
+        regions: unscaleRegions(res.regions, s), region: chosenId(res.regions),
+        sizeEvidence: res.sizeEvidence || [], sizeVerdict: res.sizeVerdict || null, rectified: job.rectified || null,
         stats: { worker: !!job.t.worker, warnings: (res.warnings || []).slice(), debug: res.debug || null }
       };
     }
@@ -2941,12 +4067,365 @@
     catch (e) { return Promise.resolve({ ok: false, reason: 'no-image', message: 'That picture could not be read.' }); }
   }
 
+  /* ================================================================== *
+   * 8. Charts split across pages as pictures (wave K, #11)
+   * ================================================================== */
+
+  /**
+   * placeTiles(tiles, opts) -> { cols, rows, at: [{x, y}], seams, score } | null
+   * tiles: [{ w, h, g: Int32Array (global class per cell, -1 fabric) , bx, by }]
+   * (bx, by: the tile's bold-line phase, or null). Pages run in reading
+   * order. For each candidate number of columns, every seam's overlap is
+   * found by matching the repeated columns / rows (allowing a row or two of
+   * slip), bold-line phase breaking ties; the layout whose seams agree best
+   * (and whose size matches the declared one) wins.
+   */
+  function placeTiles(tiles, opts) {
+    var n = tiles.length, best = null;
+    function seam(a, b, axis) {
+      /* b to the right of a (axis x) or below a (axis y) */
+      var A = tiles[a], B = tiles[b], res = { overlap: 0, slip: 0, cells: 0, agree: null, how: 'order' };
+      var maxK = Math.floor(Math.min(axis === 'x' ? Math.min(A.w, B.w) : Math.min(A.h, B.h)) / 2);
+      var bestK = null;
+      for (var k = 1; k <= maxK; k++) {
+        for (var s = -2; s <= 2; s++) {
+          var same = 0, info = 0;
+          if (axis === 'x') {
+            for (var y = 0; y < A.h; y++) {
+              var yb = y + s;
+              if (yb < 0 || yb >= B.h) continue;
+              for (var x = 0; x < k; x++) {
+                var va = A.g[y * A.w + A.w - k + x], vb = B.g[yb * B.w + x];
+                if (va < 0 && vb < 0) continue;
+                info++; if (va === vb) same++;
+              }
+            }
+          } else {
+            for (var y2 = 0; y2 < k; y2++) {
+              for (var x2 = 0; x2 < A.w; x2++) {
+                var xb = x2 + s;
+                if (xb < 0 || xb >= B.w) continue;
+                var va2 = A.g[(A.h - k + y2) * A.w + x2], vb2 = B.g[y2 * B.w + xb];
+                if (va2 < 0 && vb2 < 0) continue;
+                info++; if (va2 === vb2) same++;
+              }
+            }
+          }
+          if (info < 6) continue;
+          var ag = same / info;
+          /* bold-line phase: the join must keep the every-10 lines on 10s */
+          var pa = axis === 'x' ? A.bx : A.by, pb = axis === 'x' ? B.bx : B.by, len = axis === 'x' ? A.w : A.h;
+          var phaseOk = pa === null || pb === null || pa === undefined || pb === undefined || ((len - pa + pb - k) % 10 + 10) % 10 === 0;
+          var sc = ag + (phaseOk ? 0.01 : -0.05) + Math.min(0.01, info / 1e5);
+          if (!bestK || sc > bestK.sc) bestK = { k: k, s: s, ag: ag, info: info, sc: sc, phaseOk: phaseOk };
+        }
+      }
+      if (bestK && bestK.ag >= 0.97) {
+        res.overlap = bestK.k; res.slip = bestK.s; res.cells = bestK.info; res.agree = bestK.ag; res.how = 'overlap';
+      } else {
+        var pa2 = axis === 'x' ? A.bx : A.by, pb2 = axis === 'x' ? B.bx : B.by, len2 = axis === 'x' ? A.w : A.h;
+        if (pa2 !== null && pb2 !== null && pa2 !== undefined && pb2 !== undefined) {
+          var kk = ((len2 - pa2 + pb2) % 10 + 10) % 10;
+          res.overlap = kk; res.how = 'bold10';
+        }
+        if (bestK) res.best = { overlap: bestK.k, agree: bestK.ag };
+      }
+      return res;
+    }
+    var colsList = [];
+    if (opts.layout && opts.layout.cols > 0) colsList = [Math.min(n, opts.layout.cols)];
+    else for (var c = 1; c <= n; c++) colsList.push(c);
+    for (var ci = 0; ci < colsList.length; ci++) {
+      var C = colsList[ci], R = Math.ceil(n / C), seams = [], score = 0, at = [], i;
+      for (i = 0; i < n; i++) at.push({ x: 0, y: 0 });
+      var rowW = [], ok = true, r, cc;
+      /* every seam first; then one overlap per column boundary and per row
+         boundary, taken from the seam with the most evidence (an empty
+         overlap on one row says nothing; the next row may show it) */
+      var ovX = [0], ovY = [0], bestX = [null], bestY = [null];
+      for (r = 0; r < R; r++) {
+        for (cc = 0; cc < C; cc++) {
+          i = r * C + cc;
+          if (i >= n) break;
+          if (cc > 0) {
+            var sm = seam(i - 1, i, 'x');
+            seams.push({ a: i - 1, b: i, axis: 'x', overlap: sm.overlap, slip: sm.slip, cells: sm.cells, agree: sm.agree, how: sm.how, col: cc });
+            if (!bestX[cc] || (sm.how === 'overlap' && sm.cells > bestX[cc].cells) || (bestX[cc].how === 'order' && sm.how === 'bold10')) bestX[cc] = sm;
+          }
+          if (r > 0) {
+            var sv = seam(i - C, i, 'y');
+            seams.push({ a: i - C, b: i, axis: 'y', overlap: sv.overlap, slip: sv.slip, cells: sv.cells, agree: sv.agree, how: sv.how, row: r });
+            if (!bestY[r] || (sv.how === 'overlap' && sv.cells > bestY[r].cells) || (bestY[r].how === 'order' && sv.how === 'bold10')) bestY[r] = sv;
+          }
+        }
+      }
+      for (cc = 1; cc < C; cc++) ovX[cc] = bestX[cc] ? bestX[cc].overlap : 0;
+      for (r = 1; r < R; r++) ovY[r] = bestY[r] ? bestY[r].overlap : 0;
+      /* seams with no evidence of their own take the boundary's overlap */
+      for (var sq = 0; sq < seams.length; sq++) {
+        var S = seams[sq], bo = S.axis === 'x' ? bestX[S.col] : bestY[S.row];
+        if (S.how !== 'overlap' && bo && bo.how !== 'order') { S.overlap = bo.overlap; S.how = 'from-' + bo.how; }
+        if (S.how === 'overlap') score += S.cells;
+        else if (S.agree !== null && S.agree < 0.8) score -= 1;
+      }
+      var colX = [0], rowYs = [0];
+      for (cc = 1; cc < C; cc++) colX[cc] = colX[cc - 1] + tiles[cc - 1].w - ovX[cc];
+      for (r = 1; r < R; r++) rowYs[r] = rowYs[r - 1] + tiles[(r - 1) * C].h - ovY[r];
+      for (r = 0; r < R; r++) {
+        for (cc = 0; cc < C && r * C + cc < n; cc++) { at[r * C + cc].x = colX[cc]; at[r * C + cc].y = rowYs[r]; }
+        var last = Math.min(n, (r + 1) * C) - 1;
+        rowW.push(at[last].x + tiles[last].w);
+      }
+      var W2 = 0, H2 = 0;
+      for (i = 0; i < n; i++) { W2 = Math.max(W2, at[i].x + tiles[i].w); H2 = Math.max(H2, at[i].y + tiles[i].h); }
+      for (r = 0; r < rowW.length; r++) if (Math.abs(rowW[r] - W2) > 2 && r < rowW.length - 1) ok = false;
+      if (opts.size) score += (W2 === opts.size.w ? 1e6 : 0) + (H2 === opts.size.h ? 1e6 : 0);
+      if (!ok) score -= 1e5;
+      /* with no evidence at all, prefer the squarest page grid */
+      score -= Math.abs(C - Math.sqrt(n)) * 1e-3;
+      if (!best || score > best.score) best = { cols: C, rows: R, at: at, seams: seams, score: score, w: W2, h: H2 };
+    }
+    return best;
+  }
+
+  function readTiles(sources, opts, onProgress) {
+    var raw = isObj(opts) ? opts : {};
+    var t0 = nowMs(), token = raw.token ? String(raw.token) : ('xst' + (++seq)), cancelled = false;
+    var list = Array.isArray(sources) ? sources : [];
+    var out = new Promise(function (resolve) {
+      if (!list.length) { resolve({ ok: false, reason: 'no-image', message: 'There are no pictures to read.' }); return; }
+      if (!W.XStitch) { resolve({ ok: false, reason: 'no-image', message: 'The cross-stitch module is not loaded.' }); return; }
+      var reads = [], i = 0;
+      function emit(p) { if (typeof onProgress === 'function') { try { onProgress({ phase: 'tiles', pct: Math.round(p) }); } catch (e) { /* ignore */ } } }
+      function next() {
+        if (cancelled) { resolve({ ok: false, reason: 'cancelled', message: MSG.cancelled }); return; }
+        if (i >= list.length) { finish(); return; }
+        var to = Array.isArray(raw.tileOpts) && isObj(raw.tileOpts[i]) ? raw.tileOpts[i] : {};
+        var o = {};
+        for (var k in to) if (to.hasOwnProperty(k)) o[k] = to[k];
+        if (raw.mode && !o.mode) o.mode = raw.mode;
+        if (raw.maxColors && !o.maxColors) o.maxColors = raw.maxColors;
+        if (raw.fabric === 'none' && !o.fabric) o.fabric = 'none';
+        o.token = token + '-' + i;
+        read(list[i], o).then(function (r) { reads.push(r); i++; emit(i / list.length * 90); next(); });
+      }
+      function finish() {
+        /* pages that are not chart (a cover photo, a key page) are left out,
+           not allowed to fail the whole join */
+        var good = [], left = [];
+        for (var q = 0; q < reads.length; q++) {
+          if (reads[q].ok && reads[q].confidence >= 0.5) good.push(q);
+          else left.push(q);
+        }
+        if (!good.length) {
+          var r0 = reads[0];
+          resolve({ ok: false, reason: r0.reason, message: 'No page could be read as a chart: ' + r0.message,
+            tiles: reads.map(function (r, j) { return { index: j, ok: r.ok, size: r.size || null, message: r.message || null }; }) });
+          return;
+        }
+        /* every page of one chart has the same squares: a page read at a
+           multiple of the common pitch is read again at it */
+        var ps = good.map(function (j) { return (reads[j].lattice.pitchX + reads[j].lattice.pitchY) / 2; }).sort(function (a, b) { return a - b; });
+        var med = ps[ps.length >> 1], redo = [];
+        good.forEach(function (j) {
+          var pj = (reads[j].lattice.pitchX + reads[j].lattice.pitchY) / 2;
+          if (good.length >= 3 && (pj > med * 1.25 || pj < med * 0.8)) redo.push(j);
+        });
+        var chain = Promise.resolve();
+        redo.forEach(function (j) {
+          chain = chain.then(function () {
+            var cr = reads[j].crop, sw = Math.max(1, Math.round(cr.w / med)), sh = Math.max(1, Math.round(cr.h / med));
+            var o2 = { lattice: { x0: cr.x, y0: cr.y, pitchX: cr.w / sw, pitchY: cr.h / sh }, size: { w: sw, h: sh }, token: token + '-r' + j };
+            if (raw.mode) o2.mode = raw.mode;
+            return read(list[j], o2).then(function (r2) { if (r2.ok) { r2.repitched = true; reads[j] = r2; } });
+          });
+        });
+        chain.then(function () {
+          try {
+            var res = assembleTiles(good.map(function (j) { return reads[j]; }), raw, t0);
+            if (res.ok && res.tiles) {
+              /* page numbers as given, the left-out pages listed too */
+              res.tiles.forEach(function (t) { t.index = good[t.index]; });
+              res.seams.forEach(function (s) { s.a = good[s.a]; s.b = good[s.b]; });
+              left.forEach(function (j) { res.tiles.push({ index: j, ok: false, size: null, at: null, how: 'left-out', message: 'Left out: ' + (reads[j].ok ? 'no clear grid of squares on this page' : reads[j].message) }); });
+              res.tiles.sort(function (a, b) { return a.index - b.index; });
+              if (left.length) res.stats.warnings.unshift(left.length + (left.length === 1 ? ' page was' : ' pages were') + ' left out as not chart (page ' + left.map(function (j) { return j + 1; }).join(', ') + ')');
+              if (redo.length) res.stats.warnings.push('page ' + redo.map(function (j) { return j + 1; }).join(', ') + ' read again at the other pages\' square size');
+            }
+            resolve(res);
+          } catch (e) { resolve({ ok: false, reason: 'no-layout', message: 'The pages could not be put together (' + ((e && e.message) || 'error') + ').' }); }
+        });
+      }
+      next();
+    });
+    out.token = token;
+    readTiles.active = readTiles.active || {};
+    readTiles.active[token] = function () { cancelled = true; for (var j = 0; j < list.length; j++) cancel(token + '-' + j); };
+    return out;
+  }
+
+  function assembleTiles(reads, raw, t0) {
+    var C = getMainCore(), XS = W.XStitch, n = reads.length, i, j;
+    /* 1. one class list for every page: the colours as printed, merged
+       across pages when they are the same ink */
+    var gcls = [], tileMaps = [];
+    for (i = 0; i < n; i++) {
+      var r = reads[i], map = {};
+      for (j = 0; j < r.classes.length; j++) {
+        var k = r.classes[j];
+        var lab = hexToLabMain(k.hex) || [50, 0, 0];
+        var hit = -1, bd = Infinity, ent = (k.entry !== null && k.entry !== undefined && !k.fabric) ? k.entry : null;
+        for (var g = 0; g < gcls.length; g++) {
+          if (ent !== null) { if (gcls[g].entry === ent) { hit = g; bd = 0; break; } continue; }
+          if (gcls[g].entry !== null) continue;
+          var dd = C.de2000(lab[0], lab[1], lab[2], gcls[g].lab[0], gcls[g].lab[1], gcls[g].lab[2]);
+          if (dd < bd) { bd = dd; hit = g; }
+        }
+        if (hit < 0 || bd > 4.5) {
+          hit = gcls.length;
+          gcls.push({ lab: lab.slice(), n: 0, fabricVotes: 0, entry: ent });
+        }
+        var G = gcls[hit], tot = G.n + k.count;
+        if (tot > 0) for (var t = 0; t < 3; t++) G.lab[t] = (G.lab[t] * G.n + lab[t] * k.count) / tot;
+        G.n = tot;
+        if (k.fabric) G.fabricVotes += k.count;
+        map[k.palette] = hit;
+        if (k.fabric) map['f'] = hit;
+      }
+      tileMaps.push(map);
+    }
+    var tiles = [];
+    for (i = 0; i < n; i++) {
+      var rr = reads[i], gw = rr.size.w, gh = rr.size.h, gg = new Int32Array(gw * gh);
+      var fab = tileMaps[i]['f'];
+      for (j = 0; j < gw * gh; j++) {
+        var p = rr.cells[j];
+        gg[j] = p < 0 ? (fab === undefined ? -1 : fab) : (tileMaps[i][p] === undefined ? -1 : tileMaps[i][p]);
+      }
+      tiles.push({ w: gw, h: gh, g: gg, bx: rr.boldPhase ? rr.boldPhase.x : null, by: rr.boldPhase ? rr.boldPhase.y : null });
+    }
+    /* the fabric class: the one most pages called fabric; it reads as -1
+       for the overlap matching (empty squares say nothing) */
+    var fabG = -1, fv = 0;
+    for (j = 0; j < gcls.length; j++) if (gcls[j].fabricVotes > fv) { fv = gcls[j].fabricVotes; fabG = j; }
+    if (raw.fabric === 'none') fabG = -1;
+    if (fabG >= 0) for (i = 0; i < n; i++) for (j = 0; j < tiles[i].g.length; j++) if (tiles[i].g[j] === fabG) tiles[i].g[j] = -1;
+    var size = isObj(raw.size) && raw.size.w > 1 && raw.size.h > 1 ? { w: Math.round(raw.size.w), h: Math.round(raw.size.h) } : null;
+    var lay = placeTiles(tiles, { layout: isObj(raw.layout) ? raw.layout : null, size: size });
+    if (!lay) return { ok: false, reason: 'no-layout', message: 'The pages could not be put together.' };
+    /* 2. the whole chart; overlaps written once (the first page wins, the
+       seam agreement says how often the second agreed) */
+    var Wd = lay.w, Hd = lay.h, cells = new Int32Array(Wd * Hd), seen = new Uint8Array(Wd * Hd);
+    for (j = 0; j < cells.length; j++) cells[j] = -1;
+    for (i = 0; i < n; i++) {
+      var T = tiles[i], ax = lay.at[i].x, ay = lay.at[i].y;
+      for (var y = 0; y < T.h; y++) {
+        var Y = ay + y;
+        if (Y < 0 || Y >= Hd) continue;
+        for (var x = 0; x < T.w; x++) {
+          var X = ax + x;
+          if (X < 0 || X >= Wd) continue;
+          var q = Y * Wd + X;
+          if (!seen[q]) { cells[q] = T.g[y * T.w + x]; seen[q] = 1; }
+        }
+      }
+    }
+    var holes = 0;
+    for (j = 0; j < seen.length; j++) if (!seen[j]) holes++;
+    /* 3. match the joined classes to the key, with its counts this time */
+    var counts = new Int32Array(gcls.length), N = Wd * Hd;
+    for (j = 0; j < N; j++) if (cells[j] >= 0) counts[cells[j]]++;
+    var o = normOpts(raw, 1);
+    var used = [];
+    for (j = 0; j < gcls.length; j++) if (counts[j] > 0) used.push(j);
+    var cls = used.map(function (g2) { return { lab: gcls[g2].lab, n: counts[g2], border: 0 }; });
+    var nUse = 0;
+    for (j = 0; j < o.entries.length; j++) if (o.entries[j].use) nUse++;
+    var m = null;
+    if (nUse) {
+      /* empty squares are fabric already: no fabric class to find */
+      m = C.matchKey(cls, o.entries, 'none', N, null);
+      /* a colour the key cannot place that sits close to one it did is that
+         colour seen through another page's compression: fold it in */
+      for (var guard = 0; guard < 8; guard++) {
+        var drop = -1, into = -1;
+        for (j = 0; j < cls.length && drop < 0; j++) {
+          if (m.entry[j] >= 0 || !cls[j].n) continue;
+          var bd2 = Infinity, bj2 = -1;
+          for (var j3 = 0; j3 < cls.length; j3++) {
+            if (j3 === j || m.entry[j3] < 0 || !cls[j3].n) continue;
+            var dd3 = C.de2000(cls[j].lab[0], cls[j].lab[1], cls[j].lab[2], cls[j3].lab[0], cls[j3].lab[1], cls[j3].lab[2]);
+            if (dd3 < bd2) { bd2 = dd3; bj2 = j3; }
+          }
+          if (bj2 >= 0 && bd2 < 10) { drop = j; into = bj2; }
+        }
+        if (drop < 0) break;
+        for (var q2 = 0; q2 < N; q2++) if (cells[q2] === used[drop]) cells[q2] = used[into];
+        cls[into].n += cls[drop].n; cls[drop].n = 0;
+        m = C.matchKey(cls, o.entries, 'none', N, null);
+      }
+      var keepU = [], keepC = [];
+      for (j = 0; j < cls.length; j++) if (cls[j].n) { keepU.push(used[j]); keepC.push(cls[j]); }
+      used = keepU; cls = keepC;
+      m = C.matchKey(cls, o.entries, 'none', N, null);
+    }
+    var classes = [], classOf = new Int16Array(N), idOf = {};
+    for (j = 0; j < used.length; j++) {
+      idOf[used[j]] = j;
+      var rgb = C.labToRgb(cls[j].lab[0], cls[j].lab[1], cls[j].lab[2]);
+      classes.push({ id: j, count: cls[j].n, rgb: rgb, lab: cls[j].lab, entry: m && m.entry[j] >= 0 ? m.entry[j] : null,
+        fabric: false, how: m ? m.how[j] : null, deltaE: m && m.dE[j] !== null ? Math.round(m.dE[j] * 10) / 10 : null, rep: -1 });
+    }
+    for (j = 0; j < N; j++) classOf[j] = cells[j] >= 0 ? idOf[cells[j]] : -1;
+    var core = {
+      ok: true, mode: 'colour', crop: { x: 0, y: 0, w: Wd, h: Hd }, lattice: { x0: 0, y0: 0, pitchX: 1, pitchY: 1 },
+      size: { w: Wd, h: Hd }, sizeSource: 'tiles', confidence: 1, alternatives: [], style: reads[0].style,
+      classOf: classOf, classes: classes, fabricClass: -1, cellConf: new Uint8Array(N), lowCells: 0, warnings: []
+    };
+    for (j = 0; j < N; j++) core.cellConf[j] = 255;
+    var res = assemble(core, raw, { scale: 1 }, { worker: false });
+    var seams = lay.seams.map(function (s) {
+      return { a: s.a, b: s.b, axis: s.axis, overlap: s.overlap, cells: s.cells, agree: s.agree === null ? null : Math.round(s.agree * 1000) / 1000,
+        ok: s.how === 'overlap' ? s.agree >= 0.97 : null, how: s.how };
+    });
+    var warn = [];
+    if (holes) warn.push(fmt(holes) + ' squares are not on any page');
+    var unsure = seams.filter(function (s) { return s.ok === null; }).length;
+    if (unsure) warn.push(unsure + ' of the joins between pages could not be checked (no repeated rows or columns)');
+    if (size && (Wd !== size.w || Hd !== size.h)) warn.push('the pages join to ' + Wd + ' x ' + Hd + ', not the ' + size.w + ' x ' + size.h + ' the pattern gives');
+    res.layout = { cols: lay.cols, rows: lay.rows };
+    res.tiles = reads.map(function (r2, k2) {
+      var hows = seams.filter(function (s) { return s.b === k2; }).map(function (s) { return s.how; });
+      return { index: k2, ok: true, size: r2.size, at: lay.at[k2], how: k2 === 0 ? 'order' : (hows.indexOf('overlap') >= 0 ? 'overlap' : (hows[0] || 'order')), message: null };
+    });
+    res.seams = seams;
+    res.stats.warnings = warn.concat(res.stats.warnings || []);
+    /* the join's own honesty: a size other than the pattern's, or a page
+       whose size was doubtful, makes the whole read doubtful; a wrong size
+       is "off" in the Check, whatever the colours say */
+    var doubtPages = reads.filter(function (r3) { return r3.sizeVerdict === 'doubtful'; }).length;
+    res.sizeVerdict = (size && (Wd !== size.w || Hd !== size.h)) || doubtPages ? 'doubtful' : (size ? 'checked' : 'consistent');
+    res.sizeOff = size && (Wd !== size.w || Hd !== size.h) ? { read: { w: Wd, h: Hd }, expected: size } : null;
+    if (doubtPages) res.stats.warnings.push(doubtPages + (doubtPages === 1 ? ' page has' : ' pages have') + ' a doubtful size of its own');
+    if (res.sizeOff && res.check) {
+      var ck = {};
+      for (var kq in res.check) if (res.check.hasOwnProperty(kq)) ck[kq] = res.check[kq];
+      ck.verdict = 'off'; ck.exact = false;
+      ck.summary = 'The pages join to ' + Wd + ' x ' + Hd + ', not the ' + size.w + ' x ' + size.h + ' the pattern gives. ' + (res.check.summary || '');
+      res.check = ck;
+    }
+    res.ms = res.stats.ms = Math.round((nowMs() - t0) * 10) / 10;
+    return res;
+  }
+
   W.XSRead = {
     version: VERSION,
     isAvailable: isAvailable,
     read: read,
     detect: detect,
+    readTiles: readTiles,
     cancel: cancel,
+    _placeTiles: placeTiles,
 
     /* test/debug surface — not part of the contract */
     _core: XSReadCore,

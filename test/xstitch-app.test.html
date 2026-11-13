@@ -1,0 +1,778 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cross-stitch app tests</title>
+<style>
+  body { margin: 0; background: #111; }
+  #log { font: 13px/1.4 Menlo, Consolas, monospace; background:#111; color:#eee; padding:12px; }
+  .pass { color:#7bd389; } .fail { color:#ff6b6b; background:#2a1414; } .note { color:#c9a227; }
+  .group { margin-top:14px; font-weight:bold; color:#9cf; border-bottom:1px solid #333; }
+  #summary { margin-top:16px; font-size:17px; font-weight:bold; } #summary.ok { color:#7bd389; } #summary.bad { color:#ff6b6b; }
+</style>
+</head>
+<body>
+<!-- App-level suite for the cross-stitch module (wave K, xs-audit).
+     The real app (index.html) loads in a 375 × 812 frame on a private store key and the
+     cross-stitch screen is driven through window.XStitchApp.__test and the real DOM, on
+     synthetic charts built in code below (nothing from tmp-pdf/).
+       bash tools/headless-suite.sh xstitch-app.test
+     Everything it makes is deleted and the private key removed at the end. -->
+<div id="log"><h1>Cross-stitch app suite</h1><div id="out"></div><div id="summary">running…</div></div>
+<script>
+'use strict';
+var out = document.getElementById('out'), passed = 0, failed = 0;
+function log(ok, label, detail) {
+  if (ok) passed++; else failed++;
+  var d = document.createElement('div');
+  d.className = ok ? 'pass' : 'fail';
+  d.textContent = (ok ? 'PASS' : 'FAIL') + ' - ' + label + (detail ? '  (' + detail + ')' : '');
+  out.appendChild(d);
+  (ok ? console.log : console.error)(d.textContent);
+}
+function note(t) { var d = document.createElement('div'); d.className = 'note'; d.textContent = '     ' + t; out.appendChild(d); }
+function group(t) { var d = document.createElement('div'); d.className = 'group'; d.textContent = t; out.appendChild(d); }
+function J(v) { try { return JSON.stringify(v); } catch (e) { return String(v); } }
+function assertEqual(a, e, label) { var ok = J(a) === J(e); log(ok, label, ok ? '' : 'expected ' + J(e) + ' got ' + J(a)); }
+function assertTrue(c, label, detail) { log(!!c, label, c ? '' : (detail === undefined ? 'was false' : String(detail))); }
+function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+function until(f, ms) {
+  var t0 = Date.now();
+  return new Promise(function (res) {
+    (function tick() { var v = false; try { v = f(); } catch (e) { v = false; } if (v || Date.now() - t0 > (ms || 2000)) res(v); else setTimeout(tick, 20); })();
+  });
+}
+function txt(n) { return n ? n.textContent.replace(/\s+/g, ' ').trim() : ''; }
+var finished = false;
+function finish() {
+  if (finished) return;
+  finished = true;
+  var s = document.getElementById('summary');
+  s.textContent = passed + ' passed, ' + failed + ' failed';
+  s.className = failed ? 'bad' : 'ok';
+}
+
+var KEY = 'stitchkeeper-wavek-xsaudit-test';
+var NAME = /^XSA /;
+var frame = document.createElement('iframe');
+frame.style.cssText = 'position:fixed;left:-2000px;top:0;width:375px;height:812px;border:0;';
+var t0 = Date.now();
+var hard = setTimeout(function () { log(false, 'the suite finished in time (90 s)'); cleanup(); finish(); }, 90000);
+
+function cleanup() {
+  try {
+    var w = frame.contentWindow;
+    if (w && w.Store && w.Store.projects) {
+      w.Store.projects().slice().forEach(function (p) {
+        if (!NAME.test(p.name)) return;
+        try { if (w.BlobStore && w.BlobStore.deletePrefix) w.BlobStore.deletePrefix('p:' + p.id + ':'); } catch (e) { /* ignore */ }
+        w.Store.deleteProject(p.id);
+      });
+      try { w.Store.setSetting('focusProjects', {}); } catch (e) { /* ignore */ }
+    }
+  } catch (e) { /* ignore */ }
+  try { localStorage.removeItem(KEY); } catch (e) { /* ignore */ }
+}
+
+frame.onload = function () {
+  var w = frame.contentWindow;
+  (function wait() {
+    if (!(w.App && w.Store && w.XStitchApp && w.XStitch && w.document.getElementById('screen-home'))) {
+      if (Date.now() - t0 < 30000) return setTimeout(wait, 100);
+      log(false, 'the app frame booted with XStitchApp');
+      clearTimeout(hard); cleanup(); finish();
+      return;
+    }
+    run(w).then(function () { clearTimeout(hard); cleanup(); finish(); },
+      function (e) { clearTimeout(hard); log(false, 'the suite threw', String(e && (e.stack || e.message) || e)); cleanup(); finish(); });
+  })();
+};
+frame.src = '../index.html';
+document.body.appendChild(frame);
+
+/* ------------------------------------------------------------------ *
+ * Synthetic charts
+ * ------------------------------------------------------------------ */
+var PAL = [
+  { brand: 'DMC', code: '310', name: 'Black', hex: '000000' },
+  { brand: 'DMC', code: '321', name: 'Red', hex: 'c72b3b' },
+  { brand: 'DMC', code: '702', name: 'Kelly Green', hex: '47a73b' },
+  { brand: 'DMC', code: '3865', name: 'Winter White', hex: 'f9f7f1' },
+  { brand: 'DMC', code: '797', name: 'Royal Blue', hex: '13477d' },
+  { brand: 'DMC', code: '444', name: 'Lemon', hex: 'ffd600' },
+  { brand: 'DMC', code: '208', name: 'Lavender', hex: '835b8b' },
+  { brand: 'DMC', code: '931', name: 'Antique Blue', hex: '6a859c' },
+  { brand: 'DMC', code: '3371', name: 'Black Brown', hex: '1e1108' },
+  { brand: 'DMC', code: '725', name: 'Topaz', hex: 'ffc840' }
+];
+function cellsOf(w, h, ncol, gap) {
+  var c = [];
+  for (var y = 0; y < h; y++) for (var x = 0; x < w; x++) {
+    var v = ((x >> 2) + (y >> 2)) % ncol;
+    if (gap && (x % 7 === 6) && (y % 5 === 4)) v = -1;          // a few fabric squares
+    c.push(v);
+  }
+  return c;
+}
+function countsOf(cells, n) { var k = []; for (var i = 0; i < n; i++) k.push(0); cells.forEach(function (v) { if (v >= 0) k[v]++; }); return k; }
+function rawChart(X, w, h, ncol, o) {
+  o = o || {};
+  var cells = o.cells || cellsOf(w, h, ncol, true);
+  var k = countsOf(cells, ncol);
+  var pal = PAL.slice(0, ncol).map(function (e, i) {
+    var q = { brand: e.brand, code: e.code, name: e.name, hex: e.hex, kind: 'cross', stitchCount: k[i], keyCount: k[i] };
+    return q;
+  });
+  if (o.palette) pal = o.palette;
+  return {
+    v: 1,
+    fabric: { count: 14, over: 1, kind: 'aida', color: 'White' },
+    design: { w: w, h: h, title: o.title || 'Sampler' },
+    palette: pal,
+    chart: { w: w, h: h, cells: X.packCells(cells, w, h), part: o.part || [], back: o.back || [], knots: o.knots || [] },
+    progress: { mode: 'cells' },
+    pages: o.pages || [],
+    source: o.source || { kind: 'oxs', fileName: 'sampler.oxs' }
+  };
+}
+
+/* ------------------------------------------------------------------ */
+async function run(w) {
+  var d = w.document, Store = w.Store, App = w.App, X = w.XStitch, XA = w.XStitchApp, T = XA.__test;
+  Store.__setKeyForTests(KEY);
+  App.closeAllSheets();
+  try { Store.setSetting('focusProjects', {}); } catch (e) { /* ignore */ }
+  var scr = d.getElementById('screen-craft');
+  function sheets() { return Array.prototype.slice.call(d.querySelectorAll('dialog.sheet')); }
+  function topSheet() { var s = sheets(); return s.length ? s[s.length - 1] : null; }
+  function sheetBtn(re, root) {
+    root = root || topSheet();
+    if (!root) return null;
+    return Array.prototype.slice.call(root.querySelectorAll('button')).filter(function (b) { return re.test(txt(b)); })[0] || null;
+  }
+  function key(k, target) {
+    var e = new w.KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true });
+    (target || d.body).dispatchEvent(e);
+  }
+  function make(name, raw) {
+    var p = Store.createProject({ name: 'XSA ' + name, craft: 'crossstitch', craftData: raw });
+    return Store.project(p.id);
+  }
+  function open(p) { App.closeAllSheets(); Store.setActiveProject(p.id); App.render(); }
+  function data(p) { return XA.dataOf(Store.project(p.id || p)); }
+  function doneCount(p) {
+    var dd = data(p), bits = X.bitsState(dd.progress.done, dd.chart.w * dd.chart.h), n = 0;
+    for (var i = 0; i < dd.chart.w * dd.chart.h; i++) if (X.getBit(bits, i)) n++;
+    return n;
+  }
+  /* spies on the shell-data recording calls */
+  var spy = { counted: [], marks: [] };
+  var realCounted = Store.counted, realLog = Store.logMarks;
+  Store.counted = function (ev) { spy.counted.push(ev); return realCounted.apply(Store, arguments); };
+  Store.logMarks = function (id, list) { spy.marks.push({ id: id, list: list.slice() }); return realLog.apply(Store, arguments); };
+  function resetSpy() { spy.counted = []; spy.marks = []; }
+
+  /* ================================================================ */
+  group('1. XStitchApp.__test.selfCheck (19 pure checks of the wave K logic)');
+  var sc = T.selfCheck();
+  assertEqual(sc.length, 19, 'selfCheck returns 19 checks');
+  sc.forEach(function (c) { log(c.ok, 'selfCheck: ' + c.name, c.ok ? '' : J(c.got)); });
+
+  /* ================================================================ */
+  group('2. The screen and marking (Store.counted + Store.logMarks on every mark and unmark)');
+  var p = make('marking', rawChart(X, 30, 20, 4));
+  open(p);
+  await sleep(80);
+  assertTrue(!scr.hidden, 'a cross-stitch project paints #screen-craft');
+  var btn = d.getElementById('xs-stitch-btn');
+  assertTrue(!!btn, 'the big tap button is there');
+  var head = btn.querySelector('.stitch-head');
+  assertTrue(!!head && head.contains(btn.querySelector('.stitch-number')), 'the count sits in the pinned .stitch-head row');
+  var hcs = head ? w.getComputedStyle(head) : null;
+  assertTrue(!!hcs && hcs.position !== 'static' && parseInt(hcs.zIndex, 10) >= 1, 'the count row stacks above the chart canvases (z-index ≥ 1, positioned)', hcs && hcs.position + ' ' + hcs.zIndex);
+  var v = T.view();
+  assertTrue(v && v.projectId === p.id && v.cells && v.cells.length === 600, 'the view model holds the decoded chart');
+  var st0 = T.statsOf(data(p));
+  var bar = scr.querySelector('.xs-cb ~ .stitch-section .progress, .stitch-section .progress');
+  assertEqual(bar && bar.getAttribute('role'), 'progressbar', 'the total bar is a progressbar');
+  assertEqual(bar && bar.getAttribute('aria-valuemax'), String(st0.total), 'its max is the one total');
+  assertTrue(/0 of [\d,]+ stitches · 0%/.test(txt(scr.querySelector('.bar-label'))), 'bar label "0 of N stitches · 0%"', txt(scr.querySelector('.bar-label')));
+  resetSpy();
+  btn.dispatchEvent(new w.MouseEvent('click', { bubbles: true, detail: 0 }));   // keyboard activation
+  await sleep(20);
+  assertEqual(doneCount(p), 1, 'Enter / Space on the button (click, detail 0) marks one stitch');
+  assertEqual(spy.counted.length, 1, 'Store.counted is called once for that mark');
+  assertTrue(spy.counted[0] && spy.counted[0].n === 1 && spy.counted[0].unit === 'stitch' && spy.counted[0].projectId === p.id, 'counted({ n: 1, unit: stitch, projectId })', J(spy.counted[0]));
+  assertTrue(spy.counted[0] && spy.counted[0].part === 'DMC 310', 'counted carries the colour as part ("DMC 310")', spy.counted[0] && spy.counted[0].part);
+  assertTrue(spy.marks.length === 1 && spy.marks[0].list.length === 1 && spy.marks[0].list[0][1] === 1, 'Store.logMarks gets [[cell, 1]]', J(spy.marks));
+  var firstCell = spy.marks[0] && spy.marks[0].list[0][0];
+  assertEqual(T.view().cells[firstCell], 0, 'the marked square is the current colour (DMC 310)');
+  /* a pointer tap */
+  resetSpy();
+  var r = btn.getBoundingClientRect();
+  var pe = { bubbles: true, cancelable: true, pointerId: 7, pointerType: 'touch', clientX: r.left + 40, clientY: r.top + 40, button: 0 };
+  btn.dispatchEvent(new w.PointerEvent('pointerdown', pe));
+  btn.dispatchEvent(new w.PointerEvent('pointerup', pe));
+  await sleep(20);
+  assertEqual(doneCount(p), 2, 'a pointer tap marks a second stitch');
+  /* a swipe is not a stitch */
+  btn.dispatchEvent(new w.PointerEvent('pointerdown', pe));
+  btn.dispatchEvent(new w.PointerEvent('pointermove', Object.assign({}, pe, { clientX: pe.clientX + 40 })));
+  btn.dispatchEvent(new w.PointerEvent('pointerup', Object.assign({}, pe, { clientX: pe.clientX + 40 })));
+  await sleep(20);
+  assertEqual(doneCount(p), 2, 'a swipe on the button counts nothing');
+  assertEqual(txt(scr.querySelector('#xs-stitch-btn .stitch-number')), '2', 'the button reads 2');
+  /* −1 */
+  resetSpy();
+  var minus = Array.prototype.slice.call(scr.querySelectorAll('.xs-tap-actions button')).filter(function (b) { return txt(b) === '−1'; })[0];
+  minus.click();
+  await sleep(20);
+  assertEqual(doneCount(p), 1, '−1 unmarks the last stitch');
+  assertTrue(spy.counted.length === 1 && spy.counted[0].n === -1, 'Store.counted({ n: -1 }) on the unmark', J(spy.counted));
+  assertTrue(spy.marks.length === 1 && spy.marks[0].list[0][1] === 0, 'Store.logMarks gets [[cell, 0]] on the unmark', J(spy.marks));
+  /* a list of squares (the drag / 10×10 / page path) */
+  resetSpy();
+  var list = [];
+  for (var i = 0; i < 600 && list.length < 6; i++) if (T.view().cells[i] === 1) list.push(i);
+  var mk = T.markCellList(p.id, list, true, 1, null);
+  assertEqual(mk, 6, 'markCellList marks 6 squares');
+  assertTrue(spy.counted.length === 1 && spy.counted[0].n === 6, 'one Store.counted({ n: 6 }) for a bulk mark', J(spy.counted.map(function (c) { return c.n; })));
+  assertTrue(spy.marks.length === 1 && spy.marks[0].list.length === 6, 'one Store.logMarks with 6 pairs', spy.marks.length && spy.marks[0].list.length);
+  assertEqual(doneCount(p), 7, '7 done in all');
+  var undoBtn = Array.prototype.slice.call(scr.querySelectorAll('.bottombar .bar-btn')).filter(function (b) { return /Undo/.test(txt(b)); })[0];
+  undoBtn.click();
+  await sleep(40);
+  assertEqual(doneCount(p), 1, 'Undo in the bottom bar takes the bulk mark back in one step');
+  assertEqual(txt(scr.querySelector('#xs-stitch-btn .stitch-number')), '1', '… and the button follows');
+  /* a listener (XStitchApp.onMarked, xs-extras' hook) hears marks */
+  var heard = [];
+  var off = XA.onMarked(function (ev) { heard.push(ev); });
+  btn.dispatchEvent(new w.MouseEvent('click', { bubbles: true, detail: 0 }));
+  await sleep(20);
+  off();
+  assertTrue(heard.length === 1 && heard[0].on === true && heard[0].n === 1 && heard[0].colour === 0, 'onMarked hears { n: 1, on, colour }', J(heard));
+
+  /* ================================================================ */
+  group('3. Stitch mode on the working-mode contract');
+  var smBtn = scr.querySelector('.xs-stitch-mode-btn');
+  assertTrue(!!smBtn, 'a "⤢ Stitch mode" button under the strip');
+  var menuNames = App.ctx && App.ctx.workMode ? 'ok' : 'no ctx.workMode';
+  assertEqual(menuNames, 'ok', 'the shell gives ctx.workMode');
+  smBtn.click();
+  await sleep(120);
+  assertTrue(scr.classList.contains('work-mode'), 'Stitch mode opens on #screen-craft');
+  assertTrue(Store.focusMode(p.id) === true, 'it is remembered per project (settings.focusProjects)');
+  var surf = scr.querySelector('.work-surface .xs-work-chart');
+  assertTrue(!!surf, 'the chart is the working surface');
+  var sr = surf ? surf.getBoundingClientRect() : { height: 0, width: 0 };
+  var share = sr.height * sr.width / (375 * 812);
+  note('Stitch mode chart: ' + Math.round(sr.width) + ' × ' + Math.round(sr.height) + ' px = ' + Math.round(share * 100) + '% of a 375 × 812 screen' +
+    (scr.classList.contains('work-under-hud') ? ' (surface under the HUD)' : ''));
+  assertTrue(share >= 0.70, 'the chart takes at least 70% of the phone screen', Math.round(share * 100) + '%');
+  var smApi = App.ctx.workMode;
+  if (scr.classList.contains('work-under-hud')) {
+    assertTrue(share >= 0.85, 'under the HUD the chart reaches the 85% target', Math.round(share * 100) + '%');
+    var free = scr.querySelector('.work-hud') ? (function () {
+      var stk = scr.querySelector('.work-stack').getBoundingClientRect(), bt = scr.querySelector('.work-btns').getBoundingClientRect();
+      return Math.max(0, bt.top - stk.bottom) * 375 / (375 * 812);
+    })() : 0;
+    note('free rectangle between the readout and the buttons (where Fit puts the chart): ≈ ' + Math.round(free * 100) + '% of the screen');
+    assertTrue(scr.querySelector('.xs-work-chart').classList.contains('xs-under-hud'), 'the chart wrap knows it is under the HUD');
+  }
+  var big = scr.querySelector('.work-big');
+  assertEqual(txt(big), '2', 'the readout shows this colour’s done count');
+  var cells = Array.prototype.slice.call(scr.querySelectorAll('.work-cell, .xs-work-cell'));
+  assertTrue(/ALL/.test(txt(scr.querySelector('.work-hud'))), 'the readout has the ALL total cell');
+  if (d.activeElement && d.activeElement.blur) d.activeElement.blur();
+  resetSpy();
+  key(' ');
+  await sleep(30);
+  assertEqual(doneCount(p), 3, 'Space marks the next stitch');
+  key('PageDown');
+  await sleep(30);
+  assertEqual(doneCount(p), 4, 'the pedal (PageDown) is forward = the next stitch');
+  key('ArrowRight');
+  await sleep(30);
+  assertEqual(doneCount(p), 5, 'ArrowRight is forward too');
+  key('PageUp');
+  await sleep(30);
+  assertEqual(doneCount(p), 4, 'PageUp is back = take back the last stitch');
+  assertTrue(spy.counted.length === 4 && spy.marks.length === 4, 'every stitch-mode mark and unmark is recorded (4 counted, 4 logMarks)', spy.counted.length + ' / ' + spy.marks.length);
+  assertEqual(txt(scr.querySelector('.work-big')), '4', 'the big number follows');
+  var wu = scr.querySelector('.work-undo');
+  assertTrue(!!wu && !wu.disabled, 'Undo is on the HUD and enabled');
+  wu.click();
+  await sleep(40);
+  assertEqual(doneCount(p), 5, 'HUD Undo takes back the last action (the PageUp unmark)');
+  var sec = Array.prototype.slice.call(scr.querySelectorAll('.work-hud button')).map(function (b) { return b.getAttribute('aria-label') || txt(b); });
+  assertTrue(sec.some(function (s) { return /Next colour/.test(s); }) && sec.some(function (s) { return /Previous colour/.test(s); }), 'the HUD has ‹ › colour buttons');
+  var offRight = Array.prototype.slice.call(scr.querySelectorAll('.work-btns button')).filter(function (b) {
+    var rr = b.getBoundingClientRect(); return !b.hidden && (rr.right > 375 || rr.left < 0);
+  }).map(function (b) { return (b.getAttribute('aria-label') || txt(b)) + ' ' + Math.round(b.getBoundingClientRect().left) + '–' + Math.round(b.getBoundingClientRect().right); });
+  assertTrue(!offRight.length, 'every corner button is on the 375 px screen (+1 was pushed off before)', offRight.join('; '));
+  var plusB = scr.querySelector('.work-btns .work-row-plus');
+  assertTrue(!!plusB && /\+1/.test(txt(plusB)), 'the +1 button is there');
+  var small = Array.prototype.slice.call(scr.querySelectorAll('.work-hud button')).filter(function (b) {
+    var rr = b.getBoundingClientRect(); return rr.width > 0 && (rr.width < 44 || rr.height < 44);
+  }).map(function (b) { return (b.getAttribute('aria-label') || txt(b)) + ' ' + Math.round(b.getBoundingClientRect().width) + '×' + Math.round(b.getBoundingClientRect().height); });
+  assertTrue(!small.length, 'every HUD button is at least 44 × 44 px', small.join('; '));
+  /* the next-colour button changes the colour the stitch goes to */
+  var nextCol = Array.prototype.slice.call(scr.querySelectorAll('.work-hud button')).filter(function (b) { return /Next colour/.test(b.getAttribute('aria-label') || ''); })[0];
+  nextCol.click();
+  await sleep(30);
+  assertEqual(data(p).current.paletteIndex, 1, '› moves to the next colour');
+  key(' ');
+  await sleep(30);
+  var lastMark = spy.marks[spy.marks.length - 1];
+  assertEqual(T.view().cells[lastMark.list[0][0]], 1, 'Space now marks DMC 321');
+  /* keys: H highlights */
+  key('h');
+  await sleep(20);
+  assertTrue(T.view().isolate === true, 'H highlights the current colour');
+  key('h');
+  await sleep(20);
+  assertTrue(!T.view().isolate, 'H again shows every colour');
+  /* Options panel */
+  var more = scr.querySelector('.work-more');
+  more.click();
+  await sleep(40);
+  var panel = scr.querySelector('.work-panel');
+  assertTrue(!!panel && !panel.hidden && /Unmark/.test(txt(panel)) && /Find my place/.test(txt(panel)), 'Options ▾ lists the tool, Unmark, Highlight, Find my place');
+  assertTrue(!!panel.querySelector('.xs-work-near'), 'Options ▾ has 🎯 Nearest stitch to do');
+  assertTrue(/Keep awake|Awake/i.test(txt(panel)), 'the shell adds Keep awake to Options');
+  more.click();
+  await sleep(20);
+  /* remembered: a reload (render from home) reopens it */
+  Store.setActiveProject(null); App.render(); await sleep(30);
+  assertTrue(!scr.classList.contains('work-mode') || scr.hidden, 'going home leaves Stitch mode');
+  open(p); await sleep(150);
+  assertTrue(scr.classList.contains('work-mode'), 'opening the project again reopens Stitch mode (remembered)');
+  key('Escape');
+  await sleep(60);
+  assertTrue(!scr.classList.contains('work-mode'), 'Escape closes Stitch mode');
+  assertTrue(Store.focusMode(p.id) === false, '… and forgets it');
+  /* the readout helper */
+  var ro = T.stitchModeReadout(Store.project(p.id));
+  assertTrue(ro && ro.cells && ro.cells.length === 2 && /of/.test(ro.say), 'stitchModeReadout gives two cells and a sentence', J(ro && ro.say));
+
+  /* ================================================================ */
+  group('4. The check before "Use it" (exact, close, off demoted, unchecked)');
+  var realExtract = X.extractGrid;
+  function gridRes(kind) {
+    var w0 = 12, h0 = 10, cl = cellsOf(w0, h0, 3, false), k = countsOf(cl, 3);
+    var printed = k.slice();
+    if (kind === 'close') printed[0] += 1;
+    if (kind === 'off') printed[0] += 40;
+    var entries = PAL.slice(0, 3).map(function (e, i) { return { brand: e.brand, code: e.code, name: e.name, hex: e.hex, kind: 'cross', stitchCount: kind === 'unchecked' ? null : printed[i] }; });
+    var dd = X.normalize(rawChart(X, w0, h0, 3, { cells: cl }), null);
+    var chk = X.checkCounts(dd, entries);
+    return { ok: true, w: w0, h: h0, cells: cl, filled: 120, matched: 3, colors: 3, warnings: [],
+      palette: entries.map(function (e, i) { return Object.assign({}, e, { stitchCount: k[i] }); }), check: chk };
+  }
+  var verdicts = {};
+  for (var kind of ['exact', 'close', 'off', 'unchecked']) {
+    var res = gridRes(kind);
+    verdicts[kind] = res.check && res.check.verdict;
+    X.extractGrid = function () { return Promise.resolve(res); };
+    var box = d.createElement('div');
+    d.body.appendChild(box);
+    var used = 0;
+    await T.runGridBeta({ doc: {} }, { entries: [] }, box, function () { used++; });
+    var useBtn = Array.prototype.slice.call(box.querySelectorAll('button')).filter(function (b) { return /^Use it/.test(txt(b)); })[0];
+    var line = box.querySelector('.check-line');
+    assertTrue(!!line, kind + ': the check line is shown before Use it', txt(box).slice(0, 120));
+    var headP = box.querySelector('.xs-beta-ok');
+    assertTrue(/grid in 3 colours\.$/.test(txt(headP)), kind + ': the head says the size and the key colours, no second "N of M matched" count', txt(headP));
+    if (kind === 'off') {
+      assertEqual(txt(useBtn), 'Use it anyway…', 'off: the button says "Use it anyway…"');
+      assertTrue(!useBtn.classList.contains('primary'), 'off: it is demoted (not primary)');
+      assertTrue(!useBtn.disabled, 'off: it is never disabled');
+      useBtn.click();
+      await sleep(40);
+      var cs = topSheet();
+      assertTrue(!!cs && cs.classList.contains('sheet-confirm'), 'off: a plain confirm opens');
+      assertTrue(/off|disagree|may be wrong/i.test(txt(cs)), 'off: the confirm says what is off', txt(cs).slice(0, 140));
+      sheetBtn(/Go back/, cs).click();
+      await sleep(40);
+      assertEqual(used, 0, 'off: Go back does not use it');
+      useBtn.click();
+      await sleep(40);
+      sheetBtn(/Use it anyway/, topSheet()).click();
+      await sleep(40);
+      assertEqual(used, 1, 'off: confirming uses it');
+    } else {
+      assertEqual(txt(useBtn), 'Use it', kind + ': the button says "Use it"');
+      assertTrue(useBtn.classList.contains('primary'), kind + ': it stays the primary button');
+      useBtn.click();
+      await sleep(20);
+      assertEqual(used, 1, kind + ': one tap uses it, no confirm');
+    }
+    box.remove();
+  }
+  X.extractGrid = realExtract;
+  /* a key row with no printed count (xs-read: claimed by colour, how 'colour'):
+     unverified, never a tick and never a mismatch */
+  var nc = { ok: true, filled: 200, palette: [], unresolved: [], check: { verdict: 'close', summary: '5 of 6 colours match; DMC 04 has no count printed.',
+    rows: [{ entry: 0, brand: 'DMC', code: '310', name: 'Black', read: 100, expected: 100, ok: true, delta: 0, pct: 0 },
+      { entry: 1, brand: 'DMC', code: '04', name: 'Tin', read: 100, expected: null, ok: null, delta: null, pct: null, how: 'colour' }] } };
+  var ncc = T.gridCheckOf(nc, App.ctx);
+  var r04 = ncc && ncc.rows.filter(function (q) { return /04/.test(q.label); })[0];
+  assertEqual(r04 && r04.verdict, 'unknown', 'a key row with no count is "unknown" in the check, not exact and not off');
+  assertEqual(T.checkOff(nc.check), 0, 'and it is not counted as off');
+  var ncBox = d.createElement('div');
+  App.ctx.check.render(ncBox, ncc, {});
+  assertTrue(/no count/i.test(txt(ncBox)) && !/≠/.test(txt(ncBox)), 'the check sheet says the key prints no count for it', txt(ncBox).slice(0, 160));
+  assertEqual(verdicts, { exact: 'exact', close: 'close', off: 'off', unchecked: 'unchecked' }, 'the four synthetic reads give the four verdicts');
+  App.closeAllSheets();
+
+  /* applyGrid with an unresolved class: the band + "?" row */
+  var gu = gridRes('exact');
+  /* ten DMC 310 squares the read could not tell from DMC 321: the key still
+     prints 310's full count, so choosing 310 makes the check exact again */
+  var moved = 0;
+  gu.cells = gu.cells.map(function (c) { if (c === 0 && moved < 10) { moved++; return 3; } return c; });
+  gu.palette.forEach(function (e) { e.keyCount = e.stitchCount; });   // as extractGrid gives them
+  gu.palette.push({ name: 'DMC 349 or DMC 3843 (not told apart)', hex: 'cc6633', unresolved: [0, 1], kind: 'cross' });
+  gu.unresolved = [{ palette: 3, ink: 'cc6633', cells: 10, candidates: [0, 1], expected: [gu.palette[0].stitchCount, gu.palette[1].stitchCount], why: 'shared-ink' }];
+  var pg = make('grid read', rawChart(X, 4, 4, 2));
+  open(pg);
+  await sleep(40);
+  T.applyGrid(pg.id, gu);
+  await sleep(80);
+  var dg = data(pg);
+  assertEqual(dg.palette.length, 4, 'applyGrid keeps the placeholder as its own colour');
+  assertTrue(dg.palette[3].unresolved && dg.palette[3].symbol === '?', 'the placeholder is marked "?"');
+  assertTrue(dg.source.check && dg.source.check.verdict === 'off', 'source.check keeps the off verdict');
+  var band = scr.querySelector('.xs-read-band');
+  assertTrue(band && !band.hidden && /10 stitches/.test(txt(band)), 'the band above the chart says 10 stitches have no key colour', txt(band));
+  var qRow = scr.querySelector('.xs-key-row.unresolved');
+  assertTrue(!!qRow && /not told apart/.test(txt(qRow)), 'the key row says "not told apart: tap ? to choose"');
+
+  /* ================================================================ */
+  group('5. "Which colour are these?" is one undo step');
+  var edit = qRow.querySelector('.xs-key-edit');
+  assertEqual(txt(edit), '?', 'the row’s button is "?"');
+  edit.click();
+  await sleep(40);
+  var rs = topSheet();
+  assertTrue(!!rs && rs.classList.contains('sheet-xs-resolve'), '"?" opens "Which colour are these?"');
+  var rows = rs ? rs.querySelectorAll('.xs-resolve-row') : [];
+  assertTrue(rows.length >= 2, 'the candidates are listed (' + rows.length + ')');
+  assertTrue(/key prints/.test(txt(rows[0])), 'each candidate shows what the key prints');
+  assertTrue(!!sheetBtn(/fabric/, rs), '"They are fabric" is offered');
+  var before = data(pg);
+  var undoDepth = Store.undoDepth ? Store.undoDepth() : null;
+  rows[0].click();
+  await sleep(60);
+  var after = data(pg);
+  var cnt0 = 0;
+  var cellsAfter = X.unpackCells ? X.unpackCells(after.chart.cells, 12, 10) : null;
+  assertTrue(!after.palette.some(function (e) { return e.unresolved; }), 'choosing a candidate resolves the colour');
+  var bandAfter = scr.querySelector('.xs-read-band');
+  assertTrue(bandAfter.hidden || !/off|no key colour/i.test(txt(bandAfter)),
+    'choosing the right colour: the band is re-checked live and no longer says off', txt(bandAfter));
+  Store.undo();
+  App.render();
+  await sleep(40);
+  var back = data(pg);
+  assertTrue(back.palette.some(function (e) { return e.unresolved; }), 'one Undo brings the "?" colour back');
+  assertEqual(back.chart.cells, before.chart.cells, '… and the chart exactly as it was');
+  App.closeAllSheets();
+
+  /* ================================================================ */
+  group('6. Pages: outlines, "Mark page done" asks, marks and the flag in one undo step');
+  var pages = [{ n: 0, label: 'Page 1', region: { x: 0, y: 0, w: 15, h: 20 } }, { n: 1, label: 'Page 2', region: { x: 15, y: 0, w: 15, h: 20 } }];
+  var pp = make('pages', rawChart(X, 30, 20, 4, { pages: pages }));
+  open(pp);
+  await sleep(60);
+  var dp = data(pp);
+  assertEqual(dp.pages.length, 2, 'the project keeps its two page regions');
+  var pageTotal = 0;
+  for (var yy = 0; yy < 20; yy++) for (var xx = 0; xx < 15; xx++) if (T.view().cells[yy * 30 + xx] >= 0) pageTotal++;
+  assertTrue(/^page 1 · 0 of \d+$/.test(T.pageLine(dp)), 'pageLine at the crosshair: "page 1 · 0 of N"', T.pageLine(dp));
+  T.markPageDone(pp.id, 0, true);
+  await sleep(40);
+  var cf = topSheet();
+  assertTrue(!!cf && /Mark Page 1 done\?/.test(txt(cf)), '"Mark page done" asks first', txt(cf).slice(0, 100));
+  sheetBtn(/^Mark /, cf).click();
+  await sleep(80);
+  assertEqual(doneCount(pp), pageTotal, 'every stitch of page 1 is marked (' + pageTotal + ')');
+  assertTrue(data(pp).progress.pageDone.some(function (q) { return q.page === 0 && q.done; }), 'and page 1 is flagged done');
+  assertTrue(/page 1 · \d+ of \d+/.test(T.pageLine(data(pp))) && T.pageLine(data(pp)).indexOf(pageTotal + ' of ' + pageTotal) > 0, 'pageLine follows: "' + T.pageLine(data(pp)) + '"');
+  Store.undo(); App.render(); await sleep(40);
+  assertEqual(doneCount(pp), 0, 'one Undo takes back the stitches…');
+  assertTrue(!data(pp).progress.pageDone.some(function (q) { return q.page === 0 && q.done; }), '… and the flag');
+  /* the outlines are drawn on the strip (label text in the chart's own model) */
+  App.closeAllSheets();
+
+  /* ================================================================ */
+  group('7. Parking');
+  T.openParkingSheet(pp.id);
+  await sleep(40);
+  var ps = topSheet();
+  assertTrue(!!ps && ps.classList.contains('sheet-xs-park'), 'the Parking sheet opens');
+  var parkBtn = sheetBtn(/^📌 Park DMC 310/, ps) || sheetBtn(/📌 Park .* at /, ps);
+  assertTrue(!!parkBtn, 'it offers to park the current colour', txt(ps).slice(0, 200));
+  if (parkBtn) {
+    parkBtn.click();
+    await sleep(60);
+    var dpk = data(pp);
+    assertEqual(dpk.parking.length, 1, 'one thread is parked');
+    assertTrue(dpk.parking[0] && typeof dpk.parking[0].x === 'number' && dpk.parking[0].corner, 'the park has a square and a corner', J(dpk.parking[0]));
+  }
+  App.closeAllSheets();
+
+  /* ================================================================ */
+  group('8. Find my place');
+  T.openFindSheet(pp.id);
+  await sleep(80);
+  var fs = topSheet();
+  assertTrue(!!fs && fs.classList.contains('sheet-xs-find'), 'Find my place opens');
+  var inp = fs.querySelector('input');
+  assertTrue(d.activeElement === inp, 'focus goes to the place box');
+  inp.value = 'col 999 row 1';
+  sheetBtn(/Go there/, fs).click();
+  await sleep(30);
+  assertTrue(/off the chart/i.test(txt(fs.querySelector('.xs-find-msg'))), 'a place off the chart is said in plain words', txt(fs.querySelector('.xs-find-msg')));
+  inp.value = 'col 12 row 7';
+  sheetBtn(/Go there/, fs).click();
+  await sleep(60);
+  assertEqual([T.view().cx, T.view().cy], [11, 6], '"col 12 row 7" moves the crosshair to column 12, row 7');
+  App.closeAllSheets();
+
+  /* ================================================================ */
+  group('9. Islands (Stitch mode readout, worked out after a pause)');
+  App.ctx.workMode.open();
+  await sleep(500);
+  App.ctx.workMode.refresh();
+  await sleep(40);
+  var hudText = txt(scr.querySelector('.work-hud'));
+  assertTrue(/island \d+\/\d+/.test(hudText), 'the readout names the island ("island 1/N")', hudText.slice(0, 200));
+  assertTrue(/page \d · /.test(hudText), 'and the page under the crosshair', hudText.slice(0, 200));
+  App.ctx.workMode.close();
+  await sleep(40);
+
+  /* ================================================================ */
+  group('10. Row by row');
+  var wide = make('rows', rawChart(X, 60, 12, 3));
+  open(wide);
+  await sleep(60);
+  var rowsBtn = d.getElementById('xs-rows-btn');
+  assertTrue(rowsBtn && !rowsBtn.hidden, '☰ Row by row is offered on a chart');
+  rowsBtn.click();
+  await sleep(80);
+  var rsh = topSheet();
+  assertTrue(!!rsh && rsh.classList.contains('sheet-xs-rows'), 'the Row by row sheet opens');
+  assertTrue(/Rows across/.test(txt(rsh)), 'a wide chart offers "Rows across"');
+  var rdone = rsh.querySelector('.xs-row-done');
+  resetSpy();
+  rdone.click();
+  await sleep(60);
+  var rowMarked = doneCount(wide);
+  assertTrue(rowMarked > 0, 'Row done marks the row’s squares (' + rowMarked + ')');
+  assertTrue(spy.counted.length === 1 && spy.marks.length === 1, 'Row done is recorded once', spy.counted.length + '/' + spy.marks.length);
+  App.closeAllSheets();
+
+  /* ================================================================ */
+  group('11. What are you making? (the kind switch)');
+  XA.openSheet('fabric');
+  await sleep(60);
+  var fsh = topSheet();
+  var sel = fsh && fsh.querySelector('select.xs-kind-select');
+  assertTrue(!!sel, 'Fabric & size asks "What are you making?"');
+  if (sel) {
+    var opts = Array.prototype.slice.call(sel.options).map(function (o) { return o.textContent; });
+    assertTrue(opts.length >= 5, 'five kinds offered: ' + opts.join(', '));
+    var dmOpt = Array.prototype.slice.call(sel.options).filter(function (o) { return /Diamond/.test(o.textContent); })[0];
+    sel.value = dmOpt.value;
+    sel.dispatchEvent(new w.Event('change', { bubbles: true }));
+    var save = Array.prototype.slice.call(fsh.querySelectorAll('.sheet-foot button')).filter(function (b) { return /Save|Done|Use/.test(txt(b)); })[0];
+    assertTrue(!!save, 'the sheet has a Save button');
+    if (save) save.click();
+    await sleep(60);
+    assertEqual(X.kindOf(data(wide)), dmOpt.value, 'the kind is saved');
+    var cap = txt(scr.querySelector('#xs-stitch-btn .stitch-caption'));
+    assertTrue(/DRILL/.test(cap), 'the button caption follows the kind ("' + cap + '")');
+  }
+  App.closeAllSheets();
+
+  /* ================================================================ */
+  group('12. The ⋯ menu lists the extras; each sheet opens and closes with focus back');
+  open(p);
+  await sleep(60);
+  var cmenu = d.getElementById('c-menu');
+  cmenu.focus();
+  cmenu.click();
+  await sleep(60);
+  var ms = topSheet();
+  var labels = ms ? Array.prototype.slice.call(ms.querySelectorAll('.menu-item')).map(function (b) { return txt(b); }) : [];
+  var XE = w.XStitchExtras;
+  var extras = XE ? XE.menuItems(Store.project(p.id)) : [];
+  assertTrue(extras.length >= 6, 'XStitchExtras lists its items for a chart with progress (' + extras.map(function (e) { return e.id; }).join(', ') + ')');
+  extras.forEach(function (it) {
+    assertTrue(labels.some(function (l) { return l.indexOf(it.label) >= 0; }), '⋯ lists "' + it.label + '"');
+  });
+  ['Stitch mode', 'Chart', 'Floss list', 'Row by row', 'Find my place', 'Share a picture', 'Parking notes'].forEach(function (l) {
+    assertTrue(labels.some(function (x) { return x.indexOf(l) >= 0; }), '⋯ lists "' + l + '"');
+  });
+  App.closeAllSheets();
+  await sleep(30);
+  for (var it of extras) {
+    cmenu.focus();
+    var okOpen = XE.open(it.id, Store.project(p.id), { ctx: App.ctx, app: XA });
+    await sleep(80);
+    var es = topSheet();
+    assertTrue(okOpen && !!es, it.id + ': the sheet opens');
+    var closeB = es && es.querySelector('.sheet-close');
+    assertTrue(!!closeB && es.contains(d.activeElement), it.id + ': focus moves into the sheet');
+    var wide2 = es ? Array.prototype.slice.call(es.querySelectorAll('*')).filter(function (n) { var rr = n.getBoundingClientRect(); return rr.width > 0 && rr.right > 376; }).length : 0;
+    assertEqual(wide2, 0, it.id + ': nothing is wider than the 375 px screen');
+    if (closeB) closeB.click();
+    await sleep(60);
+    assertTrue(!topSheet(), it.id + ': ✕ closes it');
+    assertTrue(d.activeElement === cmenu, it.id + ': focus returns to ⋯', d.activeElement && (d.activeElement.id || d.activeElement.className));
+  }
+
+  /* ================================================================ */
+  group('13. Share a picture');
+  var defn = T.def;
+  var pic = null;
+  try { pic = await defn.sharePicture(Store.project(p.id), { size: 256 }); } catch (e) { pic = null; }
+  assertTrue(pic === null || (pic && pic.width === 256), 'def.sharePicture gives a 256 px canvas (or null without a renderer)', pic ? pic.width : 'null');
+  if (pic) {
+    var g = pic.getContext('2d'), px = g ? g.getImageData(128, 128, 1, 1).data : null;
+    assertTrue(!px || px[3] > 0, 'the picture has the stitching in the middle');
+  }
+  App.openShareCard(p.id);
+  await until(function () { return topSheet() && /Share a picture/.test(txt(topSheet())); }, 3000);
+  var shs = topSheet();
+  assertTrue(!!shs && /Share a picture/.test(txt(shs)), '⋯ → Share a picture opens its preview');
+  App.closeAllSheets();
+
+  /* ================================================================ */
+  group('15. Re-letter symbols (opt-in) and the photo confirm');
+  var rawS = rawChart(X, 20, 10, 4);
+  rawS.palette.forEach(function (e) { e.symbol = '×'; });
+  var ps2 = make('symbols', rawS);
+  open(ps2);
+  await sleep(40);
+  var why = T.reletterReason(data(ps2));
+  assertTrue(!!why && /share a symbol/.test(why), 'a palette whose colours share "×" is offered re-lettering', why);
+  T.openFlossSheet(ps2.id);
+  await sleep(60);
+  var rlb = topSheet() && topSheet().querySelector('.xs-reletter');
+  assertTrue(!!rlb, 'Floss shows "Re-letter symbols"');
+  var symsBefore = data(ps2).palette.map(function (e) { return e.symbol; });
+  rlb.click();
+  await sleep(40);
+  assertTrue(/Re-letter the symbols\?/.test(txt(topSheet())), 'it asks first');
+  sheetBtn(/^Re-letter$/, topSheet()).click();
+  await sleep(60);
+  var symsAfter = data(ps2).palette.map(function (e) { return e.symbol; });
+  assertTrue(X.symbolCheck(data(ps2).palette).ok, 'after re-lettering every colour has a distinct symbol', J(symsAfter));
+  assertTrue(!T.reletterReason(data(ps2)), '… and the offer goes away');
+  Store.undo(); App.render(); await sleep(30);
+  assertEqual(data(ps2).palette.map(function (e) { return e.symbol; }), symsBefore, 'one Undo brings the old symbols back');
+  App.closeAllSheets();
+  assertEqual(T.photoReplaceText(X.normalize({}, null)), null, 'a photo into an empty project asks nothing');
+  var prt = T.photoReplaceText(data(p));
+  assertTrue(/already has 4 colours/.test(prt) && /stitches are marked/.test(prt) && /Undo/.test(prt), 'a photo over a key and chart says what it replaces', prt);
+
+  /* ================================================================ */
+  group('16. Joining chart pages: only pages that look like the tile');
+  function cand(n, pitch, s0, ok) { return { n: n, s0: s0, det: { ok: ok !== false, lattice: pitch ? { pitchX: pitch, pitchY: pitch } : null } }; }
+  var tileRef = cand(2, 12, 1);
+  var picked = T.tilePages([cand(1, 31, 1), tileRef, cand(3, 24, 2), cand(4, 12.5, 1), cand(5, 12, 1, false)], tileRef).map(function (c) { return c.n; });
+  assertEqual(picked, [2, 3, 4], 'a cover page with a different "grid" and a page with no lattice are not joined (same squares at page scale are)');
+
+  /* ================================================================ */
+  group('18. Key names that are really chart symbols');
+  ['Zlnn9999MM', '3Zlllnn9MMM', 'fZZyYiiii', 'YYiiiiQQQZnnnn nn'].forEach(function (s) { assertTrue(T.looksLikeSymbolSoup(s), '"' + s + '" is not a colour name'); });
+  ['Snow White', 'Black', 'Coral Dark', 'Tin - Dark', 'Ecru', 'Beige Brown - Very Light', ''].forEach(function (s) { assertTrue(!T.looksLikeSymbolSoup(s), '"' + s + '" is a colour name (or empty)'); });
+  var ents = [{ brand: 'DMC', code: '954', name: 'Zlnn9999MM' }, { brand: 'DMC', code: '310', name: 'Black' }];
+  assertEqual(T.cleanKeyNames(ents), 1, 'one name replaced');
+  assertTrue(ents[0].name && !/\d/.test(ents[0].name) && ents[1].name === 'Black', 'DMC 954 gets the floss table name; Black is kept', J(ents));
+
+  /* ================================================================ */
+  group('17. The owner’s potatoes flow (key picture, then the chart picture); skips without tmp-pdf');
+  var kr = null, kb = null, cb = null;
+  try {
+    var r1 = await w.fetch('../tmp-pdf/xs-potatoes-key.png'), r2 = await w.fetch('../tmp-pdf/xs-potatoes-preview.webp');
+    if (r1.ok && r2.ok) { kb = await r1.blob(); cb = await r2.blob(); }
+  } catch (e) { kb = null; }
+  if (!kb || !T.keyReadAvailable() || !T.readerAvailable()) {
+    note('skipped: tmp-pdf/xs-potatoes-* not here, or a reader is missing');
+  } else {
+    var pot = make('potatoes', {});
+    open(pot);
+    T.openKeyReadSheet(pot.id, { blob: kb, name: 'key.png' });
+    await until(function () { return /Use 6 colours/.test(txt(topSheet())); }, 20000);
+    assertTrue(/Use 6 colours/.test(txt(topSheet())), 'the key picture reads 6 rows');
+    sheetBtn(/^Use 6 colours/).click();
+    await sleep(300);
+    assertEqual(data(pot).palette.map(function (e) { return e.code; }), ['4', '310', '745', '842', '3032', '3827'], 'six DMC codes, in the key’s order');
+    /* The key reader now reads all six printed counts on this key (it used to
+       miss DMC 04's). So the "no count printed" row is proven on a copy of the
+       key with DMC 04's count taken away, and the real flow must show a tick. */
+    assertEqual(data(pot).palette.map(function (e) { return e.stitchCount || 0; }), [100, 1839, 305, 1134, 1159, 1184], 'the key picture gives all six printed counts');
+    var keyOf = function (dropCountFor) {
+      return data(pot).palette.map(function (e) {
+        return { brand: 'DMC', code: e.code, name: e.name, hex: e.hex, stitchCount: e.code === dropCountFor ? null : (e.stitchCount || null), kind: 'cross' };
+      });
+    };
+    T.openReadSheet(pot.id, { blob: cb, name: 'preview.webp', keyFrom: 'project', key: keyOf('4') });
+    await until(function () { return /Use this chart/.test(txt(topSheet())) && /Read 144 × 85/.test(txt(topSheet())); }, 30000);
+    var rowsN = Array.prototype.slice.call(topSheet().querySelectorAll('.xs-count-table tbody tr')).map(function (tr) { return txt(tr); });
+    var n04 = rowsN.filter(function (s) { return /DMC 4 /.test(s); })[0] || '';
+    assertTrue(/not checked \(no count printed\)/.test(n04) && /100/.test(n04), 'with no count for DMC 04: 100 stitches, "not checked (no count printed)"', n04);
+    assertTrue(!/✓|−|\+\d/.test(n04.replace(/not checked \(no count printed\)/, '')), 'with no count for DMC 04: no tick and no mismatch', n04);
+    App.closeAllSheets();
+    await sleep(300);
+    T.openReadSheet(pot.id, { blob: cb, name: 'preview.webp', keyFrom: 'project', key: keyOf(null) });
+    await until(function () { return /Use this chart/.test(txt(topSheet())) && /Read 144 × 85/.test(txt(topSheet())); }, 30000);
+    var rsT = txt(topSheet());
+    assertTrue(/Read 144 × 85 squares · 6 colours · 5,721 stitches/.test(rsT), 'the chart picture reads 144 × 85, 6 colours, 5,721 stitches', rsT.slice(0, 120));
+    var rowsT = Array.prototype.slice.call(topSheet().querySelectorAll('.xs-count-table tbody tr')).map(function (tr) { return txt(tr); });
+    var r04 = rowsT.filter(function (s) { return /DMC 4 /.test(s); })[0] || '';
+    assertTrue(/100/.test(r04) && /✓/.test(r04) && !/not checked/.test(r04), 'DMC 04: 100 read, 100 printed, ticked', r04);
+    var useP = sheetBtn(/^Use this chart/);
+    assertTrue(!!useP && useP.classList.contains('primary'), 'the check is not off: "Use this chart" stays primary');
+    useP.click();
+    await sleep(800);
+    var dpot = data(pot), spot = T.statsOf(dpot);
+    var truth = { '4': 100, '310': 1839, '745': 305, '842': 1134, '3032': 1159, '3827': 1184 };   // the key as printed
+    var got = {};
+    dpot.palette.forEach(function (e, i) { got[e.code] = spot.byColor[i] ? spot.byColor[i].total : 0; });
+    var worst = 0;
+    Object.keys(truth).forEach(function (c) { worst = Math.max(worst, Math.abs((got[c] || 0) - truth[c])); });
+    assertTrue(spot.total === 5721 && worst <= 1, 'after "Use this chart" all six colours land on their key colour, each within one stitch (5,721 in all)', J(got));
+    App.closeAllSheets();
+  }
+
+  /* ================================================================ */
+  group('14. Tap cost on a 224 × 288 chart (64,512 stitches, 10 colours)');
+  var bigp = make('big', rawChart(X, 224, 288, 10));
+  open(bigp);
+  await sleep(200);
+  var bb = d.getElementById('xs-stitch-btn');
+  var times = [];
+  for (var k = 0; k < 25; k++) {
+    var ta = w.performance.now();
+    bb.dispatchEvent(new w.MouseEvent('click', { bubbles: true, detail: 0 }));
+    times.push(w.performance.now() - ta);
+  }
+  times.sort(function (a, b) { return a - b; });
+  var med = times[12], worst = times[24];
+  note('tap: median ' + med.toFixed(1) + ' ms, worst ' + worst.toFixed(1) + ' ms (headless; Store.counted, logMarks and the renderer included)');
+  assertEqual(doneCount(bigp), 25, '25 taps mark 25 stitches');
+  assertTrue(med < 30, 'median tap under 30 ms headless', med.toFixed(1));
+
+  Store.counted = realCounted;
+  Store.logMarks = realLog;
+  Store.setActiveProject(null);
+  App.render();
+}
+</script>
+</body>
+</html>

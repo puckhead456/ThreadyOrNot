@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Check sheet (CheckSheet) tests</title>
+<link rel="stylesheet" href="../css/app.css">
+<link rel="stylesheet" href="../css/themes.css">
+<style>
+  .t-page { font: 14px/1.4 Menlo, Consolas, monospace; background:#111; color:#eee; padding:16px; }
+  .pass { color:#7bd389; } .fail { color:#ff6b6b; background:#2a1414; }
+  .group { margin-top:18px; font-weight:bold; color:#9cf; border-bottom:1px solid #333; padding-bottom:4px; }
+  #summary { margin-top:20px; font-size:18px; font-weight:bold; } #summary.ok { color:#7bd389; } #summary.bad { color:#ff6b6b; }
+  .note { color:#aaa; } #demo { background: var(--surface); color: var(--text); padding: 12px; max-width: 420px; font: 15px/1.4 var(--font-body); }
+</style>
+</head>
+<body>
+<div class="t-page">
+<h1>CheckSheet — "what the pattern prints against what the app read" (wave K)</h1>
+<p class="note"><code>js/checksheet.js</code> alone: the shape, the badges, the adaptors from crochet's count report
+  and cross-stitch's wave J check, the guard and the demoted button, and the rendered table (shown below).</p>
+<div id="out"></div>
+<div id="summary">running…</div>
+<h2>The rendered sheet body (an "off" check)</h2>
+<div id="demo"></div>
+</div>
+<script src="../js/checksheet.js"></script>
+<script>
+'use strict';
+var out = document.getElementById('out'), passed = 0, failed = 0;
+function log(ok, label, detail) {
+  if (ok) passed++; else failed++;
+  var d = document.createElement('div'); d.className = ok ? 'pass' : 'fail';
+  d.textContent = (ok ? 'PASS' : 'FAIL') + ' - ' + label + (detail ? '  (' + detail + ')' : '');
+  out.appendChild(d);
+}
+function group(t) { var d = document.createElement('div'); d.className = 'group'; d.textContent = t; out.appendChild(d); }
+function eq(a, b, label) { var ok = JSON.stringify(a) === JSON.stringify(b); log(ok, label, ok ? '' : 'expected ' + JSON.stringify(b) + ' got ' + JSON.stringify(a)); }
+function ok(c, label, d) { log(!!c, label, c ? '' : d); }
+var C = window.CheckSheet;
+
+(async function () {
+  group('normalize: any value in, a Check out');
+  eq(C.normalize(null), { verdict: 'unchecked', summary: 'Nothing printed to check against.', rows: [] }, 'null');
+  eq(C.normalize({ verdict: 'bogus', rows: 'x' }).verdict, 'unchecked', 'junk verdict and rows');
+  var n = C.normalize({ rows: [{ label: 'A', printed: 6, read: 6, verdict: 'exact' }, { label: 'B', printed: 12, read: 10, verdict: 'off', page: 3.7 }] });
+  eq(n.verdict, 'off', 'no verdict given: worked out from the rows (an off row → off)');
+  eq(n.rows[1].page, 3, 'page floored');
+  eq(C.normalize({ rows: [{ label: 'x', ok: true }] }).rows[0].verdict, 'exact', 'a wave J row with ok: true → exact');
+  eq(C.normalize({ rows: [{ label: 'x', ok: false }] }).rows[0].verdict, 'off', 'ok: false → off');
+  eq(C.normalize({ rows: [{ label: 'x', verdict: 'unchecked' }] }).rows[0].verdict, 'unknown', 'a row "unchecked" → unknown');
+  eq(C.normalize({ rows: [{ label: 'x', hex: 'red' }] }).rows[0].hex, undefined, 'a hex that is not #rgb is dropped');
+  eq(C.normalize({ rows: [{ label: 'x', hex: '#aabbcc' }] }).rows[0].hex, '#aabbcc', 'a #hex is kept');
+  eq(C.verdictOf([{ verdict: 'computed' }, { verdict: 'exact' }]), 'close', 'computed rows → close');
+  eq(C.verdictOf([{ verdict: 'exact' }]), 'exact', 'all exact → exact');
+  eq(C.verdictOf([{ verdict: 'unknown' }]), 'unchecked', 'only unknown → unchecked');
+
+  group('the one badge');
+  eq(['exact', 'computed', 'close', 'off', 'unknown', 'unchecked'].map(C.glyph), ['✓', '≈', '≈', '≠', '?', '?'], 'glyphs');
+  var b = C.badge('off');
+  eq([b.textContent, b.className, b.getAttribute('role'), b.getAttribute('aria-label')], ['≠', 'check-badge check-off', 'img', 'disagrees'], 'an off badge');
+  eq(C.badge('computed').getAttribute('aria-label'), 'worked out by the app', 'a computed badge is named');
+  eq(C.badge('nope').textContent, '?', 'an unknown verdict draws ?');
+
+  group('fromCountReport: crochet / knitting');
+  var rep = { rows: 20, printed: 10, computed: 9, missing: 1, unresolved: 0,
+    disagree: [{ row: 7, rowEnd: 7, printed: 36, computed: 42, text: 'Rnd 7: …' }] };
+  var c1 = C.fromCountReport(rep, { word: 'Round', name: 'Body' });
+  eq(c1.verdict, 'close', 'one disagreeing round in 20 is close (a printed typo, kept as printed)');
+  eq(c1.summary, '20 rounds · 10 printed · 9 computed ≈ · 1 count unknown · 1 count disagrees with the pattern', 'the summary line');
+  eq(c1.title, 'Body: counts against the pattern', 'title');
+  eq(c1.rows.length, 1, 'without lines: one row per disagreement');
+  eq([c1.rows[0].label, c1.rows[0].printed, c1.rows[0].read, c1.rows[0].verdict], ['Round 7', 36, 42, 'off'], 'the disagreeing row');
+  var c2 = C.fromCountReport({ rows: 10, printed: 5, computed: 0, missing: 0, unresolved: 0,
+    disagree: [{ row: 2, rowEnd: 3, printed: 1, computed: 2 }] }, { word: 'Row' });
+  eq(c2.verdict, 'off', 'two of ten rows (a fifth) disagree → off');
+  eq(c2.rows[0].label, 'Row 2–3', 'a range label');
+  eq(C.fromCountReport({ rows: 6, printed: 6, computed: 0, missing: 0, unresolved: 0, disagree: [] }).verdict, 'exact', 'all printed → exact');
+  eq(C.fromCountReport({ rows: 0, disagree: [] }).verdict, 'unchecked', 'no rows → unchecked');
+  eq(C.fromCountReport({ rows: 4, printed: 0, computed: 0, missing: 4, unresolved: 0, disagree: [] }).verdict, 'unchecked',
+    'knitting: every count unknown → unchecked, never "exact"');
+  eq(C.fromCountReport(null).verdict, 'unchecked', 'a null report');
+  var lines = [
+    { kind: 'row', row: 1, rowEnd: 1, countSource: 'explicit', count: 6 },
+    { kind: 'row', row: 2, rowEnd: 2, countSource: 'computed', count: 12 },
+    { kind: 'row', row: 3, rowEnd: 5, countSource: null, count: null },
+    { kind: 'row', row: 6, rowEnd: 6, countSource: 'explicit', count: 36, deviation: { printed: 36, computed: 30 } },
+    { kind: 'row', row: 7, rowEnd: 7, sizeUnresolved: true },
+    { kind: 'note', text: 'Stuff firmly' }
+  ];
+  var c3 = C.fromCountReport({ rows: 7, printed: 2, computed: 1, missing: 3, unresolved: 1,
+    disagree: [{ row: 6, rowEnd: 6, printed: 36, computed: 30 }] }, { word: 'Row', lines: lines });
+  eq(c3.rows.map(function (r) { return r.label + ':' + r.verdict; }),
+    ['Row 1:exact', 'Row 2:computed', 'Row 3–5:unknown', 'Row 6:off', 'Row 7:unknown'], 'with lines: one row per counted line, notes skipped');
+  ok(/count unknown/.test(c3.rows[2].why), 'a row with no count says "count unknown"');
+  eq([c3.rows[1].printed, c3.rows[1].read], [null, 12], 'a computed row: nothing printed, the app read 12');
+
+  group('fromXStitch: the wave J contract §3');
+  var xs = { hasCounts: true, verdict: 'off', summary: '4 of 6 colours match; DMC 310 reads 1,812 of 1,839.',
+    rows: [{ entry: 0, code: '310', brand: 'DMC', name: 'Black', hex: '#000000', read: 1812, expected: 1839, ok: false },
+      { entry: 1, code: '321', brand: 'DMC', name: 'Red', hex: '#c72b3b', read: 400, expected: 400, ok: true },
+      { entry: 2, code: '699', brand: 'DMC', name: 'Green', read: 101, expected: 100, ok: true },
+      { entry: 3, code: '3865', brand: 'DMC', name: 'White', read: 50, expected: null, ok: null }],
+    unmatchedEntries: [5], unmatchedClasses: 1, readTotal: 2363, expectedTotal: 2339 };
+  var c4 = C.fromXStitch(xs);
+  eq(c4.verdict, 'off', 'verdict kept');
+  eq(c4.summary, xs.summary, 'summary kept');
+  eq(c4.rows.map(function (r) { return r.verdict; }), ['off', 'exact', 'close', 'unknown'], 'row verdicts: off, exact, close (within tolerance), unknown');
+  eq(c4.rows[0].label, 'DMC 310 · Black', 'label');
+  eq(c4.rows[0].hex, '#000000', 'swatch hex');
+  ok(/1 key colour found no stitches/.test(c4.note) && /1 colour on the chart/.test(c4.note), 'the note names unmatched key rows and chart colours');
+  ok(/1 colour on the chart matches no key row\./.test(c4.note), 'one: "1 colour on the chart matches no key row"', c4.note);
+  var c5 = C.fromXStitch({ verdict: 'off', rows: [], unmatchedEntries: [1, 2], unmatchedClasses: 3 });
+  ok(/2 key colours found no stitches\./.test(c5.note) && /3 colours on the chart match no key row\./.test(c5.note), 'many: "2 key colours found …", "3 colours … match"', c5.note);
+  eq(C.fromCountReport({ rows: 1, printed: 1, computed: 0, missing: 0, unresolved: 0, disagree: [{ row: 1, rowEnd: 1, printed: 6, computed: 5 }] }, { word: 'Round' }).summary,
+    '1 round · 1 printed · 1 count disagrees with the pattern', 'singular: 1 round, 1 count disagrees');
+  eq(C.fromCountReport({ rows: 2, printed: 2, computed: 0, missing: 0, unresolved: 0, disagree: [{ row: 1, rowEnd: 1, printed: 6, computed: 5 }, { row: 2, rowEnd: 2, printed: 12, computed: 10 }] }, { word: 'Round' }).summary,
+    '2 rounds · 2 printed · 2 counts disagree with the pattern', 'plural: 2 rounds, 2 counts disagree');
+  eq(C.normalize({ verdict: 'off', rows: [{ label: 'a', verdict: 'off' }] }).summary, '1 line disagrees with what the pattern prints.', 'summaryOf: 1 line disagrees');
+  eq(C.normalize({ verdict: 'off', rows: [{ label: 'a', verdict: 'off' }, { label: 'b', verdict: 'off' }] }).summary, '2 lines disagree with what the pattern prints.', 'summaryOf: 2 lines disagree');
+
+  group('guard and demote: "off" asks, never blocks');
+  var asked = null;
+  var r1 = await C.guard({ verdict: 'close' }, function (o) { asked = o; return Promise.resolve(false); });
+  eq([r1, asked], [true, null], 'close: no question, goes ahead');
+  var r2 = await C.guard({ verdict: 'off', summary: 'Two colours are off.' }, function (o) { asked = o; return Promise.resolve(true); });
+  eq(r2, true, 'off + "Use it anyway" → true');
+  eq(asked.title, 'Use it anyway?', 'the question');
+  ok(/Two colours are off\./.test(asked.message), 'the message says what is off');
+  var r3 = await C.guard({ verdict: 'off' }, function () { return Promise.resolve(false); });
+  eq(r3, false, 'off + "Go back and check" → false');
+  var r4 = await C.guard({ verdict: 'off' }, function () { throw new Error('x'); });
+  eq(r4, true, 'a broken confirm never blocks');
+  var btn = document.createElement('button');
+  btn.className = 'btn primary';
+  var dm = C.demote(btn, { verdict: 'off', summary: 'Two colours are off.' });
+  eq([btn.classList.contains('primary'), btn.classList.contains('check-demoted')], [false, true], 'off: the button loses .primary');
+  ok(/disagrees: Two colours are off/.test(btn.getAttribute('aria-description')), 'and says why to a screen reader');
+  ok(dm.isDemoted(), 'isDemoted');
+  dm.set({ verdict: 'exact' });
+  eq([btn.classList.contains('primary'), btn.classList.contains('check-demoted'), btn.hasAttribute('aria-description')], [true, false, false], 'a better check gives .primary back');
+
+  group('render, line and open');
+  var host = document.createElement('div');
+  C.render(host, c4, { onPage: function () {} });
+  ok(host.classList.contains('check-sheet'), 'the container is a check sheet');
+  eq(host.querySelector('.check-summary').textContent, xs.summary, 'the summary on top');
+  ok(/You can still use it/.test(host.textContent), 'off: says it can still be used');
+  var labels = Array.prototype.map.call(host.querySelectorAll('.check-label'), function (x) { return x.textContent; });
+  eq(labels[0], 'DMC 310 · Black', 'disagreements first');
+  eq(host.querySelectorAll('tbody tr').length, 4, 'one row per check row');
+  eq(host.querySelectorAll('th[scope="col"]').length, 4, 'column headers are scoped');
+  eq(host.querySelector('tbody tr .check-col-num').textContent, '1,839', 'numbers with thousands');
+  var pageHit = null;
+  var host2 = document.createElement('div');
+  C.render(host2, { rows: [{ label: 'Step 7', verdict: 'unknown', why: 'page 4 is a picture', page: 4 }] }, { onPage: function (pg) { pageHit = pg; } });
+  host2.querySelector('.check-page').click();
+  eq(pageHit, 4, 'a 📄 page link calls onPage with the page');
+  var opened = null;
+  var ln = C.line(c1, { onOpen: function (c) { opened = c; } });
+  eq(ln.querySelector('.check-badge').textContent, '≈', 'line: the badge');
+  ln.querySelector('.check-open').click();
+  eq(opened && opened.verdict, 'close', 'line: "See the check" opens it');
+  var sheetOpts = null;
+  C.open(c4, { openSheet: function (o) { sheetOpts = o; return { close: function () {} }; } });
+  eq([sheetOpts.title, sheetOpts.cls], ['Chart against the key', 'sheet-check'], 'open: through the shell’s openSheet');
+  var body = document.createElement('div');
+  sheetOpts.build(body);
+  ok(body.querySelector('.check-table'), 'open: the sheet body is the table');
+
+  C.render(document.getElementById('demo'), c4);
+  var el = document.getElementById('summary');
+  el.textContent = passed + ' passed, ' + failed + ' failed';
+  el.className = failed ? 'bad' : 'ok';
+})().catch(function (e) { log(false, 'threw ' + (e && e.stack || e)); var el = document.getElementById('summary'); el.textContent = passed + ' passed, ' + failed + ' failed'; el.className = 'bad'; });
+</script>
+</body>
+</html>

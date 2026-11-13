@@ -470,7 +470,10 @@ restore();
 var summaryEl = document.getElementById('summary');
 summaryEl.textContent = 'running… (the cross-stitch module group loads in a frame)';
 
+// two frame groups finish this page: 11 (the cross-stitch module) and 12 (the shell, wave K)
 function finish() {
+  finish.calls = (finish.calls || 0) + 1;
+  if (finish.calls < 2) return;
   if (finish.done) return;
   finish.done = true;
   var finalLine = passed + ' passed, ' + failed + ' failed';
@@ -598,6 +601,716 @@ window.setTimeout(restore, 400);
       finish();
     });
   });
+})();
+
+/* ====================================================================== *
+ * 12. The shell's wave K surfaces, in the real app (docs/wave-k/api/shell-ui.md)
+ *
+ * index.html loads in a 375 × 812 frame on a private store key. A demo
+ * craft registers a screen (`renderProject`), a working mode (`workMode`),
+ * a template hook and its own drop-zone words; the group drives the shell
+ * around it: the working mode on #screen-craft (open, keys, remembered,
+ * Undo, re-render, close), ctx.counted, Save as template for a non-counter
+ * craft, the craft picker for ＋ New template, the craft drop-zone label,
+ * the check sheet and the share card, and that crochet's own working mode
+ * still opens through the same engine. Everything it makes is deleted and
+ * the private key removed at the end.
+ * ====================================================================== */
+(function () {
+  var KEY = 'stitchkeeper-wavek-crafts-test';
+  var f = document.createElement('iframe');
+  f.style.cssText = 'position:fixed;left:-2000px;top:0;width:375px;height:812px;border:0;';
+  var t0 = Date.now();
+  var timer = window.setTimeout(function () {
+    group('12. The shell’s wave K surfaces (app frame)');
+    log(false, 'the app frame booted in time');
+    cleanup();
+    finish();
+  }, 30000);
+  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+  function cleanup() {
+    try {
+      var w = f.contentWindow;
+      if (w && w.Store && w.Store.projects) {
+        w.Store.projects().slice().forEach(function (p) { if (/^WKT /.test(p.name)) w.Store.deleteProject(p.id); });
+        w.Store.templates().slice().forEach(function (t) { if (/^WKT /.test(t.name)) w.Store.deleteTemplate(t.id); });
+      }
+    } catch (e) { /* ignore */ }
+    try { localStorage.removeItem(KEY); } catch (e) { /* ignore */ }
+    if (f.parentNode) f.parentNode.removeChild(f);
+  }
+  f.onload = function () {
+    var w = f.contentWindow;
+    var d = w.document;
+    (function wait() {
+      if (!(w.App && w.Store && d.getElementById('screen-home'))) {
+        if (Date.now() - t0 < 25000) return setTimeout(wait, 100);
+        return;
+      }
+      run(w, d).then(function () {
+        window.clearTimeout(timer);
+        cleanup();
+        finish();
+      }, function (e) {
+        window.clearTimeout(timer);
+        log(false, 'group 12 threw', String(e && (e.stack || e.message) || e));
+        cleanup();
+        finish();
+      });
+    })();
+  };
+  f.src = '../index.html';
+  document.body.appendChild(f);
+
+  function key(w, k, target) {
+    var e = new w.KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true });
+    (target || w.document.body).dispatchEvent(e);
+  }
+
+  async function run(w, d) {
+    group('12. The shell’s wave K surfaces (app frame)');
+    w.Store.__setKeyForTests(KEY);
+    w.App.closeAllSheets();
+    var Store = w.Store, App = w.App;
+    assertTrue(!!(w.WorkMode && w.CheckSheet && w.ShareCard && w.PageViewer), 'the four shared-surface files load from index.html');
+    assertTrue(!!(App.ctx.workMode && App.ctx.counted && App.ctx.check && App.ctx.pageViewer), 'ctx carries workMode, counted, check and pageViewer');
+
+    /* a demo screen craft */
+    var calls = { surface: 0, destroy: 0, said: [] };
+    Store.registerCraft({ id: 'wkdemo', normalize: function (cd) { return cd && typeof cd === 'object' ? cd : {}; },
+      summary: function (p) { return 'marked ' + ((p.craftData && p.craftData.n) || 0); } });
+    var spec = {
+      label: 'Demo mode', backTo: 'the demo',
+      surface: function (node) { calls.surface++; node.appendChild(w.document.createTextNode('the demo surface'));
+        return { destroy: function () { calls.destroy++; } }; },
+      primary: { label: 'Mark one', run: function (api) {
+        var p = api.project();
+        Store.updateCraftData(p.id, function (cd) { cd.n = (cd.n || 0) + 1; });
+        var r = api.counted({ n: Store.project(p.id).craftData.n, total: 50, unit: 'stitch' });
+        calls.said.push(r && r.said);
+        App.render();
+      } },
+      undo: true,
+      readout: function (api) {
+        var p = api.project();
+        var n = (p.craftData && p.craftData.n) || 0;
+        return { title: p.name, cells: [{ cap: 'MARKED', big: String(n), of: '/ 50' }], say: n + ' of 50 marked' };
+      }
+    };
+    App.registerCraft({
+      id: 'wkdemo', name: 'Demo', emoji: '🧪', tagline: 'A test craft',
+      copy: { dropLabel: 'Drop a demo PDF, or a picture of a chart' },
+      template: {
+        fromProject: function (p) { return { craftData: { fabric: p.craftData.fabric || 'aida', n: 0 }, checklist: ['Wash it'] }; },
+        describe: function (t) { return 'fabric ' + ((t.craftData || {}).fabric || '?'); }
+      },
+      renderProject: function (p, main, ctx) {
+        if (!main.querySelector('.work-open')) main.appendChild(ctx.workMode.button());
+      },
+      destroyProject: function () {},
+      openImportSheet: function () {},
+      workMode: spec
+    });
+
+    var p = Store.createProject({ name: 'WKT demo', craft: 'wkdemo', craftData: { fabric: 'linen' } });
+    Store.setActiveProject(p.id);
+    App.render();
+    var scr = d.getElementById('screen-craft');
+    assertTrue(!scr.hidden, 'the demo project paints #screen-craft');
+    var openBtn = scr.querySelector('#craft-body .work-open');
+    assertTrue(!!openBtn, 'ctx.workMode.button() gives the craft a ready ⤢ button');
+    assertEqual(openBtn && openBtn.textContent, '⤢Demo mode', 'it reads the spec’s label');
+
+    /* working mode */
+    openBtn.click();
+    await sleep(60);
+    assertTrue(scr.classList.contains('work-mode'), 'the craft working mode opens on #screen-craft');
+    assertTrue(Store.focusMode(p.id) === true, 'it is remembered (settings.focusProjects)');
+    assertEqual(d.getElementById('live-region').textContent, 'Demo mode. 0 of 50 marked', 'opening is announced');
+    var surf = scr.querySelector('.work-surface');
+    assertTrue(!!surf && /demo surface/.test(surf.textContent), 'the craft’s surface is mounted');
+    assertEqual(calls.surface, 1, 'surface() ran once');
+    var topbar = scr.querySelector('.topbar');
+    assertEqual(topbar ? w.getComputedStyle(topbar).display : 'none', 'none', 'the topbar is hidden in working mode');
+    var r = surf.getBoundingClientRect();
+    assertTrue(r.width >= 370 && r.height >= 780, 'the surface fills the 375 × 812 screen', Math.round(r.width) + '×' + Math.round(r.height));
+    if (d.activeElement && d.activeElement.blur) d.activeElement.blur();
+    key(w, ' ');
+    key(w, 'PageDown');
+    await sleep(40);
+    assertEqual(Store.project(p.id).craftData.n, 2, 'Space marks, and the pedal (PageDown) defaults to primary');
+    assertEqual(calls.surface, 1, 'a re-render keeps the same surface (no remount)');
+    var big = scr.querySelector('.work-big');
+    assertEqual(big && big.textContent, '2', 'the readout follows the craft’s state');
+    assertEqual(calls.said, [null, null], 'ctx.counted: a plain mark says nothing');
+    var und = scr.querySelector('.work-undo');
+    assertTrue(!!und && !und.disabled, 'Undo (spec.undo: true) is enabled after a mark');
+    und.click();
+    await sleep(40);
+    assertEqual(Store.project(p.id).craftData.n, 1, 'Undo takes the last mark back through Store.undo');
+    assertEqual(scr.querySelector('.work-big').textContent, '1', '… and the readout follows');
+    App.render();
+    assertTrue(scr.classList.contains('work-mode'), 'a full re-render keeps the mode open');
+    App.render();
+    Store.setActiveProject(null);
+    App.render();
+    assertEqual(calls.destroy, 1, 'going home takes the surface down');
+    Store.setActiveProject(p.id);
+    App.render();
+    assertTrue(scr.classList.contains('work-mode'), 'reopening the project brings the remembered mode back');
+    key(w, 'Escape');
+    await sleep(40);
+    assertTrue(!scr.classList.contains('work-mode'), 'Escape closes it');
+    assertTrue(Store.focusMode(p.id) === false, '… and forgets it');
+    assertEqual(d.getElementById('live-region').textContent, 'Back to the demo. 1 of 50 marked', 'closing is announced');
+
+    /* ctx.counted */
+    var said = App.ctx.counted({ n: 50, total: 50, unit: 'stitch', quiet: true });
+    assertEqual(said.said, '50 of 50 stitches', 'ctx.counted says the total');
+    var meter = d.createElement('div');
+    meter.setAttribute('role', 'progressbar');
+    App.ctx.counted({ n: 7, total: 24, node: meter, quiet: true });
+    assertEqual([meter.getAttribute('aria-valuenow'), meter.getAttribute('aria-valuemax'), meter.getAttribute('aria-valuetext')],
+      ['7', '24', '7 of 24 stitches'], 'ctx.counted writes aria-valuenow / max / text on a progressbar');
+    var btn = d.createElement('button');
+    App.ctx.counted({ n: 3, unit: 'step', units: 'steps', node: btn, quiet: true });
+    assertEqual(btn.getAttribute('aria-description'), '3 steps', 'on a button it writes a description instead');
+
+    /* templates for every craft */
+    var menuLabels = null;
+    App.render();
+    d.getElementById('c-menu').click();
+    await sleep(80);
+    var menu = d.querySelector('dialog[open]');
+    menuLabels = menu ? Array.prototype.map.call(menu.querySelectorAll('.menu-item'), function (b) { return b.textContent; }) : [];
+    assertTrue(menuLabels.some(function (l) { return /Save as template/.test(l); }), '⋯ menu of a screen craft has Save as template');
+    assertTrue(menuLabels.some(function (l) { return /Demo mode/.test(l); }), '⋯ menu offers the craft’s working mode');
+    assertTrue(menuLabels.some(function (l) { return /Share a picture/.test(l); }), '⋯ menu offers Share a picture');
+    var saveItem = Array.prototype.filter.call(menu.querySelectorAll('.menu-item'), function (b) { return /Save as template/.test(b.textContent); })[0];
+    saveItem.click();
+    await sleep(120);
+    var ed = d.querySelector('dialog[open]');
+    var nameIn = ed && ed.querySelector('input[type="text"]');
+    assertTrue(!!nameIn, 'the template editor opens');
+    var partsHidden = ed && Array.prototype.some.call(ed.querySelectorAll('.field'), function (fl) {
+      return fl.hidden && fl.querySelector('.tpl-parts-edit');
+    });
+    assertTrue(partsHidden, 'a screen craft’s template has no Parts field');
+    nameIn.value = 'WKT demo template';
+    var saveBtn = Array.prototype.filter.call(ed.querySelectorAll('button'), function (b) { return b.textContent === 'Save'; })[0];
+    saveBtn.click();
+    await sleep(80);
+    var tpl = Store.templates().filter(function (t) { return t.name === 'WKT demo template'; })[0];
+    assertTrue(!!tpl, 'Save as template saved it');
+    assertEqual(tpl && tpl.craft, 'wkdemo', 'under the craft');
+    assertEqual(tpl && tpl.craftData, { fabric: 'linen', n: 0 }, 'with the craft’s seed (def.template.fromProject, progress dropped)');
+    assertEqual(tpl && tpl.checklist, ['Wash it'], 'and its checklist');
+    var made = Store.createProject({ name: 'WKT from template', templateId: tpl && tpl.id });
+    assertEqual([made.craft, made.craftData && made.craftData.fabric, made.craftData && made.craftData.n], ['wkdemo', 'linen', 0],
+      'a project made from it is a demo project with the seed');
+
+    App.closeAllSheets();
+    App.openSettingsSheet();
+    await sleep(80);
+    var set = d.querySelector('dialog[open]');
+    var newTpl = set && set.querySelector('[data-tour="settings-new-template"]');
+    newTpl.click();
+    await sleep(80);
+    var pick = d.querySelectorAll('dialog[open]');
+    var picker = pick[pick.length - 1];
+    var picks = Array.prototype.map.call(picker.querySelectorAll('.tpl-craft-pick'), function (b) { return b.getAttribute('data-craft'); });
+    assertTrue(picks.indexOf('crochet') === 0 && picks.indexOf('wkdemo') > 0, '＋ New template asks which craft first', JSON.stringify(picks));
+    picker.querySelector('[data-craft="wkdemo"]').click();
+    await sleep(80);
+    var eds = d.querySelectorAll('dialog[open]');
+    var ed2 = eds[eds.length - 1];
+    assertTrue(/Demo/.test(ed2.querySelector('.craft-tag') ? ed2.querySelector('.craft-tag').textContent : ''), 'the new template’s craft is the one picked');
+    var tplCard = set.querySelector('.tpl-item-sub');
+    assertTrue(Array.prototype.some.call(set.querySelectorAll('.tpl-item-sub'), function (s) { return s.textContent === 'fabric linen · 1 checklist item'; }),
+      'the template card says what the seed holds (def.template.describe)');
+    var prof = set.querySelector('[data-settings="profile"]');
+    if (typeof Store.profile === 'function') {
+      assertTrue(!!prof, 'Settings has Your profile');
+      var bust = prof && prof.querySelector('input[data-measure="bust"]');
+      if (bust) {
+        bust.value = '92';
+        bust.dispatchEvent(new w.Event('change'));
+        var unitNow = Store.profile().units.length;
+        assertEqual(Store.measurement('bust', unitNow), 92, 'a measurement typed in Settings lands in the profile');
+        Store.removeMeasurement('bust');
+      }
+    } else {
+      log(true, 'Settings: no Store.profile yet (shell-data): the profile section stays hidden');
+    }
+    App.closeAllSheets();
+
+    /* craft-aware drop zone label */
+    d.querySelector('[data-action="new-project"]') && d.querySelector('[data-action="new-project"]').click();
+    await sleep(100);
+    var np = d.querySelector('dialog[open]');
+    var demoSeg = np && Array.prototype.filter.call(np.querySelectorAll('button'), function (b) { return /Demo/.test(b.textContent); })[0];
+    if (demoSeg) {
+      demoSeg.click();
+      await sleep(60);
+      assertTrue(/picture of a chart/.test(np.textContent), 'the New project drop zone uses the craft’s own words (def.copy.dropLabel)');
+    } else {
+      log(false, 'the craft picker shows the demo craft');
+    }
+    App.closeAllSheets();
+
+    /* the check sheet and the share card */
+    var chk = App.ctx.check.fromCountReport({ rows: 10, printed: 6, computed: 3, missing: 1, unresolved: 0,
+      disagree: [{ row: 4, rowEnd: 4, printed: 36, computed: 24, text: 'Rnd 4' }] }, { word: 'Round', name: 'Body' });
+    assertEqual(chk.verdict, 'close', 'one disagreement in ten rounds is "close", not "off"');
+    App.ctx.check.open(chk);
+    await sleep(60);
+    var cs = d.querySelector('dialog[open].sheet-check, dialog[open] .check-sheet');
+    assertTrue(!!cs, 'ctx.check.open shows the check sheet');
+    App.closeAllSheets();
+    App.openShareCard(p.id);
+    await sleep(400);
+    var sc = d.querySelector('dialog[open] canvas.share-card-canvas');
+    assertTrue(!!sc && sc.width === 1080 && sc.height === 1080, 'Share a picture draws a 1080 × 1080 card');
+    assertTrue(/WKT demo/.test(sc ? sc.getAttribute('aria-label') : ''), 'the card has a spoken description');
+    App.closeAllSheets();
+
+    /* the opt-in text reader: offered, never downloaded here, its text always "check it" */
+    var O = App.ctx.ocr;
+    assertTrue(!!O && typeof O.offerButton === 'function', 'ctx.ocr is there (and App.ocr)');
+    assertTrue(App.ocr === O, 'App.ocr is the same helper');
+    var ob = O.offerButton({ onReady: function () {} });
+    if (O.available()) {
+      assertEqual(ob.textContent, 'Try reading this scanned page (downloads about 5 MB once)', 'the offer states the one-time download size');
+    } else {
+      assertTrue(ob.hidden, 'without a usable reader the offer stays hidden');
+    }
+    var node = d.createElement('div');
+    node.textContent = 'DMC 310 Black';
+    O.mark(node, { conf: 54 });
+    assertTrue(node.classList.contains('ocr-read') && /Read from a picture — check it/.test(node.textContent), 'mark(): OCR text is labelled "check it"');
+    O.mark(node);
+    assertEqual(node.querySelectorAll('.ocr-flag').length, 1, 'mark() twice labels once');
+    var oc = O.check({ lines: [{ text: 'Rnd 1: 6 sc in MR (6)', conf: 91 }, { text: 'Rnd 2: inc x6 (l2)', conf: 41 }, { text: '  ', conf: 10 }] }, { page: 4 });
+    assertEqual(oc.verdict, 'unchecked', 'check(): an OCR read is never "exact"');
+    assertEqual(oc.rows.map(function (r) { return r.verdict; }), ['unknown', 'unknown'], 'every line is "?" (blank lines dropped)');
+    assertTrue(/check every row/.test(oc.summary) && /1 line the reader was unsure of/.test(oc.summary), 'the summary says check every row, and how many were unsure');
+    assertEqual(oc.rows[1].page, 4, 'rows carry the page for the 📄 link');
+    var nt = O.noText();
+    assertTrue(nt.indexOf('These pages are pictures, so there is no text to read.') === 0 && !/\bscan\b|scanned/i.test(nt.split('(')[0]),
+      'a PDF with no text says its pages are pictures, not "a scan"', nt);
+    if (O.available()) assertTrue(/text reader \(Settings → Read scanned pages\)/.test(nt), '… and offers the opt-in text reader where it runs');
+    assertEqual(O.failText(new Error('Couldn’t read that PDF (it may be scanned images).')), nt, 'the extractor’s "may be scanned images" error shows the new words');
+    assertEqual(O.failText(new Error('That PDF is password-protected.')), 'That PDF is password-protected.', 'other errors keep their own message');
+    assertEqual(O.failText(null), nt, 'no message at all: the no-text words');
+    App.openSettingsSheet();
+    await sleep(120);
+    var ocrSec = d.querySelector('dialog[open] [data-settings="ocr"]');
+    if (w.Ocr) {
+      assertTrue(!!ocrSec, 'Settings has Read scanned pages');
+      await sleep(300);
+      var st = ocrSec ? ocrSec.querySelector('.ocr-status').textContent : '';
+      assertTrue(/^(Not installed\.|Installed · [\d.]+ MB on this device\.|This browser cannot run the text reader\.)$/.test(st), 'it says installed or not', st);
+      if (st === 'Not installed.') {
+        assertTrue(/Download \(about 5 MB once\)/.test(ocrSec.textContent), 'Download states the size');
+      }
+    }
+    App.closeAllSheets();
+
+    /* K1: the whole piece in the viewer, for a knitting project of 2+ parts */
+    var V = App.__viewerQa;
+    var kt = Store.templates('knitting').filter(function (t) { return t.id === 'knit-sweater'; })[0];
+    if (V && kt && w.DiagramGeo && typeof w.DiagramGeo.assemble === 'function') {
+      var kp = Store.createProject({ name: 'WKT sweater', templateId: kt.id, craft: 'knitting' });
+      var cro = Store.createProject({ name: 'WKT crochet two', templateId: 'blank' });
+      assertTrue(kp.parts.length >= 2 && V.wholeAvailable(kp), 'whole piece is offered for a knitting project of ' + kp.parts.length + ' parts');
+      assertTrue(!V.wholeAvailable(cro), 'never for crochet');
+      assertTrue(!V.wholeOn(kp), 'off until asked');
+      var A = V.assembled(kp);
+      assertTrue(!!A && !!A.model && /^(sock|sweater-flat|board)$/.test(A.kind), 'DiagramGeo.assemble gives a model and a kind', A && A.kind);
+      var cap = V.caption(A);
+      assertTrue(!!cap.name, 'a plain caption: ' + cap.name + (cap.detail ? ' · ' + cap.detail : ''));
+      assertEqual(V.caption({ kind: 'board', reason: 'the sleeves have no armhole rows' }),
+        { name: 'All the pieces', detail: 'the sleeves have no armhole rows' }, 'the board caption says why');
+      assertTrue(V.assembled(kp) === A, 'nothing moved: the assembled piece is reused, not rebuilt');
+      var undoBefore = Store.canUndo();
+      Store.clearUndo();
+      V.setWhole(kp, true);
+      assertTrue(V.wholeOn(kp), 'the choice is remembered for the project');
+      assertTrue(!Store.canUndo(), '… as a device setting, with no undo step');
+      assertTrue(!V.wholeOn(cro), 'other projects keep their own choice');
+      Store.setActiveProject(kp.id);
+      App.render();
+      V.open();
+      await sleep(150);
+      var vs = d.querySelector('dialog[open] [data-viewer-whole]');
+      assertTrue(!!vs, 'the viewer of a knitting project shows This part / Whole piece');
+      assertEqual(vs ? vs.querySelector('[aria-pressed="true"], .on') && vs.querySelector('[aria-pressed="true"], .on').textContent : '', 'Whole piece',
+        'it opens on the remembered choice');
+      var shapeName = d.querySelector('dialog[open] .viewer-shape span');
+      assertEqual(shapeName && shapeName.textContent, cap.name, 'the shape line names the whole piece');
+      var vh = V.handle();
+      if (vh) {
+        var calls2 = { assemble: 0, setModel: 0, setDone: 0 };
+        var origAssemble = w.DiagramGeo.assemble, origSet = vh.setModel, origDone = vh.setDone;
+        var hasDone = typeof origDone === 'function';
+        w.DiagramGeo.assemble = function () { calls2.assemble++; return origAssemble.apply(this, arguments); };
+        vh.setModel = function () { calls2.setModel++; return origSet.apply(this, arguments); };
+        if (hasDone) vh.setDone = function () { calls2.setDone++; return origDone.apply(this, arguments); };
+        var kpart = Store.activePart(Store.project(kp.id));
+        // the first stitch starts the part (todo → started): that one rebuild is expected
+        Store.tapStitch(kp.id, kpart.id); V.push();
+        await sleep(80);
+        var after1 = { assemble: calls2.assemble, setModel: calls2.setModel };
+        assertEqual(after1, { assemble: 1, setModel: 1 }, 'the part’s first stitch (not started → started) rebuilds once, after the tap');
+        calls2 = { assemble: 0, setModel: 0, setDone: 0 };
+        for (var tp = 0; tp < 5; tp++) { Store.tapStitch(kp.id, kpart.id); V.push(); }
+        await sleep(60);
+        if (hasDone) {
+          assertEqual(calls2, { assemble: 0, setModel: 0, setDone: 5 }, 'five stitch taps: setDone five times, no assemble, no setModel');
+          Store.tapRow(kp.id, kpart.id);
+          V.push();
+          await sleep(60);
+          assertEqual(calls2, { assemble: 0, setModel: 0, setDone: 6 }, 'a row change moves progress with setDone too: no rebuild');
+        } else {
+          assertEqual(calls2, { assemble: 0, setModel: 0, setDone: 0 }, 'five stitch taps on Whole piece: no assemble, no setModel (the tap stays cheap)');
+          Store.tapRow(kp.id, kpart.id);
+          V.push();
+          assertEqual([calls2.assemble, calls2.setModel], [0, 0], 'a row change does not rebuild on the tap path itself …');
+          await sleep(60);
+          assertEqual([calls2.assemble, calls2.setModel], [1, 1], '… but once, just after it');
+        }
+        var base = { assemble: calls2.assemble, setModel: calls2.setModel };
+        V.push();
+        await sleep(60);
+        assertEqual([calls2.assemble, calls2.setModel], [base.assemble, base.setModel], 'and not again while nothing moved');
+        // the frame turns: the board re-wraps to the new shape, once
+        var stage = d.querySelector('dialog[open] .viewer-stage');
+        var cvs = stage && stage.querySelector('canvas');
+        if (cvs) {
+          var oldW = cvs.style.width, oldH = cvs.style.height;
+          cvs.style.width = '700px'; cvs.style.height = '300px';
+          V.resized(); V.resized();
+          await sleep(80);
+          assertEqual([calls2.assemble - base.assemble, calls2.setModel - base.setModel], [1, 1], 'a new frame shape re-assembles once (two resize events)');
+          V.resized();
+          await sleep(60);
+          assertEqual([calls2.assemble - base.assemble, calls2.setModel - base.setModel], [1, 1], 'the same shape again: nothing');
+          cvs.style.width = oldW; cvs.style.height = oldH;
+        }
+        w.DiagramGeo.assemble = origAssemble;
+        vh.setModel = origSet;
+        if (hasDone) vh.setDone = origDone;
+      } else {
+        log(true, 'K1: no viewer handle in this frame (no 3D here): the tap-cost check is skipped');
+      }
+      App.closeAllSheets();
+      V.setWhole(kp, false);
+      assertTrue(!V.wholeOn(kp), 'switching back forgets it');
+      Store.setActiveProject(cro.id);
+      App.render();
+      V.open();
+      await sleep(150);
+      assertTrue(!d.querySelector('dialog[open] [data-viewer-whole]'), 'a crochet viewer has no switch');
+      App.closeAllSheets();
+      void undoBefore;
+    } else {
+      log(true, 'K1: DiagramGeo.assemble or the knitting sweater template is not here: no switch to test');
+    }
+
+    /* P13: on a long knitting row a tap counts a repeat (or marker segment); crochet never */
+    var KQ = App.__knitTapQa;
+    var kn = Store.createProject({ name: 'WKT long rows', craft: 'knitting', templateId: 'knit-blank' });
+    var knText = 'Row 1 (RS): *K3, p2; rep from * to end. (60 sts)\nRow 2: *K2, p3; rep from * to end. (60 sts)\n' +
+      'Row 3: *K3, p2; rep from * to end. (60 sts)\nRow 4: *K2, p3; rep from * to end. (60 sts)';
+    Store.importPatternSections(kn.id, [{ name: Store.activePart(kn).name, makeCount: 1, text: knText }], { mode: 'active', text: knText });
+    kn = Store.project(kn.id);
+    var kpt = Store.activePart(kn);
+    Store.setActiveProject(kn.id);
+    App.render();
+    assertEqual(KQ.unit(kn), 'repeat', 'a knitting project counts repeats on long rows unless told otherwise');
+    var units = KQ.units(kn, kpt);
+    if (!units) {
+      // no repeat groups read here: the marker-segment path instead
+      [15, 30, 45].forEach(function (a) { Store.addMarker(kn.id, kpt.id, { at: a }); });
+      kn = Store.project(kn.id); kpt = Store.activePart(kn);
+      units = KQ.units(kn, kpt);
+    }
+    assertTrue(!!units && units.ends[units.ends.length - 1] === 60, 'a 60-st row is cut into units that end at 60', JSON.stringify(units));
+    var first = units ? units.ends[0] : 1;
+    assertEqual(KQ.step(units, 0), first, 'the first tap counts to the end of the first unit (' + first + ' sts)');
+    var undo0 = Store.canUndo();
+    KQ.tap();
+    assertEqual(Store.activePart(Store.project(kn.id)).stitch, first, 'one tap = ' + first + ' stitches');
+    KQ.tap({ single: true });
+    assertEqual(Store.activePart(Store.project(kn.id)).stitch, first + 1, 'a long press (single) counts one stitch');
+    assertEqual(KQ.step(units, first + 1), units.ends[1] - first - 1, 'mid-unit, a tap finishes that unit');
+    var hint = d.getElementById('knit-tap-unit');
+    App.render();
+    hint = d.getElementById('knit-tap-unit');
+    assertTrue(!!hint && !hint.hidden && /^Tap = 1 (repeat|marker segment) \(\d+ sts?\) · hold = 1 st$/.test(hint.textContent),
+      'the counter says what a tap counts', hint && hint.textContent);
+    assertTrue(/Hold to count one stitch/.test(d.getElementById('stitch-btn').getAttribute('aria-description') || ''), 'and tells a screen reader');
+    KQ.setUnit(kn, 'stitch');
+    assertEqual(KQ.units(Store.project(kn.id), Store.activePart(Store.project(kn.id))), null, 'switched to stitches: no units');
+    KQ.tap();
+    assertEqual(Store.activePart(Store.project(kn.id)).stitch, first + 2, '… and a tap counts one stitch');
+    App.render();
+    assertTrue(!d.getElementById('knit-tap-unit') || d.getElementById('knit-tap-unit').hidden, 'the hint goes');
+    KQ.setUnit(kn, 'repeat');
+    void undo0;
+    Store.tapRow(kn.id, Store.activePart(Store.project(kn.id)).id);
+    var u2 = KQ.units(Store.project(kn.id), Store.activePart(Store.project(kn.id)));
+    assertEqual(u2 && u2.kind, 'repeat', 'row 2 ("*K2, p3; rep from * to end" on 60): the real repeat groups win');
+    assertEqual(u2 && u2.ends.length, 12, '… 12 repeats of 5');
+    var cr = Store.createProject({ name: 'WKT crochet long', templateId: 'blank' });
+    var crText = 'Rnd 1: 60 sc in ring (60)\nRnd 2: (sc in next 4 st, inc) x12 (72)';
+    Store.importPatternSections(cr.id, [{ name: Store.activePart(cr).name, makeCount: 1, text: crText }], { mode: 'active', text: crText });
+    cr = Store.project(cr.id);
+    assertEqual(KQ.unit(cr), 'stitch', 'crochet: a tap is always one stitch');
+    assertEqual(KQ.units(cr, Store.activePart(cr)), null, 'crochet: no units on a 60-st round');
+    Store.setActiveProject(cr.id);
+    App.render();
+    KQ.tap();
+    assertEqual(Store.activePart(Store.project(cr.id)).stitch, 1, 'crochet: one tap, one stitch');
+
+    /* P8: a pair the reader found, knit both at once after the import */
+    var pp = Store.createProject({ name: 'WKT pair', craft: 'knitting', templateId: 'knit-blank' });
+    var sleeveText = 'Cast on 40 sts.\nRow 1: K to end. (40 sts)\nRow 2: P to end. (40 sts)';
+    Store.importPatternSections(pp.id, [{ name: 'Sleeve', makeCount: 2, text: sleeveText }], { mode: 'parts', text: sleeveText });
+    assertEqual(KQ.bothAtOnce(pp.id, ['Sleeve']), 1, '"Knit both at once" splits the pair after the import');
+    var names = Store.project(pp.id).parts.map(function (q) { return q.name + '×' + q.makeCount; });
+    assertTrue(names.indexOf('Sleeve 1×1') >= 0 && names.indexOf('Sleeve 2×1') >= 0, 'into Sleeve 1 and Sleeve 2', names.join(', '));
+    assertEqual(KQ.bothAtOnce(pp.id, ['Sleeve']), 0, 'never twice');
+    Store.setActiveProject(null);
+    App.render();
+
+    /* E12: a pattern book imports exactly the pattern whose tab is open */
+    var BOOK2 = ['=== PAGE 1 ===', 'Two Little Patterns', 'Plain Hat ..... 2', 'Ribbed Cowl ..... 3',
+      '=== PAGE 2 ===', 'Plain Hat', 'Sizes: 18 (20, 22)"', 'GAUGE 20 sts and 28 rnds = 4" in St st.', 'NEEDLES U.S. size 7 (4.5 mm): 16" circular.',
+      'HAT', 'CO 90 (100, 110) sts. Pm and join in the rnd.', 'Rnd 1: *K1, p1; rep from * around.', 'Rnd 2: Rep Rnd 1.', 'Rnd 3: Knit.',
+      'FINISHING', 'Weave in the hat ends.',
+      '=== PAGE 3 ===', 'Ribbed Cowl', 'Sizes: 24 (30)"', 'GAUGE 22 sts and 30 rnds = 4" in rib.', 'NEEDLES U.S. size 6 (4 mm): 24" circular.',
+      'COWL', 'CO 132 (164) sts. Pm and join in the rnd.', 'Rnd 1: *K2, p2; rep from * around.', 'Rnd 2: Rep Rnd 1.',
+      'FINISHING', 'Block the cowl flat.'].join('\n');
+    var bk = Store.createProject({ name: 'WKT book', craft: 'knitting', templateId: 'knit-blank' });
+    Store.setActiveProject(bk.id);
+    App.render();
+    App.openImportSheet(bk.id, BOOK2);
+    await sleep(250);
+    var isd = function () { var all = d.querySelectorAll('dialog[open]'); return all[all.length - 1]; };
+    var tabsTxt = function () { return Array.prototype.map.call(isd().querySelectorAll('.imp-size-tabs .size-tab'), function (t) { return t.textContent; }); };
+    var chipsTxt = function () { return Array.prototype.map.call(isd().querySelectorAll('.size-chip'), function (c) { return c.textContent; }).join('|'); };
+    var tabs0 = tabsTxt();
+    assertEqual(tabs0.length, 2, 'the book lists both patterns of its contents', tabs0.join(', '));
+    var pickNote = isd().querySelector('[data-book-pick]');
+    assertEqual(pickNote && pickNote.getAttribute('data-book-pick'), 'Plain Hat', 'the first pattern with rows is the one to import');
+    assertTrue(!isd().querySelector('.imp-size-tick'), 'no separate tick in a book: the open tab is the pattern imported');
+    var hatChips = chipsTxt();
+    assertTrue(/18/.test(hatChips) && !/24/.test(hatChips), 'Plain Hat’s own size chips', hatChips);
+    var cowlTab = Array.prototype.filter.call(isd().querySelectorAll('.imp-size-tabs .size-tab'), function (t) { return /Ribbed Cowl/.test(t.textContent); })[0];
+    cowlTab.click();
+    await sleep(120);
+    pickNote = isd().querySelector('[data-book-pick]');
+    assertEqual(pickNote && pickNote.getAttribute('data-book-pick'), 'Ribbed Cowl', 'picking the cowl’s tab makes it the pattern imported');
+    var cowlChips = chipsTxt();
+    assertTrue(/24/.test(cowlChips) && !/18/.test(cowlChips), 'and the size chips are the cowl’s own', cowlChips);
+    var tabStates = Array.prototype.map.call(isd().querySelectorAll('.imp-size-tabs .size-tab'), function (t) { return /the pattern to import/.test(t.getAttribute('aria-label')); });
+    assertEqual(tabStates, [false, true], 'exactly one pattern is marked to import (single choice)');
+    var checkTexts = Array.prototype.map.call(isd().querySelectorAll('.imp-list .imp-check-text, .imp-list .imp-item'), function (x) { return x.textContent; }).join(' ');
+    assertTrue(!/hat ends/i.test(checkTexts), 'no checklist suggestion from the hat’s pages while the cowl is picked');
+    var sizeBtn = isd().querySelector('.size-chip');
+    if (sizeBtn) sizeBtn.click();
+    await sleep(60);
+    var create = isd().querySelector('[data-tour="import-create"]');
+    create.click();
+    await sleep(200);
+    var guard = d.querySelectorAll('dialog[open]');
+    if (guard.length && /anyway/.test(guard[guard.length - 1].textContent)) {
+      Array.prototype.filter.call(guard[guard.length - 1].querySelectorAll('button'), function (b) { return /anyway/.test(b.textContent); })[0].click();
+      await sleep(200);
+    }
+    var bkParts = Store.project(bk.id).parts.map(function (q) { return q.name; });
+    assertTrue(bkParts.some(function (n) { return /cowl/i.test(n); }) && !bkParts.some(function (n) { return /hat/i.test(n); }),
+      'Create parts imports the cowl only, never the first pattern too', bkParts.join(', '));
+    assertTrue(!!(Store.project(bk.id).size && /24/.test(Store.project(bk.id).size.label || '')), 'with the cowl’s size', JSON.stringify(Store.project(bk.id).size));
+    var bpl = w.Knits && typeof w.Knits.bookPatterns === 'function' ? w.Knits.bookPatterns(BOOK2) : null;
+    var cowlMat = bpl && bpl[1] && bpl[1].materials;
+    if (cowlMat && ((cowlMat.yarn || []).length || (cowlMat.needles || []).length)) {
+      assertEqual(JSON.stringify((Store.project(bk.id).craftData || {}).materials), JSON.stringify(cowlMat),
+        'P20: the picked pattern’s own materials are kept with the project');
+    } else {
+      log(true, 'P20: the synthetic book has no materials the reader keeps (nothing to store)');
+    }
+    var single = Store.createProject({ name: 'WKT single', craft: 'knitting', templateId: 'knit-blank' });
+    var singleText = 'MATERIALS\nYarn: Cascade 220, 3 (4, 5) skeins.\nNeedles: US 8 (5 mm) 16" circular.\nRow 1: Knit. (40 sts)';
+    var kept = KQ.keepMaterials(single.id, singleText, null);
+    var expectMat = w.Knits && typeof w.Knits.materials === 'function' ? w.Knits.materials(singleText) : null;
+    if (expectMat && ((expectMat.yarn || []).length || (expectMat.needles || []).length)) {
+      assertTrue(kept && JSON.stringify(Store.project(single.id).craftData.materials) === JSON.stringify(expectMat),
+        'P20: a single pattern keeps Knits.materials of the whole text');
+    } else {
+      assertTrue(!kept, 'P20: nothing read, nothing kept');
+    }
+    var cpm = Store.createProject({ name: 'WKT crochet mat', templateId: 'blank' });
+    assertTrue(!KQ.keepMaterials(cpm.id, singleText, null) && !(Store.project(cpm.id).craftData || {}).materials,
+      'P20: never for crochet');
+    App.closeAllSheets();
+    assertEqual([KQ.pageInside(34, { from: 30, to: 40 }), KQ.pageInside(34, { from: 2, to: 12 }), KQ.pageInside(5, null)], [true, false, true],
+      'charts: only a page inside the picked pattern’s own pages is kept (none outside a book)');
+
+    /* knit-audit 1: a one-size book pattern never takes the book's first pattern's sizes */
+    var BOOK3 = ['=== PAGE 1 ===', 'Two More Patterns', 'Sized Hat ..... 2', 'One-Size Cowl ..... 3',
+      '=== PAGE 2 ===', 'Sized Hat', 'Sizes: 18 (20, 22)"', 'GAUGE 20 sts and 28 rnds = 4" in St st.',
+      'HAT', 'CO 90 (100, 110) sts. Pm and join in the rnd.', 'Rnd 1: *K1, p1; rep from * around.', 'Rnd 2: Rep Rnd 1.',
+      '=== PAGE 3 ===', 'One-Size Cowl', 'GAUGE 22 sts and 30 rnds = 4" in rib.',
+      'COWL', 'CO 132 sts. Pm and join in the rnd.', 'Rnd 1: *K2, p2; rep from * around.', 'Rnd 2: Rep Rnd 1.'].join('\n');
+    var b3 = Store.createProject({ name: 'WKT book3', craft: 'knitting', templateId: 'knit-blank' });
+    Store.setActiveProject(b3.id);
+    App.render();
+    App.openImportSheet(b3.id, BOOK3);
+    await sleep(250);
+    var cowl3 = Array.prototype.filter.call(isd().querySelectorAll('.imp-size-tabs .size-tab'), function (t) { return /Cowl/.test(t.textContent); })[0];
+    if (cowl3) {
+      cowl3.click();
+      await sleep(120);
+      assertEqual(isd().querySelectorAll('.size-chip').length, 0, 'the one-size cowl shows no size chips');
+      isd().querySelector('[data-tour="import-create"]').click();
+      await sleep(250);
+      var gd = d.querySelectorAll('dialog[open]');
+      if (gd.length && /anyway/.test(gd[gd.length - 1].textContent)) {
+        Array.prototype.filter.call(gd[gd.length - 1].querySelectorAll('button'), function (b) { return /anyway/.test(b.textContent); })[0].click();
+        await sleep(200);
+      }
+      var p3 = Store.project(b3.id);
+      assertTrue(!(p3.sizes && p3.sizes.length >= 2) && !p3.size, 'the imported one-size pattern carries no sizes and no size label', JSON.stringify([p3.sizes, p3.size]));
+      App.render();
+      var rl = d.getElementById('row-label');
+      assertTrue(!!rl && !/18|20|22/.test(rl.textContent), 'the counter label shows no other pattern’s size', rl && rl.textContent);
+    } else {
+      log(false, 'the one-size cowl tab is listed');
+    }
+    App.closeAllSheets();
+
+    /* knit-audit 2: a knitting pattern's size groups import ONE group (the open tab) */
+    var GROUPS = ['CHILDREN', 'Sizes: 2 (4, 6) yrs', 'YOKE', 'CO 80 (88, 96) sts.', 'Row 1: Knit. (80 sts)', 'Row 2: Purl. (80 sts)',
+      'LADIES', 'Sizes: S (M, L)', 'YOKE', 'CO 100 (110, 120) sts.', 'Row 1: Knit. (100 sts)', 'Row 2: Purl. (100 sts)'].join('\n');
+    var sg = Store.createProject({ name: 'WKT groups', craft: 'knitting', templateId: 'knit-blank' });
+    Store.setActiveProject(sg.id);
+    App.render();
+    App.openImportSheet(sg.id, GROUPS);
+    await sleep(250);
+    var gtabs = isd().querySelectorAll('.imp-size-tabs .size-tab');
+    if (gtabs.length >= 2) {
+      var marked = Array.prototype.filter.call(gtabs, function (t) { return !/skipped|not imported/.test(t.textContent + ' ' + t.getAttribute('aria-label')); }).length;
+      assertEqual(marked, 1, 'knitting size groups: only the open group is imported');
+      gtabs[1].click();
+      await sleep(120);
+      var gn = isd().querySelector('[data-book-pick]');
+      assertTrue(!!gn && gn.getAttribute('data-book-pick') === gtabs[1].querySelector('.size-tab-name').textContent, 'picking the other group makes it the one imported');
+    } else {
+      log(true, 'knit-audit 2: this synthetic text gives no size groups here (checked by hand on the Sandnes raglan)');
+    }
+    App.closeAllSheets();
+
+    /* knit-audit 3 / E13: a part worked in the round says rounds */
+    var rp = Store.createProject({ name: 'WKT rounds', craft: 'knitting', templateId: 'knit-blank' });
+    var rtext = 'Rnd 1: Knit. (60 sts)\nRnd 2: Knit. (60 sts)\nRnd 3: Knit. (60 sts)';
+    Store.importPatternSections(rp.id, [{ name: 'Leg', makeCount: 1, text: rtext, rowWord: 'rnd' }], { mode: 'parts', text: rtext });
+    rp = Store.project(rp.id);
+    var leg = rp.parts.filter(function (q) { return q.name === 'Leg'; })[0];
+    if (leg && leg.rowWord === 'rnd') {
+      assertEqual(KQ.partWord(rp, leg), 'Round', 'a knitting part read as worked in the round is a Round part');
+      assertEqual(KQ.untilChip({ kind: 'rows', rows: 5 }, rp, leg), '↕ 5 rounds', 'the until chip counts rounds');
+      assertEqual(KQ.untilChip({ kind: 'length', value: 2, unit: 'in', rows: 9 }, rp, leg), '📏 2 in ≈ 9 rounds', 'the length chip too');
+      Store.setActiveProject(rp.id);
+      Store.setActivePart && Store.setActivePart(rp.id, leg.id);
+      App.render();
+      var lbl = (d.getElementById('row-label') || {}).textContent || '';
+      assertTrue(/ROUND|RND/.test(lbl) && !/\bROW\b/.test(lbl), 'the counter label says ROUND for it', lbl);
+    } else {
+      log(true, 'E13: the store did not keep rowWord on this import (store side)');
+    }
+    var crp = Store.createProject({ name: 'WKT crochet rows', templateId: 'blank' });
+    assertEqual(KQ.partWord(crp, crp.parts[0]), 'Row', 'crochet: a rows project still says Row');
+
+    /* knit-charts: picture charts in the background scan, cancellable, never on a text-only import */
+    var keys = KQ.chartKeys();
+    assertTrue(['kind', 'confidence', 'reasons', 'calib', 'colour', 'imageBox', 'rowNosRead'].every(function (k) { return keys.indexOf(k) >= 0; }),
+      'the chart keys keep a picture chart’s kind, confidence, reasons, calibration, colour, image box and read row numbers');
+    var KCw = w.KnitChart, scanCalls = [], origScan = KCw && KCw.scan;
+    if (KCw) KCw.scan = function (h, o) { scanCalls.push(o); return new Promise(function () {}); };
+    var t0s = w.performance.now();
+    var started = KQ.attachWith(rp.id, null);
+    var textMs = w.performance.now() - t0s;
+    assertTrue(started === false && scanCalls.length === 0, 'a text-only import starts no chart scan');
+    assertTrue(textMs < 5, 'and costs nothing (' + textMs.toFixed(2) + ' ms)');
+    var fakeH = { renderPage: function () { return Promise.reject(new Error('no')); } };
+    var t1s = w.performance.now();
+    assertTrue(KQ.attachWith(rp.id, fakeH) === true, 'a PDF import starts the background scan');
+    var callMs = w.performance.now() - t1s;
+    assertEqual(scanCalls.length, 0, 'the scan does not start on the import’s own path');
+    assertTrue(callMs < 5, 'the import returns at once (' + callMs.toFixed(2) + ' ms)');
+    await sleep(120);
+    assertEqual(scanCalls.length, 1, 'it starts just after');
+    assertTrue(scanCalls[0] && scanCalls[0].pictures === true && scanCalls[0].signal && scanCalls[0].signal.cancelled === false,
+      'with pictures: true and a live signal');
+    var firstSig = scanCalls[0] && scanCalls[0].signal;
+    KQ.attachWith(rp.id, fakeH);
+    assertTrue(firstSig && firstSig.cancelled === true, 'a newer import cancels the scan in flight');
+    await sleep(120);
+    if (KCw) KCw.scan = origScan;
+
+    /* knit-audit 4: the project name */
+    assertEqual(KQ.projectName('', 'knit-patons-boyfriend-cable'), 'Patons Boyfriend Cable', 'no title: the file name, tidied');
+    assertEqual(KQ.projectName('', 'knit-cascade-basic-socks.pdf'), 'Cascade Basic Socks', '… without its extension');
+    var titled = 'BOYFRIEND’S CABLE KNIT PULLOVER PAK0129-029645M | March 16, 2023\nRow 1: Knit. (40 sts)';
+    var tt = w.Knits && w.Knits.title ? w.Knits.title(titled) : null;
+    if (tt) assertEqual(KQ.projectName(titled, 'knit-patons-boyfriend-cable'), tt, 'the pattern’s own title wins: ' + tt);
+
+    /* the boot-time page-image sweep never touches another store's images */
+    var SQ = App.__sweepQa;
+    var otherKey = 'stitchkeeper-wavek-sweep-guard';
+    var realId = 'wktreal' + Date.now().toString(36);
+    var blobKey = 'p:' + realId + ':chartpage:1';
+    try {
+      localStorage.setItem(otherKey, JSON.stringify({ projects: [{ id: realId, name: 'A real project' }] }));
+      var putOk = w.BlobStore ? await w.BlobStore.put(blobKey, 'page') : false;
+      assertTrue(SQ.otherIds().indexOf(realId) >= 0, 'the sweep sees the projects of every other store key on the device');
+      assertTrue(SQ.liveIds().indexOf(realId) >= 0, '… and keeps them alive');
+      assertTrue(SQ.bootKey() && SQ.bootKey() !== Store.KEY, 'this frame switched store keys after boot');
+      var sw = await SQ.run();
+      assertEqual(sw && sw.skipped, 'key changed', 'after Store.__setKeyForTests the sweep does not run at all');
+      if (putOk) {
+        var still = await w.BlobStore.get(blobKey);
+        assertTrue(!!still, 'a real user’s page image is still there');
+      }
+    } finally {
+      try { localStorage.removeItem(otherKey); } catch (e) { /* ignore */ }
+      if (w.BlobStore) await w.BlobStore.delete(blobKey);
+    }
+
+    /* crochet still opens its working mode through the engine */
+    var cp = Store.createProject({ name: 'WKT crochet' });
+    Store.setActiveProject(cp.id);
+    App.render();
+    var three = d.getElementById('stitch-3d');
+    if (three) {
+      three.click();
+      await sleep(60);
+      assertTrue(d.getElementById('screen-project').classList.contains('work-mode'), 'crochet: Work in 3D opens the working mode');
+      assertTrue(!!d.getElementById('work-hud') && !!d.getElementById('work-panel'), 'crochet: wave I’s #work-hud and #work-panel ids are kept');
+      var labels = Array.prototype.map.call(d.querySelectorAll('#work-hud .work-btns .work-btn'), function (b) { return b.getAttribute('aria-label'); });
+      assertEqual(labels.slice(0, 2), ['Remove one stitch', 'Undo last action'], 'crochet: −1 and Undo on the left, as in wave I');
+      key(w, 'Escape');
+      await sleep(40);
+      assertTrue(!d.getElementById('screen-project').classList.contains('work-mode'), 'crochet: Escape closes it');
+      assertEqual(d.activeElement && d.activeElement.id, 'stitch-3d', 'crochet: focus returns to Work in 3D');
+    } else {
+      log(true, 'crochet: no live 3D here (no WebGL in this frame): the working-mode button is not offered');
+    }
+    Store.setActiveProject(null);
+    App.render();
+  }
 })();
 </script>
 </body>

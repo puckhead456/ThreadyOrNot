@@ -3070,7 +3070,78 @@
       bendRot(d.ux, d.uz, d.psi, x, y, z, _w);
       x = _w[0] + d.tx; y = _w[1] + d.ty; z = _w[2] + d.tz;
     }
+    /* wave K (K1): a piece of a whole garment — a flat piece bent round the
+       body, a flat sleeve rolled into a tube, then set in place. Absent on
+       every single-piece layout, so nothing above changes. */
+    if (w.wrap || w.roll) {
+      sheetWrap(w.wrap || w.roll, !!w.roll, band, x, y, z, _w);
+      x = _w[0]; y = _w[1]; z = _w[2];
+    }
+    if (w.place) {
+      var P = w.place.m, T = w.place.t;
+      var X = P[0] * x + P[1] * y + P[2] * z, Y = P[3] * x + P[4] * y + P[5] * z, Z = P[6] * x + P[7] * y + P[8] * z;
+      x = X + T[0]; y = Y + T[1]; z = Z + T[2];
+    }
     out[0] = x; out[1] = y; out[2] = z;
+    return out;
+  }
+
+  /* An ellipse of half-perimeter 1 with depth/width ELLIPSE_K (a body's
+     cross-section), and its arc-length table, so a flat piece bent onto it
+     keeps every stitch its own width. */
+  var ELLIPSE_K = 0.62;
+  var _ell = null;
+  function ellipseTable() {
+    if (_ell) return _ell;
+    var N = 128, a = 1, b = ELLIPSE_K, th = [], s = [0], i, acc = 0;
+    for (i = 0; i <= N; i++) th.push(-Math.PI / 2 + Math.PI * i / N);
+    for (i = 1; i <= N; i++) {
+      var x0 = a * Math.sin(th[i - 1]), z0 = b * Math.cos(th[i - 1]);
+      var x1 = a * Math.sin(th[i]), z1 = b * Math.cos(th[i]);
+      acc += Math.sqrt((x1 - x0) * (x1 - x0) + (z1 - z0) * (z1 - z0));
+      s.push(acc);
+    }
+    _ell = { th: th, s: s, half: acc, a: a / acc, b: b / acc };
+    return _ell;
+  }
+  /** Parametric angle at arc fraction t of the half ellipse (t -0.5…0.5). */
+  function ellipseTheta(t) {
+    var E = ellipseTable(), want = (clamp(t, -0.5, 0.5) + 0.5) * E.half, s = E.s, lo = 0, hi = s.length - 1;
+    while (hi - lo > 1) { var mid = (lo + hi) >> 1; if (s[mid] <= want) lo = mid; else hi = mid; }
+    var f = s[hi] > s[lo] ? (want - s[lo]) / (s[hi] - s[lo]) : 0;
+    return E.th[lo] + f * (E.th[hi] - E.th[lo]);
+  }
+  /**
+   * A rows sheet (the renderer lays a row on a shallow cylinder of radius
+   * band.Rc behind the sheet) bent onto the body or rolled into a tube.
+   * `s` is the arc position along the row, `rho` the distance off the sheet.
+   *   wrap {side: +1 front | -1 back, yu, Wu, scu}: half an elliptic cylinder
+   *     whose half-perimeter is the row's own width below the underarm (so
+   *     front and back meet at the side seams row by row) and the underarm
+   *     row's above it (so the armhole opens).
+   *   roll {phase}: a tube whose circumference is the row's own width.
+   */
+  function sheetWrap(o, roll, band, x, y, z, out) {
+    var Rc = band && band.Rc > 0 ? band.Rc : 0;
+    var s, rho;
+    if (Rc > 0) { s = Rc * Math.atan2(x, z + Rc); rho = Math.sqrt(x * x + (z + Rc) * (z + Rc)) - Rc; }
+    else { s = x; rho = z; }
+    var W = band && band.width > 0 ? band.width : (o.Wu || 1);
+    var sc = band && band.x0 != null && band.width > 0 ? band.x0 + band.width / 2 : 0;
+    if (roll) {
+      var r = W / TAU, th = TAU * (s - sc) / W + (o.phase || 0), rr = r + rho;
+      out[0] = rr * Math.sin(th); out[1] = y; out[2] = rr * Math.cos(th);
+      return out;
+    }
+    var yMid = band ? (band.yTop + band.yBot) / 2 : y;
+    if (o.Wu > 0 && yMid > o.yu) { W = o.Wu; }
+    var E = ellipseTable(), A = E.a * W, B = E.b * W;
+    var t = (s - sc) / W, thE = ellipseTheta(t);
+    var ex = A * Math.sin(thE), ez = B * Math.cos(thE);
+    var nx = B * Math.sin(thE), nz = A * Math.cos(thE), nl = Math.sqrt(nx * nx + nz * nz) || 1;
+    var px = ex + rho * nx / nl, pz = ez + rho * nz / nl;
+    var sg = o.side < 0 ? -1 : 1;
+    out[0] = sg * px; out[1] = y; out[2] = sg * pz;
     return out;
   }
 
@@ -3506,6 +3577,627 @@
     cls.knit.extentHeight = box.y1 - box.y0;
   }
 
+  /* ------------------------------------- 7d. follow on the bend (1.8.0, wave K, K4) */
+
+  /* Follow mode turned a bent sock about the LEG's axis, so on the foot the
+     stitch being made never came round to the front. These give the renderer
+     the local frame of the piece at the round being worked (the linear part
+     of `warpPoint` there: the bends and the toe-up turn), so it can stand the
+     working segment upright and turn about that instead. */
+
+  /** Row-major 3×3 of bendRot(ux, uz, a). */
+  function bendMat(ux, uz, a, out) {
+    var e = [[1, 0, 0], [0, 1, 0], [0, 0, 1]], r = [0, 0, 0];
+    for (var c = 0; c < 3; c++) {
+      bendRot(ux, uz, a, e[c][0], e[c][1], e[c][2], r);
+      out[c] = r[0]; out[3 + c] = r[1]; out[6 + c] = r[2];
+    }
+    return out;
+  }
+  function mul3(a, b, out) {
+    var o = out || new Array(9), t = new Array(9);
+    for (var i = 0; i < 3; i++) {
+      for (var j = 0; j < 3; j++) {
+        t[i * 3 + j] = a[i * 3] * b[j] + a[i * 3 + 1] * b[3 + j] + a[i * 3 + 2] * b[6 + j];
+      }
+    }
+    for (var k = 0; k < 9; k++) o[k] = t[k];
+    return o;
+  }
+
+  /**
+   * The warp's rotation at walked height `y` (row-major 3×3): where the
+   * walked frame's axes point on the finished piece there. Identity for a
+   * piece with no bend. Same order as `warpPoint`: the lowest bend first,
+   * then the ones above it, then the toe-up turn.
+   */
+  function frameAt(w, y, out) {
+    var m = out || new Array(9);
+    m[0] = 1; m[1] = 0; m[2] = 0; m[3] = 0; m[4] = 1; m[5] = 0; m[6] = 0; m[7] = 0; m[8] = 1;
+    if (!w) return m;
+    var b, k, r = new Array(9);
+    if (w.bends && w.bends.length) {
+      for (k = w.bends.length - 1; k >= 0; k--) {
+        b = w.bends[k];
+        if (y > b.y0) continue;
+        var th = y >= b.y1 ? b.phi * (b.y0 - y) / Math.max(b.y0 - b.y1, 1e-9) : b.phi;
+        bendMat(b.ux, b.uz, th, r);
+        mul3(r, m, m);
+      }
+    }
+    if (w.disp) {
+      bendMat(w.disp.ux, w.disp.uz, w.disp.psi, r);
+      mul3(r, m, m);
+    }
+    return m;
+  }
+
+  /**
+   * Band i's local frame, for follow mode: `m` (frameAt its middle), the
+   * walked height `y`, the point `c` on the tube's axis there (warped), and
+   * `deg`, how far the local axis is from the walked one's direction on the
+   * finished piece. null when the piece has no bend (nothing to tilt).
+   */
+  function followFrame(cls, i) {
+    var w = cls && cls.warp;
+    if (!w || !w.bends || !w.bends.length || cls.mode === 'rows') return null;
+    var b = cls.bands && cls.bands[i];
+    if (!b) return null;
+    var y = (b.yTop + b.yBot) / 2;
+    var m = frameAt(w, y);
+    var c = warpPoint(w, null, 0, y, 0, [0, 0, 0]);
+    var dy = clamp(m[4], -1, 1);
+    return { m: m, y: y, c: c, deg: Math.acos(dy) * 180 / Math.PI };
+  }
+
+  /**
+   * Band extents as seen in another frame: every sample point `warpPoint`
+   * gives is moved by -c (when given), then by the rotation `m`. The same
+   * samples as the layout's own extents, so a tilted fit frames exactly what
+   * an untilted one would.
+   */
+  function extentsIn(cls, bands, m, c) {
+    var w = cls && cls.warp, out = [], p = [0, 0, 0], i, k, t;
+    var cx = c ? c[0] : 0, cy = c ? c[1] : 0, cz = c ? c[2] : 0;
+    bands = bands || (cls && cls.bands) || [];
+    for (i = 0; i < bands.length; i++) {
+      var b = bands[i];
+      out.push(null);
+      if (!b) continue;
+      var rad = 0, ymin = Infinity, ymax = -Infinity;
+      for (t = 0; t < 2; t++) {
+        var rr = t ? b.rBot : b.rTop, yy = t ? b.yBot : b.yTop;
+        for (k = 0; k < 16; k++) {
+          var th = k / 16 * TAU, mul = b.prof ? b.prof(th, t) : 1;
+          warpPoint(w, b, rr * mul * Math.cos(th), yy, rr * mul * Math.sin(th), p);
+          var x = p[0] - cx, y = p[1] - cy, z = p[2] - cz;
+          var X = m[0] * x + m[1] * y + m[2] * z, Y = m[3] * x + m[4] * y + m[5] * z, Z = m[6] * x + m[7] * y + m[8] * z;
+          rad = Math.max(rad, Math.sqrt(X * X + Z * Z));
+          ymin = Math.min(ymin, Y); ymax = Math.max(ymax, Y);
+        }
+      }
+      out[i] = { rad: rad, ymin: ymin, ymax: ymax };
+    }
+    return out;
+  }
+
+  /* ------------------------- 7e. stranded colour from the chart (1.8.0, wave K, K3) */
+
+  /* A colourwork chart row (KnitChart.rowCells: tokens in knitting order,
+     each with `color` — the key's label, "MC", "CC1" — `produces`, and
+     `unknown` for a `?n` cell) laid onto a round's stitch records by repeat.
+     The chart row's produced stitches repeat round the round from `offset`.
+     A cell the reader could not match, or a label with no yarn colour,
+     keeps the main colour: never a guessed colour. Pure. */
+  function paletteHex(pal, label) {
+    if (!pal || label == null) return null;
+    var s = String(label), v = pal[s];
+    if (v == null) v = pal[s.toUpperCase()];
+    if (v == null) v = pal[s.toLowerCase()];
+    return typeof v === 'string' && /^#[0-9a-f]{3,8}$/i.test(v.trim()) ? v.trim() : null;
+  }
+  function chartColors(stitches, cells, opts) {
+    var o = opts || {}, pal = o.palette || null;
+    var list = arr(stitches) || [], toks = arr(cells) || [];
+    var seq = [], i, k;
+    for (i = 0; i < toks.length; i++) {
+      var t = toks[i] || {};
+      if (t.skip) continue;
+      var p = isNum(t.produces) ? Math.max(0, Math.round(t.produces)) : 1;
+      for (k = 0; k < p; k++) seq.push({ label: t.unknown ? null : (t.color == null ? null : String(t.color)), unknown: !!t.unknown });
+    }
+    var out = { colors: [], labels: [], unknown: 0, unmatched: 0, partial: false, width: seq.length };
+    var off = isNum(o.offset) ? Math.round(o.offset) : 0, slot = 0;
+    for (i = 0; i < list.length; i++) {
+      var rec = list[i] || {};
+      var span = knitSpan(rec);
+      var cell = seq.length ? seq[(((slot + off) % seq.length) + seq.length) % seq.length] : null;
+      slot += rec.t === 'bo' ? 1 : span;
+      var hex = null, lab = cell ? cell.label : null;
+      if (cell && cell.unknown) out.unknown++;
+      else if (lab != null) {
+        hex = paletteHex(pal, lab);
+        if (!hex && /^mc$/i.test(lab) && typeof o.main === 'string') hex = o.main;
+        if (!hex) out.unmatched++;
+      }
+      out.colors.push(hex);
+      out.labels.push(lab);
+    }
+    out.partial = out.unknown > 0;
+    return out;
+  }
+  /** A copy of `round` whose stitch records carry the chart's colours as `c`
+      (an unknown cell keeps what the record had); `chartPartial` when some
+      cells were unread. The input is never changed. */
+  function applyChart(round, cells, opts) {
+    var r = round || {}, c = {}, k;
+    for (k in r) if (Object.prototype.hasOwnProperty.call(r, k)) c[k] = r[k];
+    var res = chartColors(r.stitches, cells, opts);
+    var src = arr(r.stitches) || [], st = new Array(src.length), any = 0;
+    for (var i = 0; i < src.length; i++) {
+      var s = src[i] || {}, d = {};
+      for (k in s) if (Object.prototype.hasOwnProperty.call(s, k)) d[k] = s[k];
+      if (res.colors[i]) { d.c = res.colors[i]; any++; }
+      st[i] = d;
+    }
+    c.stitches = st;
+    c.chartColored = any;
+    if (res.partial) c.chartPartial = true;
+    return c;
+  }
+
+  /* ------------------------------------ 7f. the whole piece (1.8.0, wave K, K1) */
+
+  /* A garment is drawn whole only when the app can say how its pieces go
+     together: every part's role read from its name, and a construction it
+     knows (a sock's sections, a sweater of flat set-in or drop-shoulder
+     pieces). Anything else — an unnamed "Part 3", a raglan whose body and
+     sleeves it cannot place, a Front a quarter wider than the Back — is the
+     PIECES BOARD: every part flat, to scale, side by side. Never an invented
+     garment. */
+  var ROLE_RULES = [
+    ['neckband', /\bneck\s*-?band\b|\bneck(line)?\s+(edging|border|rib(bing)?)\b|\bcollar\b|\bneck\s+trim\b/],
+    ['heel-flap', /\bheel\s*flap\b/],
+    ['heel-turn', /\bturn(ing)?\s+(the\s+)?heel\b|\bheel\s+turn\b/],
+    ['heel-flap', /\bheel\b/],
+    ['gusset', /\bgusset/],
+    ['toe', /\btoes?\b/],
+    ['foot', /\bfoot\b|\binstep\b|\bsole\b/],
+    ['leg', /\bleg\b/],
+    ['cuff', /\bcuff\b|\bribbing\b/],
+    ['left-front', /\bleft\s+front\b/],
+    ['right-front', /\bright\s+front\b/],
+    ['sleeve', /\bsleeves?\b/],
+    ['yoke', /\byoke\b/],
+    ['front', /\bfront\b/],
+    ['back', /\bback\b/],
+    ['body', /\bbody\b/]
+  ];
+  var SOCK_ORDER = ['cuff', 'leg', 'heel-flap', 'heel-turn', 'gusset', 'foot', 'toe'];
+  var SWEATER_ROLES = { back: 1, front: 1, 'left-front': 1, 'right-front': 1, sleeve: 1, neckband: 1 };
+  var TILE_TOL = 0.25;          // a Front more than 25% off the Back does not tile
+  var SLEEVE_ANGLE = 70 * Math.PI / 180;   // a sleeve set in at 70° from the body's vertical
+  var BOARD_GAP = 4;            // stitches between pieces on the board
+
+  /** A part's role from its name, or null. */
+  function roleOf(name) {
+    var s = String(name || '').toLowerCase().replace(/\(.*?\)/g, ' ').replace(/[^a-z\s-]/g, ' ').replace(/\s+/g, ' ').trim();
+    if (!s) return null;
+    for (var i = 0; i < ROLE_RULES.length; i++) if (ROLE_RULES[i][1].test(s)) return ROLE_RULES[i][0];
+    return null;
+  }
+
+  function partRole(p) { return (p && p.role) || roleOf(p && p.name); }
+
+  /** { kind: 'sock' | 'sweater-flat' | 'board', reason } for a list of parts. */
+  function construction(parts) {
+    var list = arr(parts) || [];
+    if (!list.length) return { kind: 'board', reason: 'no parts' };
+    var roles = list.map(partRole), i;
+    var unknown = [];
+    for (i = 0; i < list.length; i++) if (!roles[i]) unknown.push(list[i].name || ('Part ' + (i + 1)));
+    if (unknown.length) return { kind: 'board', reason: 'cannot tell what ' + unknown.join(', ') + (unknown.length > 1 ? ' are' : ' is') };
+    var sock = roles.every(function (r) { return SOCK_ORDER.indexOf(r) >= 0; });
+    if (sock && list.length >= 2) {
+      var heel = roles.indexOf('heel-flap') >= 0 || roles.indexOf('heel-turn') >= 0;
+      var lower = roles.indexOf('foot') >= 0 || roles.indexOf('toe') >= 0 || roles.indexOf('gusset') >= 0;
+      var upper = roles.indexOf('leg') >= 0 || roles.indexOf('cuff') >= 0;
+      if (heel && (lower || upper)) return { kind: 'sock', reason: 'sock sections' };
+      return { kind: 'board', reason: 'sock sections without a heel' };
+    }
+    var sw = roles.every(function (r) { return SWEATER_ROLES[r] === 1; });
+    if (sw) {
+      var hasBack = roles.indexOf('back') >= 0;
+      var hasFront = roles.indexOf('front') >= 0 || (roles.indexOf('left-front') >= 0 && roles.indexOf('right-front') >= 0);
+      var flatOK = true;
+      for (i = 0; i < list.length; i++) {
+        var md = list[i].model;
+        if (roles[i] !== 'neckband' && (!md || md.mode !== 'rows')) flatOK = false;
+      }
+      if (hasBack && hasFront && flatOK) return { kind: 'sweater-flat', reason: 'back, front and sleeves worked flat' };
+      if (!flatOK) return { kind: 'board', reason: 'pieces worked in the round are not put together yet' };
+      return { kind: 'board', reason: 'needs a back and a front' };
+    }
+    return { kind: 'board', reason: 'this construction is not put together yet' };
+  }
+
+  function copyRound(r) {
+    var c = {}, k;
+    for (k in r) if (Object.prototype.hasOwnProperty.call(r, k)) c[k] = r[k];
+    return c;
+  }
+  /* A part's rounds as its state draws them: a finished part solid, a part
+     not started a ghost, the part being worked as its own model says. */
+  function stateRounds(p) {
+    var md = p.model || {}, rs = arr(md.rounds) || [], out = [], st = p.state || 'todo';
+    for (var i = 0; i < rs.length; i++) {
+      if (!rs[i]) continue;
+      var c = copyRound(rs[i]);
+      var cnt = Math.max(0, c.count | 0);
+      if (st === 'done') { c.ghost = false; c.done = cnt; }
+      else if (st !== 'working') { c.ghost = true; c.done = 0; }
+      out.push(c);
+    }
+    return out;
+  }
+  function workingIndex(p, nRounds) {
+    var md = p.model || {};
+    var cur = isNum(md.current) ? md.current | 0 : nRounds - 1;
+    return clamp(cur, 0, Math.max(0, nRounds - 1));
+  }
+
+  /**
+   * A sock imported as its sections, chained into ONE model in work order
+   * (top-down: cuff, leg, heel flap, turn, gusset, foot, toe; toe-up the
+   * other way round, when the toe comes first in the parts' own order), so
+   * the heel bend the single-part L already draws makes it one sock, and
+   * follow mode (K4) works on it unchanged. Flat sections keep or get their
+   * side, so their rows read as worked flat. null when nothing to chain.
+   */
+  function chainSock(parts) {
+    var list = (arr(parts) || []).filter(function (p) { return p && p.model && arr(p.model.rounds) && SOCK_ORDER.indexOf(partRole(p)) >= 0; });
+    if (!list.length) return null;
+    var pos = function (p) { return SOCK_ORDER.indexOf(partRole(p)); };
+    var firstToe = -1, firstTop = -1;
+    list.forEach(function (p, i) {
+      var r = partRole(p);
+      if (r === 'toe' && firstToe < 0) firstToe = i;
+      if ((r === 'cuff' || r === 'leg') && firstTop < 0) firstTop = i;
+    });
+    var toeUp = firstToe >= 0 && (firstTop < 0 || firstToe < firstTop);
+    var ord = list.map(function (p, i) { return { p: p, i: i }; });
+    ord.sort(function (a, b) { var d = toeUp ? pos(b.p) - pos(a.p) : pos(a.p) - pos(b.p); return d || a.i - b.i; });
+    var rounds = [], sections = [], current = -1, anyWorking = false, allDone = true, graft = false, closedStart = false;
+    ord.forEach(function (o, k) {
+      var p = o.p, rs = stateRounds(p), from = rounds.length;
+      var flat = p.model.mode === 'rows';
+      for (var i = 0; i < rs.length; i++) {
+        var r = rs[i];
+        if (flat && r.side !== 'rs' && r.side !== 'ws') r.side = i % 2 ? 'ws' : 'rs';
+        r.part = p.id;
+        rounds.push(r);
+      }
+      if (p.state === 'working') { anyWorking = true; current = from + workingIndex(p, rs.length); }
+      if (p.state !== 'done') allDone = false;
+      var sh = p.model.shape || {};
+      if (sh.graft === true) graft = true;
+      if (k === 0 && sh.closedStart === true) closedStart = true;
+      sections.push({ id: p.id, name: p.name || '', role: partRole(p), from: from, to: rounds.length - 1, state: p.state || 'todo' });
+    });
+    if (!rounds.length) return null;
+    if (!anyWorking) {
+      current = rounds.length - 1;
+      if (!allDone) {
+        // nothing being worked: point at the first round not done
+        for (var q = 0; q < rounds.length; q++) if (rounds[q].ghost) { current = Math.max(0, q - 1); break; }
+      }
+    }
+    for (var j = 0; j < rounds.length; j++) rounds[j].row = j + 1;
+    var m0 = ord[0].p.model;
+    var shape = { start: closedStart ? 'magic-ring' : 'unknown' };
+    if (graft) shape.graft = true;
+    if (closedStart) shape.closedStart = true;
+    return {
+      mode: 'rounds', craft: 'knitting', rounds: rounds, current: current,
+      defaultColor: m0.defaultColor || null, shape: shape,
+      window: { first: 1, total: rounds.length }, deviation: null,
+      finished: allDone, toeUp: toeUp, sections: sections
+    };
+  }
+
+  /* -- the sweater: flat pieces bent onto the body -------------------------- */
+
+  function rowWidths(L) {
+    var bs = L.bands || [], out = [];
+    for (var i = 0; i < bs.length; i++) out.push(bs[i] && bs[i].width > 0 ? bs[i].width : 0);
+    return out;
+  }
+  /** The row the armhole starts at: the first row past 30% of the piece
+      that is 4% narrower than every row below it and stays so. */
+  function underarmOf(L) {
+    var w = rowWidths(L), n = w.length, mx = 0;
+    for (var i = 0; i < n; i++) {
+      if (i > 0.3 * n && w[i] > 0 && w[i] < 0.96 * mx) {
+        var stays = true;
+        for (var k = i; k < Math.min(n, i + 3); k++) if (w[k] >= 0.96 * mx) stays = false;
+        if (stays) return { index: i, width: mx };
+      }
+      if (w[i] > mx) mx = w[i];
+    }
+    return { index: n, width: mx };
+  }
+  function bandYRange(L, from, to) {
+    var y0 = Infinity, y1 = -Infinity, bs = L.bands || [];
+    for (var i = Math.max(0, from); i <= Math.min(bs.length - 1, to); i++) {
+      if (!bs[i]) continue;
+      y0 = Math.min(y0, bs[i].yTop, bs[i].yBot); y1 = Math.max(y1, bs[i].yTop, bs[i].yBot);
+    }
+    return { y0: y0, y1: y1 };
+  }
+  function rotZ(a) { var c = Math.cos(a), s = Math.sin(a); return [c, -s, 0, s, c, 0, 0, 0, 1]; }
+  function mergeWarp(base, extra) {
+    var w = { bends: null, disp: null, chevron: null, field: false, yoke: null };
+    var k;
+    if (base) for (k in base) if (Object.prototype.hasOwnProperty.call(base, k)) w[k] = base[k];
+    for (k in extra) if (Object.prototype.hasOwnProperty.call(extra, k)) w[k] = extra[k];
+    return w;
+  }
+  /** Band extents through a piece's whole warp (both modes), for the fit. */
+  function pieceExtents(L) {
+    var w = L.warp, bs = L.bands || [], p = [0, 0, 0], sig = 0, i, k, t;
+    if (w && w.place) sig += w.place.t[0] * 31 + w.place.t[1] * 17 + w.place.m[0] * 1000 + w.place.m[1] * 777;
+    if (w && w.wrap) sig += 5003 * (w.wrap.side || 1) + (w.wrap.Wu || 0) * 13;
+    if (w && w.roll) sig += 7001 + (w.roll.phase || 0) * 100;
+    var box = { x0: Infinity, x1: -Infinity, y0: Infinity, y1: -Infinity, z0: Infinity, z1: -Infinity };
+    function take(b, x, y, z) {
+      warpPoint(w, b, x, y, z, p);
+      if (p[0] < box.x0) box.x0 = p[0]; if (p[0] > box.x1) box.x1 = p[0];
+      if (p[1] < box.y0) box.y0 = p[1]; if (p[1] > box.y1) box.y1 = p[1];
+      if (p[2] < box.z0) box.z0 = p[2]; if (p[2] > box.z1) box.z1 = p[2];
+    }
+    for (i = 0; i < bs.length; i++) {
+      var b = bs[i];
+      if (!b) continue;
+      var rad = 0, ymin = Infinity, ymax = -Infinity;
+      for (t = 0; t < 2; t++) {
+        for (k = 0; k < 16; k++) {
+          if (L.mode === 'rows') {
+            var Rc = b.Rc > 0 ? b.Rc : 1e6, sx = b.x0 + b.width * k / 15;
+            take(b, Rc * Math.sin(sx / Rc), t ? b.yTop : b.yBot, Rc * Math.cos(sx / Rc) - Rc);
+          } else {
+            var rr = t ? b.rBot : b.rTop, yy = t ? b.yBot : b.yTop, th = k / 16 * TAU, mul = b.prof ? b.prof(th, t) : 1;
+            take(b, rr * mul * Math.cos(th), yy, rr * mul * Math.sin(th));
+          }
+          rad = Math.max(rad, Math.sqrt(p[0] * p[0] + p[2] * p[2]));
+          ymin = Math.min(ymin, p[1]); ymax = Math.max(ymax, p[1]);
+        }
+      }
+      b.ext = { rad: rad, ymin: ymin, ymax: ymax };
+      b.warpSig = Math.round(sig + (b.warpSig || 0));
+    }
+    return box;
+  }
+  /** A part's layout with extra warp terms (wrap / roll / place), its band
+      extents measured through all of it. */
+  function pieceLayout(model, extra) {
+    var L = layout(model);
+    L.warp = mergeWarp(L.warp, extra || {});
+    L.pieceBox = pieceExtents(L);
+    return L;
+  }
+  /* The point on a sheet at arc position s, row band b, through warp w. */
+  function sheetPoint(L, i, s, out) {
+    var b = L.bands[i], Rc = b.Rc > 0 ? b.Rc : 1e6;
+    return warpPoint(L.warp, b, Rc * Math.sin(s / Rc), (b.yTop + b.yBot) / 2, Rc * Math.cos(s / Rc) - Rc, out || [0, 0, 0]);
+  }
+  function dist3(a, b) { var x = a[0] - b[0], y = a[1] - b[1], z = a[2] - b[2]; return Math.sqrt(x * x + y * y + z * z); }
+
+  function sweaterPieces(parts) {
+    var byRole = {}, i;
+    parts.forEach(function (p) { var r = partRole(p); (byRole[r] = byRole[r] || []).push(p); });
+    var back = byRole.back[0];
+    var fronts = byRole.front ? [byRole.front[0]] : [byRole['right-front'][0], byRole['left-front'][0]];
+    var Lb = layout(back.model), ub = underarmOf(Lb);
+    var Wu = ub.width;
+    // a front is the back's width, or two halves of it
+    var Wf = 0, Lf = fronts.map(function (p) { return layout(p.model); });
+    Lf.forEach(function (L) { Wf += underarmOf(L).width; });
+    if (!(Wu > 0) || Math.abs(Wf - Wu) > TILE_TOL * Wu) return { fail: 'the front (' + Math.round(Wf) + ' sts) and the back (' + Math.round(Wu) + ' sts) do not go round one body' };
+    var hb = bandYRange(Lb, 0, Lb.bands.length - 1), yTop = hb.y1;
+    var yu = ub.index > 0 ? bandYRange(Lb, ub.index - 1, ub.index - 1).y1 : hb.y1;
+    for (i = 0; i < Lf.length; i++) {
+      var hf = bandYRange(Lf[i], 0, Lf[i].bands.length - 1);
+      if (Math.abs((hf.y1 - hf.y0) - (hb.y1 - hb.y0)) > TILE_TOL * (hb.y1 - hb.y0)) return { fail: 'the front and the back are not the same length' };
+      yTop = Math.max(yTop, hf.y1);
+    }
+    var out = [];
+    out.push({ part: back, extra: { wrap: { side: -1, yu: yu, Wu: Wu } } });
+    // two fronts (a cardigan) would each be a quarter of the ellipse: not proved yet
+    if (fronts.length !== 1) return { fail: 'cardigan fronts are not put together yet' };
+    out.push({ part: fronts[0], extra: { wrap: { side: 1, yu: yu, Wu: Wu } } });
+    // the body's underarm points, where the sleeves are set in
+    var E = ellipseTable(), aU = E.a * Wu;
+    var sleeves = [];
+    (byRole.sleeve || []).forEach(function (p) {
+      var times = Math.max(1, Math.min(2, (p.makeCount | 0) || 1));
+      for (var t = 0; t < times; t++) sleeves.push(p);
+    });
+    if (sleeves.length > 2) sleeves.length = 2;
+    sleeves.forEach(function (p, k) {
+      var sgn = k === 0 ? 1 : -1;    // right sleeve at +x, then the left
+      var Ls = layout(p.model), us = underarmOf(Ls);
+      var iu = Math.max(0, Math.min(Ls.bands.length - 1, us.index - 1));
+      var bu = Ls.bands[iu], r = (bu.width || us.width) / TAU, ys = bu.yTop;
+      var beta = sgn * SLEEVE_ANGLE;
+      var m = rotZ(beta);
+      var e = [sgn * Math.cos(SLEEVE_ANGLE), Math.sin(SLEEVE_ANGLE), 0];
+      var U = [sgn * aU, yu, 0];
+      var C = [U[0] + r * e[0], U[1] + r * e[1], U[2]];
+      var t = [C[0] - (m[1] * ys), C[1] - (m[4] * ys), C[2]];
+      out.push({ part: p, mirror: k === 1 && times2(p), extra: { roll: { phase: sgn * Math.PI / 2 }, place: { m: m, t: t } }, sleeve: { U: U, iu: iu, sgn: sgn } });
+    });
+    (byRole.neckband || []).forEach(function (p) {
+      out.push({ part: p, extra: { place: { m: [-1, 0, 0, 0, -1, 0, 0, 0, 1], t: [0, yTop, 0] } }, neck: true });
+    });
+    return { pieces: out, yu: yu, Wu: Wu, yTop: yTop };
+  }
+  function times2(p) { return (p.makeCount | 0) >= 2; }
+
+  /**
+   * The pieces board, laid out for a frame of width/height `aspect`: every
+   * piece to the same scale, the largest first, wrapped into shelves (rows of
+   * pieces, top to bottom, each on its own baseline) — the shelf count that
+   * lets the whole board be drawn biggest in that frame wins. A 375 × 812
+   * phone (aspect 0.46) gets two or three shelves; a wide desktop one.
+   */
+  function boardPieces(parts, aspect) {
+    var items = [];
+    parts.forEach(function (p, order) {
+      if (!p || !p.model) return;
+      var times = Math.max(1, Math.min(2, (p.makeCount | 0) || 1));
+      for (var t = 0; t < times; t++) {
+        var L = pieceLayout(p.model, {});
+        var bx = L.pieceBox;
+        if (!isFinite(bx.x0)) continue;
+        // a tube on the board is as wide as its widest ring
+        var x0 = bx.x0, x1 = bx.x1;
+        if (L.mode !== 'rows') { var R = Math.max(Math.abs(bx.x0), Math.abs(bx.x1), Math.abs(bx.z0), Math.abs(bx.z1)); x0 = -R; x1 = R; }
+        items.push({ part: p, x0: x0, w: x1 - x0, y0: bx.y0, h: bx.y1 - bx.y0, order: order * 2 + t });
+      }
+    });
+    // largest first (by area), pattern order among equals
+    items.sort(function (a, b) { return (b.w * b.h - a.w * a.h) || (a.order - b.order); });
+    var asp = isNum(aspect) && aspect > 0 ? aspect : 1;
+    var totalW = 0, i;
+    for (i = 0; i < items.length; i++) totalW += items[i].w + (i ? BOARD_GAP : 0);
+    var best = null;
+    for (var rowsN = 1; rowsN <= Math.max(1, items.length); rowsN++) {
+      // next-fit shelves no wider than an even share of the total (the widest piece always fits)
+      var limit = totalW / rowsN, shelves = [], cur = null;
+      for (i = 0; i < items.length; i++) {
+        var it = items[i];
+        if (!cur || (cur.w > 0 && cur.w + BOARD_GAP + it.w > limit + 1e-6)) { cur = { items: [], w: 0, h: 0 }; shelves.push(cur); }
+        cur.w += (cur.items.length ? BOARD_GAP : 0) + it.w;
+        cur.h = Math.max(cur.h, it.h);
+        cur.items.push(it);
+      }
+      var W = 0, H = 0;
+      shelves.forEach(function (s, k) { W = Math.max(W, s.w); H += s.h + (k ? BOARD_GAP : 0); });
+      // the scale this board is drawn at in the frame (bigger is better)
+      var sc = Math.min(asp / Math.max(W, 1e-6), 1 / Math.max(H, 1e-6));
+      if (!best || sc > best.sc + 1e-9) best = { sc: sc, shelves: shelves, H: H };
+      if (shelves.length < rowsN) break;   // more rows than it can use
+    }
+    var out = [], y = best.H;
+    best.shelves.forEach(function (s, k) {
+      y -= s.h;
+      var cursor = -s.w / 2;
+      s.items.forEach(function (it) {
+        out.push({ part: it.part, extra: { place: { m: [1, 0, 0, 0, 1, 0, 0, 0, 1], t: [cursor - it.x0, y - it.y0, 0] } }, w: it.w, shelf: k });
+        cursor += it.w + BOARD_GAP;
+      });
+      y -= BOARD_GAP;
+    });
+    return out;
+  }
+
+  /**
+   * The whole piece. `parts` = [{ id, name, role?, makeCount, state:
+   * 'done' | 'working' | 'todo', model }] in pattern order (model =
+   * Store.diagramModel(part)). Returns { kind, reason, model, checks }:
+   *   'sock'         model = chainSock(parts): an ordinary Model v2
+   *   'sweater-flat' model = { pieces: [...] } — Diagram draws it whole
+   *   'board'        model = { pieces: [...] } — every part flat, side by side
+   * `cls` (optional): a kind string, or { kind?, aspect? } — `kind` forces one
+   * (a construction that does not hold up falls back to the board with the
+   * reason), `aspect` is the frame's width / height, which the board wraps to.
+   */
+  function assemble(parts, cls) {
+    var list = (arr(parts) || []).filter(function (p) { return p && p.model && arr(p.model.rounds) && p.model.rounds.length; });
+    var c = construction(list);
+    var kind = (cls && cls.kind) || (typeof cls === 'string' ? cls : null) || c.kind;
+    var reason = c.reason, checks = {};
+    if (kind === 'sock') {
+      var sm = chainSock(list);
+      if (sm) {
+        var Ls = layout(sm);
+        checks.bends = Ls.knit && Ls.knit.bends ? Ls.knit.bends.length : 0;
+        checks.sections = sm.sections.length;
+        if (checks.bends >= 1) return { kind: 'sock', reason: reason, model: sm, checks: checks };
+        reason = 'the heel did not turn: shown as pieces';
+      }
+      kind = 'board';
+    }
+    var placed = null;
+    if (kind === 'sweater-flat') {
+      var sw = sweaterPieces(list);
+      if (sw.fail) { reason = sw.fail; kind = 'board'; }
+      else { placed = sw; }
+    }
+    var specs = placed ? placed.pieces : boardPieces(list, cls && typeof cls === 'object' ? cls.aspect : null);
+    if (kind !== 'sweater-flat') kind = 'board';
+    var pieces = [], current = -1, curPiece = -1, allDone = true;
+    specs.forEach(function (sp, k) {
+      var p = sp.part, md = {}, key;
+      for (key in p.model) if (Object.prototype.hasOwnProperty.call(p.model, key)) md[key] = p.model[key];
+      md.rounds = stateRounds(p);
+      md.current = workingIndex(p, md.rounds.length);
+      var L = pieceLayout(md, sp.extra);
+      var st = p.state || 'todo';
+      if (st !== 'done') allDone = false;
+      if (st === 'working' && curPiece < 0) curPiece = k;
+      pieces.push({ id: p.id, name: p.name || '', role: partRole(p), state: st, model: md, layout: L, copy: !!sp.mirror });
+    });
+    if (placed) {
+      // the proposal's checks, in stitches
+      var back = pieces[0], front = pieces[1], gap = 0, pa = [0, 0, 0], pb = [0, 0, 0];
+      var nb = back.layout.bands.length, nf = front.layout.bands.length;
+      var ub = underarmOf(back.layout).index, uf = underarmOf(front.layout).index;
+      for (var i = 0; i < Math.min(ub, uf, nb, nf); i++) {
+        var bb = back.layout.bands[i], bf = front.layout.bands[i];
+        if (!bb || !bf) continue;
+        for (var sgn = -1; sgn <= 1; sgn += 2) {
+          sheetPoint(back.layout, i, bb.x0 + bb.width / 2 + sgn * bb.width / 2, pa);
+          sheetPoint(front.layout, i, bf.x0 + bf.width / 2 - sgn * bf.width / 2, pb);
+          gap = Math.max(gap, dist3(pa, pb));
+        }
+      }
+      checks.sideSeam = gap;
+      var capGap = 0, capIn = true;
+      specs.forEach(function (sp, k) {
+        if (!sp.sleeve) return;
+        var L = pieces[k].layout, b = L.bands[sp.sleeve.iu];
+        var Rc = b.Rc > 0 ? b.Rc : 1e6, se = b.x0;   // the seam edge of the underarm row
+        var q = warpPoint(L.warp, b, Rc * Math.sin(se / Rc), b.yTop, Rc * Math.cos(se / Rc) - Rc, [0, 0, 0]);
+        capGap = Math.max(capGap, dist3(q, sp.sleeve.U));
+        // the cap's top lies inside the armhole: between the underarm and the shoulder, inside the body
+        // the rolled top ring's centre: the mean of two opposite points on it
+        var top = L.bands[L.bands.length - 1];
+        var p1 = sheetPoint(L, L.bands.length - 1, top.x0 + top.width / 2, [0, 0, 0]);
+        var p2 = sheetPoint(L, L.bands.length - 1, top.x0, [0, 0, 0]);
+        var ctr = [(p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2, (p1[2] + p2[2]) / 2];
+        if (!(ctr[1] >= placed.yu - 1 && ctr[1] <= placed.yTop + 1 && Math.abs(ctr[0]) <= ellipseTable().a * placed.Wu + 1)) capIn = false;
+        checks.capTop = checks.capTop || [];
+        checks.capTop.push(ctr);
+      });
+      checks.capArmhole = capGap;
+      checks.capInside = capIn;
+      checks.underarmY = placed.yu;
+      checks.bodyHalfWidth = ellipseTable().a * placed.Wu;
+      if (gap > 0.5 || capGap > 0.5) { reason = 'the pieces did not meet (' + Math.round(gap * 10) / 10 + ' sts at the side seam)'; }
+    }
+    // the round being worked, over all the pieces in order
+    var off = 0;
+    for (var k = 0; k < pieces.length; k++) {
+      if (k === curPiece) { current = off + pieces[k].model.current; break; }
+      off += pieces[k].model.rounds.length;
+    }
+    return {
+      kind: kind, reason: reason, checks: checks,
+      model: { pieces: pieces, kind: kind, current: current, finished: allDone, craft: 'knitting' }
+    };
+  }
+
   /* -------------------------------------------------------------- 8. layout */
 
   /**
@@ -3676,7 +4368,7 @@
   /* --------------------------------------------------------------- exports */
 
   global.DiagramGeo = {
-    version: '1.6.0',
+    version: '1.8.0',
 
     // constants (read-only by convention; the test page prints them)
     SW: SW,
@@ -3777,6 +4469,20 @@
     // cables (1.6.0, knit-3d-2)
     knitCables: knitCables,
     cableShapeOf: cableShapeOf,
+    // follow on the bend (1.8.0, wave K)
+    frameAt: frameAt,
+    followFrame: followFrame,
+    extentsIn: extentsIn,
+    // stranded colour (1.8.0, wave K)
+    chartColors: chartColors,
+    applyChart: applyChart,
+    // the whole piece (1.8.0, wave K)
+    roleOf: roleOf,
+    construction: construction,
+    chainSock: chainSock,
+    pieceLayout: pieceLayout,
+    underarmOf: underarmOf,
+    assemble: assemble,
 
     // the two the renderer calls
     classify: classify,
